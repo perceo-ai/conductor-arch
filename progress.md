@@ -41,6 +41,26 @@
 - Added `linux-conductor workspace archive <name>`.
 - Workspace archive now marks metadata as `archived` and records `archived_at`.
 - Added unit tests for settings precedence, ignored-file copy behavior, setup script execution, and workspace archive metadata.
+- Added no-spend GitHub Actions workflow definitions:
+  - `.github/workflows/test.yml` runs format and workspace tests on `self-hosted` runners only.
+  - `.github/workflows/publish.yml` builds release tarballs on tag/manual runs on `self-hosted` runners only.
+- Added `linux-conductor run <workspace>` for `scripts.run` using the same Conductor environment builder as setup.
+- Added `linux-conductor session start <workspace> --kind shell|codex|claude`.
+- Session launch now resolves the workspace directory and Conductor-compatible environment before starting the selected local tool.
+- Added unit tests for run script environment propagation and shell session launch metadata.
+- Added SQLite-backed process records for run scripts and sessions.
+- `linux-conductor run <workspace>` now starts `scripts.run` in the background, captures stdout/stderr to a workspace log file, and prints the PID/log path.
+- Added `linux-conductor stop <workspace>` for stopping the latest running run script.
+- Added `linux-conductor logs <workspace> --run` for printing the latest run log.
+- Added minimal session process persistence/log metadata for `session start`.
+- Added `linux-conductor session stop <workspace>` for stopping the latest running session process.
+- Added `linux-conductor logs <workspace> --session` for printing the latest session log.
+- Added a CLI integration test that creates a real temporary Git repo/workspace, starts a fake shell session process through the compiled CLI, reads logs, and stops the session.
+- Added `linux-conductor diff <workspace>`, `linux-conductor diff <workspace> --name-only`, and `linux-conductor diff <workspace> --file <path>`.
+- Added `linux-conductor pr create <workspace> [--title <title>] [--body <body>] [--draft]`, which pushes the branch and calls `gh pr create`.
+- Added `linux-conductor pr checks <workspace>`, backed by `gh pr checks`.
+- Added unit tests for run log capture/stop, session process persistence, changed file listing, and unified diff output.
+- Updated the GitHub test workflow with an explicit `cargo test -p linux-conductor --test cli_sessions --locked` step while keeping all Actions jobs on self-hosted runners.
 
 ## Verification
 
@@ -52,15 +72,50 @@
 cargo test --workspace
 ```
 
+- Formatting passed:
+
+```bash
+cargo fmt --all -- --check
+```
+
+- Red/green checked the new run/session tests with:
+
+```bash
+cargo test -p linux-conductor-core
+```
+
 - Smoke-checked:
 
 ```bash
 cargo run -q -p linux-conductor -- workspace --help
+cargo run -q -p linux-conductor -- run --help
+cargo run -q -p linux-conductor -- session start --help
+cargo run -q -p linux-conductor -- session stop --help
+cargo run -q -p linux-conductor -- stop --help
+cargo run -q -p linux-conductor -- logs --help
+cargo run -q -p linux-conductor -- diff --help
+cargo run -q -p linux-conductor -- pr --help
+cargo run -q -p linux-conductor -- pr create --help
+cargo run -q -p linux-conductor -- pr checks --help
+```
+
+- Actual CLI session smoke test passed:
+
+```bash
+cargo test -p linux-conductor --test cli_sessions -- --nocapture
+```
+
+- Locked verification used by GitHub Actions passed:
+
+```bash
+cargo test --workspace --locked
+cargo test -p linux-conductor --test cli_sessions --locked -- --nocapture
 ```
 
 ## Suggested Next Step
 
-- Continue Day 1 by adding `session start <workspace> --kind shell`, either by launching the user's shell in the workspace or by introducing the first process/session table.
-- Add `run <workspace>` for `scripts.run` with the same environment builder used by setup.
+- Add richer session PTY handling for interactive shell/Codex/Claude sessions; current session start is supervised/logged but not a true terminal PTY.
+- Persist PR URL/number after `gh pr create` instead of only printing `gh` output.
 - Add `workspace archive` cleanup options later; current archive is metadata-only.
-- Then move into Day 2 basics: changed file list, unified diff command, branch push, PR creation through `gh`, and checks through `gh pr checks`.
+- Add local todos/checks summary and archive-after-merge/discard flow.
+- Then move into Day 3 basics: README demo walkthrough and first packaging artifact.
