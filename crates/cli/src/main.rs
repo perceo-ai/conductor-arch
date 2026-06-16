@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use linux_conductor_core::doctor;
 use linux_conductor_core::paths::AppPaths;
@@ -53,6 +53,27 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    Todo {
+        #[command(subcommand)]
+        command: TodoCommand,
+    },
+    Checks {
+        workspace: String,
+    },
+    Open {
+        workspace: String,
+        #[arg(long, default_value = "code")]
+        editor: String,
+    },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    Status { workspace: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -72,6 +93,9 @@ enum RepoCommand {
     Doctor {
         name: Option<String>,
     },
+    Update {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -85,8 +109,16 @@ enum WorkspaceCommand {
         #[arg(long)]
         base: Option<String>,
     },
-    List,
+    List {
+        #[arg(long)]
+        active: bool,
+    },
     Archive {
+        name: String,
+        #[arg(long)]
+        remove_worktree: bool,
+    },
+    Restore {
         name: String,
     },
 }
@@ -116,6 +148,28 @@ enum PrCommand {
     },
     Checks {
         workspace: String,
+    },
+    View {
+        workspace: String,
+    },
+    Merge {
+        workspace: String,
+        #[arg(long, default_value = "squash")]
+        method: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TodoCommand {
+    Add {
+        workspace: String,
+        text: Vec<String>,
+    },
+    List {
+        workspace: String,
+    },
+    Done {
+        id: i64,
     },
 }
 
@@ -171,6 +225,13 @@ fn main() -> Result<()> {
                 RepoCommand::Doctor { name: _ } => {
                     print_doctor(doctor::report_from_host());
                 }
+                RepoCommand::Update { name } => {
+                    let repo = store.update(&name)?;
+                    println!(
+                        "Updated {} (default branch: {})",
+                        repo.name, repo.default_branch
+                    );
+                }
             }
         }
         Command::Workspace { command } => {
@@ -197,8 +258,11 @@ fn main() -> Result<()> {
                         workspace.port_base
                     );
                 }
-                WorkspaceCommand::List => {
+                WorkspaceCommand::List { active } => {
                     for workspace in store.list()? {
+                        if active && workspace.status != "active" {
+                            continue;
+                        }
                         println!(
                             "{}\t{}\t{}\t{}\t{}\t{}",
                             workspace.name,
@@ -210,12 +274,24 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-                WorkspaceCommand::Archive { name } => {
-                    let workspace = store.archive(&name)?;
+                WorkspaceCommand::Archive {
+                    name,
+                    remove_worktree,
+                } => {
+                    let workspace = store.archive(&name, remove_worktree)?;
                     println!(
                         "Archived {} at {}",
                         workspace.name,
                         workspace.path.display()
+                    );
+                }
+                WorkspaceCommand::Restore { name } => {
+                    let workspace = store.restore(&name)?;
+                    println!(
+                        "Restored {} at {} (branch: {})",
+                        workspace.name,
+                        workspace.path.display(),
+                        workspace.branch
                     );
                 }
             }
@@ -289,6 +365,16 @@ fn main() -> Result<()> {
                 PrCommand::Checks { workspace } => {
                     print!("{}", store.pull_request_checks(&workspace)?);
                 }
+                PrCommand::View { workspace } => {
+                    match store.refresh_pull_request_state(&workspace)? {
+                        Some(pr) => println!("#{} {} (state: {})", pr.number, pr.url, pr.state),
+                        None => println!("No pull request recorded for {workspace}"),
+                    }
+                }
+                PrCommand::Merge { workspace, method } => {
+                    print!("{}", store.merge_pull_request(&workspace, &method)?);
+                    println!("Merged pull request for {workspace}");
+                }
             }
         }
         Command::Session { command } => {
@@ -309,9 +395,100 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Todo { command } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            match command {
+                TodoCommand::Add { workspace, text } => {
+                    let todo = store.add_todo(&workspace, &text.join(" "))?;
+                    println!("Added todo #{} to {}: {}", todo.id, workspace, todo.text);
+                }
+                TodoCommand::List { workspace } => {
+                    for todo in store.list_todos(&workspace)? {
+                        println!("#{}\t{}\t{}", todo.id, todo.status, todo.text);
+                    }
+                }
+                TodoCommand::Done { id } => {
+                    let todo = store.complete_todo(id)?;
+                    println!("Completed todo #{}: {}", todo.id, todo.text);
+                }
+            }
+        }
+        Command::Checks { workspace } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            print_checks_summary(store.checks_summary(&workspace)?);
+        }
+        Command::Open { workspace, editor } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let launch = store.editor_launch(&workspace, &editor)?;
+            let mut cmd = std::process::Command::new(&launch.program);
+            cmd.args(&launch.args)
+                .current_dir(&launch.cwd)
+                .envs(launch.env);
+            cmd.spawn()
+                .with_context(|| format!("launch editor {editor} for workspace {workspace}"))?;
+            println!("Opened {} in {editor}", launch.cwd.display());
+        }
+        Command::Mcp { command } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            match command {
+                McpCommand::Status { workspace } => {
+                    print_mcp_status(store.mcp_status(&workspace)?);
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary) {
+    println!(
+        "Workspace: {} ({})",
+        summary.workspace.name, summary.workspace.status
+    );
+    println!("Branch: {}", summary.workspace.branch);
+    println!("Changed files: {}", summary.changed_files);
+    println!(
+        "Run script: {}",
+        summary
+            .run_status
+            .map(|status| status.as_str())
+            .unwrap_or("not started")
+    );
+    println!(
+        "Session: {} ({} active)",
+        summary
+            .session_status
+            .map(|status| status.as_str())
+            .unwrap_or("not started"),
+        summary.active_sessions
+    );
+    match summary.pull_request {
+        Some(pr) => println!("Pull request: #{} {} ({})", pr.number, pr.url, pr.state),
+        None => println!("Pull request: none"),
+    }
+    println!(
+        "Todos: {} open / {} total",
+        summary.open_todos, summary.total_todos
+    );
+}
+
+fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
+    println!("MCP status for {}", status.workspace_path.display());
+    let groups = [
+        ("Claude user (~/.claude.json)", &status.claude_user),
+        ("Claude project (.mcp.json)", &status.claude_project),
+        ("Codex user (~/.codex/config.toml)", &status.codex_user),
+        ("Codex project (.codex/config.toml)", &status.codex_project),
+    ];
+    for (label, servers) in groups {
+        if servers.is_empty() {
+            println!("  {label}: none");
+        } else {
+            let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
+            println!("  {label}: {}", names.join(", "));
+        }
+    }
 }
 
 impl From<CliSessionKind> for SessionKind {

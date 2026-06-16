@@ -102,6 +102,45 @@ impl RepositoryStore {
         Ok(repositories)
     }
 
+    pub fn update(&self, name: &str) -> Result<Repository> {
+        let repo = self.get_by_name(name)?;
+        let remote_exists = Command::new("git")
+            .arg("-C")
+            .arg(&repo.root_path)
+            .args(["remote", "get-url", &repo.remote_name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if remote_exists {
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo.root_path)
+                .args(["fetch", &repo.remote_name, "--prune"])
+                .output()
+                .with_context(|| format!("fetch {}", repo.remote_name))?;
+        }
+
+        let default_branch = detect_default_branch(&repo.root_path, &repo.remote_name);
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE repositories SET default_branch = ?1, updated_at = ?2 WHERE name = ?3",
+            rusqlite::params![default_branch, now, name],
+        )?;
+        self.get_by_name(name)
+    }
+
+    fn get_by_name(&self, name: &str) -> Result<Repository> {
+        self.conn
+            .query_row(
+                "SELECT id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+                 FROM repositories WHERE name = ?1",
+                [name],
+                row_to_repository,
+            )
+            .with_context(|| format!("load repository {name}"))
+    }
+
     fn get_by_path(&self, root_path: &Path) -> Result<Repository> {
         self.conn
             .query_row(
