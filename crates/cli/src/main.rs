@@ -88,6 +88,9 @@ enum Command {
     Conflicts {
         workspace: String,
     },
+    Discard {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -155,6 +158,9 @@ enum WorkspaceCommand {
         remove_worktree: bool,
     },
     Restore {
+        name: String,
+    },
+    Discard {
         name: String,
     },
 }
@@ -348,6 +354,13 @@ fn main() -> Result<()> {
                         workspace.name,
                         workspace.path.display(),
                         workspace.branch
+                    );
+                }
+                WorkspaceCommand::Discard { name } => {
+                    let workspace = store.discard(&name)?;
+                    println!(
+                        "Discarded {} — worktree removed and branch deleted",
+                        workspace.name
                     );
                 }
             }
@@ -593,6 +606,14 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Command::Discard { name } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let workspace = store.discard(&name)?;
+            println!(
+                "Discarded {} — worktree removed and branch deleted",
+                workspace.name
+            );
         }
     }
 

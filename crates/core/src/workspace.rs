@@ -336,6 +336,17 @@ impl WorkspaceStore {
         Ok(lines)
     }
 
+    pub fn discard(&self, name: &str) -> Result<Workspace> {
+        let workspace = self.archive(name, true)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        // Delete the local branch (ignore errors if already gone or not fully merged)
+        let _ = git_dynamic(
+            &repository.root_path,
+            &["branch", "-D", workspace.branch.as_str()],
+        );
+        Ok(workspace)
+    }
+
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -2540,6 +2551,163 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         let summary = store.checks_summary("berlin").unwrap();
         assert_eq!(summary.total_todos, 1);
         assert_eq!(summary.open_todos, 0);
+    }
+
+    #[test]
+    fn checkpoint_create_makes_git_ref_and_list_returns_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let cp = store
+            .checkpoint_create("berlin", "before refactor", None)
+            .unwrap();
+        assert_eq!(cp.message, "before refactor");
+        assert!(cp.git_ref.starts_with("refs/linux-conductor/checkpoints/"));
+        assert!(cp.session_id.is_none());
+
+        let list = store.checkpoint_list("berlin").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, cp.id);
+    }
+
+    #[test]
+    fn checkpoint_restore_resets_workspace_to_checkpoint_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        // Take checkpoint at initial state
+        let cp = store
+            .checkpoint_create("berlin", "clean state", None)
+            .unwrap();
+
+        // Make a change and commit it
+        fs::write(workspace.path.join("added.txt"), "new content\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "added.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "added file",
+            ])
+            .status()
+            .unwrap();
+        assert!(workspace.path.join("added.txt").exists());
+
+        // Restore to checkpoint
+        store.checkpoint_restore("berlin", cp.id).unwrap();
+
+        // The added file should be gone
+        assert!(!workspace.path.join("added.txt").exists());
+    }
+
+    #[test]
+    fn find_conflicting_workspaces_detects_same_changed_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let berlin = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let tokyo = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        // Both workspaces modify the same file
+        fs::write(berlin.path.join("README.md"), "berlin changes\n").unwrap();
+        fs::write(tokyo.path.join("README.md"), "tokyo changes\n").unwrap();
+        // Berlin also modifies a unique file
+        fs::write(berlin.path.join("berlin-only.txt"), "unique\n").unwrap();
+
+        let conflicts = store.find_conflicting_workspaces("berlin").unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, "tokyo");
+        assert!(conflicts[0].1.contains(&"README.md".to_owned()));
+        assert!(!conflicts[0].1.contains(&"berlin-only.txt".to_owned()));
+
+        // Tokyo sees the same conflict
+        let conflicts_from_tokyo = store.find_conflicting_workspaces("tokyo").unwrap();
+        assert_eq!(conflicts_from_tokyo.len(), 1);
+        assert_eq!(conflicts_from_tokyo[0].0, "berlin");
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {
