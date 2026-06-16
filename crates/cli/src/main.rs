@@ -69,11 +69,32 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum McpCommand {
     Status { workspace: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewCommand {
+    Add {
+        workspace: String,
+        file: String,
+        #[arg(long)]
+        line: Option<i64>,
+        body: Vec<String>,
+    },
+    List {
+        workspace: String,
+    },
+    Resolve {
+        id: i64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -443,6 +464,45 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Review { command } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            match command {
+                ReviewCommand::Add {
+                    workspace,
+                    file,
+                    line,
+                    body,
+                } => {
+                    let comment =
+                        store.add_review_comment(&workspace, &file, line, &body.join(" "))?;
+                    println!(
+                        "Added review comment #{} on {}{}",
+                        comment.id,
+                        file,
+                        line.map(|l| format!(":{l}")).unwrap_or_default()
+                    );
+                }
+                ReviewCommand::List { workspace } => {
+                    for comment in store.list_review_comments(&workspace)? {
+                        let line = comment
+                            .line_number
+                            .map(|l| format!(":{l}"))
+                            .unwrap_or_default();
+                        println!(
+                            "#{}\t{}\t{}{}\t{}",
+                            comment.id, comment.status, comment.file_path, line, comment.body
+                        );
+                    }
+                }
+                ReviewCommand::Resolve { id } => {
+                    let comment = store.resolve_review_comment(id)?;
+                    println!(
+                        "Resolved review comment #{} on {}",
+                        comment.id, comment.file_path
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -453,30 +513,44 @@ fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary)
         "Workspace: {} ({})",
         summary.workspace.name, summary.workspace.status
     );
-    println!("Branch: {}", summary.workspace.branch);
-    println!("Changed files: {}", summary.changed_files);
+    println!("Branch:    {}", summary.workspace.branch);
+    match &summary.branch_push_state {
+        Some(state) if !state.has_upstream => {
+            println!("Push:      no upstream set (push with: linux-conductor pr create)");
+        }
+        Some(state) => println!(
+            "Push:      {} ahead, {} behind upstream",
+            state.ahead, state.behind
+        ),
+        None => {}
+    }
+    println!("Changed:   {} file(s)", summary.changed_files);
     println!(
-        "Run script: {}",
+        "Run:       {}",
         summary
             .run_status
-            .map(|status| status.as_str())
+            .map(|s| s.as_str())
             .unwrap_or("not started")
     );
     println!(
-        "Session: {} ({} active)",
+        "Session:   {} ({} active)",
         summary
             .session_status
-            .map(|status| status.as_str())
+            .map(|s| s.as_str())
             .unwrap_or("not started"),
         summary.active_sessions
     );
     match summary.pull_request {
-        Some(pr) => println!("Pull request: #{} {} ({})", pr.number, pr.url, pr.state),
-        None => println!("Pull request: none"),
+        Some(pr) => println!("PR:        #{} {} ({})", pr.number, pr.url, pr.state),
+        None => println!("PR:        none"),
     }
     println!(
-        "Todos: {} open / {} total",
+        "Todos:     {} open / {} total",
         summary.open_todos, summary.total_todos
+    );
+    println!(
+        "Review:    {} open comment(s)",
+        summary.open_review_comments
     );
 }
 

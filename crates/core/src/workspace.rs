@@ -137,6 +137,26 @@ pub struct Todo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub file_path: String,
+    pub line_number: Option<i64>,
+    pub body: String,
+    pub status: String,
+    pub github_thread_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPushState {
+    pub ahead: usize,
+    pub behind: usize,
+    pub has_upstream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecksSummary {
     pub workspace: Workspace,
     pub changed_files: usize,
@@ -146,6 +166,8 @@ pub struct ChecksSummary {
     pub pull_request: Option<PullRequest>,
     pub open_todos: usize,
     pub total_todos: usize,
+    pub branch_push_state: Option<BranchPushState>,
+    pub open_review_comments: usize,
 }
 
 struct RepositoryRecord {
@@ -563,6 +585,84 @@ impl WorkspaceStore {
         Ok(imported)
     }
 
+    pub fn add_review_comment(
+        &self,
+        name: &str,
+        file_path: &str,
+        line_number: Option<i64>,
+        body: &str,
+    ) -> Result<ReviewComment> {
+        let workspace = self.get_by_name(name)?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO review_comments
+                (workspace_id, file_path, line_number, body, status, github_thread_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'open', NULL, ?5, ?6)",
+            params![workspace.id, file_path, line_number, body, now, now],
+        )?;
+        self.get_review_comment(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_review_comments(&self, name: &str) -> Result<Vec<ReviewComment>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, file_path, line_number, body, status, github_thread_id, created_at, updated_at
+             FROM review_comments WHERE workspace_id = ?1 ORDER BY file_path, line_number",
+        )?;
+        let comments = stmt
+            .query_map([workspace.id], row_to_review_comment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(comments)
+    }
+
+    pub fn resolve_review_comment(&self, id: i64) -> Result<ReviewComment> {
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE review_comments SET status = 'resolved', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        anyhow::ensure!(changed > 0, "review comment {id} not found");
+        self.get_review_comment(id)
+    }
+
+    fn get_review_comment(&self, id: i64) -> Result<ReviewComment> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, file_path, line_number, body, status, github_thread_id, created_at, updated_at
+                 FROM review_comments WHERE id = ?1",
+                [id],
+                row_to_review_comment,
+            )
+            .with_context(|| format!("load review comment {id}"))
+    }
+
+    pub fn branch_push_state(&self, name: &str) -> Result<BranchPushState> {
+        let workspace = self.get_by_name(name)?;
+        let upstream_exists = Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+
+        if !upstream_exists {
+            return Ok(BranchPushState {
+                ahead: 0,
+                behind: 0,
+                has_upstream: false,
+            });
+        }
+
+        let ahead = count_git_rev_list(&workspace.path, "@{u}..HEAD");
+        let behind = count_git_rev_list(&workspace.path, "HEAD..@{u}");
+        Ok(BranchPushState {
+            ahead,
+            behind,
+            has_upstream: true,
+        })
+    }
+
     pub fn add_todo(&self, name: &str, text: &str) -> Result<Todo> {
         let workspace = self.get_by_name(name)?;
         let now = timestamp();
@@ -621,6 +721,9 @@ impl WorkspaceStore {
         let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
         let todos = self.list_todos(name)?;
         let open_todos = todos.iter().filter(|todo| todo.status == "open").count();
+        let branch_push_state = self.branch_push_state(name).ok();
+        let comments = self.list_review_comments(name)?;
+        let open_review_comments = comments.iter().filter(|c| c.status == "open").count();
         Ok(ChecksSummary {
             workspace,
             changed_files,
@@ -630,6 +733,8 @@ impl WorkspaceStore {
             pull_request,
             open_todos,
             total_todos: todos.len(),
+            branch_push_state,
+            open_review_comments,
         })
     }
 
@@ -1017,6 +1122,18 @@ impl WorkspaceStore {
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS review_comments (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              file_path TEXT NOT NULL,
+              line_number INTEGER,
+              body TEXT NOT NULL,
+              status TEXT NOT NULL,
+              github_thread_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -1095,6 +1212,33 @@ fn row_to_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
     })
+}
+
+fn row_to_review_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewComment> {
+    Ok(ReviewComment {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        file_path: row.get(2)?,
+        line_number: row.get(3)?,
+        body: row.get(4)?,
+        status: row.get(5)?,
+        github_thread_id: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn count_git_rev_list(cwd: &Path, range: &str) -> usize {
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-list", "--count", range])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 fn extract_pull_request_url(output: &str) -> Option<String> {
