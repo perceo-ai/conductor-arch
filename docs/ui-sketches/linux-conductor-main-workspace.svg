@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Linux Conductor main workspace UI sketch</title>
+  <desc id="desc">Dark desktop app wireframe with a left workspace sidebar, central agent terminal, right review panel, and bottom prompt composer.</desc>
+  <defs>
+    <style>
+      .bg { fill: #141414; }
+      .panel { fill: #1b1b1b; stroke: #303030; stroke-width: 1; }
+      .panel2 { fill: #202020; stroke: #353535; stroke-width: 1; }
+      .muted { fill: #8c8c8c; font: 13px Inter, Arial, sans-serif; }
+      .text { fill: #e8e8e8; font: 14px Inter, Arial, sans-serif; }
+      .small { fill: #b8b8b8; font: 12px Inter, Arial, sans-serif; }
+      .title { fill: #f2f2f2; font: 600 15px Inter, Arial, sans-serif; }
+      .mono { fill: #d8d8d8; font: 13px "JetBrains Mono", "SFMono-Regular", Consolas, monospace; }
+      .accent { fill: #7dd3fc; }
+      .green { fill: #73d98f; }
+      .yellow { fill: #e5c07b; }
+      .red { fill: #ef7d7d; }
+      .chip { fill: #2a2a2a; stroke: #3b3b3b; stroke-width: 1; }
+      .line { stroke: #303030; stroke-width: 1; }
+      .softline { stroke: #282828; stroke-width: 1; }
+      .button { fill: #2c2c2c; stroke: #474747; stroke-width: 1; }
+      .primary { fill: #e8e8e8; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1440" height="900"/>
+
+  <rect class="panel" x="18" y="18" width="300" height="864" rx="8"/>
+  <rect class="panel" x="330" y="18" width="770" height="864" rx="8"/>
+  <rect class="panel" x="1112" y="18" width="310" height="864" rx="8"/>
+
+  <circle cx="42" cy="42" r="6" fill="#ff6b6b"/>
+  <circle cx="62" cy="42" r="6" fill="#ffd166"/>
+  <circle cx="82" cy="42" r="6" fill="#72d572"/>
+  <text class="title" x="34" y="82">conductor-linux</text>
+  <rect class="button" x="206" y="60" width="86" height="30" rx="6"/>
+  <text class="small" x="226" y="80">New</text>
+
+  <line class="line" x1="18" y1="100" x2="318" y2="100"/>
+  <text class="muted" x="34" y="128">conductor</text>
+  <rect class="panel2" x="30" y="142" width="272" height="58" rx="6"/>
+  <circle class="green" cx="48" cy="162" r="5"/>
+  <text class="text" x="62" y="166">tel-aviv</text>
+  <text class="small" x="62" y="184">lc/linux-port-main</text>
+  <text class="green" x="246" y="166">+42</text>
+
+  <rect class="chip" x="30" y="210" width="272" height="58" rx="6"/>
+  <circle class="yellow" cx="48" cy="230" r="5"/>
+  <text class="text" x="62" y="234">berlin</text>
+  <text class="small" x="62" y="252">fix/pr-checks</text>
+  <text class="yellow" x="246" y="234">run</text>
+
+  <rect class="chip" x="30" y="278" width="272" height="58" rx="6"/>
+  <circle class="accent" cx="48" cy="298" r="5"/>
+  <text class="text" x="62" y="302">tokyo</text>
+  <text class="small" x="62" y="320">feat/workspace-ui</text>
+  <text class="accent" x="246" y="302">PR</text>
+
+  <text class="muted" x="34" y="378">archive</text>
+  <rect class="chip" x="30" y="392" width="272" height="44" rx="6"/>
+  <text class="small" x="48" y="418">warsaw · merged PR #18</text>
+
+  <line class="line" x1="330" y1="74" x2="1100" y2="74"/>
+  <text class="title" x="354" y="48">tel-aviv</text>
+  <text class="muted" x="430" y="48">conductor · lc/linux-port-main</text>
+  <rect class="button" x="770" y="32" width="76" height="30" rx="6"/>
+  <text class="small" x="792" y="52">Run</text>
+  <rect class="button" x="854" y="32" width="88" height="30" rx="6"/>
+  <text class="small" x="876" y="52">Open</text>
+  <rect class="button" x="950" y="32" width="112" height="30" rx="6"/>
+  <text class="small" x="973" y="52">Create PR</text>
+
+  <rect class="chip" x="354" y="94" width="220" height="32" rx="6"/>
+  <text class="small" x="374" y="115">Codex · high reasoning</text>
+  <rect class="chip" x="584" y="94" width="160" height="32" rx="6"/>
+  <text class="small" x="604" y="115">Shell</text>
+
+  <rect class="panel2" x="354" y="148" width="706" height="94" rx="8"/>
+  <text class="small" x="378" y="176">You</text>
+  <text class="text" x="378" y="204">Build the Linux MVP quickly. Keep the core workflow reliable.</text>
+
+  <rect class="panel2" x="354" y="260" width="706" height="178" rx="8"/>
+  <text class="small" x="378" y="288">Codex</text>
+  <text class="text" x="378" y="316">I created the workspace runtime and wired setup scripts.</text>
+  <text class="mono" x="378" y="350">$ git worktree add ~/conductor/workspaces/app/tel-aviv -b lc/linux-port-main origin/main</text>
+  <text class="mono" x="378" y="378">$ pnpm install</text>
+  <text class="green" x="378" y="408">setup complete · CONDUCTOR_PORT=42030</text>
+
+  <rect class="panel2" x="354" y="456" width="706" height="192" rx="8"/>
+  <text class="small" x="378" y="484">Terminal · run script</text>
+  <text class="mono" x="378" y="518">$ linux-conductor run tel-aviv</text>
+  <text class="mono" x="378" y="550">&gt; vite --host 127.0.0.1 --port 42030</text>
+  <text class="green" x="378" y="582">Local: http://127.0.0.1:42030/</text>
+  <text class="muted" x="378" y="614">watching src/main.rs, crates/core/src/workspace.rs</text>
+
+  <rect class="panel2" x="354" y="732" width="706" height="116" rx="8"/>
+  <text class="muted" x="378" y="762">Message Codex in tel-aviv...</text>
+  <rect class="button" x="912" y="796" width="122" height="34" rx="6"/>
+  <text class="small" x="942" y="818">Send</text>
+
+  <text class="title" x="1136" y="48">Review</text>
+  <rect class="chip" x="1136" y="72" width="80" height="30" rx="6"/>
+  <text class="small" x="1156" y="92">Files 8</text>
+  <rect class="chip" x="1226" y="72" width="88" height="30" rx="6"/>
+  <text class="small" x="1246" y="92">Checks</text>
+  <rect class="chip" x="1324" y="72" width="70" height="30" rx="6"/>
+  <text class="small" x="1343" y="92">PR</text>
+
+  <line class="line" x1="1112" y1="118" x2="1422" y2="118"/>
+  <text class="small" x="1136" y="150">crates/core/src/workspace.rs</text>
+  <text class="green" x="1360" y="150">+118</text>
+  <text class="small" x="1136" y="182">crates/core/src/settings.rs</text>
+  <text class="green" x="1366" y="182">+64</text>
+  <text class="small" x="1136" y="214">crates/cli/src/main.rs</text>
+  <text class="green" x="1366" y="214">+91</text>
+  <text class="small" x="1136" y="246">README.md</text>
+  <text class="green" x="1374" y="246">+32</text>
+
+  <line class="line" x1="1112" y1="274" x2="1422" y2="274"/>
+  <text class="title" x="1136" y="308">Checks</text>
+  <circle class="green" cx="1144" cy="338" r="5"/>
+  <text class="small" x="1160" y="342">git status clean except workspace changes</text>
+  <circle class="green" cx="1144" cy="370" r="5"/>
+  <text class="small" x="1160" y="374">setup passed</text>
+  <circle class="yellow" cx="1144" cy="402" r="5"/>
+  <text class="small" x="1160" y="406">PR not created</text>
+  <circle class="red" cx="1144" cy="434" r="5"/>
+  <text class="small" x="1160" y="438">2 todos open</text>
+
+  <line class="line" x1="1112" y1="466" x2="1422" y2="466"/>
+  <text class="title" x="1136" y="500">Run</text>
+  <rect class="panel2" x="1136" y="518" width="258" height="116" rx="8"/>
+  <text class="mono" x="1154" y="552">pnpm dev --port 42030</text>
+  <text class="green" x="1154" y="584">running</text>
+  <rect class="button" x="1292" y="584" width="74" height="30" rx="6"/>
+  <text class="small" x="1314" y="604">Stop</text>
+
+  <line class="line" x1="1112" y1="662" x2="1422" y2="662"/>
+  <text class="title" x="1136" y="696">Todos</text>
+  <text class="small" x="1136" y="728">[ ] AppImage packaging smoke test</text>
+  <text class="small" x="1136" y="760">[ ] Record 2-workspace demo</text>
+</svg>

@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Linux Conductor review and checks UI sketch</title>
+  <desc id="desc">Dark wireframe showing a diff viewer, file list, local review comments, checks, PR state, and merge readiness.</desc>
+  <defs>
+    <style>
+      .bg { fill: #141414; }
+      .panel { fill: #1b1b1b; stroke: #303030; stroke-width: 1; }
+      .panel2 { fill: #202020; stroke: #353535; stroke-width: 1; }
+      .muted { fill: #8c8c8c; font: 13px Inter, Arial, sans-serif; }
+      .text { fill: #e8e8e8; font: 14px Inter, Arial, sans-serif; }
+      .small { fill: #b8b8b8; font: 12px Inter, Arial, sans-serif; }
+      .title { fill: #f2f2f2; font: 600 15px Inter, Arial, sans-serif; }
+      .mono { fill: #d8d8d8; font: 13px "JetBrains Mono", "SFMono-Regular", Consolas, monospace; }
+      .green { fill: #73d98f; }
+      .red { fill: #ef7d7d; }
+      .yellow { fill: #e5c07b; }
+      .add { fill: #163522; }
+      .remove { fill: #3a1c1c; }
+      .chip { fill: #2a2a2a; stroke: #3b3b3b; stroke-width: 1; }
+      .line { stroke: #303030; stroke-width: 1; }
+      .button { fill: #2c2c2c; stroke: #474747; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1440" height="900"/>
+  <rect class="panel" x="18" y="18" width="280" height="864" rx="8"/>
+  <rect class="panel" x="310" y="18" width="782" height="864" rx="8"/>
+  <rect class="panel" x="1104" y="18" width="318" height="864" rx="8"/>
+
+  <text class="title" x="42" y="50">Changes</text>
+  <rect class="chip" x="42" y="76" width="230" height="36" rx="6"/>
+  <text class="small" x="62" y="99">All files · 8 changed</text>
+
+  <text class="small" x="42" y="148">crates/core/src/workspace.rs</text>
+  <text class="green" x="236" y="148">+118</text>
+  <text class="small" x="42" y="184">crates/core/src/settings.rs</text>
+  <text class="green" x="242" y="184">+64</text>
+  <text class="small" x="42" y="220">crates/daemon/src/pty.rs</text>
+  <text class="green" x="242" y="220">+88</text>
+  <text class="small" x="42" y="256">packaging/appimage/build.sh</text>
+  <text class="green" x="242" y="256">+41</text>
+  <text class="small" x="42" y="292">README.md</text>
+  <text class="green" x="250" y="292">+32</text>
+
+  <line class="line" x1="18" y1="330" x2="298" y2="330"/>
+  <text class="title" x="42" y="366">Local comments</text>
+  <rect class="panel2" x="42" y="388" width="230" height="78" rx="8"/>
+  <text class="small" x="58" y="416">workspace.rs:144</text>
+  <text class="muted" x="58" y="440">Port allocation should be stable.</text>
+
+  <rect class="panel2" x="42" y="484" width="230" height="78" rx="8"/>
+  <text class="small" x="58" y="512">settings.rs:88</text>
+  <text class="muted" x="58" y="536">Add precedence test.</text>
+
+  <text class="title" x="334" y="50">crates/core/src/workspace.rs</text>
+  <text class="muted" x="602" y="50">unified diff · tel-aviv</text>
+  <rect class="button" x="912" y="30" width="68" height="30" rx="6"/>
+  <text class="small" x="934" y="50">Copy</text>
+  <rect class="button" x="990" y="30" width="78" height="30" rx="6"/>
+  <text class="small" x="1014" y="50">Revert</text>
+
+  <line class="line" x1="310" y1="74" x2="1092" y2="74"/>
+  <text class="mono" x="334" y="110">@@ -82,6 +82,28 @@ impl WorkspaceManager {</text>
+  <rect class="remove" x="326" y="128" width="742" height="30"/>
+  <text class="mono" x="334" y="148">-    let port = 3000;</text>
+  <rect class="add" x="326" y="158" width="742" height="30"/>
+  <text class="mono" x="334" y="178">+    let port = self.port_allocator.allocate(repo_id, workspace_name)?;</text>
+  <rect class="add" x="326" y="188" width="742" height="30"/>
+  <text class="mono" x="334" y="208">+    env.insert("CONDUCTOR_PORT".into(), port.to_string());</text>
+  <rect class="add" x="326" y="218" width="742" height="30"/>
+  <text class="mono" x="334" y="238">+    env.insert("CONDUCTOR_IS_LOCAL".into(), "1".into());</text>
+
+  <text class="mono" x="334" y="286">@@ -144,6 +166,14 @@ fn create_context_dir(path: &amp;Path) {</text>
+  <rect class="add" x="326" y="304" width="742" height="30"/>
+  <text class="mono" x="334" y="324">+    fs::create_dir_all(path.join(".context"))?;</text>
+  <rect class="add" x="326" y="334" width="742" height="30"/>
+  <text class="mono" x="334" y="354">+    gitignore::ensure_ignored(path, ".context/")?;</text>
+
+  <rect class="panel2" x="430" y="392" width="520" height="96" rx="8"/>
+  <text class="small" x="452" y="420">Review comment</text>
+  <text class="text" x="452" y="448">This should also handle existing .context directories from restored workspaces.</text>
+  <rect class="button" x="790" y="452" width="132" height="28" rx="6"/>
+  <text class="small" x="814" y="471">Send to agent</text>
+
+  <text class="mono" x="334" y="540">@@ -220,6 +250,18 @@ fn copy_files_to_workspace(...) {</text>
+  <rect class="add" x="326" y="558" width="742" height="30"/>
+  <text class="mono" x="334" y="578">+    ensure_file_is_gitignored(root, candidate)?;</text>
+  <rect class="add" x="326" y="588" width="742" height="30"/>
+  <text class="mono" x="334" y="608">+    copy_preserving_mode(candidate, destination)?;</text>
+
+  <text class="title" x="1128" y="50">Checks</text>
+  <rect class="chip" x="1260" y="30" width="112" height="30" rx="6"/>
+  <text class="small" x="1282" y="50">Refresh</text>
+
+  <line class="line" x1="1104" y1="74" x2="1422" y2="74"/>
+  <circle class="green" cx="1138" cy="112" r="6"/>
+  <text class="text" x="1156" y="117">Branch pushed</text>
+  <text class="muted" x="1156" y="138">origin/lc/linux-port-main</text>
+
+  <circle class="green" cx="1138" cy="180" r="6"/>
+  <text class="text" x="1156" y="185">PR #24 open</text>
+  <text class="muted" x="1156" y="206">Ready for review</text>
+
+  <circle class="yellow" cx="1138" cy="248" r="6"/>
+  <text class="text" x="1156" y="253">CI running</text>
+  <text class="muted" x="1156" y="274">linux-appimage · 2m 13s</text>
+
+  <circle class="red" cx="1138" cy="316" r="6"/>
+  <text class="text" x="1156" y="321">Todos open</text>
+  <text class="muted" x="1156" y="342">2 local blockers</text>
+
+  <line class="line" x1="1104" y1="382" x2="1422" y2="382"/>
+  <text class="title" x="1128" y="420">Merge readiness</text>
+  <rect class="panel2" x="1128" y="444" width="252" height="118" rx="8"/>
+  <text class="yellow" x="1150" y="478">Not ready</text>
+  <text class="small" x="1150" y="508">CI still running</text>
+  <text class="small" x="1150" y="532">2 todos open</text>
+
+  <line class="line" x1="1104" y1="596" x2="1422" y2="596"/>
+  <text class="title" x="1128" y="632">Actions</text>
+  <rect class="button" x="1128" y="654" width="252" height="34" rx="6"/>
+  <text class="small" x="1192" y="676">Send comments to Codex</text>
+  <rect class="button" x="1128" y="704" width="252" height="34" rx="6"/>
+  <text class="small" x="1202" y="726">Fix failing checks</text>
+  <rect class="button" x="1128" y="754" width="252" height="34" rx="6"/>
+  <text class="small" x="1210" y="776">Archive workspace</text>
+</svg>
