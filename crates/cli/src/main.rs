@@ -40,6 +40,9 @@ enum Command {
         #[arg(long)]
         session: bool,
     },
+    Runs {
+        workspace: String,
+    },
     Diff {
         workspace: String,
         #[arg(long)]
@@ -413,6 +416,19 @@ fn main() -> Result<()> {
                 print!("{}", store.read_latest_run_log(&workspace)?);
             } else {
                 print!("{}", store.read_latest_session_log(&workspace)?);
+            }
+        }
+        Command::Runs { workspace } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            for run in store.list_runs(&workspace)? {
+                println!(
+                    "#{}\t{}\t{}\t{}\t{}",
+                    run.id,
+                    run.status.as_str(),
+                    run.started_at,
+                    run.ended_at.as_deref().unwrap_or("-"),
+                    run.log_path.display(),
+                );
             }
         }
         Command::Diff {

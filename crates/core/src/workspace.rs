@@ -563,6 +563,12 @@ impl WorkspaceStore {
         draft: bool,
     ) -> Result<String> {
         let workspace = self.get_by_name(name)?;
+        let changed = self.changed_files(name)?;
+        if changed.is_empty() {
+            anyhow::bail!(
+                "workspace {name} has no changed files; commit changes before creating a PR"
+            );
+        }
         let mut args = vec!["pr", "create"];
         if let Some(title) = title {
             args.extend(["--title", title]);
@@ -1108,16 +1114,24 @@ impl WorkspaceStore {
     }
 
     pub fn list_sessions(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Session)
+    }
+
+    pub fn list_runs(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Run)
+    }
+
+    fn list_processes(&self, name: &str, kind: ProcessKind) -> Result<Vec<ProcessRecord>> {
         let workspace = self.get_by_name(name)?;
         let mut stmt = self.conn.prepare(
             "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
-             FROM processes WHERE workspace_id = ?1 AND kind = 'session'
+             FROM processes WHERE workspace_id = ?1 AND kind = ?2
              ORDER BY id DESC",
         )?;
-        let sessions = stmt
-            .query_map([workspace.id], row_to_process)?
+        let records = stmt
+            .query_map(params![workspace.id, kind.as_str()], row_to_process)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(sessions)
+        Ok(records)
     }
 
     pub fn start_session(&self, name: &str, kind: SessionKind) -> Result<ProcessRecord> {
@@ -2619,6 +2633,47 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         let summary = store.checks_summary("berlin").unwrap();
         assert_eq!(summary.total_todos, 1);
         assert_eq!(summary.open_todos, 0);
+    }
+
+    #[test]
+    fn rename_updates_name_path_and_moves_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let old_path = workspace.path.clone();
+        let renamed = store.rename("berlin", "oslo").unwrap();
+
+        assert_eq!(renamed.name, "oslo");
+        assert!(!old_path.exists());
+        assert!(renamed.path.exists());
+        assert!(renamed.path.join(".context").is_dir());
+
+        // Should appear under new name in list
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "oslo");
     }
 
     #[test]
