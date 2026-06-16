@@ -1,0 +1,12 @@
+[workspace]
+members = [
+  "crates/core",
+  "crates/cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/linux-conductor/linux-conductor"
+
