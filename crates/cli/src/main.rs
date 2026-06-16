@@ -145,11 +145,15 @@ enum WorkspaceCommand {
     Create {
         repository: String,
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         #[arg(long)]
-        branch: String,
+        branch: Option<String>,
         #[arg(long)]
         base: Option<String>,
+        #[arg(long)]
+        from_issue: Option<u64>,
+        #[arg(long)]
+        branch_prefix: Option<String>,
     },
     List {
         #[arg(long)]
@@ -286,13 +290,15 @@ fn main() -> Result<()> {
                     );
                 }
                 RepoCommand::List => {
-                    for repo in store.list()? {
+                    for (repo, active, total) in store.list_with_workspace_counts()? {
                         println!(
-                            "{}\t{}\t{}\t{}",
+                            "{:<20} {:<10} {:<6} {:>2} active / {:>2} total  {}",
                             repo.name,
-                            repo.root_path.display(),
+                            repo.default_branch,
                             repo.remote_name,
-                            repo.default_branch
+                            active,
+                            total,
+                            repo.root_path.display(),
                         );
                     }
                 }
@@ -316,13 +322,23 @@ fn main() -> Result<()> {
                     name,
                     branch,
                     base,
+                    from_issue,
+                    branch_prefix,
                 } => {
-                    let workspace = store.create(CreateWorkspace {
-                        repository_name: repository,
-                        name,
-                        branch,
-                        base_ref: base,
-                    })?;
+                    let workspace = if let Some(issue) = from_issue {
+                        store.create_from_issue(&repository, issue, branch_prefix.as_deref())?
+                    } else {
+                        let name =
+                            name.with_context(|| "--name is required when not using --from-issue")?;
+                        let branch = branch
+                            .with_context(|| "--branch is required when not using --from-issue")?;
+                        store.create(CreateWorkspace {
+                            repository_name: repository,
+                            name,
+                            branch,
+                            base_ref: base,
+                        })?
+                    };
                     println!(
                         "Created {} at {} (branch: {}, base: {}, port: {})",
                         workspace.name,

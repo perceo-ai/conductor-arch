@@ -588,6 +588,42 @@ impl WorkspaceStore {
         Ok(output)
     }
 
+    pub fn create_from_issue(
+        &self,
+        repository_name: &str,
+        issue_number: u64,
+        branch_prefix: Option<&str>,
+    ) -> Result<Workspace> {
+        let repository = self.load_repository(repository_name)?;
+        // Fetch issue title from gh
+        let output = command_output(
+            &repository.root_path,
+            "gh",
+            &[
+                "issue",
+                "view",
+                &issue_number.to_string(),
+                "--json",
+                "title,number",
+            ],
+        )?;
+        let title = extract_json_string_field(&output, "title")
+            .unwrap_or_else(|| format!("issue-{issue_number}"));
+
+        // Slugify title for branch name
+        let slug = slugify(&title);
+        let prefix = branch_prefix.unwrap_or("lc");
+        let branch = format!("{prefix}/{issue_number}/{slug}");
+        let workspace_name = format!("issue-{issue_number}");
+
+        self.create(CreateWorkspace {
+            repository_name: repository_name.to_owned(),
+            name: workspace_name,
+            branch,
+            base_ref: None,
+        })
+    }
+
     pub fn read_context_brief(&self, name: &str) -> Result<Option<String>> {
         let workspace = self.get_by_name(name)?;
         let path = workspace.path.join(".context/brief.md");
@@ -1537,6 +1573,28 @@ fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     let after_quote = after_colon.strip_prefix('"')?;
     let end = after_quote.find('"')?;
     Some(after_quote[..end].to_owned())
+}
+
+fn slugify(text: &str) -> String {
+    let slug: String = text
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.len() > 40 {
+        slug[..40].trim_end_matches('-').to_owned()
+    } else {
+        slug
+    }
 }
 
 fn initialize_context_files(
@@ -2831,6 +2889,15 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         let conflicts_from_tokyo = store.find_conflicting_workspaces("tokyo").unwrap();
         assert_eq!(conflicts_from_tokyo.len(), 1);
         assert_eq!(conflicts_from_tokyo[0].0, "berlin");
+    }
+
+    #[test]
+    fn slugify_converts_to_kebab_case() {
+        assert_eq!(slugify("Add search feature"), "add-search-feature");
+        assert_eq!(slugify("Fix: weird  spaces"), "fix-weird-spaces");
+        assert_eq!(slugify("feat/cool-thing"), "feat-cool-thing");
+        let long = "a".repeat(50);
+        assert!(slugify(&long).len() <= 40);
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

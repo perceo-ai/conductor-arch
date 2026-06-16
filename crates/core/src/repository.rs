@@ -102,6 +102,31 @@ impl RepositoryStore {
         Ok(repositories)
     }
 
+    pub fn list_with_workspace_counts(&self) -> Result<Vec<(Repository, usize, usize)>> {
+        let repos = self.list()?;
+        let mut result = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let active = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workspaces WHERE repository_id = ?1 AND status = 'active'",
+                    [repo.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            let total = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workspaces WHERE repository_id = ?1",
+                    [repo.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            result.push((repo, active as usize, total as usize));
+        }
+        Ok(result)
+    }
+
     pub fn update(&self, name: &str) -> Result<Repository> {
         let repo = self.get_by_name(name)?;
         let remote_exists = Command::new("git")
