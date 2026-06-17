@@ -104,6 +104,20 @@ linux-conductor repo add ~/src/my-app
 This registers the repository, detects the default branch, and sets up a
 workspace parent at `~/conductor/workspaces/my-app/`.
 
+### 1b. Launch the GUI (optional)
+
+```bash
+linux-conductor-gtk
+```
+
+The GUI shows all your workspaces in the sidebar. Click a workspace to select it,
+then use the action toolbar to Run, Stop, open an Editor, create a PR, or Archive.
+The right panel shows Diff, Checks, Todos, and Logs for the selected workspace.
+The GUI auto-refreshes every 5 seconds.
+
+All actions that require interactive input (new workspace, new repo, agent sessions)
+open your default terminal emulator.
+
 ### 2. Create workspaces
 
 ```bash
@@ -337,8 +351,9 @@ linux-conductor checkpoint restore <workspace> <id>
   the full interactive experience.
 - **`gh` required for PR operations.** `pr create`, `pr checks`, and `pr merge`
   shell out to the `gh` CLI. Run `gh auth login` before using these commands.
-- **Flatpak not yet supported.** The sandbox conflicts with arbitrary repository
-  paths and process supervision. Install via AppImage or native package.
+- **Flatpak is experimental.** The Flatpak build uses `--filesystem=host` for
+  arbitrary repository access. Install via AppImage or native package for the
+  most reliable experience; the Flatpak manifest is provided for reference.
 - **Checkpoint restore is destructive.** `checkpoint restore` hard-resets the
   workspace and removes untracked files. Commit or copy anything you need before
   restoring.
