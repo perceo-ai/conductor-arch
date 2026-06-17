@@ -46,6 +46,9 @@ fn build_ui(app: &Application) {
     split.set_max_sidebar_width(280.0);
     split.set_show_sidebar(true);
 
+    // Toast overlay wraps the main content area for action notifications
+    let toast_overlay = adw::ToastOverlay::new();
+
     let main_box = GBox::new(Orientation::Horizontal, 0);
 
     // Right panel built first — its refresh fn is passed into center/sidebar
@@ -55,8 +58,12 @@ fn build_ui(app: &Application) {
     right_panel.set_vexpand(true);
 
     // Center panel — workspace header + action toolbar + status grid
-    let (center_panel, refresh_center_raw) =
-        build_center_panel(&paths, Rc::clone(&selected), refresh_right.clone());
+    let (center_panel, refresh_center_raw) = build_center_panel(
+        &paths,
+        Rc::clone(&selected),
+        refresh_right.clone(),
+        toast_overlay.clone(),
+    );
     center_panel.set_hexpand(true);
     center_panel.set_vexpand(true);
 
@@ -85,7 +92,8 @@ fn build_ui(app: &Application) {
     main_box.append(&center_panel);
     main_box.append(&Separator::new(Orientation::Vertical));
     main_box.append(&right_panel);
-    split.set_content(Some(&main_box));
+    toast_overlay.set_child(Some(&main_box));
+    split.set_content(Some(&toast_overlay));
 
     // Header bar
     let header = HeaderBar::new();
@@ -427,6 +435,7 @@ fn build_center_panel(
     paths: &AppPaths,
     selected: Rc<RefCell<Option<String>>>,
     refresh_right: impl Fn() + Clone + 'static,
+    toasts: adw::ToastOverlay,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let center = GBox::new(Orientation::Vertical, 0);
     center.add_css_class("center-panel");
@@ -533,12 +542,15 @@ fn build_center_panel(
     copy_path_btn.set_tooltip_text(Some("Copy workspace path to clipboard"));
     let sel = Rc::clone(&selected);
     let db_cp = paths.database_path.clone();
+    let toasts_cp = toasts.clone();
     copy_path_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
             if let Ok(store) = WorkspaceStore::open(db_cp.clone()) {
                 if let Ok(path) = store.workspace_path(&ws) {
                     if let Some(display) = gtk::gdk::Display::default() {
-                        display.clipboard().set_text(&path.display().to_string());
+                        let path_str = path.display().to_string();
+                        display.clipboard().set_text(&path_str);
+                        toasts_cp.add_toast(adw::Toast::new("Path copied to clipboard"));
                     }
                 }
             }
@@ -645,6 +657,7 @@ fn build_center_panel(
     let sel_c = Rc::clone(&selected);
     let db_path_c = paths.database_path.clone();
     let entry_c = prompt_entry.clone();
+    let toasts_send = toasts.clone();
     let do_send = move || {
         let text = entry_c.text().to_string();
         if text.trim().is_empty() {
@@ -673,6 +686,7 @@ fn build_center_panel(
                     let _ = writeln!(f, "\n---\n*t={ts}*\n\n{text}\n");
                 }
                 entry_c.set_text("");
+                toasts_send.add_toast(adw::Toast::new("Prompt saved to agent-notes.md"));
             }
         }
     };
