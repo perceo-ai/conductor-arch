@@ -2214,18 +2214,32 @@ fn populate_sessions_box(container: &GBox, db_path: &std::path::PathBuf, ws_name
 // ── HELPERS ───────────────────────────────────────────────────────────────
 
 fn spawn_terminal_command(cmd: &str) {
+    let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
+
+    // Respect $TERMINAL env var if set
+    if let Ok(term) = std::env::var("TERMINAL") {
+        if std::process::Command::new(&term)
+            .args(["-e", "bash", "-c", &full_cmd])
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+
     let terminals: &[(&str, &[&str])] = &[
         ("gnome-terminal", &["--", "bash", "-c"]),
         ("xterm", &["-e", "bash", "-c"]),
         ("konsole", &["-e", "bash", "-c"]),
         ("xfce4-terminal", &["-e", "bash", "-c"]),
+        ("tilix", &["-e", "bash", "-c"]),
+        ("terminator", &["-e", "bash", "-c"]),
         ("alacritty", &["-e", "bash", "-c"]),
         ("kitty", &["bash", "-c"]),
         ("foot", &["bash", "-c"]),
         ("wezterm", &["start", "--", "bash", "-c"]),
+        ("xterm", &["-e", "bash", "-c"]),
     ];
-
-    let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
 
     for (term, prefix_args) in terminals {
         let mut command = std::process::Command::new(term);
