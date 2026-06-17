@@ -1666,6 +1666,16 @@ fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> Strin
                     text.push_str(&format!("\n{stat}\n"));
                 }
             }
+            // Recent commits on the branch
+            if let Ok(log) = store.git_log_oneline(name, 10) {
+                let log = log.trim();
+                if !log.is_empty() {
+                    text.push_str("\n── Recent Commits ──\n\n");
+                    text.push_str(log);
+                    text.push('\n');
+                }
+            }
+
             text.push_str("\n── Unified Diff ──\n\n");
             match store.unified_diff(name, None) {
                 Ok(diff) if diff.trim().is_empty() => text.push_str("(no unstaged changes)\n"),
