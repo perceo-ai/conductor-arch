@@ -47,7 +47,8 @@ fn build_ui(app: &Application) {
     let main_box = GBox::new(Orientation::Horizontal, 0);
 
     // Right panel built first — its refresh fn is passed into center/sidebar
-    let (right_panel, refresh_right) = build_right_panel(&paths, Rc::clone(&selected));
+    let (right_panel, refresh_right) =
+        build_right_panel(&paths.database_path, &paths.logs_dir, Rc::clone(&selected));
     right_panel.set_width_request(340);
     right_panel.set_vexpand(true);
 
@@ -489,7 +490,8 @@ fn build_session_controls(selected: Rc<RefCell<Option<String>>>) -> GBox {
 // ── RIGHT PANEL ───────────────────────────────────────────────────────────
 
 fn build_right_panel(
-    paths: &AppPaths,
+    db_path: &std::path::PathBuf,
+    logs_dir: &std::path::PathBuf,
     selected: Rc<RefCell<Option<String>>>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let right = GBox::new(Orientation::Vertical, 0);
@@ -536,6 +538,19 @@ fn build_right_panel(
     todos_scroll.set_child(Some(&todos_box));
     stack.add_titled(&todos_scroll, Some("todos"), "Todos");
 
+    // Logs page
+    let logs_view = TextView::new();
+    logs_view.set_editable(false);
+    logs_view.set_monospace(true);
+    logs_view.add_css_class("diff-view");
+    logs_view.set_margin_start(8);
+    logs_view.set_margin_end(8);
+    logs_view.set_margin_top(8);
+    let logs_scroll = ScrolledWindow::new();
+    logs_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    logs_scroll.set_child(Some(&logs_view));
+    stack.add_titled(&logs_scroll, Some("logs"), "Logs");
+
     let switcher = StackSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.add_css_class("panel-switcher");
@@ -547,10 +562,12 @@ fn build_right_panel(
     right.append(&Separator::new(Orientation::Horizontal));
     right.append(&stack);
 
-    let db_path = paths.database_path.clone();
+    let db_path = db_path.clone();
+    let logs_dir = logs_dir.clone();
     let sel = Rc::clone(&selected);
     let diff_buf = diff_view.buffer();
     let checks_buf = checks_view.buffer();
+    let logs_buf = logs_view.buffer();
     let todos_box_clone = todos_box.clone();
 
     let refresh = move || {
@@ -572,12 +589,70 @@ fn build_right_panel(
         title.set_xalign(0.0);
         todos_box_clone.append(&title);
         populate_todos_box(&todos_box_clone, &db_path, ws_name.as_deref());
+
+        // Logs — read latest log file from workspace log directory
+        let logs_text = build_logs_text(&logs_dir, ws_name.as_deref());
+        logs_buf.set_text(&logs_text);
     };
 
     // Initial populate
     refresh();
 
     (right, refresh)
+}
+
+fn build_logs_text(logs_dir: &std::path::PathBuf, ws_name: Option<&str>) -> String {
+    let mut text = String::from("── Latest Logs ──\n\n");
+
+    let name = match ws_name {
+        Some(n) => n,
+        None => {
+            text.push_str("Select a workspace to view its logs.\n");
+            return text;
+        }
+    };
+
+    let ws_log_dir = logs_dir.join(name);
+    if !ws_log_dir.exists() {
+        text.push_str("No logs yet. Start a run or session first.\n");
+        return text;
+    }
+
+    // Find the most recent log file
+    let mut entries: Vec<_> = match std::fs::read_dir(&ws_log_dir) {
+        Ok(rd) => rd.flatten().collect(),
+        Err(e) => {
+            text.push_str(&format!("Error reading log directory: {e}\n"));
+            return text;
+        }
+    };
+    entries.sort_by_key(|e| {
+        e.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+
+    let Some(latest) = entries.last() else {
+        text.push_str("No log files found.\n");
+        return text;
+    };
+
+    text.push_str(&format!("File: {}\n\n", latest.path().display()));
+
+    match std::fs::read_to_string(latest.path()) {
+        Ok(content) => {
+            // Show last 200 lines to keep it manageable
+            let lines: Vec<_> = content.lines().collect();
+            let start = lines.len().saturating_sub(200);
+            if start > 0 {
+                text.push_str(&format!("… ({start} earlier lines omitted) …\n\n"));
+            }
+            text.push_str(&lines[start..].join("\n"));
+        }
+        Err(e) => text.push_str(&format!("Error reading log: {e}\n")),
+    }
+
+    text
 }
 
 fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> String {
