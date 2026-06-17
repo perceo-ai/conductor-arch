@@ -1238,9 +1238,11 @@ fn build_right_panel(
         }
         populate_checkpoints_box(&checkpoints_box_clone, &db_path, ws_name.as_deref());
 
-        // Logs
+        // Logs — set text and scroll to bottom
         let logs_text = build_logs_text(&logs_dir, ws_name.as_deref());
         logs_buf.set_text(&logs_text);
+        let end = logs_buf.end_iter();
+        logs_buf.place_cursor(&end);
     });
 
     // Wire up "Add Todo" entry — adds todo then triggers a panel refresh
