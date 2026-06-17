@@ -309,7 +309,18 @@ All plan phases are addressed and complete:
 - populate_review_box: resolves comment inline (removes row widget)
 - All 31 tests pass; all crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 7)
+
+- Checks tab: "↻ Live PR Checks" button — appends live `gh pr checks` output inline
+- Checks tab: "⇄ Sync PR State" button — calls `refresh_pull_request_state`, shows updated PR number/state/URL
+- Todos tab: "⇄ Sync from .context/" button — calls `sync_todos_from_context`, refreshes todo list inline
+- Sidebar: yellow ⚠ conflict-badge on workspace rows where `find_conflicting_workspaces` returns non-empty
+- Center panel: workspace path shown as monospace subtitle below workspace title (auto-updates on selection)
+- Right panel: added "Sessions" tab — shows active sessions & runs with kind, PID, start time; "■ Stop" button for running processes
+- All crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
 - Workspace renaming dialog in GUI (available via CLI)
+- Screen recording for demo
