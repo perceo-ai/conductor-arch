@@ -2045,6 +2045,16 @@ fn populate_sessions_box(container: &GBox, db_path: &std::path::PathBuf, ws_name
             row.append(&kind_lbl);
             row.append(&started_lbl);
 
+            let logs_btn = Button::with_label("📋 Logs");
+            logs_btn.add_css_class("flat");
+            let ws_log = name.to_owned();
+            let log_kind = kind_name;
+            logs_btn.connect_clicked(move |_| {
+                let flag = if log_kind == "run" { "--run" } else { "--session" };
+                spawn_terminal_command(&format!("linux-conductor logs {ws_log} {flag}"));
+            });
+            row.append(&logs_btn);
+
             if is_running {
                 let stop_btn = Button::with_label("■ Stop");
                 stop_btn.add_css_class("flat");
