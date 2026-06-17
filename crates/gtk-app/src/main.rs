@@ -6,6 +6,8 @@ use gtk::{
 };
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::workspace::WorkspaceStore;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
 
@@ -25,7 +27,6 @@ fn build_ui(app: &Application) {
         .default_height(800)
         .build();
 
-    // Load custom CSS for dark dense styling
     let css = CssProvider::new();
     css.load_from_data(APP_CSS);
     gtk::style_context_add_provider_for_display(
@@ -34,38 +35,43 @@ fn build_ui(app: &Application) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // Top-level split: left sidebar | main content
+    // Shared state: selected workspace name
+    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    // ── LAYOUT ───────────────────────────────────────────────────────
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(220.0);
     split.set_max_sidebar_width(280.0);
     split.set_show_sidebar(true);
 
-    // ── LEFT SIDEBAR ──────────────────────────────────────────────────
-    let sidebar = build_sidebar(&paths);
-    split.set_sidebar(Some(&sidebar));
-
-    // ── MAIN CONTENT ─────────────────────────────────────────────────
     let main_box = GBox::new(Orientation::Horizontal, 0);
-    main_box.add_css_class("main-area");
 
-    // Center workspace panel
-    let center = build_center_panel(&paths);
-    center.set_hexpand(true);
-    center.set_vexpand(true);
+    // Right panel built first — its refresh fn is passed into center/sidebar
+    let (right_panel, refresh_right) = build_right_panel(&paths, Rc::clone(&selected));
+    right_panel.set_width_request(340);
+    right_panel.set_vexpand(true);
 
-    // Right panel: diff / checks / todos
-    let right = build_right_panel(&paths);
-    right.set_width_request(340);
-    right.set_vexpand(true);
+    // Center panel — workspace header + action toolbar + status grid
+    let (center_panel, refresh_center) =
+        build_center_panel(&paths, Rc::clone(&selected), refresh_right.clone());
+    center_panel.set_hexpand(true);
+    center_panel.set_vexpand(true);
 
-    let sep = Separator::new(Orientation::Vertical);
-    main_box.append(&center);
-    main_box.append(&sep);
-    main_box.append(&right);
+    // Sidebar — triggers both center and right refresh on selection
+    let sidebar = build_sidebar(
+        &paths,
+        Rc::clone(&selected),
+        refresh_center.clone(),
+        refresh_right.clone(),
+    );
 
+    split.set_sidebar(Some(&sidebar));
+    main_box.append(&center_panel);
+    main_box.append(&Separator::new(Orientation::Vertical));
+    main_box.append(&right_panel);
     split.set_content(Some(&main_box));
 
-    // Header bar with toggle sidebar button
+    // Header bar
     let header = HeaderBar::new();
     header.set_show_end_title_buttons(true);
     let toggle_btn = Button::from_icon_name("sidebar-show-symbolic");
@@ -74,7 +80,17 @@ fn build_ui(app: &Application) {
     toggle_btn.connect_clicked(move |_| {
         split_clone.set_show_sidebar(!split_clone.shows_sidebar());
     });
+    // Refresh button
+    let refresh_btn = Button::from_icon_name("view-refresh-symbolic");
+    refresh_btn.set_tooltip_text(Some("Refresh workspace state"));
+    let rc = refresh_center.clone();
+    let rr = refresh_right.clone();
+    refresh_btn.connect_clicked(move |_| {
+        rc();
+        rr();
+    });
     header.pack_start(&toggle_btn);
+    header.pack_end(&refresh_btn);
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);
@@ -86,7 +102,12 @@ fn build_ui(app: &Application) {
 
 // ── SIDEBAR ───────────────────────────────────────────────────────────────
 
-fn build_sidebar(paths: &AppPaths) -> GBox {
+fn build_sidebar(
+    paths: &AppPaths,
+    selected: Rc<RefCell<Option<String>>>,
+    refresh_center: impl Fn() + Clone + 'static,
+    refresh_right: impl Fn() + Clone + 'static,
+) -> GBox {
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
     sidebar_box.set_width_request(220);
@@ -107,7 +128,9 @@ fn build_sidebar(paths: &AppPaths) -> GBox {
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
 
-    // Populate with workspaces from DB
+    // Store (name, index) map for row → workspace name lookup
+    let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
     if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
         if let Ok(workspaces) = store.list() {
             for ws in &workspaces {
@@ -118,13 +141,14 @@ fn build_sidebar(paths: &AppPaths) -> GBox {
                     ws.port_base as i64,
                 );
                 list.append(&row);
+                names.borrow_mut().push(ws.name.clone());
             }
         }
     }
 
     if list.first_child().is_none() {
         let empty = Label::new(Some(
-            "No workspaces yet.\nRun: linux-conductor workspace create",
+            "No workspaces yet.\n\nRun:\nlinux-conductor workspace create",
         ));
         empty.add_css_class("empty-label");
         empty.set_wrap(true);
@@ -134,16 +158,43 @@ fn build_sidebar(paths: &AppPaths) -> GBox {
         list.append(&ListBoxRow::builder().child(&empty).build());
     }
 
+    // On selection change: update shared state and refresh panels
+    let sel_clone = Rc::clone(&selected);
+    let names_clone = Rc::clone(&names);
+    list.connect_row_selected(move |_, row| {
+        let name = row.and_then(|r| {
+            let idx = r.index() as usize;
+            names_clone.borrow().get(idx).cloned()
+        });
+        *sel_clone.borrow_mut() = name;
+        refresh_center();
+        refresh_right();
+    });
+
+    // Select first workspace by default
+    if let Some(first) = list.row_at_index(0) {
+        list.select_row(Some(&first));
+    }
+
     scroll.set_child(Some(&list));
     sidebar_box.append(&scroll);
 
-    // Bottom "Add workspace" button
+    // "New workspace" opens terminal with create wizard
     let add_btn = Button::with_label("+ New Workspace");
     add_btn.add_css_class("add-workspace-btn");
     add_btn.set_margin_start(8);
     add_btn.set_margin_end(8);
     add_btn.set_margin_top(8);
     add_btn.set_margin_bottom(8);
+    add_btn.connect_clicked(|_| {
+        spawn_terminal_command(
+            r#"echo 'Available repos:'; linux-conductor repo list; echo;
+read -rp 'Repo name: ' REPO
+read -rp 'Workspace name: ' NAME
+read -rp 'Branch name: ' BRANCH
+linux-conductor workspace create "$REPO" --name "$NAME" --branch "$BRANCH""#,
+        );
+    });
     sidebar_box.append(&add_btn);
 
     sidebar_box
@@ -178,18 +229,94 @@ fn build_workspace_row(name: &str, branch: &str, status: &str, port: i64) -> Lis
 
 // ── CENTER PANEL ──────────────────────────────────────────────────────────
 
-fn build_center_panel(paths: &AppPaths) -> GBox {
+fn build_center_panel(
+    paths: &AppPaths,
+    selected: Rc<RefCell<Option<String>>>,
+    refresh_right: impl Fn() + Clone + 'static,
+) -> (GBox, impl Fn() + Clone + 'static) {
     let center = GBox::new(Orientation::Vertical, 0);
     center.add_css_class("center-panel");
 
-    // Workspace action toolbar
-    let toolbar = build_workspace_toolbar(paths);
-    center.append(&toolbar);
+    // Workspace title label in toolbar area
+    let ws_title = Label::new(Some("No workspace selected"));
+    ws_title.add_css_class("workspace-title");
+    ws_title.set_xalign(0.0);
+    ws_title.set_margin_start(12);
+    ws_title.set_margin_top(8);
 
-    let sep = Separator::new(Orientation::Horizontal);
-    center.append(&sep);
+    // Action toolbar
+    let toolbar = GBox::new(Orientation::Horizontal, 6);
+    toolbar.add_css_class("workspace-toolbar");
+    toolbar.set_margin_start(12);
+    toolbar.set_margin_end(12);
+    toolbar.set_margin_bottom(8);
 
-    // Info area
+    let run_btn = Button::with_label("▶ Run");
+    run_btn.add_css_class("suggested-action");
+    run_btn.set_tooltip_text(Some("Start run script"));
+    let sel = Rc::clone(&selected);
+    run_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor run {ws}"));
+        }
+    });
+
+    let stop_btn = Button::with_label("■ Stop");
+    stop_btn.set_tooltip_text(Some("Stop run script"));
+    let sel = Rc::clone(&selected);
+    stop_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor stop {ws}"));
+        }
+    });
+
+    let editor_btn = Button::with_label("⎋ Editor");
+    editor_btn.set_tooltip_text(Some("Open in VS Code"));
+    let sel = Rc::clone(&selected);
+    editor_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor open {ws} --editor code"));
+        }
+    });
+
+    let pr_btn = Button::with_label("↑ PR");
+    pr_btn.set_tooltip_text(Some("Push branch and create GitHub PR"));
+    let sel = Rc::clone(&selected);
+    let rr = refresh_right.clone();
+    pr_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor pr create {ws}"));
+            rr();
+        }
+    });
+
+    let archive_btn = Button::with_label("✕ Archive");
+    archive_btn.add_css_class("destructive-action");
+    archive_btn.set_tooltip_text(Some("Archive workspace"));
+    let sel = Rc::clone(&selected);
+    let rr = refresh_right.clone();
+    archive_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor archive {ws}"));
+            rr();
+        }
+    });
+
+    toolbar.append(&run_btn);
+    toolbar.append(&stop_btn);
+    toolbar.append(&editor_btn);
+    toolbar.append(&pr_btn);
+    toolbar.append(&archive_btn);
+
+    let toolbar_box = GBox::new(Orientation::Vertical, 0);
+    toolbar_box.add_css_class("workspace-toolbar");
+    toolbar_box.append(&ws_title);
+    toolbar_box.append(&toolbar);
+
+    center.append(&toolbar_box);
+    center.append(&Separator::new(Orientation::Horizontal));
+
+    // Info scroll area
     let info_scroll = ScrolledWindow::new();
     info_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     info_scroll.set_vexpand(true);
@@ -200,142 +327,97 @@ fn build_center_panel(paths: &AppPaths) -> GBox {
     info_box.set_margin_top(20);
     info_box.set_margin_bottom(20);
 
-    // Status grid
-    let status_label = build_info_section("Quick Status", build_status_grid(paths));
-    info_box.append(&status_label);
-
-    // Session controls
-    let session_section = build_session_controls(paths);
+    // Session controls section
+    let session_section = build_session_controls(Rc::clone(&selected));
     info_box.append(&session_section);
+
+    // Status grid (all workspaces overview)
+    let status_section_title = Label::new(Some("All Workspaces"));
+    status_section_title.add_css_class("section-title");
+    status_section_title.set_xalign(0.0);
+    info_box.append(&status_section_title);
+
+    let status_container = GBox::new(Orientation::Vertical, 4);
+    status_container.add_css_class("status-container");
+    info_box.append(&status_container);
 
     info_scroll.set_child(Some(&info_box));
     center.append(&info_scroll);
 
-    center
+    let db_path = paths.database_path.clone();
+    let ws_title_clone = ws_title.clone();
+    let status_container_clone = status_container.clone();
+    let sel_clone = Rc::clone(&selected);
+
+    let refresh = move || {
+        // Update workspace title
+        let title_text = sel_clone
+            .borrow()
+            .as_deref()
+            .map(|n| format!("▶ {n}"))
+            .unwrap_or_else(|| "Select a workspace".to_owned());
+        ws_title_clone.set_text(&title_text);
+
+        // Refresh status grid
+        while let Some(child) = status_container_clone.first_child() {
+            status_container_clone.remove(&child);
+        }
+        populate_status_grid(&status_container_clone, &db_path);
+    };
+
+    // Initial populate
+    refresh();
+
+    (center, refresh)
 }
 
-fn build_workspace_toolbar(_paths: &AppPaths) -> GBox {
-    let bar = GBox::new(Orientation::Horizontal, 6);
-    bar.add_css_class("workspace-toolbar");
-    bar.set_margin_start(12);
-    bar.set_margin_end(12);
-    bar.set_margin_top(8);
-    bar.set_margin_bottom(8);
-
-    let run_btn = Button::with_label("▶ Run");
-    run_btn.add_css_class("suggested-action");
-    run_btn.set_tooltip_text(Some("Start run script (linux-conductor run <workspace>)"));
-    run_btn.connect_clicked(move |_| {
-        spawn_terminal_command(
-            "linux-conductor run $(linux-conductor workspace list | head -1 | awk '{print $1}')",
-        );
-    });
-
-    let stop_btn = Button::with_label("■ Stop");
-    stop_btn.set_tooltip_text(Some("Stop run script"));
-    stop_btn.connect_clicked(|_| {
-        spawn_terminal_command(
-            "linux-conductor stop $(linux-conductor workspace list | head -1 | awk '{print $1}')",
-        );
-    });
-
-    let editor_btn = Button::with_label("⎋ Editor");
-    editor_btn.set_tooltip_text(Some("Open workspace in VS Code"));
-    editor_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor open $(linux-conductor workspace list | head -1 | awk '{print $1}') --editor code");
-    });
-
-    let pr_btn = Button::with_label("↑ Create PR");
-    pr_btn.set_tooltip_text(Some("Push branch and create GitHub PR"));
-    pr_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor pr create $(linux-conductor workspace list | head -1 | awk '{print $1}')");
-    });
-
-    let archive_btn = Button::with_label("✕ Archive");
-    archive_btn.add_css_class("destructive-action");
-    archive_btn.set_tooltip_text(Some("Archive workspace"));
-    archive_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor archive $(linux-conductor workspace list | head -1 | awk '{print $1}')");
-    });
-
-    bar.append(&run_btn);
-    bar.append(&stop_btn);
-    bar.append(&editor_btn);
-    bar.append(&pr_btn);
-    bar.append(&archive_btn);
-
-    bar
-}
-
-fn build_status_grid(paths: &AppPaths) -> GBox {
-    let grid = GBox::new(Orientation::Vertical, 4);
-
-    let mut lines: Vec<(String, String)> = Vec::new();
-
-    if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
+fn populate_status_grid(container: &GBox, db_path: &std::path::PathBuf) {
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
         if let Ok(statuses) = store.list_status() {
-            for line in statuses.iter().take(5) {
+            if statuses.is_empty() {
+                let lbl = Label::new(Some(
+                    "No workspaces.\nCreate: linux-conductor workspace create <repo> --name <name> --branch <branch>",
+                ));
+                lbl.add_css_class("info-text");
+                lbl.set_xalign(0.0);
+                lbl.set_wrap(true);
+                container.append(&lbl);
+                return;
+            }
+            for line in &statuses {
                 let ws = &line.workspace;
+                let row = GBox::new(Orientation::Horizontal, 8);
+
+                let name_lbl = Label::new(Some(&ws.name));
+                name_lbl.add_css_class("status-name");
+                name_lbl.set_xalign(0.0);
+                name_lbl.set_width_chars(16);
+
                 let pr_text = line
                     .pull_request
                     .as_ref()
                     .map(|p| format!("PR #{}", p.number))
                     .unwrap_or_else(|| "no PR".to_owned());
-                let run_text = if line.run_running {
-                    "running"
-                } else {
-                    "stopped"
-                };
-                lines.push((
-                    ws.name.clone(),
-                    format!("{} · {} · {}", ws.branch, run_text, pr_text),
-                ));
+                let run_text = if line.run_running { "▶" } else { "■" };
+                let detail = format!(
+                    "{} {} · {} · {} open todo(s)",
+                    run_text, ws.branch, pr_text, line.open_todos
+                );
+                let detail_lbl = Label::new(Some(&detail));
+                detail_lbl.add_css_class("status-detail");
+                detail_lbl.set_xalign(0.0);
+                detail_lbl.set_hexpand(true);
+                detail_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+                row.append(&name_lbl);
+                row.append(&detail_lbl);
+                container.append(&row);
             }
         }
     }
-
-    if lines.is_empty() {
-        let label = Label::new(Some("No workspaces. Create one with:\nlinux-conductor workspace create <repo> --name <name> --branch <branch>"));
-        label.add_css_class("info-text");
-        label.set_xalign(0.0);
-        label.set_wrap(true);
-        grid.append(&label);
-    } else {
-        for (name, detail) in lines {
-            let row = GBox::new(Orientation::Horizontal, 8);
-            let name_lbl = Label::new(Some(&name));
-            name_lbl.add_css_class("status-name");
-            name_lbl.set_xalign(0.0);
-            name_lbl.set_width_chars(18);
-
-            let detail_lbl = Label::new(Some(&detail));
-            detail_lbl.add_css_class("status-detail");
-            detail_lbl.set_xalign(0.0);
-            detail_lbl.set_hexpand(true);
-            detail_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-
-            row.append(&name_lbl);
-            row.append(&detail_lbl);
-            grid.append(&row);
-        }
-    }
-
-    grid
 }
 
-fn build_info_section(title: &str, content: GBox) -> GBox {
-    let section = GBox::new(Orientation::Vertical, 6);
-
-    let title_lbl = Label::new(Some(title));
-    title_lbl.add_css_class("section-title");
-    title_lbl.set_xalign(0.0);
-
-    section.append(&title_lbl);
-    section.append(&content);
-    section
-}
-
-fn build_session_controls(_paths: &AppPaths) -> GBox {
+fn build_session_controls(selected: Rc<RefCell<Option<String>>>) -> GBox {
     let section = GBox::new(Orientation::Vertical, 8);
 
     let title_lbl = Label::new(Some("Launch Session"));
@@ -344,7 +426,7 @@ fn build_session_controls(_paths: &AppPaths) -> GBox {
     section.append(&title_lbl);
 
     let hint = Label::new(Some(
-        "Sessions launch in your default terminal.\nSelect a workspace from the sidebar first.",
+        "Sessions open in your default terminal emulator.\nSelect a workspace from the sidebar.",
     ));
     hint.add_css_class("info-text");
     hint.set_xalign(0.0);
@@ -355,23 +437,50 @@ fn build_session_controls(_paths: &AppPaths) -> GBox {
     btn_row.set_margin_top(4);
 
     let shell_btn = Button::with_label("Shell");
-    shell_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor session start $(linux-conductor workspace list | head -1 | awk '{print $1}') --kind shell");
+    let sel = Rc::clone(&selected);
+    shell_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor session start {ws} --kind shell"));
+        }
     });
 
     let codex_btn = Button::with_label("Codex");
-    codex_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor session start $(linux-conductor workspace list | head -1 | awk '{print $1}') --kind codex");
+    let sel = Rc::clone(&selected);
+    codex_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor session start {ws} --kind codex"));
+        }
     });
 
     let claude_btn = Button::with_label("Claude Code");
-    claude_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor session start $(linux-conductor workspace list | head -1 | awk '{print $1}') --kind claude");
+    let sel = Rc::clone(&selected);
+    claude_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor session start {ws} --kind claude"));
+        }
+    });
+
+    let diff_btn = Button::with_label("View Diff");
+    let sel = Rc::clone(&selected);
+    diff_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor diff {ws}"));
+        }
+    });
+
+    let checks_btn = Button::with_label("Checks");
+    let sel = Rc::clone(&selected);
+    checks_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor checks {ws}"));
+        }
     });
 
     btn_row.append(&shell_btn);
     btn_row.append(&codex_btn);
     btn_row.append(&claude_btn);
+    btn_row.append(&diff_btn);
+    btn_row.append(&checks_btn);
     section.append(&btn_row);
 
     section
@@ -379,7 +488,10 @@ fn build_session_controls(_paths: &AppPaths) -> GBox {
 
 // ── RIGHT PANEL ───────────────────────────────────────────────────────────
 
-fn build_right_panel(paths: &AppPaths) -> GBox {
+fn build_right_panel(
+    paths: &AppPaths,
+    selected: Rc<RefCell<Option<String>>>,
+) -> (GBox, impl Fn() + Clone + 'static) {
     let right = GBox::new(Orientation::Vertical, 0);
     right.add_css_class("right-panel");
 
@@ -388,14 +500,41 @@ fn build_right_panel(paths: &AppPaths) -> GBox {
     stack.set_vexpand(true);
     stack.set_hexpand(true);
 
-    let diff_page = build_diff_page(paths);
-    stack.add_titled(&diff_page, Some("diff"), "Diff");
+    // Diff page
+    let diff_view = TextView::new();
+    diff_view.set_editable(false);
+    diff_view.add_css_class("diff-view");
+    diff_view.set_monospace(true);
+    diff_view.set_margin_start(8);
+    diff_view.set_margin_end(8);
+    diff_view.set_margin_top(8);
+    let diff_scroll = ScrolledWindow::new();
+    diff_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    diff_scroll.set_child(Some(&diff_view));
+    stack.add_titled(&diff_scroll, Some("diff"), "Diff");
 
-    let checks_page = build_checks_page(paths);
-    stack.add_titled(&checks_page, Some("checks"), "Checks");
+    // Checks page
+    let checks_view = TextView::new();
+    checks_view.set_editable(false);
+    checks_view.set_monospace(true);
+    checks_view.add_css_class("checks-view");
+    checks_view.set_margin_start(8);
+    checks_view.set_margin_end(8);
+    checks_view.set_margin_top(8);
+    let checks_scroll = ScrolledWindow::new();
+    checks_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    checks_scroll.set_child(Some(&checks_view));
+    stack.add_titled(&checks_scroll, Some("checks"), "Checks");
 
-    let todos_page = build_todos_page(paths);
-    stack.add_titled(&todos_page, Some("todos"), "Todos");
+    // Todos page
+    let todos_box = GBox::new(Orientation::Vertical, 8);
+    todos_box.set_margin_start(12);
+    todos_box.set_margin_end(12);
+    todos_box.set_margin_top(12);
+    let todos_scroll = ScrolledWindow::new();
+    todos_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    todos_scroll.set_child(Some(&todos_box));
+    stack.add_titled(&todos_scroll, Some("todos"), "Todos");
 
     let switcher = StackSwitcher::new();
     switcher.set_stack(Some(&stack));
@@ -405,168 +544,237 @@ fn build_right_panel(paths: &AppPaths) -> GBox {
     switcher.set_margin_bottom(8);
 
     right.append(&switcher);
-    let sep = Separator::new(Orientation::Horizontal);
-    right.append(&sep);
+    right.append(&Separator::new(Orientation::Horizontal));
     right.append(&stack);
 
-    right
+    let db_path = paths.database_path.clone();
+    let sel = Rc::clone(&selected);
+    let diff_buf = diff_view.buffer();
+    let checks_buf = checks_view.buffer();
+    let todos_box_clone = todos_box.clone();
+
+    let refresh = move || {
+        let ws_name = sel.borrow().clone();
+
+        // Diff
+        let diff_text = build_diff_text(&db_path, ws_name.as_deref());
+        diff_buf.set_text(&diff_text);
+
+        // Checks
+        let checks_text = build_checks_text(&db_path, ws_name.as_deref());
+        checks_buf.set_text(&checks_text);
+
+        // Todos
+        while let Some(child) = todos_box_clone.first_child() {
+            todos_box_clone.remove(&child);
+        }
+        let title = Label::new(Some("── Open Todos ──"));
+        title.set_xalign(0.0);
+        todos_box_clone.append(&title);
+        populate_todos_box(&todos_box_clone, &db_path, ws_name.as_deref());
+    };
+
+    // Initial populate
+    refresh();
+
+    (right, refresh)
 }
 
-fn build_diff_page(paths: &AppPaths) -> ScrolledWindow {
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-
-    let text_view = TextView::new();
-    text_view.set_editable(false);
-    text_view.add_css_class("diff-view");
-    text_view.set_monospace(true);
-    text_view.set_margin_start(8);
-    text_view.set_margin_end(8);
-    text_view.set_margin_top(8);
-
-    let mut diff_text = String::from("── Changed Files ──\n\n");
-
-    if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
-        if let Ok(workspaces) = store.list() {
-            for ws in workspaces.iter().filter(|w| w.status == "active").take(3) {
-                diff_text.push_str(&format!("▶ {}\n", ws.name));
-                if let Ok(files) = store.changed_files(&ws.name) {
-                    if files.is_empty() {
-                        diff_text.push_str("  (no changes)\n");
-                    }
+fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> String {
+    let mut text = String::from("── Changed Files ──\n\n");
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        if let Some(name) = ws_name {
+            match store.changed_files(name) {
+                Ok(files) if files.is_empty() => text.push_str("(no changes)\n"),
+                Ok(files) => {
                     for f in files {
-                        diff_text.push_str(&format!("  {f}\n"));
+                        text.push_str(&format!("  {f}\n"));
                     }
-                }
-                diff_text.push('\n');
-            }
-        }
-    }
-
-    if diff_text == "── Changed Files ──\n\n" {
-        diff_text.push_str("No active workspaces.\n\nCreate one:\n  linux-conductor workspace create <repo> --name <n> --branch <b>\n");
-    }
-
-    text_view.buffer().set_text(&diff_text);
-    scroll.set_child(Some(&text_view));
-    scroll
-}
-
-fn build_checks_page(paths: &AppPaths) -> ScrolledWindow {
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-
-    let text_view = TextView::new();
-    text_view.set_editable(false);
-    text_view.set_monospace(true);
-    text_view.add_css_class("checks-view");
-    text_view.set_margin_start(8);
-    text_view.set_margin_end(8);
-    text_view.set_margin_top(8);
-
-    let mut text = String::from("── Checks Summary ──\n\n");
-
-    if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
-        if let Ok(statuses) = store.list_status() {
-            for line in &statuses {
-                let ws = &line.workspace;
-                text.push_str(&format!("▶ {} ({})\n", ws.name, ws.status));
-                text.push_str(&format!("  Branch: {}\n", ws.branch));
-                if let Some(pr) = &line.pull_request {
-                    text.push_str(&format!("  PR: #{} {}\n", pr.number, pr.state));
-                } else {
-                    text.push_str("  PR: none\n");
-                }
-                let run = if line.run_running {
-                    "running"
-                } else {
-                    "stopped"
-                };
-                text.push_str(&format!("  Run: {run}\n"));
-                text.push_str(&format!("  Sessions: {} active\n", line.active_sessions));
-                text.push_str(&format!("  Todos: {} open\n", line.open_todos));
-                text.push('\n');
-            }
-        }
-    }
-
-    if text == "── Checks Summary ──\n\n" {
-        text.push_str("No workspaces found.\n");
-    }
-
-    text_view.buffer().set_text(&text);
-    scroll.set_child(Some(&text_view));
-    scroll
-}
-
-fn build_todos_page(paths: &AppPaths) -> ScrolledWindow {
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-
-    let vbox = GBox::new(Orientation::Vertical, 8);
-    vbox.set_margin_start(12);
-    vbox.set_margin_end(12);
-    vbox.set_margin_top(12);
-
-    let title = Label::new(Some("── Open Todos ──"));
-    title.set_xalign(0.0);
-    vbox.append(&title);
-
-    if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
-        if let Ok(workspaces) = store.list() {
-            let mut any = false;
-            for ws in &workspaces {
-                if let Ok(todos) = store.list_todos(&ws.name) {
-                    let open: Vec<_> = todos.iter().filter(|t| t.status == "open").collect();
-                    if !open.is_empty() {
-                        any = true;
-                        let ws_lbl = Label::new(Some(&format!("▶ {}", ws.name)));
-                        ws_lbl.set_xalign(0.0);
-                        ws_lbl.add_css_class("section-title");
-                        vbox.append(&ws_lbl);
-                        for todo in &open {
-                            let row = Label::new(Some(&format!("  ☐ {}", todo.text)));
-                            row.set_xalign(0.0);
-                            row.set_wrap(true);
-                            vbox.append(&row);
+                    text.push('\n');
+                    // Also show unified diff (first 60 lines to keep it readable)
+                    if let Ok(diff) = store.unified_diff(name, None) {
+                        text.push_str("── Unified Diff ──\n\n");
+                        let lines: Vec<_> = diff.lines().take(120).collect();
+                        text.push_str(&lines.join("\n"));
+                        if diff.lines().count() > 120 {
+                            text.push_str("\n\n… (truncated, run: linux-conductor diff ");
+                            text.push_str(name);
+                            text.push(')');
                         }
                     }
                 }
+                Err(e) => text.push_str(&format!("Error: {e}\n")),
             }
-            if !any {
-                let empty = Label::new(Some(
-                    "No open todos.\n\nAdd one:\n  linux-conductor todo add <workspace> <text>",
-                ));
-                empty.add_css_class("info-text");
-                empty.set_xalign(0.0);
-                empty.set_wrap(true);
-                vbox.append(&empty);
+        } else {
+            // Show changed files for all active workspaces
+            if let Ok(workspaces) = store.list() {
+                for ws in workspaces.iter().filter(|w| w.status == "active").take(5) {
+                    text.push_str(&format!("▶ {}\n", ws.name));
+                    if let Ok(files) = store.changed_files(&ws.name) {
+                        if files.is_empty() {
+                            text.push_str("  (no changes)\n");
+                        }
+                        for f in files {
+                            text.push_str(&format!("  {f}\n"));
+                        }
+                    }
+                    text.push('\n');
+                }
+            }
+            if text == "── Changed Files ──\n\n" {
+                text.push_str(
+                    "No active workspaces.\n\nCreate one:\n  linux-conductor workspace create",
+                );
             }
         }
     }
+    text
+}
 
-    scroll.set_child(Some(&vbox));
-    scroll
+fn build_checks_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> String {
+    let mut text = String::from("── Checks Summary ──\n\n");
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        if let Some(name) = ws_name {
+            match store.checks_summary(name) {
+                Ok(summary) => {
+                    let ws = &summary.workspace;
+                    text.push_str(&format!("Workspace: {} ({})\n", ws.name, ws.status));
+                    text.push_str(&format!("Branch:    {}\n", ws.branch));
+                    if let Some(state) = &summary.branch_push_state {
+                        if state.has_upstream {
+                            text.push_str(&format!(
+                                "Push:      ↑{} ↓{}\n",
+                                state.ahead, state.behind
+                            ));
+                        } else {
+                            text.push_str("Push:      no upstream yet\n");
+                        }
+                    }
+                    text.push_str(&format!("Changed:   {} file(s)\n", summary.changed_files));
+                    text.push_str(&format!(
+                        "Run:       {}\n",
+                        summary
+                            .run_status
+                            .map(|s| s.as_str())
+                            .unwrap_or("not started")
+                    ));
+                    text.push_str(&format!("Sessions:  {} active\n", summary.active_sessions));
+                    match &summary.pull_request {
+                        Some(pr) => text.push_str(&format!(
+                            "PR:        #{} {} ({})\n",
+                            pr.number, pr.url, pr.state
+                        )),
+                        None => text.push_str("PR:        none\n"),
+                    }
+                    text.push_str(&format!(
+                        "Todos:     {} open / {} total\n",
+                        summary.open_todos, summary.total_todos
+                    ));
+                    text.push_str(&format!(
+                        "Review:    {} open comment(s)\n",
+                        summary.open_review_comments
+                    ));
+                    if !summary.conflicting_workspaces.is_empty() {
+                        text.push_str("\nFile conflicts:\n");
+                        for (other, files) in &summary.conflicting_workspaces {
+                            text.push_str(&format!("  {other}: {}\n", files.join(", ")));
+                        }
+                    }
+                }
+                Err(e) => text.push_str(&format!("Error: {e}\n")),
+            }
+        } else {
+            if let Ok(statuses) = store.list_status() {
+                for line in &statuses {
+                    let ws = &line.workspace;
+                    text.push_str(&format!("▶ {} ({})\n", ws.name, ws.status));
+                    text.push_str(&format!("  Branch: {}\n", ws.branch));
+                    if let Some(pr) = &line.pull_request {
+                        text.push_str(&format!("  PR: #{} ({})\n", pr.number, pr.state));
+                    } else {
+                        text.push_str("  PR: none\n");
+                    }
+                    let run = if line.run_running {
+                        "▶ running"
+                    } else {
+                        "■ stopped"
+                    };
+                    text.push_str(&format!("  Run: {run}\n"));
+                    text.push_str(&format!("  Sessions: {} active\n", line.active_sessions));
+                    text.push_str(&format!("  Todos: {} open\n\n", line.open_todos));
+                }
+            }
+            if text == "── Checks Summary ──\n\n" {
+                text.push_str("No workspaces found.\n");
+            }
+        }
+    }
+    text
+}
+
+fn populate_todos_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: Option<&str>) {
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        let workspaces = if let Some(name) = ws_name {
+            store
+                .list()
+                .ok()
+                .and_then(|ws| ws.into_iter().find(|w| w.name == name))
+                .map(|w| vec![w])
+                .unwrap_or_default()
+        } else {
+            store.list().unwrap_or_default()
+        };
+
+        let mut any = false;
+        for ws in &workspaces {
+            if let Ok(todos) = store.list_todos(&ws.name) {
+                let open: Vec<_> = todos.iter().filter(|t| t.status == "open").collect();
+                if !open.is_empty() {
+                    any = true;
+                    let ws_lbl = Label::new(Some(&format!("▶ {}", ws.name)));
+                    ws_lbl.set_xalign(0.0);
+                    ws_lbl.add_css_class("section-title");
+                    container.append(&ws_lbl);
+                    for todo in &open {
+                        let row = Label::new(Some(&format!("  ☐ #{} {}", todo.id, todo.text)));
+                        row.set_xalign(0.0);
+                        row.set_wrap(true);
+                        container.append(&row);
+                    }
+                }
+            }
+        }
+        if !any {
+            let empty = Label::new(Some(
+                "No open todos.\n\nAdd one:\n  linux-conductor todo add <workspace> <text>",
+            ));
+            empty.add_css_class("info-text");
+            empty.set_xalign(0.0);
+            empty.set_wrap(true);
+            container.append(&empty);
+        }
+    }
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────
 
 fn spawn_terminal_command(cmd: &str) {
-    // Try common terminals in order
-    let terminals = [
-        ("gnome-terminal", vec!["--", "bash", "-c"]),
-        ("xterm", vec!["-e", "bash", "-c"]),
-        ("konsole", vec!["-e", "bash", "-c"]),
-        ("xfce4-terminal", vec!["-e"]),
-        ("alacritty", vec!["-e", "bash", "-c"]),
-        ("kitty", vec!["bash", "-c"]),
+    let terminals: &[(&str, &[&str])] = &[
+        ("gnome-terminal", &["--", "bash", "-c"]),
+        ("xterm", &["-e", "bash", "-c"]),
+        ("konsole", &["-e", "bash", "-c"]),
+        ("xfce4-terminal", &["-e", "bash", "-c"]),
+        ("alacritty", &["-e", "bash", "-c"]),
+        ("kitty", &["bash", "-c"]),
+        ("foot", &["bash", "-c"]),
+        ("wezterm", &["start", "--", "bash", "-c"]),
     ];
 
-    let full_cmd = format!("{cmd}; echo; echo 'Press Enter to close...'; read");
+    let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
 
-    for (term, prefix_args) in &terminals {
+    for (term, prefix_args) in terminals {
         let mut command = std::process::Command::new(term);
-        for arg in prefix_args {
+        for arg in *prefix_args {
             command.arg(arg);
         }
         command.arg(&full_cmd);
@@ -581,13 +789,18 @@ fn spawn_terminal_command(cmd: &str) {
 // ── STYLES ────────────────────────────────────────────────────────────────
 
 const APP_CSS: &str = r#"
+window {
+    background-color: #181825;
+    color: #cdd6f4;
+}
+
 .sidebar {
     background-color: #1e1e2e;
     border-right: 1px solid #313244;
 }
 
 .sidebar-header {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: bold;
     color: #6c7086;
     text-transform: uppercase;
@@ -601,10 +814,15 @@ const APP_CSS: &str = r#"
 .workspace-list row {
     border-radius: 6px;
     margin: 2px 6px;
+    padding: 2px 0;
 }
 
 .workspace-list row:selected {
     background-color: #313244;
+}
+
+.workspace-list row:hover {
+    background-color: #2a2a3e;
 }
 
 .workspace-name {
@@ -615,7 +833,7 @@ const APP_CSS: &str = r#"
 
 .workspace-meta {
     font-size: 11px;
-    color: #6c7086;
+    color: #585b70;
     font-family: monospace;
 }
 
@@ -624,12 +842,22 @@ const APP_CSS: &str = r#"
     color: #a6e3a1;
 }
 
-.add-workspace-btn {
-    background-color: #313244;
+.workspace-title {
+    font-size: 14px;
+    font-weight: bold;
     color: #89b4fa;
-    border: 1px solid #45475a;
+}
+
+.add-workspace-btn {
+    background-color: transparent;
+    color: #89b4fa;
+    border: 1px solid #313244;
     border-radius: 6px;
     font-size: 12px;
+}
+
+.add-workspace-btn:hover {
+    background-color: #313244;
 }
 
 .center-panel {
@@ -638,6 +866,7 @@ const APP_CSS: &str = r#"
 
 .workspace-toolbar {
     background-color: #1e1e2e;
+    padding: 8px 12px;
     border-bottom: 1px solid #313244;
 }
 
@@ -650,15 +879,17 @@ const APP_CSS: &str = r#"
 }
 
 .section-title {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: bold;
     color: #89b4fa;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
     margin-top: 8px;
 }
 
 .info-text {
     font-size: 12px;
-    color: #6c7086;
+    color: #585b70;
 }
 
 .status-name {
@@ -677,11 +908,28 @@ const APP_CSS: &str = r#"
     background-color: #1e1e2e;
     color: #cdd6f4;
     font-size: 12px;
-    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+}
+
+.status-container {
+    background-color: #1e1e2e;
+    border-radius: 6px;
+    padding: 8px;
 }
 
 .empty-label {
     font-size: 12px;
-    color: #6c7086;
+    color: #585b70;
+}
+
+headerbar {
+    background-color: #1e1e2e;
+    border-bottom: 1px solid #313244;
+}
+
+separator {
+    background-color: #313244;
+    min-width: 1px;
+    min-height: 1px;
 }
 "#;
