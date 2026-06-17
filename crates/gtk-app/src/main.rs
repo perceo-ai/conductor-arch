@@ -545,13 +545,20 @@ fn build_center_panel(
         }
     });
 
+    // Spacer between workflow and destructive buttons
+    let spacer = Label::new(None);
+    spacer.set_hexpand(true);
+
     toolbar.append(&run_btn);
     toolbar.append(&stop_btn);
     toolbar.append(&editor_btn);
     toolbar.append(&copy_path_btn);
+    toolbar.append(&Separator::new(Orientation::Vertical));
     toolbar.append(&pr_btn);
     toolbar.append(&merge_btn);
+    toolbar.append(&Separator::new(Orientation::Vertical));
     toolbar.append(&rename_btn);
+    toolbar.append(&spacer);
     toolbar.append(&archive_btn);
     toolbar.append(&discard_btn);
 
