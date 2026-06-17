@@ -165,13 +165,18 @@ fn build_sidebar(
             let prev_selected = selected.borrow().clone();
 
             if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
-                if let Ok(workspaces) = store.list() {
-                    for ws in &workspaces {
+                if let Ok(statuses) = store.list_status() {
+                    for line in &statuses {
+                        let ws = &line.workspace;
+                        let pr_num = line.pull_request.as_ref().map(|p| p.number);
+                        let run_active = line.run_running;
                         let row = build_workspace_row(
                             ws.name.as_str(),
                             ws.branch.as_str(),
                             ws.status.as_str(),
                             ws.port_base as i64,
+                            pr_num,
+                            run_active,
                         );
                         list.append(&row);
                         names.borrow_mut().push(ws.name.clone());
@@ -264,16 +269,39 @@ echo; echo 'Run linux-conductor-gtk to see the updated workspace list.'"#,
     (sidebar_box, populate)
 }
 
-fn build_workspace_row(name: &str, branch: &str, status: &str, port: i64) -> ListBoxRow {
+fn build_workspace_row(
+    name: &str,
+    branch: &str,
+    status: &str,
+    port: i64,
+    pr_number: Option<i64>,
+    run_active: bool,
+) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Vertical, 2);
     row_box.set_margin_start(12);
     row_box.set_margin_end(8);
     row_box.set_margin_top(6);
     row_box.set_margin_bottom(6);
 
+    // Name row with run indicator
+    let name_row = GBox::new(Orientation::Horizontal, 4);
+    let run_dot = Label::new(Some(if run_active { "▶" } else { "■" }));
+    run_dot.add_css_class(if run_active {
+        "run-dot-active"
+    } else {
+        "run-dot"
+    });
     let name_label = Label::new(Some(name));
     name_label.add_css_class("workspace-name");
     name_label.set_xalign(0.0);
+    name_label.set_hexpand(true);
+    name_row.append(&run_dot);
+    name_row.append(&name_label);
+    if let Some(pr) = pr_number {
+        let pr_badge = Label::new(Some(&format!("PR#{pr}")));
+        pr_badge.add_css_class("pr-badge");
+        name_row.append(&pr_badge);
+    }
 
     let meta_text = format!("{branch} · :{port}");
     let meta_label = Label::new(Some(&meta_text));
@@ -284,7 +312,7 @@ fn build_workspace_row(name: &str, branch: &str, status: &str, port: i64) -> Lis
     status_label.add_css_class("workspace-status");
     status_label.set_xalign(0.0);
 
-    row_box.append(&name_label);
+    row_box.append(&name_row);
     row_box.append(&meta_label);
     row_box.append(&status_label);
 
@@ -665,6 +693,7 @@ fn build_right_panel(
     stack.add_titled(&checks_scroll, Some("checks"), "Checks");
 
     // Todos page
+    let todos_outer = GBox::new(Orientation::Vertical, 0);
     let todos_box = GBox::new(Orientation::Vertical, 8);
     todos_box.set_margin_start(12);
     todos_box.set_margin_end(12);
@@ -672,7 +701,23 @@ fn build_right_panel(
     let todos_scroll = ScrolledWindow::new();
     todos_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     todos_scroll.set_child(Some(&todos_box));
-    stack.add_titled(&todos_scroll, Some("todos"), "Todos");
+    todos_scroll.set_vexpand(true);
+    todos_outer.append(&todos_scroll);
+    // Add-todo entry row at bottom of todos tab
+    todos_outer.append(&Separator::new(Orientation::Horizontal));
+    let todo_add_row = GBox::new(Orientation::Horizontal, 8);
+    todo_add_row.set_margin_start(12);
+    todo_add_row.set_margin_end(12);
+    todo_add_row.set_margin_top(6);
+    todo_add_row.set_margin_bottom(6);
+    let todo_entry = Entry::new();
+    todo_entry.set_placeholder_text(Some("New todo…"));
+    todo_entry.set_hexpand(true);
+    let todo_add_btn = Button::with_label("Add");
+    todo_add_row.append(&todo_entry);
+    todo_add_row.append(&todo_add_btn);
+    todos_outer.append(&todo_add_row);
+    stack.add_titled(&todos_outer, Some("todos"), "Todos");
 
     // Logs page
     let logs_view = TextView::new();
@@ -705,8 +750,9 @@ fn build_right_panel(
     let checks_buf = checks_view.buffer();
     let logs_buf = logs_view.buffer();
     let todos_box_clone = todos_box.clone();
+    let db_path2 = db_path.clone();
 
-    let refresh = move || {
+    let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let ws_name = sel.borrow().clone();
 
         // Diff
@@ -726,15 +772,41 @@ fn build_right_panel(
         todos_box_clone.append(&title);
         populate_todos_box(&todos_box_clone, &db_path, ws_name.as_deref());
 
-        // Logs — read latest log file from workspace log directory
+        // Logs
         let logs_text = build_logs_text(&logs_dir, ws_name.as_deref());
         logs_buf.set_text(&logs_text);
-    };
+    });
+
+    // Wire up "Add Todo" entry — adds todo then triggers a panel refresh
+    {
+        let sel = Rc::clone(&selected);
+        let entry = todo_entry.clone();
+        let rf = Rc::clone(&refresh);
+        let db = db_path2.clone();
+        let do_add = Rc::new(move || {
+            let text = entry.text().to_string();
+            if text.trim().is_empty() {
+                return;
+            }
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    let _ = store.add_todo(&ws_name, &text);
+                    entry.set_text("");
+                    rf();
+                }
+            }
+        });
+        let d1 = do_add.clone();
+        let d2 = do_add.clone();
+        todo_add_btn.connect_clicked(move |_| d1());
+        todo_entry.connect_activate(move |_| d2());
+    }
 
     // Initial populate
     refresh();
 
-    (right, refresh)
+    let rf = Rc::clone(&refresh);
+    (right, move || rf())
 }
 
 fn build_logs_text(logs_dir: &std::path::PathBuf, ws_name: Option<&str>) -> String {
@@ -947,18 +1019,36 @@ fn populate_todos_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: O
                     ws_lbl.add_css_class("section-title");
                     container.append(&ws_lbl);
                     for todo in &open {
-                        let row = Label::new(Some(&format!("  ☐ #{} {}", todo.id, todo.text)));
-                        row.set_xalign(0.0);
-                        row.set_wrap(true);
+                        let row = GBox::new(Orientation::Horizontal, 8);
+                        let lbl = Label::new(Some(&format!("☐ #{} {}", todo.id, todo.text)));
+                        lbl.set_xalign(0.0);
+                        lbl.set_wrap(true);
+                        lbl.set_hexpand(true);
+                        let done_btn = Button::with_label("✓");
+                        done_btn.add_css_class("flat");
+                        done_btn.set_tooltip_text(Some("Mark done"));
+                        let todo_id = todo.id;
+                        let db = db_path.clone();
+                        let row_clone = row.clone();
+                        done_btn.connect_clicked(move |_| {
+                            if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                                let _ = store.complete_todo(todo_id);
+                            }
+                            if let Some(parent) = row_clone.parent() {
+                                if let Ok(p) = parent.downcast::<GBox>() {
+                                    p.remove(&row_clone);
+                                }
+                            }
+                        });
+                        row.append(&lbl);
+                        row.append(&done_btn);
                         container.append(&row);
                     }
                 }
             }
         }
         if !any {
-            let empty = Label::new(Some(
-                "No open todos.\n\nAdd one:\n  linux-conductor todo add <workspace> <text>",
-            ));
+            let empty = Label::new(Some("No open todos. Use the entry below to add one."));
             empty.add_css_class("info-text");
             empty.set_xalign(0.0);
             empty.set_wrap(true);
@@ -1142,6 +1232,26 @@ separator {
     background-color: #313244;
     min-width: 1px;
     min-height: 1px;
+}
+
+.run-dot-active {
+    font-size: 9px;
+    color: #a6e3a1;
+}
+
+.run-dot {
+    font-size: 9px;
+    color: #45475a;
+}
+
+.pr-badge {
+    font-size: 9px;
+    font-weight: bold;
+    color: #89b4fa;
+    background-color: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 0 4px;
 }
 
 .composer-bar {
