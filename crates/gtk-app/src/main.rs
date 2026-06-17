@@ -1284,7 +1284,32 @@ fn build_right_panel(
     review_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     review_scroll.set_child(Some(&review_box));
     review_scroll.set_vexpand(true);
-    stack.add_titled(&review_scroll, Some("review"), "Review");
+    // Review outer with add-comment form at bottom
+    let review_outer = GBox::new(Orientation::Vertical, 0);
+    review_outer.append(&review_scroll);
+    review_outer.append(&Separator::new(Orientation::Horizontal));
+    let review_add_file = Entry::new();
+    review_add_file.set_placeholder_text(Some("file path…"));
+    review_add_file.set_hexpand(true);
+    let review_add_body = Entry::new();
+    review_add_body.set_placeholder_text(Some("Comment body…"));
+    review_add_body.set_hexpand(true);
+    let review_add_btn = Button::with_label("Add Comment");
+    review_add_btn.add_css_class("suggested-action");
+    let review_add_row = GBox::new(Orientation::Vertical, 4);
+    review_add_row.set_margin_start(12);
+    review_add_row.set_margin_end(12);
+    review_add_row.set_margin_top(6);
+    review_add_row.set_margin_bottom(6);
+    let review_file_row = GBox::new(Orientation::Horizontal, 6);
+    review_file_row.append(&review_add_file);
+    let review_body_row = GBox::new(Orientation::Horizontal, 6);
+    review_body_row.append(&review_add_body);
+    review_body_row.append(&review_add_btn);
+    review_add_row.append(&review_file_row);
+    review_add_row.append(&review_body_row);
+    review_outer.append(&review_add_row);
+    stack.add_titled(&review_outer, Some("review"), "Review");
 
     // Checkpoints page
     let checkpoints_outer = GBox::new(Orientation::Vertical, 0);
@@ -1336,7 +1361,7 @@ fn build_right_panel(
     let checkpoints_box_clone = checkpoints_box.clone();
     let stack_clone = stack.clone();
     let todos_outer_clone = todos_outer.clone();
-    let review_scroll_clone = review_scroll.clone();
+    let review_outer_clone = review_outer.clone();
     let sessions_scroll_clone = sessions_scroll.clone();
     let db_path2 = db_path.clone();
     let db_path3 = db_path.clone();
@@ -1344,6 +1369,7 @@ fn build_right_panel(
     let db_path5 = db_path.clone();
     let db_path6 = db_path.clone();
     let db_path7 = db_path.clone();
+    let db_path8 = db_path.clone();
 
     // Wire up "↻ Live PR Checks" — calls gh pr checks and appends live output
     {
@@ -1439,6 +1465,41 @@ fn build_right_panel(
         });
     }
 
+    // Wire up "Add Comment" in Review tab
+    {
+        let sel = Rc::clone(&selected);
+        let file_entry = review_add_file.clone();
+        let body_entry = review_add_body.clone();
+        let review_box_ref = review_box.clone();
+        let db = db_path8.clone();
+        let do_add = Rc::new(move || {
+            let file = file_entry.text().to_string();
+            let body = body_entry.text().to_string();
+            if file.trim().is_empty() || body.trim().is_empty() {
+                return;
+            }
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    if store
+                        .add_review_comment(&ws_name, &file, None, &body)
+                        .is_ok()
+                    {
+                        file_entry.set_text("");
+                        body_entry.set_text("");
+                        while let Some(child) = review_box_ref.first_child() {
+                            review_box_ref.remove(&child);
+                        }
+                        populate_review_box(&review_box_ref, &db, Some(&ws_name));
+                    }
+                }
+            }
+        });
+        let d1 = do_add.clone();
+        let d2 = do_add.clone();
+        review_add_btn.connect_clicked(move |_| d1());
+        review_add_body.connect_activate(move |_| d2());
+    }
+
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let ws_name = sel.borrow().clone();
 
@@ -1511,7 +1572,7 @@ fn build_right_panel(
                     .map(|comments| comments.iter().filter(|c| c.status == "open").count())
             })
             .unwrap_or(0);
-        let review_page = stack_clone.page(&review_scroll_clone);
+        let review_page = stack_clone.page(&review_outer_clone);
         if open_review_count > 0 {
             review_page.set_title(&format!("Review ({open_review_count})"));
         } else {
