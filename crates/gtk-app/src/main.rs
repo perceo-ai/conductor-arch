@@ -144,8 +144,9 @@ fn build_sidebar(
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
 
-    // row index → workspace name
-    let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    // row index → workspace name (header rows not included)
+    let names: Rc<RefCell<std::collections::HashMap<i32, String>>> =
+        Rc::new(RefCell::new(std::collections::HashMap::new()));
 
     let db_path = paths.database_path.clone();
 
@@ -161,13 +162,31 @@ fn build_sidebar(
                 list.remove(&child);
             }
             names.borrow_mut().clear();
+            let mut row_idx: i32 = 0;
 
             let prev_selected = selected.borrow().clone();
 
             if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
                 if let Ok(statuses) = store.list_status() {
+                    let mut current_repo = String::new();
                     for line in &statuses {
                         let ws = &line.workspace;
+                        // Repo section header when repo changes
+                        if line.repository_name != current_repo {
+                            current_repo = line.repository_name.clone();
+                            let repo_lbl = Label::new(Some(&current_repo));
+                            repo_lbl.add_css_class("repo-section-header");
+                            repo_lbl.set_xalign(0.0);
+                            repo_lbl.set_margin_start(8);
+                            repo_lbl.set_margin_top(6);
+                            repo_lbl.set_margin_bottom(2);
+                            // Non-selectable header row
+                            let header_row = ListBoxRow::builder().child(&repo_lbl).build();
+                            header_row.set_selectable(false);
+                            header_row.set_activatable(false);
+                            list.append(&header_row);
+                            row_idx += 1;
+                        }
                         let pr_num = line.pull_request.as_ref().map(|p| p.number);
                         let run_active = line.run_running;
                         let row = build_workspace_row(
@@ -179,7 +198,8 @@ fn build_sidebar(
                             run_active,
                         );
                         list.append(&row);
-                        names.borrow_mut().push(ws.name.clone());
+                        names.borrow_mut().insert(row_idx, ws.name.clone());
+                        row_idx += 1;
                     }
                 }
             }
@@ -198,18 +218,26 @@ fn build_sidebar(
 
             // Re-select previously selected workspace if still present
             let names_ref = names.borrow();
-            let target_idx = prev_selected
-                .as_deref()
-                .and_then(|n| names_ref.iter().position(|x| x == n));
+            let target_idx: Option<i32> = prev_selected.as_deref().and_then(|n| {
+                names_ref
+                    .iter()
+                    .find_map(|(&idx, name)| if name == n { Some(idx) } else { None })
+            });
             drop(names_ref);
 
             if let Some(idx) = target_idx {
-                if let Some(row) = list.row_at_index(idx as i32) {
+                if let Some(row) = list.row_at_index(idx) {
                     list.select_row(Some(&row));
                 }
             } else if list.selected_row().is_none() {
-                if let Some(first) = list.row_at_index(0) {
-                    list.select_row(Some(&first));
+                // Select first selectable row (skip header rows)
+                let mut i = 0;
+                while let Some(row) = list.row_at_index(i) {
+                    if row.is_selectable() {
+                        list.select_row(Some(&row));
+                        break;
+                    }
+                    i += 1;
                 }
             }
         }
@@ -221,10 +249,7 @@ fn build_sidebar(
     let sel_clone = Rc::clone(&selected);
     let names_clone = Rc::clone(&names);
     list.connect_row_selected(move |_, row| {
-        let name = row.and_then(|r| {
-            let idx = r.index() as usize;
-            names_clone.borrow().get(idx).cloned()
-        });
+        let name = row.and_then(|r| names_clone.borrow().get(&r.index()).cloned());
         *sel_clone.borrow_mut() = name;
         refresh_center();
         refresh_right();
@@ -1232,6 +1257,14 @@ separator {
     background-color: #313244;
     min-width: 1px;
     min-height: 1px;
+}
+
+.repo-section-header {
+    font-size: 9px;
+    font-weight: bold;
+    color: #6c7086;
+    text-transform: uppercase;
+    letter-spacing: 1px;
 }
 
 .run-dot-active {

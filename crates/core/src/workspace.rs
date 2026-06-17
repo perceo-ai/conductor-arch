@@ -174,6 +174,7 @@ pub struct ChecksSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceStatusLine {
     pub workspace: Workspace,
+    pub repository_name: String,
     pub open_todos: usize,
     pub pull_request: Option<PullRequest>,
     pub run_running: bool,
@@ -324,8 +325,17 @@ impl WorkspaceStore {
             } else {
                 None
             };
+            let repository_name: String = self
+                .conn
+                .query_row(
+                    "SELECT name FROM repositories WHERE id = ?1",
+                    [workspace.repository_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
             lines.push(WorkspaceStatusLine {
                 workspace,
+                repository_name,
                 open_todos: open_todos as usize,
                 pull_request,
                 run_running: run_running > 0,
