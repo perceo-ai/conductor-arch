@@ -924,6 +924,17 @@ fn build_right_panel(
     logs_scroll.set_child(Some(&logs_view));
     stack.add_titled(&logs_scroll, Some("logs"), "Logs");
 
+    // Sessions page
+    let sessions_box = GBox::new(Orientation::Vertical, 8);
+    sessions_box.set_margin_start(12);
+    sessions_box.set_margin_end(12);
+    sessions_box.set_margin_top(12);
+    let sessions_scroll = ScrolledWindow::new();
+    sessions_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    sessions_scroll.set_child(Some(&sessions_box));
+    sessions_scroll.set_vexpand(true);
+    stack.add_titled(&sessions_scroll, Some("sessions"), "Sessions");
+
     // Review comments page
     let review_box = GBox::new(Orientation::Vertical, 8);
     review_box.set_margin_start(12);
@@ -980,6 +991,7 @@ fn build_right_panel(
     let checks_buf = checks_view.buffer();
     let logs_buf = logs_view.buffer();
     let todos_box_clone = todos_box.clone();
+    let sessions_box_clone = sessions_box.clone();
     let review_box_clone = review_box.clone();
     let checkpoints_box_clone = checkpoints_box.clone();
     let db_path2 = db_path.clone();
@@ -1078,6 +1090,12 @@ fn build_right_panel(
         title.set_xalign(0.0);
         todos_box_clone.append(&title);
         populate_todos_box(&todos_box_clone, &db_path, ws_name.as_deref());
+
+        // Sessions
+        while let Some(child) = sessions_box_clone.first_child() {
+            sessions_box_clone.remove(&child);
+        }
+        populate_sessions_box(&sessions_box_clone, &db_path, ws_name.as_deref());
 
         // Review comments
         while let Some(child) = review_box_clone.first_child() {
@@ -1559,6 +1577,80 @@ fn populate_review_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: 
                     container.append(&Separator::new(Orientation::Horizontal));
                 }
             }
+        }
+    }
+}
+
+fn populate_sessions_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: Option<&str>) {
+    use linux_conductor_core::workspace::ProcessStatus;
+
+    let title = Label::new(Some("── Sessions & Runs ──"));
+    title.set_xalign(0.0);
+    container.append(&title);
+
+    let Some(name) = ws_name else {
+        let lbl = Label::new(Some("Select a workspace to view its sessions."));
+        lbl.add_css_class("info-text");
+        lbl.set_xalign(0.0);
+        container.append(&lbl);
+        return;
+    };
+
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        let sessions = store.list_sessions(name).unwrap_or_default();
+        let runs = store.list_runs(name).unwrap_or_default();
+
+        if sessions.is_empty() && runs.is_empty() {
+            let lbl = Label::new(Some(
+                "No sessions or runs yet.\nUse the session launchers above.",
+            ));
+            lbl.add_css_class("info-text");
+            lbl.set_xalign(0.0);
+            lbl.set_wrap(true);
+            container.append(&lbl);
+            return;
+        }
+
+        for rec in sessions.iter().chain(runs.iter()).take(15) {
+            let row = GBox::new(Orientation::Horizontal, 8);
+            let is_running = rec.status == ProcessStatus::Running;
+
+            let kind_dot = Label::new(Some(if is_running { "▶" } else { "■" }));
+            kind_dot.add_css_class(if is_running {
+                "run-dot-active"
+            } else {
+                "run-dot"
+            });
+
+            use linux_conductor_core::workspace::ProcessKind;
+            let kind_name = match rec.kind {
+                ProcessKind::Session => "session",
+                ProcessKind::Run => "run",
+            };
+            let kind_text = format!("{kind_name} pid:{}", rec.pid);
+            let kind_lbl = Label::new(Some(&kind_text));
+            kind_lbl.add_css_class("workspace-name");
+            kind_lbl.set_xalign(0.0);
+            kind_lbl.set_hexpand(true);
+
+            let started_lbl = Label::new(Some(&rec.started_at));
+            started_lbl.add_css_class("workspace-meta");
+
+            row.append(&kind_dot);
+            row.append(&kind_lbl);
+            row.append(&started_lbl);
+
+            if is_running {
+                let stop_btn = Button::with_label("■ Stop");
+                stop_btn.add_css_class("flat");
+                let ws = name.to_owned();
+                stop_btn.connect_clicked(move |_| {
+                    spawn_terminal_command(&format!("linux-conductor stop {ws}"));
+                });
+                row.append(&stop_btn);
+            }
+
+            container.append(&row);
         }
     }
 }
