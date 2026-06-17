@@ -1173,9 +1173,9 @@ fn build_right_panel(
         let diff_text = build_diff_text(&db_path, ws_name.as_deref());
         diff_buf.set_text(&diff_text);
 
-        // Checks
+        // Checks (with color tags)
         let checks_text = build_checks_text(&db_path, ws_name.as_deref());
-        checks_buf.set_text(&checks_text);
+        apply_colored_checks(&checks_buf, &checks_text);
 
         // Todos
         while let Some(child) = todos_box_clone.first_child() {
@@ -1368,6 +1368,59 @@ fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> Strin
         }
     }
     text
+}
+
+fn apply_colored_checks(buf: &gtk::TextBuffer, text: &str) {
+    buf.set_text(text);
+
+    let ensure_tag = |name: &str, fg: &str| -> gtk::TextTag {
+        let table = buf.tag_table();
+        if let Some(t) = table.lookup(name) {
+            return t;
+        }
+        let tag = gtk::TextTag::new(Some(name));
+        tag.set_foreground(Some(fg));
+        table.add(&tag);
+        tag
+    };
+
+    let green = ensure_tag("checks-green", "#a6e3a1");
+    let red = ensure_tag("checks-red", "#f38ba8");
+    let blue = ensure_tag("checks-blue", "#89b4fa");
+    let yellow = ensure_tag("checks-yellow", "#f9e2af");
+    let dim = ensure_tag("checks-dim", "#6c7086");
+
+    for (line_num, line) in text.lines().enumerate() {
+        let tag = if line.contains("▶ running") || line.contains("Run:      ▶") {
+            Some(&green)
+        } else if line.contains("Error:") || line.contains("conflict") || line.contains("■ stopped")
+        {
+            Some(&red)
+        } else if line.starts_with("PR:")
+            || line.starts_with("Branch:")
+            || line.starts_with("Workspace:")
+        {
+            Some(&blue)
+        } else if line.contains("ahead") || line.contains("behind") || line.contains("no PR") {
+            Some(&yellow)
+        } else if line.starts_with("Push:") || line.starts_with("Changed:") {
+            Some(&dim)
+        } else {
+            None
+        };
+
+        if let Some(t) = tag {
+            let line_n = line_num as i32;
+            if let Some(start) = buf.iter_at_line(line_n) {
+                if let Some(end) = buf.iter_at_line(line_n + 1) {
+                    buf.apply_tag(t, &start, &end);
+                } else {
+                    let end = buf.end_iter();
+                    buf.apply_tag(t, &start, &end);
+                }
+            }
+        }
+    }
 }
 
 fn build_checks_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> String {
