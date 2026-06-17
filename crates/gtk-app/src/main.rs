@@ -318,6 +318,22 @@ linux-conductor workspace create "$REPO" --name "$NAME" --branch "$BRANCH""#,
     });
     sidebar_box.append(&add_btn);
 
+    // "New workspace from issue" shortcut
+    let issue_btn = Button::with_label("+ From Issue");
+    issue_btn.add_css_class("add-workspace-btn");
+    issue_btn.set_margin_start(8);
+    issue_btn.set_margin_end(8);
+    issue_btn.set_margin_bottom(4);
+    issue_btn.connect_clicked(|_| {
+        spawn_terminal_command(
+            r#"echo 'Available repos:'; linux-conductor repo list; echo;
+read -rp 'Repo name: ' REPO
+read -rp 'GitHub issue URL: ' ISSUE_URL
+linux-conductor workspace create "$REPO" --from-issue "$ISSUE_URL""#,
+        );
+    });
+    sidebar_box.append(&issue_btn);
+
     // "Add repo" button for onboarding
     let repo_btn = Button::with_label("+ Add Repository");
     repo_btn.add_css_class("add-workspace-btn");
