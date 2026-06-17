@@ -110,22 +110,32 @@ workspace parent at `~/conductor/workspaces/my-app/`.
 linux-conductor-gtk
 ```
 
-The GUI shows all workspaces grouped by repository in the sidebar with live run/PR badges
-and conflict warnings. Click a workspace to select it.
+The GUI shows all workspaces grouped by repository in the sidebar. Sidebar rows show:
+- ▶/■ run state indicator, PR# badge, ⚡N active-session badge, ✓N open-todo badge
+- ⚠ conflict badge when the workspace has file conflicts with siblings
 
-**Toolbar:** Run · Stop · Editor · ⎘ Path · ↑ PR · ⇓ Merge · Rename · Archive · Discard
+Click a workspace to select it. The center panel shows a **quick stats strip** (run state · sessions · PR · todos) and a task brief from `.context/brief.md`.
 
-**Right panel tabs:**
-- **Diff** — colored git status + unified diff (green additions, red deletions)
-- **Checks** — colored workspace status; "↻ Live PR Checks" and "⇄ Sync PR State" buttons
-- **Todos** — view/add/complete todos; "⇄ Sync from .context/" imports agent-written todos
-- **Sessions** — active sessions and runs with stop buttons
-- **Logs** — last 200 lines of latest run/session log, auto-scrolled to end
-- **Review** — open review comments with "→ Agent" and "Resolve" actions
-- **Checkpoints** — save and restore Git checkpoints per workspace
+**Toolbar:** Run · Stop · Editor · ⎘ Path | ↑ PR · ⇓ Merge | ✎ Rename · ↺ Restore · ✕ Archive · ⊗ Discard
+
+Archive and Discard show confirmation dialogs. Restore is shown only for archived workspaces.
+
+**Right panel tabs** (counts update live):
+- **Diff** — `git diff --stat` summary, colored git status + unified diff
+- **Checks** — colored workspace status; "↻ Live PR Checks", "⇄ Sync PR State", "👁 PR View" buttons
+- **Todos (N)** — view/add/complete todos inline; "⇄ Sync from .context/" imports agent-written todos
+- **Sessions (N)** — active sessions and runs; "📋 Logs" per process, "■ Stop" for running sessions
+- **Logs** — last 200 lines of latest log, auto-scrolled to end
+- **Review (N)** — open review comments with "→ Agent" (appends to agent-notes.md) and "Resolve"
+- **Checkpoints** — save/restore Git checkpoints with a message entry
 
 The agent prompt bar at the bottom sends notes to `.context/agent-notes.md`.
-Keyboard shortcut: **Ctrl+R** refreshes all panels. Auto-refresh runs every 5 seconds.
+Keyboard shortcut: **Ctrl+R** refreshes all panels. Auto-refresh every 5 seconds.
+
+Launch the GUI pre-selecting a workspace:
+```bash
+linux-conductor-gtk --workspace berlin
+```
 
 All interactive actions (new workspace, new repo, agent sessions) open your default terminal emulator.
 
