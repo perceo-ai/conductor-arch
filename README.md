@@ -110,13 +110,24 @@ workspace parent at `~/conductor/workspaces/my-app/`.
 linux-conductor-gtk
 ```
 
-The GUI shows all your workspaces in the sidebar. Click a workspace to select it,
-then use the action toolbar to Run, Stop, open an Editor, create a PR, or Archive.
-The right panel shows Diff, Checks, Todos, and Logs for the selected workspace.
-The GUI auto-refreshes every 5 seconds.
+The GUI shows all workspaces grouped by repository in the sidebar with live run/PR badges
+and conflict warnings. Click a workspace to select it.
 
-All actions that require interactive input (new workspace, new repo, agent sessions)
-open your default terminal emulator.
+**Toolbar:** Run · Stop · Editor · ⎘ Path · ↑ PR · ⇓ Merge · Rename · Archive · Discard
+
+**Right panel tabs:**
+- **Diff** — colored git status + unified diff (green additions, red deletions)
+- **Checks** — colored workspace status; "↻ Live PR Checks" and "⇄ Sync PR State" buttons
+- **Todos** — view/add/complete todos; "⇄ Sync from .context/" imports agent-written todos
+- **Sessions** — active sessions and runs with stop buttons
+- **Logs** — last 200 lines of latest run/session log, auto-scrolled to end
+- **Review** — open review comments with "→ Agent" and "Resolve" actions
+- **Checkpoints** — save and restore Git checkpoints per workspace
+
+The agent prompt bar at the bottom sends notes to `.context/agent-notes.md`.
+Keyboard shortcut: **Ctrl+R** refreshes all panels. Auto-refresh runs every 5 seconds.
+
+All interactive actions (new workspace, new repo, agent sessions) open your default terminal emulator.
 
 ### 2. Create workspaces
 
