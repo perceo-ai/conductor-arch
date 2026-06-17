@@ -63,6 +63,7 @@ fn build_ui(app: &Application) {
         Rc::clone(&selected),
         refresh_right.clone(),
         toast_overlay.clone(),
+        window.clone(),
     );
     center_panel.set_hexpand(true);
     center_panel.set_vexpand(true);
@@ -454,6 +455,7 @@ fn build_center_panel(
     selected: Rc<RefCell<Option<String>>>,
     refresh_right: impl Fn() + Clone + 'static,
     toasts: adw::ToastOverlay,
+    window: ApplicationWindow,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let center = GBox::new(Orientation::Vertical, 0);
     center.add_css_class("center-panel");
@@ -538,10 +540,27 @@ fn build_center_panel(
     archive_btn.set_tooltip_text(Some("Archive workspace"));
     let sel = Rc::clone(&selected);
     let rr = refresh_right.clone();
+    let win_a = window.clone();
     archive_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!("linux-conductor archive {ws}"));
-            rr();
+            let dialog = adw::MessageDialog::new(
+                Some(&win_a),
+                Some("Archive Workspace?"),
+                Some(&format!("Archive \"{ws}\"? This stops any running processes and marks the workspace archived. The worktree directory is preserved.")),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("archive", "Archive");
+            dialog.set_response_appearance("archive", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let rr2 = rr.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "archive" {
+                    spawn_terminal_command(&format!("linux-conductor archive {ws}"));
+                    rr2();
+                }
+            });
+            dialog.present();
         }
     });
 
@@ -549,9 +568,25 @@ fn build_center_panel(
     discard_btn.add_css_class("destructive-action");
     discard_btn.set_tooltip_text(Some("Discard workspace and remove worktree"));
     let sel = Rc::clone(&selected);
+    let win_d = window.clone();
     discard_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!("linux-conductor discard {ws}"));
+            let dialog = adw::MessageDialog::new(
+                Some(&win_d),
+                Some("Discard Workspace?"),
+                Some(&format!("Discard \"{ws}\"? This permanently removes the worktree directory and all uncommitted changes. This cannot be undone.")),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("discard", "Discard");
+            dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            dialog.connect_response(None, move |_, response| {
+                if response == "discard" {
+                    spawn_terminal_command(&format!("linux-conductor discard {ws}"));
+                }
+            });
+            dialog.present();
         }
     });
 
