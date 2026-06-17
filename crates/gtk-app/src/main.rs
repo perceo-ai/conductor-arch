@@ -1334,6 +1334,10 @@ fn build_right_panel(
     let sessions_box_clone = sessions_box.clone();
     let review_box_clone = review_box.clone();
     let checkpoints_box_clone = checkpoints_box.clone();
+    let stack_clone = stack.clone();
+    let todos_outer_clone = todos_outer.clone();
+    let review_scroll_clone = review_scroll.clone();
+    let sessions_scroll_clone = sessions_scroll.clone();
     let db_path2 = db_path.clone();
     let db_path3 = db_path.clone();
     let db_path4 = db_path.clone();
@@ -1446,7 +1450,7 @@ fn build_right_panel(
         let checks_text = build_checks_text(&db_path, ws_name.as_deref());
         apply_colored_checks(&checks_buf, &checks_text);
 
-        // Todos
+        // Todos (with live count in tab label)
         while let Some(child) = todos_box_clone.first_child() {
             todos_box_clone.remove(&child);
         }
@@ -1454,18 +1458,65 @@ fn build_right_panel(
         title.set_xalign(0.0);
         todos_box_clone.append(&title);
         populate_todos_box(&todos_box_clone, &db_path, ws_name.as_deref());
+        // Count open todos for tab label
+        let open_todo_count: usize = ws_name
+            .as_deref()
+            .and_then(|n| {
+                WorkspaceStore::open(db_path.clone())
+                    .ok()
+                    .and_then(|store| store.list_todos(n).ok())
+                    .map(|todos| todos.iter().filter(|t| t.status == "open").count())
+            })
+            .unwrap_or(0);
+        let todos_page = stack_clone.page(&todos_outer_clone);
+        if open_todo_count > 0 {
+            todos_page.set_title(&format!("Todos ({open_todo_count})"));
+        } else {
+            todos_page.set_title("Todos");
+        }
 
-        // Sessions
+        // Sessions (with count in tab label)
         while let Some(child) = sessions_box_clone.first_child() {
             sessions_box_clone.remove(&child);
         }
         populate_sessions_box(&sessions_box_clone, &db_path, ws_name.as_deref());
+        let active_sess_count: usize = ws_name
+            .as_deref()
+            .and_then(|n| {
+                WorkspaceStore::open(db_path.clone())
+                    .ok()
+                    .and_then(|store| store.list_status().ok())
+                    .and_then(|lines| lines.into_iter().find(|l| l.workspace.name == n))
+                    .map(|l| l.active_sessions)
+            })
+            .unwrap_or(0);
+        let sessions_page = stack_clone.page(&sessions_scroll_clone);
+        if active_sess_count > 0 {
+            sessions_page.set_title(&format!("Sessions ({active_sess_count})"));
+        } else {
+            sessions_page.set_title("Sessions");
+        }
 
-        // Review comments
+        // Review comments (with open count in tab label)
         while let Some(child) = review_box_clone.first_child() {
             review_box_clone.remove(&child);
         }
         populate_review_box(&review_box_clone, &db_path, ws_name.as_deref());
+        let open_review_count: usize = ws_name
+            .as_deref()
+            .and_then(|n| {
+                WorkspaceStore::open(db_path.clone())
+                    .ok()
+                    .and_then(|store| store.list_review_comments(n).ok())
+                    .map(|comments| comments.iter().filter(|c| c.status == "open").count())
+            })
+            .unwrap_or(0);
+        let review_page = stack_clone.page(&review_scroll_clone);
+        if open_review_count > 0 {
+            review_page.set_title(&format!("Review ({open_review_count})"));
+        } else {
+            review_page.set_title("Review");
+        }
 
         // Checkpoints
         while let Some(child) = checkpoints_box_clone.first_child() {
