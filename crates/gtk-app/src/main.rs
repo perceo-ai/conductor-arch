@@ -419,7 +419,11 @@ fn build_workspace_row(
     meta_label.set_xalign(0.0);
 
     let status_label = Label::new(Some(status));
-    status_label.add_css_class("workspace-status");
+    status_label.add_css_class(if status == "archived" {
+        "workspace-status-archived"
+    } else {
+        "workspace-status"
+    });
     status_label.set_xalign(0.0);
 
     row_box.append(&name_row);
@@ -2019,6 +2023,12 @@ window {
 .workspace-status {
     font-size: 10px;
     color: #a6e3a1;
+}
+
+.workspace-status-archived {
+    font-size: 10px;
+    color: #45475a;
+    font-style: italic;
 }
 
 .workspace-title {
