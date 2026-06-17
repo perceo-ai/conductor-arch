@@ -471,7 +471,18 @@ fn build_center_panel(
     let session_section = build_session_controls(Rc::clone(&selected));
     info_box.append(&session_section);
 
-    // Status grid (all workspaces overview)
+    // Context brief section — shows .context/brief.md for selected workspace
+    let brief_title = Label::new(Some("Task Brief"));
+    brief_title.add_css_class("section-title");
+    brief_title.set_xalign(0.0);
+    info_box.append(&brief_title);
+
+    let brief_label = Label::new(Some("Select a workspace to view its task brief."));
+    brief_label.add_css_class("info-text");
+    brief_label.set_xalign(0.0);
+    brief_label.set_wrap(true);
+    info_box.append(&brief_label);
+
     // MCP status section
     let mcp_section_title = Label::new(Some("MCP Servers"));
     mcp_section_title.add_css_class("section-title");
@@ -559,6 +570,7 @@ fn build_center_panel(
     let ws_title_clone = ws_title.clone();
     let status_container_clone = status_container.clone();
     let mcp_container_clone = mcp_container.clone();
+    let brief_label_clone = brief_label.clone();
     let sel_clone = Rc::clone(&selected);
 
     let refresh = move || {
@@ -569,6 +581,17 @@ fn build_center_panel(
             .map(|n| format!("▶ {n}"))
             .unwrap_or_else(|| "Select a workspace".to_owned());
         ws_title_clone.set_text(&title_text);
+
+        // Update task brief
+        let brief_text = ws_name
+            .as_deref()
+            .and_then(|n| {
+                WorkspaceStore::open(db_path.clone())
+                    .ok()
+                    .and_then(|store| store.read_context_brief(n).ok().flatten())
+            })
+            .unwrap_or_else(|| "Select a workspace to view its task brief.".to_owned());
+        brief_label_clone.set_text(&brief_text);
 
         // Refresh MCP status for selected workspace
         while let Some(child) = mcp_container_clone.first_child() {
@@ -1336,6 +1359,39 @@ fn populate_review_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: 
                     let body_lbl = Label::new(Some(&comment.body));
                     body_lbl.set_xalign(0.0);
                     body_lbl.set_wrap(true);
+
+                    let btn_row = GBox::new(Orientation::Horizontal, 6);
+
+                    // Send to agent — appends comment to .context/agent-notes.md
+                    let send_btn = Button::with_label("→ Agent");
+                    send_btn.add_css_class("flat");
+                    send_btn.set_tooltip_text(Some("Send this comment to agent-notes.md"));
+                    let body_clone = comment.body.clone();
+                    let file_clone = file_text.clone();
+                    let ws_owned = name.to_owned();
+                    let db2 = db_path.clone();
+                    send_btn.connect_clicked(move |_| {
+                        if let Ok(store) = WorkspaceStore::open(db2.clone()) {
+                            if let Ok(ws_path) = store.workspace_path(&ws_owned) {
+                                let notes = ws_path.join(".context").join("agent-notes.md");
+                                if let Some(p) = notes.parent() {
+                                    let _ = std::fs::create_dir_all(p);
+                                }
+                                use std::io::Write;
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&notes)
+                                {
+                                    let _ = writeln!(
+                                        f,
+                                        "\n---\n**Review comment** `{file_clone}`\n\n{body_clone}\n"
+                                    );
+                                }
+                            }
+                        }
+                    });
+
                     let resolve_btn = Button::with_label("Resolve");
                     resolve_btn.add_css_class("flat");
                     let comment_id = comment.id;
@@ -1351,9 +1407,11 @@ fn populate_review_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: 
                             }
                         }
                     });
+                    btn_row.append(&send_btn);
+                    btn_row.append(&resolve_btn);
                     row.append(&file_lbl);
                     row.append(&body_lbl);
-                    row.append(&resolve_btn);
+                    row.append(&btn_row);
                     container.append(&row);
                     container.append(&Separator::new(Orientation::Horizontal));
                 }
