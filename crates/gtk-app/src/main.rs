@@ -474,11 +474,22 @@ fn build_center_panel(
     });
 
     let editor_btn = Button::with_label("⎋ Editor");
-    editor_btn.set_tooltip_text(Some("Open in VS Code"));
+    editor_btn.set_tooltip_text(Some("Open in editor (cursor, code, or vim)"));
     let sel = Rc::clone(&selected);
     editor_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!("linux-conductor open {ws} --editor code"));
+            let editor = ["cursor", "code", "codium", "vim"]
+                .iter()
+                .find(|e| {
+                    std::process::Command::new("which")
+                        .arg(e)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                })
+                .copied()
+                .unwrap_or("code");
+            spawn_terminal_command(&format!("linux-conductor open {ws} --editor {editor}"));
         }
     });
 
