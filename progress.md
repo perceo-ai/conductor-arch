@@ -136,3 +136,59 @@ cargo test -p linux-conductor --test cli_sessions --locked -- --nocapture
 - Add `workspace archive` cleanup options later; current archive is metadata-only.
 - Add local todos/checks summary and archive-after-merge/discard flow.
 - Then move into Day 3 basics: README demo walkthrough and first packaging artifact.
+
+## 2026-06-17
+
+- Inspected the prior handoff, plan, README, and current CLI/core command surface.
+- Found that the tree was clean and the CLI path was already substantially beyond the original Phase 1/Day 2 scope.
+- Chose a small natural continuation instead of starting a new GUI scaffold:
+  - Added validation so empty/whitespace todo text is rejected.
+  - Added validation so empty/whitespace checkpoint messages are rejected.
+  - Added unit tests for both validation paths.
+  - Updated README command docs to include current commands that were missing:
+    - `workspace create --from-issue`
+    - `workspace list --active`
+    - `workspace discard`
+    - `workspace rename`
+    - `runs`
+    - `session list`
+    - `todo sync`
+    - `pr create --from-context`
+    - top-level `status`, `conflicts`, `archive`, and `discard`
+    - `mcp status`
+    - `review add/list/resolve`
+    - `checkpoint create/list/restore`
+  - Fixed README known limits: checkpoint restore is implemented, but destructive.
+
+## Verification 2026-06-17
+
+- Could not run Rust tests or formatting in this environment because `cargo` and `rustup` are not installed or on PATH.
+- Confirmed with:
+
+```bash
+cargo run -q -p linux-conductor -- --help
+which cargo
+which rustup
+find /home/kitts -maxdepth 4 -type f -name cargo
+```
+
+- Ran static repo checks:
+
+```bash
+git diff -- crates/core/src/workspace.rs README.md
+rg -n "Checkpoint restore not implemented|not implemented|TODO|TBD" README.md progress.md crates/core/src/workspace.rs
+git status --short
+```
+
+## Suggested Next Step 2026-06-17
+
+- Install Rust in this environment and run:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+```
+
+- Then choose either:
+  - Start the Day 3 GUI shell, or
+  - Keep polishing the CLI demo path with verified packaging artifacts.

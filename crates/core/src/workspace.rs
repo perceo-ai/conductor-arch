@@ -805,6 +805,8 @@ impl WorkspaceStore {
         message: &str,
         session_id: Option<i64>,
     ) -> Result<Checkpoint> {
+        let message = message.trim();
+        anyhow::ensure!(!message.is_empty(), "checkpoint message is required");
         let workspace = self.get_by_name(name)?;
         let now = timestamp();
         let git_ref = format!("refs/linux-conductor/checkpoints/{}/{now}", workspace.id);
@@ -892,6 +894,8 @@ impl WorkspaceStore {
     }
 
     pub fn add_todo(&self, name: &str, text: &str) -> Result<Todo> {
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "todo text is required");
         let workspace = self.get_by_name(name)?;
         let now = timestamp();
         self.conn.execute(
@@ -2694,6 +2698,39 @@ run = "printf 'started\n'; while true; do sleep 1; done"
     }
 
     #[test]
+    fn empty_todos_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let err = store.add_todo("berlin", "   ").unwrap_err();
+
+        assert!(err.to_string().contains("todo text is required"));
+        assert!(store.list_todos("berlin").unwrap().is_empty());
+    }
+
+    #[test]
     fn rename_updates_name_path_and_moves_directory() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -2771,6 +2808,41 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         let list = store.checkpoint_list("berlin").unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, cp.id);
+    }
+
+    #[test]
+    fn empty_checkpoint_messages_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let err = store.checkpoint_create("berlin", "   ", None).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("checkpoint message is required"));
+        assert!(store.checkpoint_list("berlin").unwrap().is_empty());
     }
 
     #[test]

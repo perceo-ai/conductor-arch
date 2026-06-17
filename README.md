@@ -228,16 +228,22 @@ linux-conductor repo list
 linux-conductor repo doctor [<name>]
 
 linux-conductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
+linux-conductor workspace create <repo> --from-issue <number> [--branch-prefix <prefix>]
 linux-conductor workspace list
+linux-conductor workspace list --active
 linux-conductor workspace archive <name> [--remove-worktree]
 linux-conductor workspace restore <name>
+linux-conductor workspace discard <name>
+linux-conductor workspace rename <name> <new-name>
 
 linux-conductor run <workspace>
+linux-conductor runs <workspace>
 linux-conductor stop <workspace>
 linux-conductor logs <workspace> --run|--session
 
 linux-conductor session start <workspace> --kind shell|codex|claude
 linux-conductor session stop <workspace>
+linux-conductor session list <workspace>
 
 linux-conductor open <workspace> [--editor code|cursor|vim|...]
 
@@ -246,13 +252,27 @@ linux-conductor diff <workspace> [--name-only] [--file <path>]
 linux-conductor todo add <workspace> <text...>
 linux-conductor todo list <workspace>
 linux-conductor todo done <id>
+linux-conductor todo sync <workspace>
 
-linux-conductor pr create <workspace> [--title <t>] [--body <b>] [--draft]
+linux-conductor pr create <workspace> [--title <t>] [--body <b>] [--draft] [--from-context]
 linux-conductor pr view <workspace>
 linux-conductor pr checks <workspace>
 linux-conductor pr merge <workspace> [--method squash|merge|rebase]
 
 linux-conductor checks <workspace>
+linux-conductor status
+linux-conductor conflicts <workspace>
+linux-conductor archive <workspace> [--remove-worktree]
+linux-conductor discard <workspace>
+linux-conductor mcp status <workspace>
+
+linux-conductor review add <workspace> <file> [--line <n>] <body...>
+linux-conductor review list <workspace>
+linux-conductor review resolve <id>
+
+linux-conductor checkpoint create <workspace> [--session <id>] <message...>
+linux-conductor checkpoint list <workspace>
+linux-conductor checkpoint restore <workspace> <id>
 ```
 
 ---
@@ -298,8 +318,9 @@ linux-conductor checks <workspace>
   shell out to the `gh` CLI. Run `gh auth login` before using these commands.
 - **Flatpak not yet supported.** The sandbox conflicts with arbitrary repository
   paths and process supervision. Install via AppImage or native package.
-- **Checkpoint restore not implemented.** The plan includes private Git refs for
-  per-turn checkpoints; this is deferred past the MVP.
+- **Checkpoint restore is destructive.** `checkpoint restore` hard-resets the
+  workspace and removes untracked files. Commit or copy anything you need before
+  restoring.
 - **Single SQLite database.** Concurrent CLI invocations against the same
   database may occasionally contend; this is fine for interactive use but not
   for scripted parallelism.
