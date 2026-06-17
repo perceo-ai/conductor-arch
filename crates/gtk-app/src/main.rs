@@ -835,7 +835,7 @@ fn build_session_controls(selected: Rc<RefCell<Option<String>>>) -> GBox {
     section.append(&title_lbl);
 
     let hint = Label::new(Some(
-        "Sessions open in your default terminal emulator.\nSelect a workspace from the sidebar.",
+        "Opens in your default terminal emulator with workspace environment variables set.",
     ));
     hint.add_css_class("info-text");
     hint.set_xalign(0.0);
