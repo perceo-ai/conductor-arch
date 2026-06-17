@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<component type="console-application">
+<component type="desktop-application">
   <id>io.github.pranavkannepalli.linux-conductor</id>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
@@ -43,6 +43,7 @@
   </keywords>
   <provides>
     <binary>linux-conductor</binary>
+    <binary>linux-conductor-gtk</binary>
   </provides>
   <releases>
     <release version="0.1.0" date="2026-06-16">

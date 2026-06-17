@@ -2,9 +2,9 @@
 Name=Linux Conductor
 GenericName=Coding Agent Workflow
 Comment=Linux-native parallel coding-agent workflow tool built around Git worktrees
-Exec=linux-conductor
+Exec=linux-conductor-gtk
 Icon=io.github.pranavkannepalli.linux-conductor
-Terminal=true
+Terminal=false
 Type=Application
 Categories=Development;
 Keywords=git;worktree;codex;claude;agents;workflow;

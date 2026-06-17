@@ -42,8 +42,25 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Install GTK4 and libadwaita dev headers
+        shell: bash
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends \
+              libgtk-4-dev libadwaita-1-dev pkg-config
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y gtk4-devel libadwaita-devel pkgconf
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -S --noconfirm gtk4 libadwaita pkgconf
+          else
+            echo "Unknown distro; skipping GTK4 headers"
+          fi
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
 
       - name: Test workspace
         run: cargo test --workspace --locked
