@@ -721,6 +721,35 @@ fn build_center_panel(
     info_box.set_margin_top(20);
     info_box.set_margin_bottom(20);
 
+    // Quick stats strip — run · sessions · PR · todos
+    let stats_box = GBox::new(Orientation::Horizontal, 16);
+    stats_box.add_css_class("quick-stats");
+    stats_box.set_margin_bottom(4);
+
+    let run_stat = Label::new(Some("■ Stopped"));
+    run_stat.add_css_class("stat-stopped");
+    run_stat.set_xalign(0.0);
+
+    let sess_stat = Label::new(Some("0 sessions"));
+    sess_stat.add_css_class("stat-dim");
+
+    let pr_stat = Label::new(Some("no PR"));
+    pr_stat.add_css_class("stat-dim");
+
+    let todo_stat = Label::new(Some("0 todos"));
+    todo_stat.add_css_class("stat-dim");
+
+    stats_box.append(&run_stat);
+    stats_box.append(&Separator::new(Orientation::Vertical));
+    stats_box.append(&sess_stat);
+    stats_box.append(&Separator::new(Orientation::Vertical));
+    stats_box.append(&pr_stat);
+    stats_box.append(&Separator::new(Orientation::Vertical));
+    stats_box.append(&todo_stat);
+
+    info_box.append(&stats_box);
+    info_box.append(&Separator::new(Orientation::Horizontal));
+
     // Session controls section
     let session_section = build_session_controls(Rc::clone(&selected));
     info_box.append(&session_section);
@@ -832,7 +861,12 @@ fn build_center_panel(
     let restore_btn_clone = restore_btn.clone();
     let archive_btn_clone = archive_btn.clone();
     let archive_banner_clone = archive_banner.clone();
+    let run_stat_clone = run_stat.clone();
+    let sess_stat_clone = sess_stat.clone();
+    let pr_stat_clone = pr_stat.clone();
+    let todo_stat_clone = todo_stat.clone();
     let db_path2 = paths.database_path.clone();
+    let db_path3 = paths.database_path.clone();
 
     let refresh = move || {
         // Update workspace title and path subtitle
@@ -853,6 +887,35 @@ fn build_center_panel(
         restore_btn_clone.set_visible(is_archived);
         archive_btn_clone.set_visible(!is_archived);
         archive_banner_clone.set_visible(is_archived);
+
+        // Update quick stats strip
+        if let Some(n) = ws_name.as_deref() {
+            if let Some(line) = WorkspaceStore::open(db_path3.clone()).ok()
+                .and_then(|store| store.list_status().ok())
+                .and_then(|lines| lines.into_iter().find(|l| l.workspace.name == n))
+            {
+                if line.run_running {
+                    run_stat_clone.set_text("▶ Running");
+                    run_stat_clone.set_css_classes(&["stat-running"]);
+                } else {
+                    run_stat_clone.set_text("■ Stopped");
+                    run_stat_clone.set_css_classes(&["stat-stopped"]);
+                }
+                sess_stat_clone.set_text(&format!("{} session(s)", line.active_sessions));
+                pr_stat_clone.set_text(
+                    &line.pull_request.as_ref()
+                        .map(|p| format!("PR #{} ({})", p.number, p.state))
+                        .unwrap_or_else(|| "no PR".to_owned())
+                );
+                todo_stat_clone.set_text(&format!("{} todo(s)", line.open_todos));
+            }
+        } else {
+            run_stat_clone.set_text("■ Stopped");
+            run_stat_clone.set_css_classes(&["stat-stopped"]);
+            sess_stat_clone.set_text("0 sessions");
+            pr_stat_clone.set_text("no PR");
+            todo_stat_clone.set_text("0 todos");
+        }
 
         let path_text = ws_name
             .as_deref()
@@ -2169,6 +2232,26 @@ window {
     border-left: 3px solid #f9e2af;
     padding: 6px 10px;
     border-radius: 4px;
+}
+
+.quick-stats {
+    padding: 4px 0;
+}
+
+.stat-running {
+    color: #a6e3a1;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.stat-stopped {
+    color: #6c7086;
+    font-size: 12px;
+}
+
+.stat-dim {
+    color: #6c7086;
+    font-size: 12px;
 }
 
 .workspace-title {
