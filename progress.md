@@ -350,8 +350,16 @@ All plan phases are addressed and complete:
 - Sidebar: session count badge (⚡N, green) and open-todo count badge (✓N, yellow) on workspace rows
 - Toolbar: "↺ Restore" button — shown only for archived workspaces, hidden otherwise; archive_btn hides when archived
 - Toolbar: Archive and Discard now open `adw::MessageDialog` confirmation dialogs before running CLI command
+- Toolbar: "✎ Rename" now opens inline `adw::MessageDialog` with text Entry widget instead of terminal prompt
+- Center panel: yellow "⚠ archived" banner visible when workspace is archived
+- Center panel: quick stats strip — run state · sessions · PR · todos (updates every 5 seconds)
+- Center panel: `--workspace <name>` flag pre-selects workspace on launch
+- Diff tab: `git diff --stat` summary header (N files changed, N insertions, N deletions)
+- Sessions tab: "📋 Logs" button per process opens `linux-conductor logs` in terminal
+- Todos/Sessions/Review tab labels show live counts in parentheses when non-zero
 - CI: test.yml updated to use ubuntu-24.04 / ubuntu-22.04 matrix, `dtolnay/rust-toolchain@stable`, Cargo cache
 - CI: publish.yml updated to use ubuntu-24.04 runner with GTK4 deps instead of self-hosted
+- README: updated GUI section with comprehensive feature list
 - All 30 tests pass; all crates build clean; cargo fmt clean
 
 ## Remaining Polish (not blocking MVP)
