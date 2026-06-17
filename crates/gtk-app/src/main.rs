@@ -2057,6 +2057,27 @@ window {
     background-color: transparent;
 }
 
+.panel-switcher button {
+    background-color: transparent;
+    color: #6c7086;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.panel-switcher button:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+
+.panel-switcher button:checked {
+    background-color: #313244;
+    color: #89b4fa;
+    font-weight: 600;
+}
+
 .section-title {
     font-size: 11px;
     font-weight: bold;
