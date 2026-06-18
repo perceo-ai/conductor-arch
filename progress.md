@@ -257,6 +257,8 @@ Verified Phase 3 evidence so far:
 - GTK terminal display now strips common ANSI/OSC escape sequences and applies
   carriage-return progress-line updates in the visible transcript while keeping
   the persisted terminal logs raw.
+- GTK terminal display now handles simple cursor-up plus clear-line redraws for
+  common progress/status output that rewrites the previous line.
 - GTK terminal display caps the on-screen scrollback and shows a trim marker
   while preserving complete raw terminal transcript logs on disk.
 - GTK app shell reconciles stale terminal process records once during startup
@@ -297,12 +299,13 @@ Verified Phase 3 evidence so far:
 
 Still needs Phase 4 work:
 
-- Terminal emulator polish: cursor-state emulation beyond common escape
-  stripping and carriage-return line updates, multiple managed terminal
-  tabs/sessions in the UI, a polished terminal history/scrollback browser beyond
-  basic session listing/transcript search/selected transcript loading, and live
-  PTY process reattach after app restart. Latest transcript restore is built,
-  but that is not the same as reattaching to the old shell process.
+- Terminal emulator polish: broader cursor-state/session emulation beyond common
+  escape stripping and carriage-return/cursor-up line redraws, multiple managed
+  terminal tabs/sessions in the UI, a polished terminal history/scrollback
+  browser beyond basic session listing/transcript search/selected transcript
+  loading, and live PTY process reattach after app restart. Latest transcript
+  restore is built, but that is not the same as reattaching to the old shell
+  process.
 - Full Spotlight parity: app-open recursive file watching now exists, but there
   is still no app-closed/background watcher, rich conflict UI, or Conductor-level
   parity around every checkpoint/watch edge case. Current support is manual

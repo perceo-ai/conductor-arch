@@ -649,6 +649,12 @@ fn terminal_display_text(text: &str) -> String {
             continue;
         }
         if ch == '\n' {
+            if let Some(position) = cursor {
+                if rendered.get(position) == Some(&'\n') {
+                    cursor = None;
+                    continue;
+                }
+            }
             cursor = None;
             rendered.push(ch);
             continue;
@@ -661,15 +667,34 @@ fn terminal_display_text(text: &str) -> String {
         match chars.peek().copied() {
             Some('[') => {
                 chars.next();
+                let mut sequence = String::new();
                 let mut final_code = None;
                 for code in chars.by_ref() {
                     if ('@'..='~').contains(&code) {
                         final_code = Some(code);
                         break;
                     }
+                    sequence.push(code);
                 }
-                if final_code == Some('K') {
-                    clear_terminal_display_line(&mut rendered, cursor);
+                match final_code {
+                    Some('A') => {
+                        cursor = Some(move_terminal_display_cursor_up(
+                            &rendered,
+                            cursor.unwrap_or(rendered.len()),
+                            csi_first_number(&sequence, 1),
+                        ));
+                    }
+                    Some('G') => {
+                        cursor = Some(move_terminal_display_cursor_to_column(
+                            &rendered,
+                            cursor.unwrap_or(rendered.len()),
+                            csi_first_number(&sequence, 1),
+                        ));
+                    }
+                    Some('K') => {
+                        clear_terminal_display_line(&mut rendered, cursor);
+                    }
+                    _ => {}
                 }
             }
             Some(']') => {
@@ -720,12 +745,59 @@ fn clear_terminal_display_line(rendered: &mut Vec<char>, cursor: Option<usize>) 
     rendered.drain(start..end);
 }
 
+fn move_terminal_display_cursor_up(rendered: &[char], cursor: usize, lines: usize) -> usize {
+    let column = cursor.saturating_sub(line_start_before(rendered, cursor));
+    let mut start = line_start_before(rendered, cursor);
+    for _ in 0..lines {
+        if start == 0 {
+            break;
+        }
+        start = line_start_before(rendered, start.saturating_sub(1));
+    }
+    (start + column).min(line_end_after(rendered, start))
+}
+
+fn move_terminal_display_cursor_to_column(
+    rendered: &[char],
+    cursor: usize,
+    column: usize,
+) -> usize {
+    let start = line_start_before(rendered, cursor);
+    let target = start + column.saturating_sub(1);
+    target.min(line_end_after(rendered, start))
+}
+
+fn csi_first_number(sequence: &str, default: usize) -> usize {
+    sequence
+        .split(';')
+        .next()
+        .and_then(|part| part.parse::<usize>().ok())
+        .filter(|number| *number > 0)
+        .unwrap_or(default)
+}
+
 fn line_start(rendered: &[char]) -> usize {
     rendered
         .iter()
         .rposition(|ch| *ch == '\n')
         .map(|index| index + 1)
         .unwrap_or(0)
+}
+
+fn line_start_before(rendered: &[char], cursor: usize) -> usize {
+    rendered[..cursor.min(rendered.len())]
+        .iter()
+        .rposition(|ch| *ch == '\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn line_end_after(rendered: &[char], start: usize) -> usize {
+    rendered[start.min(rendered.len())..]
+        .iter()
+        .position(|ch| *ch == '\n')
+        .map(|offset| start + offset)
+        .unwrap_or(rendered.len())
 }
 
 struct TerminalSession {
@@ -828,6 +900,13 @@ mod tests {
         let rendered = terminal_display_text("Downloading 10%\rDownloading 100%\nnext\n");
 
         assert_eq!(rendered, "Downloading 100%\nnext\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_cursor_up_line_redraws() {
+        let rendered = terminal_display_text("step 1\nstep 2\n\u{1b}[1A\u{1b}[2Kdone\n");
+
+        assert_eq!(rendered, "step 1\ndone\n");
     }
 
     #[test]

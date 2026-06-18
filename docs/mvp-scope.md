@@ -170,12 +170,13 @@ MVP is not complete until the normal workflow can be driven from the app.
   terminal allocation. Each recorded shell gets a distinct log path, and PTY
   command/output chunks are appended to that raw transcript log. The visible
   transcript strips common ANSI/OSC escape sequences, applies carriage-return
-  progress-line updates, and caps on-screen scrollback while keeping persisted
-  logs raw. It can search persisted transcript logs, list recorded terminal
-  sessions/logs, load a selected past transcript into the terminal view, and
-  restore the latest transcript into the terminal view after app restart.
-  Managed multi-terminal UI, a more polished terminal history/scrollback
-  browser, and live PTY process reattach after app restart are still missing.
+  and cursor-up progress-line redraws, and caps on-screen scrollback while
+  keeping persisted logs raw. It can search persisted transcript logs, list
+  recorded terminal sessions/logs, load a selected past transcript into the
+  terminal view, and restore the latest transcript into the terminal view after
+  app restart. Broader cursor/session emulation, managed multi-terminal UI, a
+  more polished terminal history/scrollback browser, and live PTY process
+  reattach after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
   app-wide polling sync, and app-open recursive filesystem watching for active
