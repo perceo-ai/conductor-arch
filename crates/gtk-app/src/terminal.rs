@@ -361,21 +361,36 @@ fn append_text(buffer: &TextBuffer, text: &str) {
 }
 
 fn terminal_display_text(text: &str) -> String {
-    let mut rendered = String::new();
+    let mut rendered = Vec::new();
+    let mut cursor = None;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch != '\u{1b}' {
+        if ch == '\r' {
+            cursor = Some(line_start(&rendered));
+            continue;
+        }
+        if ch == '\n' {
+            cursor = None;
             rendered.push(ch);
+            continue;
+        }
+        if ch != '\u{1b}' {
+            push_terminal_display_char(&mut rendered, &mut cursor, ch);
             continue;
         }
 
         match chars.peek().copied() {
             Some('[') => {
                 chars.next();
+                let mut final_code = None;
                 for code in chars.by_ref() {
                     if ('@'..='~').contains(&code) {
+                        final_code = Some(code);
                         break;
                     }
+                }
+                if final_code == Some('K') {
+                    clear_terminal_display_line(&mut rendered, cursor);
                 }
             }
             Some(']') => {
@@ -396,7 +411,42 @@ fn terminal_display_text(text: &str) -> String {
             None => {}
         }
     }
+    rendered.into_iter().collect()
+}
+
+fn push_terminal_display_char(rendered: &mut Vec<char>, cursor: &mut Option<usize>, ch: char) {
+    let Some(position) = *cursor else {
+        rendered.push(ch);
+        return;
+    };
+    if position < rendered.len() && rendered[position] != '\n' {
+        rendered[position] = ch;
+    } else if position <= rendered.len() {
+        rendered.insert(position, ch);
+    } else {
+        rendered.push(ch);
+    }
+    *cursor = Some(position + 1);
+}
+
+fn clear_terminal_display_line(rendered: &mut Vec<char>, cursor: Option<usize>) {
+    let Some(start) = cursor else {
+        return;
+    };
+    let end = rendered[start..]
+        .iter()
+        .position(|ch| *ch == '\n')
+        .map(|offset| start + offset)
+        .unwrap_or(rendered.len());
+    rendered.drain(start..end);
+}
+
+fn line_start(rendered: &[char]) -> usize {
     rendered
+        .iter()
+        .rposition(|ch| *ch == '\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
 }
 
 struct TerminalSession {
@@ -484,8 +534,15 @@ mod tests {
 
     #[test]
     fn terminal_display_text_strips_common_ansi_escape_sequences() {
-        let rendered = terminal_display_text("\u{1b}[32mok\u{1b}[0m\r\u{1b}[Kdone\n");
+        let rendered = terminal_display_text("\u{1b}[32mok\u{1b}[0m \u{1b}]0;title\u{7}done\n");
 
-        assert_eq!(rendered, "ok\rdone\n");
+        assert_eq!(rendered, "ok done\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_carriage_return_line_updates() {
+        let rendered = terminal_display_text("Downloading 10%\rDownloading 100%\nnext\n");
+
+        assert_eq!(rendered, "Downloading 100%\nnext\n");
     }
 }

@@ -168,10 +168,11 @@ MVP is not complete until the normal workflow can be driven from the app.
   when their recorded shell PID is no longer alive. Each recorded shell gets a
   distinct log path, and PTY command/output chunks are appended to that raw
   transcript log. The visible transcript strips common ANSI/OSC escape
-  sequences, can search persisted transcript logs, and restores the latest
-  transcript into the terminal view after app restart. Managed multi-terminal
-  UI, a polished terminal history browser, and live PTY process reattach after
-  app restart are still missing.
+  sequences, applies carriage-return progress-line updates, can search
+  persisted transcript logs, and restores the latest transcript into the
+  terminal view after app restart. Managed multi-terminal UI, a polished
+  terminal history browser, and live PTY process reattach after app restart are
+  still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
   app-wide polling sync, and app-open recursive filesystem watching for active
