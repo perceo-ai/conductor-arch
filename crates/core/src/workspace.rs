@@ -67,6 +67,7 @@ pub enum ProcessKind {
     Setup,
     Run,
     Session,
+    Terminal,
 }
 
 impl ProcessKind {
@@ -75,6 +76,7 @@ impl ProcessKind {
             Self::Setup => "setup",
             Self::Run => "run",
             Self::Session => "session",
+            Self::Terminal => "terminal",
         }
     }
 }
@@ -430,7 +432,12 @@ impl WorkspaceStore {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
 
-        for kind in [ProcessKind::Setup, ProcessKind::Run, ProcessKind::Session] {
+        for kind in [
+            ProcessKind::Setup,
+            ProcessKind::Run,
+            ProcessKind::Session,
+            ProcessKind::Terminal,
+        ] {
             if let Some(process) = self.find_latest_running_process(workspace.id, kind)? {
                 stop_process(process.pid)?;
                 let now = timestamp();
@@ -606,6 +613,60 @@ impl WorkspaceStore {
         let process = self.latest_process(workspace.id, ProcessKind::Session)?;
         fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))
+    }
+
+    pub fn record_terminal_process(
+        &self,
+        name: &str,
+        command: &str,
+        pid: u32,
+    ) -> Result<ProcessRecord> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "terminal command is required");
+        let workspace = self.get_by_name(name)?;
+        let now = timestamp();
+        let log_path = self
+            .logs_dir
+            .join(&workspace.name)
+            .join("terminal-active.log");
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create log directory {}", parent.display()))?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("open log {}", log_path.display()))?;
+
+        self.conn.execute(
+            "INSERT INTO processes (
+                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
+            params![
+                workspace.id,
+                ProcessKind::Terminal.as_str(),
+                command,
+                i64::from(pid),
+                log_path.to_string_lossy().to_string(),
+                ProcessStatus::Running.as_str(),
+                now,
+            ],
+        )?;
+        self.get_process(self.conn.last_insert_rowid())
+    }
+
+    pub fn mark_terminal_process_stopped(
+        &self,
+        process_id: i64,
+        exit_code: Option<i32>,
+    ) -> Result<ProcessRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+            params![ProcessStatus::Stopped.as_str(), now, exit_code, process_id,],
+        )?;
+        self.get_process(process_id)
     }
 
     pub fn terminal_command(&self, name: &str, command: &str) -> Result<TerminalCommandResult> {
@@ -1534,6 +1595,10 @@ impl WorkspaceStore {
         self.list_processes(name, ProcessKind::Session)
     }
 
+    pub fn list_terminals(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Terminal)
+    }
+
     pub fn list_runs(&self, name: &str) -> Result<Vec<ProcessRecord>> {
         self.list_processes(name, ProcessKind::Run)
     }
@@ -1937,6 +2002,7 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         "setup" => ProcessKind::Setup,
         "run" => ProcessKind::Run,
         "session" => ProcessKind::Session,
+        "terminal" => ProcessKind::Terminal,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     let pid = row.get::<_, i64>(4)?;
@@ -3575,6 +3641,58 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn terminal_process_records_track_running_and_stopped_shells() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let running = store
+            .record_terminal_process("berlin", "shell", 4242)
+            .unwrap();
+
+        assert_eq!(running.kind, ProcessKind::Terminal);
+        assert_eq!(running.command, "shell");
+        assert_eq!(running.pid, 4242);
+        assert_eq!(running.status, ProcessStatus::Running);
+        assert_eq!(running.exit_code, None);
+        assert!(running.ended_at.is_none());
+        assert!(running.log_path.ends_with("terminal-active.log"));
+
+        let terminals = store.list_terminals("berlin").unwrap();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].id, running.id);
+
+        let stopped = store
+            .mark_terminal_process_stopped(running.id, Some(143))
+            .unwrap();
+
+        assert_eq!(stopped.id, running.id);
+        assert_eq!(stopped.status, ProcessStatus::Stopped);
+        assert_eq!(stopped.exit_code, Some(143));
+        assert!(stopped.ended_at.is_some());
+    }
+
+    #[test]
     fn setup_workspace_executes_setup_script_and_captures_logs() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -4391,6 +4509,7 @@ spotlight_testing = true
                 ProcessKind::Setup => store.list_setups(workspace).unwrap(),
                 ProcessKind::Run => store.list_runs(workspace).unwrap(),
                 ProcessKind::Session => store.list_sessions(workspace).unwrap(),
+                ProcessKind::Terminal => store.list_terminals(workspace).unwrap(),
             };
             if let Some(record) = records.into_iter().find(|record| record.status == status) {
                 return record;

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use gtk::prelude::*;
 use gtk::{Box as GBox, Button, Entry, Label, Orientation, ScrolledWindow, TextBuffer, TextView};
 use linux_conductor_core::pty::PtySession;
@@ -36,12 +37,12 @@ pub fn embedded_terminal_panel(
         workspace_path.display()
     ));
 
-    let active_pty: Rc<RefCell<Option<PtySession>>> = Rc::new(RefCell::new(None));
+    let active_pty: Rc<RefCell<Option<TerminalSession>>> = Rc::new(RefCell::new(None));
     let buffer_for_poll = transcript.buffer();
     let pty_for_poll = active_pty.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
         if let Some(session) = pty_for_poll.borrow_mut().as_mut() {
-            let output = session.read_available();
+            let output = session.session.read_available();
             if !output.is_empty() {
                 append_text(&buffer_for_poll, &output);
             }
@@ -68,20 +69,29 @@ pub fn embedded_terminal_panel(
             append_text(&buffer_for_start, "\n[pty already running]\n");
             return;
         }
-        match WorkspaceStore::open(db_for_pty.clone())
-            .and_then(|store| store.session_launch(&workspace_for_pty, SessionKind::Shell))
-            .and_then(|launch| {
-                PtySession::spawn(
-                    launch.program,
-                    launch.args,
-                    &launch.cwd,
-                    launch.env,
-                    24,
-                    cols,
-                )
-            }) {
-            Ok(session) => {
-                *pty_for_start.borrow_mut() = Some(session);
+        match WorkspaceStore::open(db_for_pty.clone()).and_then(|store| {
+            let launch = store.session_launch(&workspace_for_pty, SessionKind::Shell)?;
+            let command = display_command(&launch.program, &launch.args);
+            let session = PtySession::spawn(
+                launch.program,
+                launch.args,
+                &launch.cwd,
+                launch.env,
+                24,
+                cols,
+            )?;
+            let pid = session
+                .process_id()
+                .context("PTY shell did not report a process id")?;
+            let process = store.record_terminal_process(&workspace_for_pty, &command, pid)?;
+            Ok(TerminalSession {
+                session,
+                database_path: db_for_pty.clone(),
+                process_id: Some(process.id),
+            })
+        }) {
+            Ok(terminal) => {
+                *pty_for_start.borrow_mut() = Some(terminal);
                 append_text(&buffer_for_start, "\n[pty shell started]\n");
             }
             Err(err) => append_text(&buffer_for_start, &format!("\n[pty error]\n{err:#}\n")),
@@ -90,7 +100,7 @@ pub fn embedded_terminal_panel(
     let pty_for_stop = active_pty.clone();
     let buffer_for_stop = transcript.buffer();
     stop_pty_btn.connect_clicked(move |_| {
-        if let Some(mut session) = pty_for_stop.borrow_mut().take() {
+        if let Some(session) = pty_for_stop.borrow_mut().take() {
             match session.stop() {
                 Ok(()) => append_text(&buffer_for_stop, "\n[pty shell stopped]\n"),
                 Err(err) => {
@@ -170,11 +180,11 @@ fn send_or_run_terminal_command(
     workspace_name: String,
     command: String,
     buffer: TextBuffer,
-    pty: Rc<RefCell<Option<PtySession>>>,
+    pty: Rc<RefCell<Option<TerminalSession>>>,
 ) {
     if let Some(session) = pty.borrow_mut().as_mut() {
         append_text(&buffer, &format!("\n$ {command}\n"));
-        if let Err(err) = session.write(&format!("{command}\n")) {
+        if let Err(err) = session.session.write(&format!("{command}\n")) {
             append_text(&buffer, &format!("[pty write error]\n{err:#}\n"));
         }
         return;
@@ -233,4 +243,40 @@ fn run_terminal_command(
 fn append_text(buffer: &TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
+}
+
+struct TerminalSession {
+    session: PtySession,
+    database_path: PathBuf,
+    process_id: Option<i64>,
+}
+
+impl TerminalSession {
+    fn stop(mut self) -> Result<()> {
+        self.session.stop()?;
+        self.mark_stopped(Some(143))
+    }
+
+    fn mark_stopped(&mut self, exit_code: Option<i32>) -> Result<()> {
+        let Some(process_id) = self.process_id.take() else {
+            return Ok(());
+        };
+        WorkspaceStore::open(self.database_path.clone())?
+            .mark_terminal_process_stopped(process_id, exit_code)?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.session.stop();
+        let _ = self.mark_stopped(Some(143));
+    }
+}
+
+fn display_command(program: &Path, args: &[String]) -> String {
+    std::iter::once(program.display().to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }

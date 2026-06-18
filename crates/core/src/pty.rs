@@ -89,6 +89,10 @@ impl PtySession {
         self.writer.flush().context("flush pty writer")
     }
 
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     pub fn read_available(&mut self) -> String {
         let Ok(output) = self.output.lock() else {
             return String::new();

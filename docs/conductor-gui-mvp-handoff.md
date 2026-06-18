@@ -336,8 +336,9 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Current UI does not match Conductor closely enough.
 - Agent sessions still mostly behave like launched external tools.
 - There is no true embedded Conductor chat UI.
-- There is a basic PTY-backed workspace shell, but not a polished terminal
-  emulator with resize/cursor/scrollback/session management yet.
+- There is a basic PTY-backed workspace shell with process records, but not a
+  polished terminal emulator with resize/cursor/scrollback/session management
+  yet.
 - Spotlight testing has a first manual apply/restore slice, but not continuous
   file watching/checkpoint sync or workspace switching.
 - Changes/checks/todos/process panels are basic, not review-grade.

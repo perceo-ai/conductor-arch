@@ -116,6 +116,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   exit code.
 - PTY-backed workspace shell primitive with post-spawn input and streamed
   output.
+- Terminal shell process records for embedded PTY shells, including pid,
+  running/stopped status, timestamps, and stop exit code.
 - First Spotlight testing slice: apply a workspace's tracked changes to the
   clean repository root when `spotlight_testing = true`, then reverse that patch
   on stop.
@@ -139,6 +141,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Workspace tabs for Chats, Changes, Terminal, Checks, Todos, and Processes.
 - Basic embedded terminal with PTY-backed shell controls plus presets for
   Conductor env, git status, diff, and file list.
+- Processes tab lists embedded terminal shells alongside setup, run, and agent
+  session processes.
 - Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Off.
 - History page that reads prior Conductor chats/messages from the macOS
   Conductor database when available.
@@ -154,7 +158,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   bidirectional agent chat.
 - Embedded terminal support now has a PTY-backed shell, but the UI is still a
   raw transcript/input surface rather than a polished terminal emulator with
-  resize/cursor/scrollback/session management.
+  resize/cursor/scrollback/session management. Terminal process records are
+  created and stopped, but app-crash reconciliation is still rough.
 - Spotlight support is manual apply/restore only. It does not yet watch files,
   create checkpoint commits, continuously sync, or switch active workspaces.
 - Projects/workspace creation forms are basic text fields, not polished

@@ -278,6 +278,8 @@ Manual GUI smoke:
   reports the exit code.
 - Confirm Start Shell opens a PTY-backed workspace shell, accepts a typed
   command, streams output, and Stop Shell terminates it.
+- Confirm the Processes tab shows that terminal shell as running after Start
+  Shell and stopped with exit code `143` after Stop Shell.
 - Confirm Setup, Run, and Stop controls call the current runtime APIs and show
   latest setup/run log previews.
 - With `spotlight_testing = true` and a clean repository root, confirm
@@ -293,7 +295,7 @@ Known GUI MVP gaps:
 
 - No embedded Conductor-native agent chat yet.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
-  I/O but renders as raw transcript text.
+  I/O and process records but renders as raw transcript text.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
   Spotlight slice is manual apply/restore.
 - No command palette, shortcut coverage, deep links, polished Big Terminal

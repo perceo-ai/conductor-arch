@@ -198,6 +198,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   reports the exit code without freezing the app.
 - [ ] Terminal tab can start a workspace shell, accept typed input after the
   shell starts, stream output, and stop the shell.
+- [ ] Processes tab shows the embedded terminal shell as running after Start
+  Shell and stopped with exit code `143` after Stop Shell.
 - [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
 - [ ] With `spotlight_testing = true`, Spotlight On applies tracked workspace
   changes to a clean repository root and Spotlight Off restores the root.

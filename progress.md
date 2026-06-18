@@ -48,6 +48,8 @@ security/privacy posture.
   exit code.
 - PTY-backed shell session primitive using `portable-pty`, with input writes
   and streamed output reads.
+- Terminal shell process records, so started/stopped PTY shells are visible in
+  the existing process model with pid, status, timestamps, and stop exit code.
 - First Spotlight testing slice: when enabled in repository settings, the app
   can apply a workspace's tracked changes to the repository root and later
   reverse that patch.
@@ -77,6 +79,8 @@ security/privacy posture.
 - Terminal panels can start/stop a PTY-backed workspace shell. Presets and
   typed commands go through the PTY while a shell is active, with the previous
   one-shot command path still used when no PTY is running.
+- Terminal shell records now appear in the workspace Processes tab, so the app
+  no longer treats embedded PTY shells as invisible runtime state.
 - Runtime panel can start setup/run scripts, stop run scripts, and show latest
   setup/run log tails.
 - Runtime panel can start/stop the first Spotlight testing slice and show the
@@ -202,12 +206,16 @@ Verified Phase 3 evidence so far:
   stdout, stderr, timestamps, and exit code.
 - Core now has a PTY session primitive that starts a shell in a workspace,
   accepts input after spawn, and streams output back to the app.
+- Core now records PTY terminal shells as process rows and can mark them stopped
+  with the same signal-style exit code used by other stopped runtime processes.
 - Core now tracks setup script runs as a separate process kind and can read the
   latest setup log.
 - GTK terminal panels now execute real workspace commands asynchronously instead
   of queuing placeholder text.
 - GTK terminal panels now have Start Shell/Stop Shell controls for a PTY-backed
   workspace shell.
+- GTK terminal panels create terminal process records on Start Shell and mark
+  them stopped on Stop Shell or panel teardown.
 - GTK terminal presets expose `CONDUCTOR_*` environment, git status, git diff,
   and a short file list; when a PTY shell is active, presets are sent into that
   shell.
@@ -226,7 +234,7 @@ Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
   transcript, multiple terminal sessions, persisted terminal history, and
-  stronger long-running PTY process status in the process model.
+  stronger automatic reconciliation for PTY processes if the whole app crashes.
 - Full Spotlight parity: file watching, checkpoint commits, one-way continuous
   sync, switching active Spotlight workspaces, and stronger root dirty-state
   recovery. Current support is manual apply/restore of tracked changes.

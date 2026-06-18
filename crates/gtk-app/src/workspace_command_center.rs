@@ -744,6 +744,25 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
         }
         Err(err) => out.push_str(&format!("Could not read sessions: {err:#}\n")),
     }
+    out.push_str("\nTerminals\n");
+    match store.list_terminals(name) {
+        Ok(records) if records.is_empty() => out.push_str("No terminal shells recorded.\n"),
+        Ok(records) => {
+            for record in records {
+                out.push_str(&format!(
+                    "#{} {} {} pid={} exit={} started={} log={}\n",
+                    record.id,
+                    record.command,
+                    record.status.as_str(),
+                    record.pid,
+                    exit_code_label(record.exit_code),
+                    record.started_at,
+                    record.log_path.display()
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("Could not read terminals: {err:#}\n")),
+    }
     out
 }
 
