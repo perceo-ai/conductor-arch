@@ -3,9 +3,9 @@
 ## Current State
 
 This project has completed the Phase 0 documentation reset, Phase 1 app
-architecture cleanup slice, Phase 2 project settings slice, and a Phase 3
-workspace command center slice for the corrected GUI-first MVP plan. The next
-implementation phase is embedded runtime and app-native sessions.
+architecture cleanup slice, and Phase 2 project settings slice. Phase 3
+Workspace Command Center is the active phase until the full core + CLI + GTK
+workspace command flow is verified.
 
 The codebase is being redirected from a CLI-heavy worktree tool into a
 GUI-first Conductor-style desktop app. The CLI and core backend are useful
@@ -128,7 +128,7 @@ MVP-critical missing work:
 - Repository rows now show default branch metadata, which helps users create
   workspaces from the correct base.
 
-## Phase 3 Workspace Command Center Slice Done
+## Phase 3 Workspace Command Center Status
 
 - Workspace detail now renders through a focused command center module instead
   of the old inline page.
@@ -144,9 +144,30 @@ MVP-critical missing work:
 - The Projects page can create workspaces from branch/base, GitHub issue,
   GitHub PR, Linear issue, or prompt while reusing current core workspace APIs.
   GitHub PR creation fetches the PR head ref before creating the worktree.
-  Prompt creation writes the prompt into `.context/brief.md`. Linear creation
-  calls Linear's API through `LINEAR_API_KEY`; without that key it fails with a
-  visible error instead of creating a fake workspace.
+  GitHub issue, GitHub PR, Linear issue, and prompt creation write source
+  context into `.context/brief.md`. Linear creation calls Linear's API through
+  `LINEAR_API_KEY`; without that key it fails with a visible error instead of
+  creating a fake workspace.
+
+Still needs Phase 3 proof before moving on:
+
+- Manual or automated GTK click-through for source creation and lifecycle
+  controls.
+- Live GitHub issue/PR verification after `gh auth login`.
+- Live Linear issue verification after `LINEAR_API_KEY` is configured.
+
+Verified Phase 3 evidence so far:
+
+- Core tests cover prompt, GitHub issue, and GitHub PR workspace source
+  creation. GitHub tests use fake `gh` output plus a real local git remote and
+  PR head ref.
+- Full workspace tests pass.
+- CLI prompt creation smoke created a real worktree and wrote the prompt to
+  `.context/brief.md`.
+- CLI Linear creation without `LINEAR_API_KEY` fails clearly before creating a
+  fake workspace.
+- GTK app launches on `DISPLAY=:0` and stays alive until a 5-second smoke-test
+  timeout with isolated XDG state.
 
 ## Next Step
 
@@ -158,7 +179,9 @@ Recommended next work:
 1. Keep local docs aligned with the official Conductor docs before adding
    better-than-Conductor product ideas.
 2. Continue polishing project onboarding and settings validation.
-3. Replace the session/terminal foundations with PTY-backed streaming and
+3. Finish Phase 3 verification on GTK/runtime/live connectors before starting
+   Phase 4 work.
+4. Replace the session/terminal foundations with PTY-backed streaming and
    bidirectional app-native chat/terminal I/O.
-4. Add richer runtime logs, agent controls, PR/check actions, toasts, and
+5. Add richer runtime logs, agent controls, PR/check actions, toasts, and
    visible blockers on top of the command center.

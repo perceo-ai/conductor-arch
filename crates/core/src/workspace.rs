@@ -647,12 +647,19 @@ impl WorkspaceStore {
         let branch = format!("{prefix}/{issue_number}/{slug}");
         let workspace_name = format!("issue-{issue_number}");
 
-        self.create(CreateWorkspace {
+        let workspace = self.create(CreateWorkspace {
             repository_name: repository_name.to_owned(),
             name: workspace_name,
             branch,
             base_ref: None,
-        })
+        })?;
+        write_context_brief(
+            &workspace.path,
+            &format!(
+                "# Brief\n\nGitHub issue #{issue_number}: {title}\n\n## Source\n\nGitHub Issue\n"
+            ),
+        )?;
+        Ok(workspace)
     }
 
     pub fn create_from_pull_request(
@@ -681,7 +688,7 @@ impl WorkspaceStore {
         let state =
             extract_json_string_field(&output, "state").unwrap_or_else(|| "open".to_owned());
         let slug = slugify(&title);
-        let remote_ref = format!("refs/remotes/{}/pr/{}", repository.remote_name, pr_number);
+        let remote_ref = format!("refs/linux-conductor/pull-requests/{pr_number}");
         let fetch_refspec = format!("pull/{pr_number}/head:{remote_ref}");
         git_dynamic(
             &repository.root_path,
@@ -713,6 +720,16 @@ impl WorkspaceStore {
                 )?;
             }
         }
+
+        write_context_brief(
+            &workspace.path,
+            &format!(
+                "# Brief\n\nGitHub PR #{pr_number}: {title}\n\n{}\n\n## Source\n\nGitHub Pull Request\n",
+                self.pull_request_by_workspace_id(workspace.id)?
+                    .map(|pr| pr.url)
+                    .unwrap_or_default()
+            ),
+        )?;
 
         Ok(workspace)
     }
@@ -2232,6 +2249,12 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn create_workspace_adds_git_worktree_context_dir_and_metadata() {
@@ -2309,6 +2332,183 @@ mod tests {
         let brief = fs::read_to_string(workspace.path.join(".context/brief.md")).unwrap();
         assert!(brief.contains("Build the real connector flow"));
         assert!(brief.contains("Prompt"));
+    }
+
+    #[test]
+    fn create_from_issue_uses_gh_title_and_writes_context_brief() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"title":"Fix honest connector validation","number":123}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store.create_from_issue("demo", 123, None).unwrap();
+
+        restore_path(old_path);
+        assert_eq!(workspace.name, "issue-123");
+        assert_eq!(workspace.branch, "lc/123/fix-honest-connector-validation");
+        let brief = fs::read_to_string(workspace.path.join(".context/brief.md")).unwrap();
+        assert!(brief.contains("GitHub issue #123: Fix honest connector validation"));
+        assert!(brief.contains("GitHub Issue"));
+    }
+
+    #[test]
+    fn create_from_pull_request_fetches_pr_ref_records_pr_and_writes_context_brief() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "origin", "main"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "-b", "contributor/pr-head"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("pr.txt"), "from pr\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "pr.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "pr head",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "origin", "HEAD:refs/pull/42/head"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "main"])
+            .status()
+            .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"title":"Add real PR source","url":"https://github.com/example/demo/pull/42","state":"open","number":42}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create_from_pull_request("demo", 42, None, None)
+            .unwrap();
+
+        restore_path(old_path);
+        assert_eq!(workspace.name, "pr-42");
+        assert!(workspace.path.join("pr.txt").exists());
+        let pr = store.pull_request("pr-42").unwrap().unwrap();
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.url, "https://github.com/example/demo/pull/42");
+        let brief = fs::read_to_string(workspace.path.join(".context/brief.md")).unwrap();
+        assert!(brief.contains("GitHub PR #42: Add real PR source"));
+        assert!(brief.contains("https://github.com/example/demo/pull/42"));
+    }
+
+    fn install_fake_gh(temp: &Path, script: &str) -> Option<std::ffi::OsString> {
+        let bin_dir = temp.join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let gh_path = bin_dir.join("gh");
+        fs::write(&gh_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&gh_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&gh_path, permissions).unwrap();
+        }
+        let old_path = std::env::var_os("PATH");
+        let new_path = match old_path.as_ref() {
+            Some(path) => {
+                let mut parts = vec![bin_dir];
+                parts.extend(std::env::split_paths(path));
+                std::env::join_paths(parts).unwrap()
+            }
+            None => bin_dir.into_os_string(),
+        };
+        std::env::set_var("PATH", new_path);
+        old_path
+    }
+
+    fn restore_path(old_path: Option<std::ffi::OsString>) {
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
     }
 
     #[test]

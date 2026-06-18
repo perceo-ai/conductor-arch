@@ -40,6 +40,19 @@ Use caveman mode:
 - Implement, verify, and keep going.
 - Leave concise notes when something is incomplete or blocked.
 
+Be real with the user:
+
+- Do not call a phase, feature, connector, or flow "done" unless it has current
+  evidence from code, tests, CLI smoke, or GUI/runtime verification.
+- Distinguish clearly between backend support, CLI support, GTK controls, and
+  actual end-to-end product behavior. One layer does not prove the others.
+- If auth, API keys, display server, network, local tools, or test data are
+  missing, say exactly what was not verified.
+- Do not market scaffolding as a feature. A button that calls nothing real is
+  not a feature. A CLI path with no GTK path is not a GUI feature. A GTK path
+  with no core behavior is not real.
+- When progress docs are stale or too optimistic, fix them before continuing.
+
 Use Superpowers:
 
 - Invoke relevant Superpowers skills before doing work.
@@ -54,15 +67,16 @@ coherent.
 
 ## Current Project State
 
-This repo is in Phase 1 transition after the Phase 0 docs reset:
+Current state as of the latest progress log:
 
-- Phase 0 documentation reset is complete enough to use as the baseline.
-- The backend/core/CLI foundation is substantial.
+- Phase 0, Phase 1, and Phase 2 have usable slices.
+- Phase 3 must be treated as incomplete until every item in the Phase 3 section
+  of `docs/conductor-gui-mvp-handoff.md` is proven across core/CLI/GTK where
+  applicable.
 - The GTK app is still a prototype, not a finished MVP.
-- The next real product work is GUI architecture cleanup and then the missing
-  Conductor surfaces: settings, workspace creation, embedded runtime,
-  app-native agents, review/checks/PRs, history, command palette, shortcuts,
-  deep links, provider/MCP status, and safety/privacy.
+- GitHub-backed flows require local `gh` auth. Linear-backed flows require
+  `LINEAR_API_KEY`. MCP status currently means config inspection unless live
+  reachability is explicitly tested.
 
 Do not describe the project as MVP complete. Do not call packaging
 release-ready until the GUI-first flow works without normal CLI coordination.
@@ -77,7 +91,8 @@ Follow the handoff phases:
    page/tab, running sessions, and processes.
 4. Replace ad hoc refresh closures with a clear refresh/event model.
 5. Build polished project onboarding and settings.
-6. Build the workspace command center.
+6. Finish the workspace command center with real core + CLI + GTK behavior,
+   not placeholder controls.
 7. Add embedded terminal/runtime support.
 8. Add app-native Claude Code, Codex, and Cursor session surfaces.
 9. Build real git/diff/review and GitHub PR/check/merge GUI workflows.
