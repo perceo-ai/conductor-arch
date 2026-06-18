@@ -175,8 +175,8 @@ Current GUI capabilities:
   embedded shells are visible in the Processes tab, and the app marks stale
   terminal process rows exited on startup and during periodic runtime refresh
   when their recorded shell PID is no longer alive. Each recorded shell gets its
-  own log path, so multiple shell records do not point at one shared transcript.
-  The UI is still raw transcript text, not a polished terminal emulator yet.
+  own log path, and PTY command/output chunks are appended to that raw transcript
+  log. The UI is still raw transcript text, not a polished terminal emulator yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace

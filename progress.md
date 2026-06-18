@@ -233,6 +233,9 @@ Verified Phase 3 evidence so far:
   workspace shell.
 - GTK terminal panels create terminal process records on Start Shell and mark
   them stopped on Stop Shell or panel teardown.
+- GTK terminal panels append PTY command echoes and output chunks into the
+  terminal process log, so recorded shell logs contain a usable raw transcript
+  instead of only an empty placeholder file.
 - GTK app shell reconciles stale terminal process records once during startup
   and then periodically while the app is open, so crashed or externally-ended
   shells stop showing as running without waiting for a manual refresh.
@@ -263,8 +266,9 @@ Verified Phase 3 evidence so far:
 Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
-  transcript, multiple managed terminal tabs/sessions in the UI, persisted
-  terminal history, and true terminal session restoration after app restart.
+  transcript, multiple managed terminal tabs/sessions in the UI, searchable
+  persisted terminal history, and true terminal session restoration after app
+  restart.
 - Full Spotlight parity: event-driven filesystem watching and automatic root
   repair flows. Current support is manual checkpoint/apply/restore/switch/sync
   plus app-wide polling sync of tracked changes with dirty-root refusal before

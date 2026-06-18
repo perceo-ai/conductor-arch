@@ -44,6 +44,9 @@ pub fn embedded_terminal_panel(
         if let Some(session) = pty_for_poll.borrow_mut().as_mut() {
             let output = session.session.read_available();
             if !output.is_empty() {
+                if let Err(err) = session.append_output(&output) {
+                    append_text(&buffer_for_poll, &format!("\n[pty log error]\n{err:#}\n"));
+                }
                 append_text(&buffer_for_poll, &output);
             }
         }
@@ -183,7 +186,11 @@ fn send_or_run_terminal_command(
     pty: Rc<RefCell<Option<TerminalSession>>>,
 ) {
     if let Some(session) = pty.borrow_mut().as_mut() {
-        append_text(&buffer, &format!("\n$ {command}\n"));
+        let command_line = format!("\n$ {command}\n");
+        append_text(&buffer, &command_line);
+        if let Err(err) = session.append_output(&command_line) {
+            append_text(&buffer, &format!("[pty log error]\n{err:#}\n"));
+        }
         if let Err(err) = session.session.write(&format!("{command}\n")) {
             append_text(&buffer, &format!("[pty write error]\n{err:#}\n"));
         }
@@ -264,6 +271,14 @@ impl TerminalSession {
         WorkspaceStore::open(self.database_path.clone())?
             .mark_terminal_process_stopped(process_id, exit_code)?;
         Ok(())
+    }
+
+    fn append_output(&self, output: &str) -> Result<()> {
+        let Some(process_id) = self.process_id else {
+            return Ok(());
+        };
+        WorkspaceStore::open(self.database_path.clone())?
+            .append_terminal_process_output(process_id, output)
     }
 }
 

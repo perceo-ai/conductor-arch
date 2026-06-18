@@ -165,7 +165,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   resize/cursor/scrollback/session management. Terminal process records are
   created, stopped, and reconciled to exited on app startup and periodic refresh
   when their recorded shell PID is no longer alive. Each recorded shell gets a
-  distinct log path, but managed multi-terminal UI and true terminal session
+  distinct log path, and PTY command/output chunks are appended to that raw
+  transcript log, but managed multi-terminal UI and true terminal session
   restoration after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal plus app-wide polling sync. It does

@@ -339,7 +339,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - There is a basic PTY-backed workspace shell with process records, but not a
   polished terminal emulator with resize/cursor/scrollback/session management
   yet. Stale terminal process rows are reconciled on app startup and periodic
-  refresh, and each terminal process record has a distinct log path. Managed
+  refresh, each terminal process record has a distinct log path, and PTY
+  command/output chunks are appended to that raw transcript log. Managed
   multi-terminal UI and true terminal session restoration after app restart are
   still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync

@@ -670,6 +670,29 @@ impl WorkspaceStore {
         self.get_process(process_id)
     }
 
+    pub fn append_terminal_process_output(&self, process_id: i64, output: &str) -> Result<()> {
+        if output.is_empty() {
+            return Ok(());
+        }
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Terminal,
+            "process {process_id} is not a terminal process"
+        );
+        if let Some(parent) = process.log_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create log directory {}", parent.display()))?;
+        }
+        use std::io::Write;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&process.log_path)
+            .with_context(|| format!("open log {}", process.log_path.display()))?
+            .write_all(output.as_bytes())
+            .with_context(|| format!("write log {}", process.log_path.display()))
+    }
+
     pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
@@ -4066,6 +4089,48 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(
             first.log_path.parent().unwrap(),
             second.log_path.parent().unwrap()
+        );
+    }
+
+    #[test]
+    fn terminal_process_logs_append_transcript_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let terminal = store
+            .record_terminal_process("berlin", "shell", 4242)
+            .unwrap();
+
+        store
+            .append_terminal_process_output(terminal.id, "first line\n")
+            .unwrap();
+        store
+            .append_terminal_process_output(terminal.id, "second line\n")
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(terminal.log_path).unwrap(),
+            "first line\nsecond line\n"
         );
     }
 
