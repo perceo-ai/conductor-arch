@@ -2,8 +2,9 @@
 
 ## Current State
 
-This project has completed the Phase 0 documentation reset for the corrected
-GUI-first MVP plan. The next implementation phase is app architecture cleanup.
+This project has completed the Phase 0 documentation reset and the first Phase
+1 app architecture cleanup slice for the corrected GUI-first MVP plan. The next
+implementation phase is polished GUI product surfaces.
 
 The codebase is being redirected from a CLI-heavy worktree tool into a
 GUI-first Conductor-style desktop app. The CLI and core backend are useful
@@ -82,19 +83,35 @@ MVP-critical missing work:
 - Visual parity with Conductor.
 - Release-ready packaging validation.
 
+## Phase 1 Architecture Cleanup Done
+
+- `crates/gtk-app/src/main.rs` now has explicit app state for selected
+  workspace, active page/tab, selected session, process attention state, and
+  settings layer direction.
+- GTK refresh wiring now goes through a small refresh/event hub instead of each
+  shell control manually carrying every refresh closure.
+- Workspace detail now has an app-native agent session surface that starts
+  supervised Shell, Codex, Claude, and Cursor sessions through existing core
+  APIs and shows the latest captured session log.
+- Workspace detail now has an embedded terminal foundation tab scoped to the
+  workspace, ready for PTY-backed execution.
+
 ## Next Step
 
-Do not continue adding backend-only commands until the docs and app architecture
-are aligned around the GUI-first MVP.
+Do not continue adding backend-only commands unless they unblock the GUI-first
+MVP.
 
 Recommended next work:
 
 1. Keep local docs aligned with the official Conductor docs before adding
    better-than-Conductor product ideas.
-2. Begin Phase 1 by refactoring `crates/gtk-app/src/main.rs` into
-   page/component modules.
-3. Define the app state model for projects, workspaces, selected page/tab,
-   selected agent session, running processes, review/checks attention state,
-   and settings layer.
-4. Replace ad hoc refresh closures with a clear refresh/event model.
-5. Build the embedded agent session and terminal foundation.
+2. Build polished project onboarding and repository settings, including setup,
+   run, archive, files-to-copy, `.worktreeinclude`, Spotlight, environment, and
+   layered settings visibility.
+3. Turn the workspace page into the command center: confirmations, progress,
+   targeted refresh, richer runtime logs, agent controls, review/check/PR
+   surfaces, and visible blockers.
+4. Replace the session/terminal foundations with PTY-backed streaming and
+   bidirectional app-native chat/terminal I/O.
+5. Continue splitting GTK page/component code out of `main.rs` as each surface
+   is made product-grade.

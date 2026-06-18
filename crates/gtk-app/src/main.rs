@@ -1,4 +1,10 @@
 #![allow(dead_code)]
+#![allow(clippy::ptr_arg, clippy::too_many_arguments)]
+
+mod refresh;
+mod session_surface;
+mod state;
+mod terminal;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
@@ -11,7 +17,9 @@ use linux_conductor_core::import::default_conductor_app_database;
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
 use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceStore};
+use refresh::{RefreshHub, RefreshScope};
 use rusqlite::Connection;
+use state::{AppPage, AppState};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -35,6 +43,8 @@ fn main() {
 
 fn build_ui(app: &Application, initial_workspace: Option<String>) {
     let paths = AppPaths::from_env();
+    let app_state = AppState::new(paths.clone(), initial_workspace);
+    let refresh_hub = RefreshHub::default();
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -51,22 +61,20 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(initial_workspace));
-
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(220.0);
     split.set_max_sidebar_width(280.0);
     split.set_show_sidebar(true);
 
     let toast_overlay = adw::ToastOverlay::new();
-    let (dashboard, refresh_dashboard) = build_dashboard_panel(&paths);
+    let (dashboard, refresh_dashboard) = build_dashboard_panel(&app_state.paths);
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
 
     let (workspace_detail, refresh_workspace_detail) =
-        build_workspace_detail_page(&paths, Rc::clone(&selected));
+        build_workspace_detail_page(&app_state, refresh_hub.clone());
     let (projects_page, refresh_projects) = build_projects_page(
-        &paths,
+        &app_state.paths,
         refresh_dashboard.clone(),
         refresh_workspace_detail.clone(),
     );
@@ -79,14 +87,23 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     main_stack.add_named(&projects_page, Some("projects"));
     main_stack.add_named(&history_page, Some("history"));
     main_stack.add_named(&workspace_detail, Some("workspace"));
-    main_stack.set_visible_child_name("dashboard");
+    main_stack.set_visible_child_name(match app_state.snapshot().active_page {
+        AppPage::Workspace => "workspace",
+        _ => "dashboard",
+    });
 
     let (sidebar, refresh_sidebar) = build_app_sidebar(
-        &paths,
-        Rc::clone(&selected),
+        &app_state,
+        refresh_hub.clone(),
         main_stack.clone(),
         refresh_workspace_detail.clone(),
     );
+
+    refresh_hub.set_dashboard(refresh_dashboard.clone());
+    refresh_hub.set_workspace(refresh_workspace_detail.clone());
+    refresh_hub.set_projects(refresh_projects.clone());
+    refresh_hub.set_history(refresh_history.clone());
+    refresh_hub.set_sidebar(refresh_sidebar.clone());
 
     split.set_sidebar(Some(&sidebar));
     toast_overlay.set_child(Some(&main_stack));
@@ -104,17 +121,9 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     // Refresh button
     let refresh_btn = Button::from_icon_name("view-refresh-symbolic");
     refresh_btn.set_tooltip_text(Some("Refresh workspace state"));
-    let rd = refresh_dashboard.clone();
-    let rs = refresh_sidebar.clone();
-    let rp = refresh_projects.clone();
-    let rh = refresh_history.clone();
-    let rw = refresh_workspace_detail.clone();
+    let hub_refresh = refresh_hub.clone();
     refresh_btn.connect_clicked(move |_| {
-        rs();
-        rd();
-        rp();
-        rh();
-        rw();
+        hub_refresh.refresh(RefreshScope::All);
     });
     header.pack_start(&toggle_btn);
     header.pack_end(&refresh_btn);
@@ -128,18 +137,10 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
 
     // Keyboard shortcut: Ctrl+R → refresh all panels
     let evk = gtk::EventControllerKey::new();
-    let rd_kb = refresh_dashboard.clone();
-    let rs_kb = refresh_sidebar.clone();
-    let rp_kb = refresh_projects.clone();
-    let rh_kb = refresh_history.clone();
-    let rw_kb = refresh_workspace_detail.clone();
+    let hub_kb = refresh_hub.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::r {
-            rs_kb();
-            rd_kb();
-            rp_kb();
-            rh_kb();
-            rw_kb();
+            hub_kb.refresh(RefreshScope::All);
             return gtk::glib::Propagation::Stop;
         }
         gtk::glib::Propagation::Proceed
@@ -147,15 +148,12 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     window.add_controller(evk);
 
     // Auto-refresh panels every 5 seconds
-    let rd = refresh_dashboard.clone();
-    let rs = refresh_sidebar.clone();
-    let rp = refresh_projects.clone();
-    let rw = refresh_workspace_detail.clone();
+    let hub_auto = refresh_hub.clone();
     glib::timeout_add_seconds_local(5, move || {
-        rs();
-        rd();
-        rp();
-        rw();
+        hub_auto.refresh(RefreshScope::Sidebar);
+        hub_auto.refresh(RefreshScope::Dashboard);
+        hub_auto.refresh(RefreshScope::Projects);
+        hub_auto.refresh(RefreshScope::Workspace);
         glib::ControlFlow::Continue
     });
 }
@@ -163,8 +161,8 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
 // ── APP SHELL ─────────────────────────────────────────────────────────────
 
 fn build_app_sidebar(
-    paths: &AppPaths,
-    selected: Rc<RefCell<Option<String>>>,
+    app_state: &AppState,
+    refresh_hub: RefreshHub,
     stack: Stack,
     refresh_workspace: impl Fn() + Clone + 'static,
 ) -> (GBox, impl Fn() + Clone + 'static) {
@@ -175,19 +173,31 @@ fn build_app_sidebar(
     let dashboard_btn = Button::with_label("Dashboard");
     dashboard_btn.add_css_class("nav-button-active");
     let stack_dashboard = stack.clone();
-    dashboard_btn.connect_clicked(move |_| stack_dashboard.set_visible_child_name("dashboard"));
+    let state_dashboard = app_state.clone();
+    dashboard_btn.connect_clicked(move |_| {
+        state_dashboard.set_active_page(AppPage::Dashboard);
+        stack_dashboard.set_visible_child_name("dashboard");
+    });
     sidebar_box.append(&dashboard_btn);
 
     let history_btn = Button::with_label("History");
     history_btn.add_css_class("nav-button");
     let stack_history = stack.clone();
-    history_btn.connect_clicked(move |_| stack_history.set_visible_child_name("history"));
+    let state_history = app_state.clone();
+    history_btn.connect_clicked(move |_| {
+        state_history.set_active_page(AppPage::History);
+        stack_history.set_visible_child_name("history");
+    });
     sidebar_box.append(&history_btn);
 
     let projects_btn = Button::with_label("Projects");
     projects_btn.add_css_class("nav-button");
     let stack_projects = stack.clone();
-    projects_btn.connect_clicked(move |_| stack_projects.set_visible_child_name("projects"));
+    let state_projects = app_state.clone();
+    projects_btn.connect_clicked(move |_| {
+        state_projects.set_active_page(AppPage::Projects);
+        stack_projects.set_visible_child_name("projects");
+    });
     sidebar_box.append(&projects_btn);
 
     let divider = Separator::new(Orientation::Horizontal);
@@ -219,12 +229,12 @@ fn build_app_sidebar(
     list.set_selection_mode(gtk::SelectionMode::Single);
     let names: Rc<RefCell<std::collections::HashMap<i32, String>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
-    let db_path = paths.database_path.clone();
+    let db_path = app_state.workspace_database_path();
 
     let populate = {
         let list = list.clone();
         let names = Rc::clone(&names);
-        let selected = Rc::clone(&selected);
+        let state = app_state.clone();
         let search_entry = search_entry.clone();
         move || {
             while let Some(child) = list.first_child() {
@@ -232,7 +242,7 @@ fn build_app_sidebar(
             }
             names.borrow_mut().clear();
             let filter = search_entry.text().to_string().to_lowercase();
-            let prev_selected = selected.borrow().clone();
+            let prev_selected = state.selected_workspace();
             let mut row_idx = 0;
 
             if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
@@ -309,14 +319,16 @@ fn build_app_sidebar(
     search_entry.connect_changed(move |_| pop_search());
 
     let names_select = Rc::clone(&names);
-    let selected_select = Rc::clone(&selected);
+    let state_select = app_state.clone();
     let stack_select = stack.clone();
+    let refresh_select = refresh_hub.clone();
     list.connect_row_selected(move |_, row| {
         let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
             return;
         };
-        *selected_select.borrow_mut() = Some(name);
+        state_select.set_selected_workspace(Some(name));
         refresh_workspace();
+        refresh_select.refresh(RefreshScope::Dashboard);
         stack_select.set_visible_child_name("workspace");
     });
 
@@ -326,8 +338,8 @@ fn build_app_sidebar(
 }
 
 fn build_workspace_detail_page(
-    paths: &AppPaths,
-    selected: Rc<RefCell<Option<String>>>,
+    app_state: &AppState,
+    refresh_hub: RefreshHub,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
@@ -348,13 +360,14 @@ fn build_workspace_detail_page(
     body.add_css_class("detail-body");
     root.append(&body);
 
-    let db_path = paths.database_path.clone();
+    let db_path = app_state.workspace_database_path();
+    let state = app_state.clone();
     let refresh = move || {
         while let Some(child) = body.first_child() {
             body.remove(&child);
         }
 
-        let Some(name) = selected.borrow().clone() else {
+        let Some(name) = state.selected_workspace() else {
             title.set_text("Workspace");
             subtitle.set_text("Select a workspace from the sidebar.");
             return;
@@ -464,6 +477,7 @@ fn build_workspace_detail_page(
         ] {
             let workspace = ws.name.clone();
             let db_path_action = db_path.clone();
+            let refresh_after_action = refresh_hub.clone();
             button.connect_clicked(move |_| {
                 if let Ok(store) = WorkspaceStore::open(db_path_action.clone()) {
                     let _ = match action {
@@ -472,6 +486,7 @@ fn build_workspace_detail_page(
                         "discard" => store.discard(&workspace),
                         _ => unreachable!(),
                     };
+                    refresh_after_action.refresh(RefreshScope::All);
                 }
             });
         }
@@ -488,6 +503,14 @@ fn build_workspace_detail_page(
         body.append(&switcher);
 
         let chat_box = GBox::new(Orientation::Vertical, 8);
+        let db_for_sessions = db_path.clone();
+        let workspace_for_sessions = ws.name.clone();
+        let refresh_sessions = refresh_hub.clone();
+        chat_box.append(&session_surface::agent_session_panel(
+            db_for_sessions,
+            &workspace_for_sessions,
+            move || refresh_sessions.refresh(RefreshScope::Workspace),
+        ));
         for chat in conductor_sessions_for_workspace_path(&ws.path)
             .into_iter()
             .take(8)
@@ -515,6 +538,28 @@ fn build_workspace_detail_page(
             Some("processes"),
             "Processes",
         );
+        tabs.add_titled(
+            &terminal::embedded_terminal_panel(&ws.name, &ws.path),
+            Some("terminal"),
+            "Terminal",
+        );
+        let state_tabs = state.clone();
+        tabs.connect_visible_child_name_notify(move |stack| {
+            match stack.visible_child_name().as_deref() {
+                Some("changes") => {
+                    state_tabs.set_active_workspace_tab(state::WorkspaceTab::Changes)
+                }
+                Some("checks") => state_tabs.set_active_workspace_tab(state::WorkspaceTab::Checks),
+                Some("todos") => state_tabs.set_active_workspace_tab(state::WorkspaceTab::Todos),
+                Some("processes") => {
+                    state_tabs.set_active_workspace_tab(state::WorkspaceTab::Processes)
+                }
+                Some("terminal") => {
+                    state_tabs.set_active_workspace_tab(state::WorkspaceTab::Terminal)
+                }
+                _ => state_tabs.set_active_workspace_tab(state::WorkspaceTab::Chats),
+            }
+        });
         body.append(&tabs);
     };
     refresh();
