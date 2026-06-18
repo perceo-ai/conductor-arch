@@ -174,13 +174,14 @@ Current GUI capabilities:
 - Basic embedded terminal scoped to the workspace. It can run one-shot commands
   with `CONDUCTOR_*` environment variables and can start a PTY-backed workspace
   shell that accepts input after launch and streams output. Started/stopped
-  embedded shells are visible in the Processes tab, and the app marks stale
-  terminal process rows exited on startup and during periodic runtime refresh
-  when their recorded shell PID is no longer alive. Each recorded shell gets its
-  own log path, and PTY command/output chunks are appended to that raw transcript
-  log. The terminal panel can search persisted terminal transcript logs and
-  append matching process/line results, list recorded terminal sessions/logs,
-  and restore the latest transcript into the terminal view after app restart.
+  embedded shells refresh into the Processes tab immediately, and the app marks
+  stale terminal process rows exited on startup and during periodic runtime
+  refresh when their recorded shell PID is no longer alive. Each recorded shell
+  gets its own log path, and PTY command/output chunks are appended to that raw
+  transcript log. The terminal panel can search persisted terminal transcript
+  logs and append matching process/line results, list recorded terminal
+  sessions/logs, and restore the latest transcript into the terminal view after
+  app restart.
   The visible transcript strips common ANSI control sequences and applies
   carriage-return progress-line updates, but this is not a polished terminal
   emulator yet.

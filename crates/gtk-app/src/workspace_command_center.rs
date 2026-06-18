@@ -558,12 +558,18 @@ fn work_tabs(
         "Changes",
     );
     tabs.add_titled(
-        &chat_terminal_split(db_path, ws, refresh_hub),
+        &chat_terminal_split(db_path, ws, refresh_hub.clone()),
         Some("chat-terminal"),
         "Chat / Terminal",
     );
     tabs.add_titled(
-        &terminal::embedded_terminal_panel(db_path.to_path_buf(), &ws.name, &ws.path, true),
+        &terminal::embedded_terminal_panel(
+            db_path.to_path_buf(),
+            &ws.name,
+            &ws.path,
+            true,
+            refresh_hub.clone(),
+        ),
         Some("terminal"),
         "Terminal",
     );
@@ -651,6 +657,7 @@ fn chat_terminal_split(db_path: &Path, ws: &Workspace, refresh_hub: RefreshHub) 
         &ws.name,
         &ws.path,
         false,
+        refresh_hub,
     ));
 
     split.set_start_child(Some(&chat_box));

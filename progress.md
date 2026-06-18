@@ -236,6 +236,9 @@ Verified Phase 3 evidence so far:
   workspace shell.
 - GTK terminal panels create terminal process records on Start Shell and mark
   them stopped on Stop Shell or panel teardown.
+- GTK terminal Start Shell/Stop Shell now trigger a workspace refresh so the
+  Processes tab picks up terminal process state immediately instead of waiting
+  for polling/manual refresh.
 - GTK terminal panels append PTY command echoes and output chunks into the
   terminal process log, so recorded shell logs contain a usable raw transcript
   instead of only an empty placeholder file.

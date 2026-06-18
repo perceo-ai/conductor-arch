@@ -146,7 +146,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Basic embedded terminal with PTY-backed shell controls plus presets for
   Conductor env, git status, diff, and file list.
 - Processes tab lists embedded terminal shells alongside setup, run, and agent
-  session processes.
+  session processes, and terminal Start/Stop triggers workspace refresh so
+  terminal process state appears immediately.
 - Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Sync/Off.
   Runtime button failures surface as inline status text and app toasts.
 - History page that reads prior Conductor chats/messages from the macOS

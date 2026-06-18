@@ -11,11 +11,14 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::refresh::{RefreshHub, RefreshScope};
+
 pub fn embedded_terminal_panel(
     database_path: PathBuf,
     workspace_name: &str,
     workspace_path: &Path,
     full_mode: bool,
+    refresh_hub: RefreshHub,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 8);
     root.add_css_class("terminal-panel");
@@ -68,6 +71,7 @@ pub fn embedded_terminal_panel(
     let workspace_for_pty = workspace_name.to_owned();
     let pty_for_start = active_pty.clone();
     let buffer_for_start = transcript.buffer();
+    let refresh_for_start = refresh_hub.clone();
     let cols = if full_mode { 120 } else { 80 };
     start_pty_btn.connect_clicked(move |_| {
         if pty_for_start.borrow().is_some() {
@@ -98,16 +102,21 @@ pub fn embedded_terminal_panel(
             Ok(terminal) => {
                 *pty_for_start.borrow_mut() = Some(terminal);
                 append_text(&buffer_for_start, "\n[pty shell started]\n");
+                refresh_for_start.refresh(terminal_process_refresh_scope());
             }
             Err(err) => append_text(&buffer_for_start, &format!("\n[pty error]\n{err:#}\n")),
         }
     });
     let pty_for_stop = active_pty.clone();
     let buffer_for_stop = transcript.buffer();
+    let refresh_for_stop = refresh_hub.clone();
     stop_pty_btn.connect_clicked(move |_| {
         if let Some(session) = pty_for_stop.borrow_mut().take() {
             match session.stop() {
-                Ok(()) => append_text(&buffer_for_stop, "\n[pty shell stopped]\n"),
+                Ok(()) => {
+                    append_text(&buffer_for_stop, "\n[pty shell stopped]\n");
+                    refresh_for_stop.refresh(terminal_process_refresh_scope());
+                }
                 Err(err) => {
                     append_text(&buffer_for_stop, &format!("\n[pty stop error]\n{err:#}\n"))
                 }
@@ -399,6 +408,10 @@ fn terminal_exit_label(exit_code: Option<i32>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
+fn terminal_process_refresh_scope() -> RefreshScope {
+    RefreshScope::Workspace
+}
+
 fn initial_terminal_text(
     database_path: &Path,
     workspace_name: &str,
@@ -641,5 +654,13 @@ mod tests {
         assert!(rendered.contains("#7 exited pid=4242 exit=0"));
         assert!(rendered.contains("terminal-4242.log"));
         assert!(rendered.contains("/bin/bash"));
+    }
+
+    #[test]
+    fn terminal_process_changes_refresh_workspace_scope() {
+        assert!(matches!(
+            terminal_process_refresh_scope(),
+            crate::refresh::RefreshScope::Workspace
+        ));
     }
 }

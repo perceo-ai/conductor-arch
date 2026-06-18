@@ -279,7 +279,8 @@ Manual GUI smoke:
 - Confirm Start Shell opens a PTY-backed workspace shell, accepts a typed
   command, streams output, and Stop Shell terminates it.
 - Confirm the Processes tab shows that terminal shell as running after Start
-  Shell and stopped with exit code `143` after Stop Shell.
+  Shell and stopped with exit code `143` after Stop Shell without waiting for
+  the global polling refresh.
 - Confirm starting more than one embedded shell records distinct terminal log
   paths in Processes instead of reusing one shared terminal log.
 - Confirm PTY shell command echoes and output are appended to that terminal
