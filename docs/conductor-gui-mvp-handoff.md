@@ -336,7 +336,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Current UI does not match Conductor closely enough.
 - Agent sessions still mostly behave like launched external tools.
 - There is no true embedded Conductor chat UI.
-- There is no embedded terminal.
+- There is a basic embedded command terminal, but no true PTY-backed
+  interactive terminal yet.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.
@@ -353,10 +354,12 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Full GUI-first agent coordination.
 - Native formatted Claude/Codex/Cursor chat.
 - Resumable in-app agent sessions.
-- Embedded terminal panes.
+- PTY-backed embedded terminal panes.
 - Real Conductor-like visual design.
-- Rich workspace creation from GitHub issue, branch, PR, or Linear issue.
-- Project settings editor.
+- Live-verified and polished workspace creation from GitHub issue, branch, PR,
+  or Linear issue.
+- Full Conductor-level project settings editor, including managed/user layer
+  visibility and user-only model defaults.
 - Diff viewer with inline comments.
 - GUI PR/check/review/merge flow.
 - Agent status model comparable to Conductor.

@@ -109,6 +109,9 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Setup/run/archive script support through `.conductor/settings.toml`.
 - Stable per-workspace `CONDUCTOR_PORT` allocation.
 - Run/stop/logs for background workspace processes.
+- Setup script runs and log capture as workspace runtime processes.
+- Workspace-scoped terminal command execution with captured stdout, stderr, and
+  exit code.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.
 - Supervised background sessions with process records and logs.
 - Git diff/status/log helpers.
@@ -125,8 +128,10 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Projects page that can add a local repo, clone a Git URL, list projects, and
   create a workspace.
 - Workspace detail page with metadata and actions for Shell, Codex, Claude Code,
-  Cursor, Run, Stop, Open Folder, Archive, Restore, and Discard.
-- Workspace tabs for Chats, Changes, Checks, Todos, and Processes.
+  Cursor, Setup, Run, Stop, Open Folder, Archive, Restore, and Discard.
+- Workspace tabs for Chats, Changes, Terminal, Checks, Todos, and Processes.
+- Basic embedded command terminal with presets for Conductor env, git status,
+  diff, and file list. This is not a PTY yet.
 - History page that reads prior Conductor chats/messages from the macOS
   Conductor database when available.
 - Imported Conductor repositories/workspaces are visible in the app.
@@ -136,8 +141,12 @@ MVP is not complete until the normal workflow can be driven from the app.
 - The GTK layout is functional but not yet a close visual clone of Conductor.
 - History is read-only and sourced directly from the macOS Conductor database;
   it is not yet a unified local chat model.
-- Agent sessions launch in external terminals. There is no embedded terminal or
-  in-app chat composer yet.
+- Agent sessions still launch through external terminals or supervised log
+  capture. The chat composer is only a staged prompt surface, not a live
+  bidirectional agent chat.
+- Embedded terminal support is command-based and non-PTY. It captures output and
+  exit codes for completed commands but does not yet manage interactive
+  long-running terminal sessions.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions but need confirmation,
@@ -153,16 +162,16 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Exact Conductor UI parity.
 - In-app chat threads for new Claude/Codex/Cursor sessions.
 - Resuming old chats inside the app.
-- Rich workspace creation from GitHub issue, branch, PR, or Linear issue.
+- Live GitHub/Linear workspace creation verification with real credentials.
 - Diff viewer with inline comments that can be sent back to an agent.
 - Full checks tab with CI/deployment/comment/todo aggregation.
 - PR composer/review/merge workflow in the GUI.
-- Embedded terminal panes.
+- PTY-backed embedded terminal panes.
 - Project/repository settings editor.
 - Agent status model comparable to Conductor's live session state.
 - Command palette, shortcut coverage, and deep links.
 - Provider configuration and MCP status surfaces.
-- Big Terminal Mode.
+- Polished Big Terminal Mode beyond the first full-width terminal tab/presets.
 - Spotlight testing.
 - Monorepo sparse-checkout controls and linked-directory workflows.
 - Unified local history model.

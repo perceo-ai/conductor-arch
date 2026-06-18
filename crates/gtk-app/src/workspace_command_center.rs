@@ -202,6 +202,7 @@ fn runtime_panel(
     panel.append(&section_title("Runtime"));
 
     let actions = GBox::new(Orientation::Horizontal, 8);
+    let setup_btn = Button::with_label("Setup");
     let run_btn = Button::with_label("Run");
     let stop_btn = Button::with_label("Stop");
     let folder_btn = Button::with_label("Open Folder");
@@ -209,6 +210,21 @@ fn runtime_panel(
     status.add_css_class("card-meta");
     status.set_xalign(0.0);
     status.set_wrap(true);
+
+    let setup_workspace = ws.name.clone();
+    let db_path_setup = db_path.to_path_buf();
+    let refresh_setup = refresh_hub.clone();
+    let status_setup = status.clone();
+    setup_btn.connect_clicked(move |_| {
+        status_setup.set_text("Starting setup...");
+        match WorkspaceStore::open(db_path_setup.clone())
+            .and_then(|store| store.setup_workspace(&setup_workspace))
+        {
+            Ok(record) => status_setup.set_text(&format!("Setup started: pid {}", record.pid)),
+            Err(err) => status_setup.set_text(&format!("Setup failed: {err:#}")),
+        }
+        refresh_setup.refresh(RefreshScope::All);
+    });
 
     let run_workspace = ws.name.clone();
     let db_path_run = db_path.to_path_buf();
@@ -245,11 +261,21 @@ fn runtime_panel(
         let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
     });
 
+    actions.append(&setup_btn);
     actions.append(&run_btn);
     actions.append(&stop_btn);
     actions.append(&folder_btn);
     panel.append(&actions);
+    panel.append(&detail_row("Setup", &latest_setup_line(store, &ws.name)));
     panel.append(&detail_row("Latest", &latest_runtime_line(store, &ws.name)));
+    panel.append(&detail_row(
+        "Setup Log",
+        &latest_setup_log_line(store, &ws.name),
+    ));
+    panel.append(&detail_row(
+        "Run Log",
+        &latest_run_log_line(store, &ws.name),
+    ));
     panel.append(&status);
     panel
 }
@@ -374,6 +400,11 @@ fn work_tabs(
         "Chat / Terminal",
     );
     tabs.add_titled(
+        &terminal::embedded_terminal_panel(db_path.to_path_buf(), &ws.name, &ws.path, true),
+        Some("terminal"),
+        "Terminal",
+    );
+    tabs.add_titled(
         &workspace_todos_panel(store, &ws.name),
         Some("todos"),
         "Todos",
@@ -390,6 +421,7 @@ fn work_tabs(
             Some("work") => state_tabs.set_active_workspace_tab(WorkspaceTab::Changes),
             Some("todos") => state_tabs.set_active_workspace_tab(WorkspaceTab::Todos),
             Some("processes") => state_tabs.set_active_workspace_tab(WorkspaceTab::Processes),
+            Some("terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Terminal),
             Some("chat-terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
             _ => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
         }
@@ -451,7 +483,12 @@ fn chat_terminal_split(db_path: &Path, ws: &Workspace, refresh_hub: RefreshHub) 
     let terminal_box = GBox::new(Orientation::Vertical, 8);
     terminal_box.add_css_class("command-panel");
     terminal_box.append(&section_title("Terminal"));
-    terminal_box.append(&terminal::embedded_terminal_panel(&ws.name, &ws.path));
+    terminal_box.append(&terminal::embedded_terminal_panel(
+        db_path.to_path_buf(),
+        &ws.name,
+        &ws.path,
+        false,
+    ));
 
     split.set_start_child(Some(&chat_box));
     split.set_end_child(Some(&terminal_box));
@@ -614,6 +651,24 @@ fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
 
 fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     let mut out = String::new();
+    out.push_str("Setups\n");
+    match store.list_setups(name) {
+        Ok(records) if records.is_empty() => out.push_str("No setup runs recorded.\n"),
+        Ok(records) => {
+            for record in records {
+                out.push_str(&format!(
+                    "#{} {} pid={} started={} log={}\n",
+                    record.id,
+                    record.status.as_str(),
+                    record.pid,
+                    record.started_at,
+                    record.log_path.display()
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("Could not read setup runs: {err:#}\n")),
+    }
+    out.push('\n');
     out.push_str("Runs\n");
     match store.list_runs(name) {
         Ok(records) if records.is_empty() => out.push_str("No runs recorded.\n"),
@@ -652,6 +707,24 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     out
 }
 
+fn latest_setup_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.list_setups(name) {
+        Ok(records) => records
+            .into_iter()
+            .next()
+            .map(|record| {
+                format!(
+                    "{} pid={} log={}",
+                    record.status.as_str(),
+                    record.pid,
+                    record.log_path.display()
+                )
+            })
+            .unwrap_or_else(|| "No setup runs recorded.".to_owned()),
+        Err(err) => format!("Could not read setup runtime: {err:#}"),
+    }
+}
+
 fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
     match store.list_runs(name) {
         Ok(records) => records
@@ -668,4 +741,24 @@ fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
             .unwrap_or_else(|| "No runs recorded.".to_owned()),
         Err(err) => format!("Could not read runtime: {err:#}"),
     }
+}
+
+fn latest_setup_log_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.read_latest_setup_log(name) {
+        Ok(log) => tail_lines(&log, 12),
+        Err(_) => "No setup log yet.".to_owned(),
+    }
+}
+
+fn latest_run_log_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.read_latest_run_log(name) {
+        Ok(log) => tail_lines(&log, 12),
+        Err(_) => "No run log yet.".to_owned(),
+    }
+}
+
+fn tail_lines(text: &str, max_lines: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }

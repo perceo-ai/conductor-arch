@@ -62,6 +62,7 @@ impl SessionLaunch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessKind {
+    Setup,
     Run,
     Session,
 }
@@ -69,6 +70,7 @@ pub enum ProcessKind {
 impl ProcessKind {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Setup => "setup",
             Self::Run => "run",
             Self::Session => "session",
         }
@@ -112,6 +114,17 @@ pub struct ProcessRecord {
     pub status: ProcessStatus,
     pub started_at: String,
     pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalCommandResult {
+    pub command: String,
+    pub cwd: PathBuf,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub started_at: String,
+    pub ended_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,7 +412,7 @@ impl WorkspaceStore {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
 
-        for kind in [ProcessKind::Run, ProcessKind::Session] {
+        for kind in [ProcessKind::Setup, ProcessKind::Run, ProcessKind::Session] {
             if let Some(process) = self.find_latest_running_process(workspace.id, kind)? {
                 stop_process(process.pid)?;
                 let now = timestamp();
@@ -500,6 +513,23 @@ impl WorkspaceStore {
         self.start_process(ProcessKind::Run, run, &settings, &repository, &workspace)
     }
 
+    pub fn setup_workspace(&self, name: &str) -> Result<ProcessRecord> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let Some(setup) = &settings.scripts.setup else {
+            anyhow::bail!("workspace {name} has no scripts.setup configured");
+        };
+
+        self.start_process(
+            ProcessKind::Setup,
+            setup,
+            &settings,
+            &repository,
+            &workspace,
+        )
+    }
+
     pub fn stop_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let process = self.latest_running_process(workspace.id, ProcessKind::Run)?;
@@ -515,6 +545,13 @@ impl WorkspaceStore {
     pub fn read_latest_run_log(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let process = self.latest_process(workspace.id, ProcessKind::Run)?;
+        fs::read_to_string(&process.log_path)
+            .with_context(|| format!("read log {}", process.log_path.display()))
+    }
+
+    pub fn read_latest_setup_log(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let process = self.latest_process(workspace.id, ProcessKind::Setup)?;
         fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))
     }
@@ -536,6 +573,34 @@ impl WorkspaceStore {
         let process = self.latest_process(workspace.id, ProcessKind::Session)?;
         fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))
+    }
+
+    pub fn terminal_command(&self, name: &str, command: &str) -> Result<TerminalCommandResult> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "terminal command is required");
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let started_at = timestamp();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&workspace.path)
+            .envs(conductor_environment(&settings, &repository, &workspace))
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("run terminal command in {}", workspace.path.display()))?;
+        let ended_at = timestamp();
+
+        Ok(TerminalCommandResult {
+            command: command.to_owned(),
+            cwd: workspace.path,
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            started_at,
+            ended_at,
+        })
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {
@@ -1367,6 +1432,10 @@ impl WorkspaceStore {
         self.list_processes(name, ProcessKind::Run)
     }
 
+    pub fn list_setups(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Setup)
+    }
+
     fn list_processes(&self, name: &str, kind: ProcessKind) -> Result<Vec<ProcessRecord>> {
         let workspace = self.get_by_name(name)?;
         let mut stmt = self.conn.prepare(
@@ -1676,6 +1745,7 @@ fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
 
 fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
     let kind = match row.get::<_, String>(2)?.as_str() {
+        "setup" => ProcessKind::Setup,
         "run" => ProcessKind::Run,
         "session" => ProcessKind::Session,
         _ => return Err(rusqlite::Error::InvalidQuery),
@@ -3072,6 +3142,150 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         assert_eq!(stopped.id, run.id);
         assert_eq!(stopped.status, ProcessStatus::Stopped);
         assert!(stopped.ended_at.is_some());
+    }
+
+    #[test]
+    fn terminal_command_runs_in_workspace_with_conductor_environment_and_captures_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[environment_variables]
+CUSTOM_VALUE = "from-settings"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add terminal env",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let result = store
+            .terminal_command(
+                "berlin",
+                "pwd; printf '%s:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7",
+            )
+            .unwrap();
+
+        assert_eq!(result.command, "pwd; printf '%s:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7");
+        assert_eq!(result.cwd, workspace.path);
+        assert_eq!(result.exit_code, Some(7));
+        assert!(result.stdout.contains("berlin:3000:from-settings"));
+        assert!(result.stdout.contains(result.cwd.to_str().unwrap()));
+        assert_eq!(result.stderr, "warn\n");
+        assert!(!result.started_at.is_empty());
+        assert!(!result.ended_at.is_empty());
+    }
+
+    #[test]
+    fn setup_workspace_executes_setup_script_and_captures_logs() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[scripts]
+setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\""
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add setup script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let setup = store.setup_workspace("berlin").unwrap();
+        wait_for_log(&setup.log_path, "setup:berlin:3000");
+
+        assert_eq!(setup.kind, ProcessKind::Setup);
+        assert_eq!(setup.status, ProcessStatus::Running);
+        assert!(store
+            .read_latest_setup_log("berlin")
+            .unwrap()
+            .contains("setup:berlin:3000"));
     }
 
     #[test]

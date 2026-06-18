@@ -273,7 +273,11 @@ Manual GUI smoke:
   In review, and Done.
 - Confirm the Projects page lists repositories and can create a workspace.
 - Confirm the Workspace page opens from the sidebar and shows rough Chats,
-  Changes, Checks, Todos, and Processes tabs.
+  Terminal, Changes, Checks, Todos, and Processes tabs.
+- Confirm the Terminal tab runs a short command, shows stdout/stderr, and
+  reports the exit code.
+- Confirm Setup, Run, and Stop controls call the current runtime APIs and show
+  latest setup/run log previews.
 - Confirm Shell, Codex, Claude Code, and Cursor actions use the current
   external-process launch path.
 - Confirm History lists old Conductor chats when the macOS Conductor database is
@@ -283,9 +287,9 @@ Manual GUI smoke:
 Known GUI MVP gaps:
 
 - No embedded Conductor-native agent chat yet.
-- No embedded terminal yet.
-- No command palette, shortcut coverage, deep links, Big Terminal Mode,
-  MCP status, checkpoint UI, or resumable session history yet.
+- No PTY-backed interactive terminal yet; the current terminal is command-based.
+- No command palette, shortcut coverage, deep links, polished Big Terminal
+  Mode, MCP status, checkpoint UI, or resumable session history yet.
 - Project settings can be edited from Projects for shared/local repository
   settings, including Files to copy, `.worktreeinclude` precedence, Spotlight
   testing, provider executable/provider fields, durable prompts, environment

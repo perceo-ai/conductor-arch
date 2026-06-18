@@ -190,7 +190,11 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   Todos, and Processes.
 - [ ] Workspace page buttons can launch Shell, Codex, Claude Code, and Cursor
   through the current external-process path.
-- [ ] Run and Stop buttons call the current run process APIs.
+- [ ] Setup, Run, and Stop buttons call the current runtime process APIs and
+  show latest setup/run log previews.
+- [ ] Terminal tab runs a short command, shows stdout/stderr, and reports the
+  exit code without freezing the app.
+- [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
@@ -199,15 +203,17 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 ## Known GUI MVP Gaps To Keep Visible
 
 - [ ] Embedded Conductor-native agent chat is not implemented.
-- [ ] Embedded workspace terminal is not implemented.
+- [ ] PTY-backed embedded workspace terminal is not implemented. The current
+  terminal is command-based and captures output/exit codes.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status
   are not fully implemented.
 - [ ] Rich diff viewer with inline comments is not implemented.
 - [ ] GitHub PR/check/merge workflow is not fully available from the GUI.
-- [ ] Command palette, shortcuts, deep links, Big Terminal Mode, monorepo
-  controls, linked directories, and unified local history are not complete.
+- [ ] Command palette, shortcuts, deep links, polished Big Terminal Mode,
+  monorepo controls, linked directories, and unified local history are not
+  complete.
 - [ ] Visual parity with Conductor is not complete.
 
 ## Packaging Smoke

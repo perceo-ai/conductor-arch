@@ -166,19 +166,22 @@ Current GUI capabilities:
   variables, provider executable/provider hints, durable action prompts, and
   basic Git behavior flags. Saves validate run mode and environment variable
   names.
-- Workspace page with basic Shell/Codex/Claude/Cursor launch actions, run/stop,
-  open-folder, archive/restore/discard, and rough tabs for chats, changes,
-  checks, todos, and processes.
+- Workspace page with basic Shell/Codex/Claude/Cursor launch actions,
+  setup/run/stop, open-folder, archive/restore/discard, and rough tabs for
+  chats, terminal, changes, checks, todos, and processes.
+- Basic embedded command terminal scoped to the workspace. It runs commands with
+  `CONDUCTOR_*` environment variables, captures stdout/stderr, reports exit
+  codes, and includes presets for env, git status, diff, and file list. This is
+  not a PTY-backed interactive terminal yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
 Still missing from the real MVP:
 - Embedded Conductor-native agent chat.
-- Embedded terminal.
+- PTY-backed interactive terminal.
 - More polished project onboarding and settings layout.
 - Command palette, shortcuts, and deep links.
-- Agent controls, MCP status, checkpoints, and resumable
-  session history.
+- Agent controls, MCP status, checkpoints, and resumable session history.
 - Monorepo directory selection and linked-directory workflows.
 - Rich diff/review/comment UI.
 - GUI-first GitHub PR/check/merge workflow.
@@ -481,11 +484,10 @@ Cursor interactive sessions, see
 
 ## Known limits
 
-- **No embedded terminal or native agent chat yet.** The GUI can launch Shell,
-  Codex, Claude Code, and Cursor through the current process/terminal path, but
-  the real Conductor-style embedded chat/terminal experience is still MVP work.
-  Background `session start` remains available when you want supervised process
-  records and captured logs.
+- **No native agent chat or PTY terminal yet.** The GUI has a basic embedded
+  command terminal for workspace commands, but Claude/Codex/Cursor chat and a
+  true interactive PTY terminal are still MVP work. Background `session start`
+  remains available when you want supervised process records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
   deep links, Big Terminal Mode, agent controls, MCP status, checkpoint UI, and
   resumable chat history are still MVP work.

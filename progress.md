@@ -3,9 +3,10 @@
 ## Current State
 
 This project has completed the Phase 0 documentation reset, Phase 1 app
-architecture cleanup slice, and Phase 2 project settings slice. Phase 3
-Workspace Command Center is the active phase until the full core + CLI + GTK
-workspace command flow is verified.
+architecture cleanup slice, Phase 2 project settings slice, and a usable Phase
+3 Workspace Command Center slice. Phase 4 Embedded Runtime is now active. Phase
+3 still lacks live connector proof for GitHub/Linear credentials, but the
+source creation code path is no longer placeholder-only.
 
 The codebase is being redirected from a CLI-heavy worktree tool into a
 GUI-first Conductor-style desktop app. The CLI and core backend are useful
@@ -38,6 +39,9 @@ security/privacy posture.
 - setup/run/archive script plumbing from `.conductor/settings.toml`.
 - Stable per-workspace port allocation.
 - Background run scripts and logs.
+- Background setup scripts and logs.
+- Workspace-scoped terminal command execution with captured stdout, stderr, and
+  exit code.
 - Shell/Codex/Claude/Cursor session launch primitives.
 - Codex and Claude launches honor configured executable paths from repository
   settings.
@@ -59,6 +63,10 @@ security/privacy posture.
 - Workspace page has a command center layout with status header, agents panel,
   runtime panel, changes/checks/review tabs, chat/terminal split, todos,
   processes, and lifecycle controls.
+- Workspace page has a basic embedded command terminal and a larger Terminal
+  tab with presets for Conductor environment, git status, diff, and file list.
+- Runtime panel can start setup/run scripts, stop run scripts, and show latest
+  setup/run log tails.
 - History page can read old chats from the macOS Conductor database when
   available.
 
@@ -69,8 +77,11 @@ The actual GUI-first Conductor MVP is not complete.
 MVP-critical missing work:
 
 - Embedded Conductor-native Claude/Codex/Cursor chat.
-- PTY-backed embedded workspace terminal.
-- Big Terminal Mode direction.
+- PTY-backed embedded workspace terminal. Current terminal support runs
+  workspace-scoped commands asynchronously and captures output, but it is not a
+  real interactive PTY.
+- Polished Big Terminal Mode. Current Terminal tab is the first full-width
+  direction/preset slice.
 - More polished project settings/onboarding layout.
 - Monorepo directory selection and linked-directory workflows.
 - GUI-visible MCP status. The core can inspect known MCP config files, but the
@@ -149,7 +160,7 @@ MVP-critical missing work:
   `LINEAR_API_KEY`; without that key it fails with a visible error instead of
   creating a fake workspace.
 
-Still needs Phase 3 proof before moving on:
+Still needs Phase 3 proof:
 
 - Manual or automated GTK click-through for source creation and lifecycle
   controls.
@@ -169,6 +180,32 @@ Verified Phase 3 evidence so far:
 - GTK app launches on `DISPLAY=:0` and stays alive until a 5-second smoke-test
   timeout with isolated XDG state.
 
+## Phase 4 Embedded Runtime Status
+
+- Core now has a `terminal_command` API that runs arbitrary shell commands from
+  the workspace directory with Conductor environment variables and returns
+  stdout, stderr, timestamps, and exit code.
+- Core now tracks setup script runs as a separate process kind and can read the
+  latest setup log.
+- GTK terminal panels now execute real workspace commands asynchronously instead
+  of queuing placeholder text.
+- GTK terminal presets expose `CONDUCTOR_*` environment, git status, git diff,
+  and a short file list.
+- Workspace tabs now include a full-width Terminal tab as the first Big
+  Terminal Mode direction slice.
+- Runtime panel now has Setup, Run, Stop, Open Folder actions plus latest
+  setup/run process and log previews.
+
+Still needs Phase 4 work:
+
+- True PTY-backed interactive terminal input/output.
+- Long-running terminal process management beyond setup/run process controls.
+- Automatic process exit-code monitoring for background setup/run/session
+  processes. Terminal commands report exit codes now; background process rows
+  still only mark stopped when the app stops them.
+- Spotlight testing execution from repository-root checkout.
+- Toasts and richer error/progress state.
+
 ## Next Step
 
 Do not continue adding backend-only commands unless they unblock the GUI-first
@@ -179,9 +216,8 @@ Recommended next work:
 1. Keep local docs aligned with the official Conductor docs before adding
    better-than-Conductor product ideas.
 2. Continue polishing project onboarding and settings validation.
-3. Finish Phase 3 verification on GTK/runtime/live connectors before starting
-   Phase 4 work.
-4. Replace the session/terminal foundations with PTY-backed streaming and
-   bidirectional app-native chat/terminal I/O.
-5. Add richer runtime logs, agent controls, PR/check actions, toasts, and
-   visible blockers on top of the command center.
+3. Finish live Phase 3 connector proof when `gh` auth and `LINEAR_API_KEY` are
+   available.
+4. Continue Phase 4 toward a true PTY terminal and Spotlight testing.
+5. Start Phase 5 only after the runtime base can support app-native
+   Claude/Codex/Cursor session streams.
