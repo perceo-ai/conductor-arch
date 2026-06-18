@@ -607,6 +607,13 @@ impl WorkspaceStore {
             .with_context(|| format!("read log {}", process.log_path.display()))
     }
 
+    pub fn read_latest_terminal_log(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let process = self.latest_process(workspace.id, ProcessKind::Terminal)?;
+        fs::read_to_string(&process.log_path)
+            .with_context(|| format!("read log {}", process.log_path.display()))
+    }
+
     pub fn stop_session(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let process = self.latest_running_process(workspace.id, ProcessKind::Session)?;
@@ -4254,6 +4261,49 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(matches[1].process_id, first.id);
         assert_eq!(matches[1].line_number, 2);
         assert_eq!(matches[1].line, "needle first");
+    }
+
+    #[test]
+    fn read_latest_terminal_log_returns_newest_terminal_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let older = store
+            .record_terminal_process("berlin", "older shell", 4242)
+            .unwrap();
+        let newer = store
+            .record_terminal_process("berlin", "newer shell", 4243)
+            .unwrap();
+        store
+            .append_terminal_process_output(older.id, "older transcript\n")
+            .unwrap();
+        store
+            .append_terminal_process_output(newer.id, "newer transcript\n")
+            .unwrap();
+
+        let transcript = store.read_latest_terminal_log("berlin").unwrap();
+
+        assert_eq!(transcript, "newer transcript\n");
     }
 
     #[test]

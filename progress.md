@@ -241,6 +241,8 @@ Verified Phase 3 evidence so far:
 - GTK terminal panels expose a basic terminal history search field that searches
   persisted transcript logs and appends matching process/line results into the
   terminal transcript.
+- Core can read the latest terminal transcript, and GTK terminal panels restore
+  that latest transcript into the initial terminal view after app restart.
 - GTK app shell reconciles stale terminal process records once during startup
   and then periodically while the app is open, so crashed or externally-ended
   shells stop showing as running without waiting for a manual refresh.
@@ -281,8 +283,9 @@ Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
   transcript, multiple managed terminal tabs/sessions in the UI, a polished
-  terminal history browser beyond basic transcript search, and true terminal
-  session restoration after app restart.
+  terminal history browser beyond basic transcript search, and live PTY process
+  reattach after app restart. Latest transcript restore is built, but that is
+  not the same as reattaching to the old shell process.
 - Full Spotlight parity: app-open recursive file watching now exists, but there
   is still no app-closed/background watcher, rich conflict UI, or Conductor-level
   parity around every checkpoint/watch edge case. Current support is manual

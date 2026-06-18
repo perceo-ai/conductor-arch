@@ -31,10 +31,10 @@ pub fn embedded_terminal_panel(
     transcript.set_editable(false);
     transcript.set_monospace(true);
     transcript.add_css_class("history-view");
-    transcript.buffer().set_text(&format!(
-        "Workspace terminal\nworkspace: {}\npath: {}\n\nCommands run here execute inside the workspace with CONDUCTOR_* environment variables.",
+    transcript.buffer().set_text(&initial_terminal_text(
+        &database_path,
         workspace_name,
-        workspace_path.display()
+        workspace_path,
     ));
 
     let active_pty: Rc<RefCell<Option<TerminalSession>>> = Rc::new(RefCell::new(None));
@@ -326,6 +326,35 @@ fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> 
     text
 }
 
+fn initial_terminal_text(
+    database_path: &Path,
+    workspace_name: &str,
+    workspace_path: &Path,
+) -> String {
+    let restored = WorkspaceStore::open(database_path)
+        .and_then(|store| store.read_latest_terminal_log(workspace_name))
+        .ok()
+        .filter(|log| !log.trim().is_empty());
+    format_initial_terminal_text(workspace_name, workspace_path, restored.as_deref())
+}
+
+fn format_initial_terminal_text(
+    workspace_name: &str,
+    workspace_path: &Path,
+    restored_transcript: Option<&str>,
+) -> String {
+    let mut text = format!(
+        "Workspace terminal\nworkspace: {}\npath: {}\n\nCommands run here execute inside the workspace with CONDUCTOR_* environment variables.",
+        workspace_name,
+        workspace_path.display()
+    );
+    if let Some(transcript) = restored_transcript {
+        text.push_str("\n\n[restored latest terminal transcript]\n");
+        text.push_str(transcript);
+    }
+    text
+}
+
 fn append_text(buffer: &TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
@@ -399,5 +428,18 @@ mod tests {
             format_terminal_search_results("missing", &[]),
             "\n[terminal search] missing\nNo terminal transcript matches.\n"
         );
+    }
+
+    #[test]
+    fn restored_terminal_transcript_is_included_in_initial_text() {
+        let text = format_initial_terminal_text(
+            "berlin",
+            Path::new("/tmp/workspaces/berlin"),
+            Some("last shell output\n"),
+        );
+
+        assert!(text.contains("workspace: berlin"));
+        assert!(text.contains("[restored latest terminal transcript]"));
+        assert!(text.contains("last shell output"));
     }
 }
