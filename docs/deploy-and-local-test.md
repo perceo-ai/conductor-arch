@@ -297,6 +297,8 @@ Manual GUI smoke:
   text in the GTK transcript instead of raw escape codes.
 - Confirm a command that redraws progress with carriage returns shows the latest
   progress line instead of raw `\r` artifacts.
+- Confirm resizing the GTK terminal area updates the active PTY shell size;
+  `stty size` from the shell reflects the resized grid.
 - Confirm a terminal shell that exits outside the app is eventually marked
   exited in Processes after the app-wide reconciliation poller runs.
 - Confirm stale terminal process rows from an earlier app crash are marked
@@ -332,10 +334,11 @@ Known GUI MVP gaps:
 - No embedded Conductor-native agent chat yet.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders transcript text with basic ANSI-control
-  stripping and carriage-return line updates. Stale process rows reconcile at
-  startup and while the app is open, and shell records get distinct searchable
-  raw transcript logs with latest-transcript restore, but this is not live PTY
-  process reattach or a polished terminal history browser.
+  stripping, carriage-return line updates, and resize propagation. Stale
+  process rows reconcile at startup and while the app is open, and shell records
+  get distinct searchable raw transcript logs with latest-transcript restore,
+  but this is not live PTY process reattach or a polished terminal history
+  browser.
 - Full Spotlight parity is not implemented; the current Spotlight slice is
   manual checkpoint/apply/restore/switch/sync with dirty-root refusal before
   patch reversal, explicit destructive root repair, app-wide polling sync, and

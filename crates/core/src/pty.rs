@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub struct PtySession {
+    master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
     writer: Box<dyn Write + Send>,
     output: Arc<Mutex<String>>,
@@ -75,6 +76,7 @@ impl PtySession {
         });
 
         Ok(Self {
+            master: pair.master,
             child,
             writer,
             output,
@@ -91,6 +93,17 @@ impl PtySession {
 
     pub fn process_id(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("resize pty")
     }
 
     pub fn read_available(&mut self) -> String {

@@ -33,4 +33,19 @@ mod pty_tests {
         assert!(echoed.contains("echo:from-pty"));
         session.stop().unwrap();
     }
+
+    #[test]
+    fn pty_session_resize_updates_child_terminal_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = crate::pty::PtySession::spawn_shell(temp.path(), Vec::new()).unwrap();
+
+        session.resize(33, 111).unwrap();
+        session.write("stty size; exit\n").unwrap();
+        let size = session
+            .read_until("33 111", Duration::from_secs(2))
+            .unwrap();
+
+        assert!(size.contains("33 111"));
+        session.stop().unwrap();
+    }
 }

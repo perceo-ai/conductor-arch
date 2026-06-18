@@ -46,10 +46,27 @@ pub fn embedded_terminal_panel(
     ));
 
     let active_pty: Rc<RefCell<Option<TerminalSession>>> = Rc::new(RefCell::new(None));
+    let last_pty_size: Rc<RefCell<Option<(u16, u16)>>> = Rc::new(RefCell::new(None));
     let buffer_for_poll = transcript.buffer();
     let pty_for_poll = active_pty.clone();
+    let transcript_for_poll = transcript.clone();
+    let last_size_for_poll = last_pty_size.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
         if let Some(session) = pty_for_poll.borrow_mut().as_mut() {
+            let size = terminal_size_from_pixels(
+                transcript_for_poll.allocated_width(),
+                transcript_for_poll.allocated_height(),
+            );
+            if *last_size_for_poll.borrow() != Some(size) {
+                if let Err(err) = session.resize(size.0, size.1) {
+                    append_text(
+                        &buffer_for_poll,
+                        &format!("\n[pty resize error]\n{err:#}\n"),
+                    );
+                } else {
+                    *last_size_for_poll.borrow_mut() = Some(size);
+                }
+            }
             let output = session.session.read_available();
             if !output.is_empty() {
                 if let Err(err) = session.append_output(&output) {
@@ -546,6 +563,12 @@ fn terminal_process_refresh_scope() -> RefreshScope {
     RefreshScope::Workspace
 }
 
+fn terminal_size_from_pixels(width: i32, height: i32) -> (u16, u16) {
+    let cols = (width.max(0) / 8).clamp(20, u16::MAX as i32) as u16;
+    let rows = (height.max(0) / 20).clamp(4, u16::MAX as i32) as u16;
+    (rows, cols)
+}
+
 fn initial_terminal_text(
     database_path: &Path,
     workspace_name: &str,
@@ -681,6 +704,10 @@ impl TerminalSession {
         self.mark_stopped(Some(143))
     }
 
+    fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        self.session.resize(rows, cols)
+    }
+
     fn mark_stopped(&mut self, exit_code: Option<i32>) -> Result<()> {
         let Some(process_id) = self.process_id.take() else {
             return Ok(());
@@ -765,6 +792,12 @@ mod tests {
         let rendered = terminal_display_text("Downloading 10%\rDownloading 100%\nnext\n");
 
         assert_eq!(rendered, "Downloading 100%\nnext\n");
+    }
+
+    #[test]
+    fn terminal_size_from_pixels_clamps_to_minimum_grid() {
+        assert_eq!(terminal_size_from_pixels(960, 480), (24, 120));
+        assert_eq!(terminal_size_from_pixels(1, 1), (4, 20));
     }
 
     #[test]

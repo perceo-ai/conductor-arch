@@ -219,6 +219,7 @@ Verified Phase 3 evidence so far:
   stdout, stderr, timestamps, and exit code.
 - Core now has a PTY session primitive that starts a shell in a workspace,
   accepts input after spawn, and streams output back to the app.
+- Core PTY sessions can resize the child terminal.
 - Core now records PTY terminal shells as process rows and can mark them stopped
   with the same signal-style exit code used by other stopped runtime processes.
 - Core now gives each recorded PTY terminal shell its own log file instead of
@@ -234,6 +235,8 @@ Verified Phase 3 evidence so far:
   of queuing placeholder text.
 - GTK terminal panels now have Start Shell/Stop Shell controls for a PTY-backed
   workspace shell.
+- GTK terminal panels propagate terminal view size changes to the active PTY
+  shell, so child processes can observe the resized row/column grid.
 - GTK terminal panels create terminal process records on Start Shell and mark
   them stopped on Stop Shell or panel teardown.
 - GTK terminal Start Shell/Stop Shell now trigger a workspace refresh so the
@@ -292,12 +295,12 @@ Verified Phase 3 evidence so far:
 
 Still needs Phase 4 work:
 
-- Terminal emulator polish: resize events, cursor-state emulation beyond common
-  escape stripping and carriage-return line updates, multiple managed terminal
-  tabs/sessions in the UI, a polished terminal history browser beyond basic
-  session listing/transcript search/selected transcript loading, and live PTY
-  process reattach after app restart. Latest transcript restore is built, but
-  that is not the same as reattaching to the old shell process.
+- Terminal emulator polish: cursor-state emulation beyond common escape
+  stripping and carriage-return line updates, scrollback management, multiple
+  managed terminal tabs/sessions in the UI, a polished terminal history browser
+  beyond basic session listing/transcript search/selected transcript loading,
+  and live PTY process reattach after app restart. Latest transcript restore is
+  built, but that is not the same as reattaching to the old shell process.
 - Full Spotlight parity: app-open recursive file watching now exists, but there
   is still no app-closed/background watcher, rich conflict UI, or Conductor-level
   parity around every checkpoint/watch edge case. Current support is manual

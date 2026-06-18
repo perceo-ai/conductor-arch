@@ -182,6 +182,7 @@ Current GUI capabilities:
   logs and append matching process/line results, list recorded terminal
   sessions/logs, load a selected past transcript into the terminal view, and
   restore the latest transcript into the terminal view after app restart.
+  Active PTY shells are resized from the GTK terminal allocation.
   The visible transcript strips common ANSI control sequences and applies
   carriage-return progress-line updates, but this is not a polished terminal
   emulator yet.
@@ -517,11 +518,10 @@ Cursor interactive sessions, see
 
 - **No native agent chat or polished terminal emulator yet.** The GUI has a
   PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
-  chat, resize/cursor/scrollback polish beyond basic ANSI stripping and
-  carriage-return line updates, managed multi-terminal UI, a polished history
-  browser beyond basic session listing/transcript search, and live PTY process
-  reattach after app restart are still MVP work. Latest transcript restore is
-  built.
+  chat, cursor/scrollback polish beyond basic ANSI stripping and carriage-return
+  line updates, managed multi-terminal UI, a polished history browser beyond
+  basic session listing/transcript search, and live PTY process reattach after
+  app restart are still MVP work. Latest transcript restore is built.
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
