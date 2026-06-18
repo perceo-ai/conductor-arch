@@ -220,6 +220,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   latest progress line instead of raw `\r` artifacts.
 - [ ] Resizing the GTK terminal area updates the active PTY shell size; `stty
   size` from the shell reflects the resized grid.
+- [ ] Long terminal output caps the on-screen transcript with a scrollback
+  trimmed marker while the persisted raw terminal log remains complete.
 - [ ] If an embedded terminal shell exits outside the app, the Processes tab
   eventually marks its terminal row exited after the app-wide reconciliation
   poller runs.
@@ -254,9 +256,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   has a PTY-backed shell but still renders as transcript text with basic
   ANSI-control stripping, carriage-return line updates, and resize propagation;
   stale process rows reconcile at startup and while the app is open, and shell
-  records get distinct searchable raw transcript logs with latest-transcript
-  restore, but this is not a full emulator/live PTY reattach model or polished
-  terminal history browser.
+  records get distinct searchable raw transcript logs with capped on-screen
+  scrollback and latest-transcript restore, but this is not a full emulator/live
+  PTY reattach model or polished terminal history/scrollback browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, app-open recursive file watching for active Spotlight workspace

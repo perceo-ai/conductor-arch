@@ -184,7 +184,8 @@ Current GUI capabilities:
   restore the latest transcript into the terminal view after app restart.
   Active PTY shells are resized from the GTK terminal allocation.
   The visible transcript strips common ANSI control sequences and applies
-  carriage-return progress-line updates, but this is not a polished terminal
+  carriage-return progress-line updates, and the on-screen scrollback is capped
+  while raw transcript logs stay complete, but this is not a polished terminal
   emulator yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
@@ -518,10 +519,10 @@ Cursor interactive sessions, see
 
 - **No native agent chat or polished terminal emulator yet.** The GUI has a
   PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
-  chat, cursor/scrollback polish beyond basic ANSI stripping and carriage-return
-  line updates, managed multi-terminal UI, a polished history browser beyond
-  basic session listing/transcript search, and live PTY process reattach after
-  app restart are still MVP work. Latest transcript restore is built.
+  chat, cursor polish beyond basic ANSI stripping and carriage-return line
+  updates, managed multi-terminal UI, a polished history/scrollback browser
+  beyond basic session listing/transcript search, and live PTY process reattach
+  after app restart are still MVP work. Latest transcript restore is built.
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,

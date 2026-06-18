@@ -164,18 +164,18 @@ MVP is not complete until the normal workflow can be driven from the app.
   bidirectional agent chat.
 - Embedded terminal support now has a PTY-backed shell, but the UI is still a
   transcript/input surface rather than a polished terminal emulator with
-  cursor/scrollback/session management. Terminal process records are created,
-  stopped, and reconciled to exited on app startup and periodic refresh when
-  their recorded shell PID is no longer alive. Active PTY shells are resized
-  from the GTK terminal allocation. Each recorded shell gets a distinct log
-  path, and PTY command/output chunks are appended to that raw transcript log.
-  The visible transcript strips common ANSI/OSC escape sequences, applies
-  carriage-return progress-line updates, can search persisted transcript logs,
-  lists recorded terminal sessions/logs, loads a selected past transcript into
-  the terminal view, and restores the latest transcript into the terminal view
-  after app restart. Managed multi-terminal UI, a more polished terminal
-  history browser, and live PTY process reattach after app restart are still
-  missing.
+  cursor/session management. Terminal process records are created, stopped, and
+  reconciled to exited on app startup and periodic refresh when their recorded
+  shell PID is no longer alive. Active PTY shells are resized from the GTK
+  terminal allocation. Each recorded shell gets a distinct log path, and PTY
+  command/output chunks are appended to that raw transcript log. The visible
+  transcript strips common ANSI/OSC escape sequences, applies carriage-return
+  progress-line updates, and caps on-screen scrollback while keeping persisted
+  logs raw. It can search persisted transcript logs, list recorded terminal
+  sessions/logs, load a selected past transcript into the terminal view, and
+  restore the latest transcript into the terminal view after app restart.
+  Managed multi-terminal UI, a more polished terminal history/scrollback
+  browser, and live PTY process reattach after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
   app-wide polling sync, and app-open recursive filesystem watching for active

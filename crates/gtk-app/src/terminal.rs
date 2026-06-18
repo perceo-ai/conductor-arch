@@ -16,6 +16,9 @@ use std::time::Duration;
 
 use crate::refresh::{RefreshHub, RefreshScope};
 
+const TERMINAL_SCROLLBACK_LINES: usize = 2_000;
+const TERMINAL_SCROLLBACK_TRIM_MARKER: &str = "[terminal scrollback trimmed]\n";
+
 pub fn embedded_terminal_panel(
     database_path: PathBuf,
     workspace_name: &str,
@@ -541,15 +544,18 @@ fn terminal_history_option_label(record: &ProcessRecord) -> String {
 }
 
 fn format_selected_terminal_transcript(record: &ProcessRecord, transcript: &str) -> String {
-    format!(
-        "[terminal transcript #{}]\nstatus={} pid={} exit={} started={}\ncommand: {}\n\n{}",
-        record.id,
-        record.status.as_str(),
-        record.pid,
-        terminal_exit_label(record.exit_code),
-        record.started_at,
-        record.command,
-        terminal_display_text(transcript)
+    trim_terminal_scrollback(
+        &format!(
+            "[terminal transcript #{}]\nstatus={} pid={} exit={} started={}\ncommand: {}\n\n{}",
+            record.id,
+            record.status.as_str(),
+            record.pid,
+            terminal_exit_label(record.exit_code),
+            record.started_at,
+            record.command,
+            terminal_display_text(transcript)
+        ),
+        TERMINAL_SCROLLBACK_LINES,
     )
 }
 
@@ -601,6 +607,36 @@ fn format_initial_terminal_text(
 fn append_text(buffer: &TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, &terminal_display_text(text));
+    trim_terminal_buffer(buffer, TERMINAL_SCROLLBACK_LINES);
+}
+
+fn trim_terminal_buffer(buffer: &TextBuffer, max_lines: usize) {
+    let text = buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string();
+    let trimmed = trim_terminal_scrollback(&text, max_lines);
+    if trimmed != text {
+        buffer.set_text(&trimmed);
+    }
+}
+
+fn trim_terminal_scrollback(text: &str, max_lines: usize) -> String {
+    if max_lines == 0 {
+        return TERMINAL_SCROLLBACK_TRIM_MARKER.to_owned();
+    }
+
+    let trailing_newline = text.ends_with('\n');
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= max_lines {
+        return text.to_owned();
+    }
+
+    let mut trimmed = TERMINAL_SCROLLBACK_TRIM_MARKER.to_owned();
+    trimmed.push_str(&lines[lines.len() - max_lines..].join("\n"));
+    if trailing_newline {
+        trimmed.push('\n');
+    }
+    trimmed
 }
 
 fn terminal_display_text(text: &str) -> String {
@@ -798,6 +834,13 @@ mod tests {
     fn terminal_size_from_pixels_clamps_to_minimum_grid() {
         assert_eq!(terminal_size_from_pixels(960, 480), (24, 120));
         assert_eq!(terminal_size_from_pixels(1, 1), (4, 20));
+    }
+
+    #[test]
+    fn terminal_scrollback_keeps_latest_lines_with_marker() {
+        let rendered = trim_terminal_scrollback("one\ntwo\nthree\nfour\n", 2);
+
+        assert_eq!(rendered, "[terminal scrollback trimmed]\nthree\nfour\n");
     }
 
     #[test]
