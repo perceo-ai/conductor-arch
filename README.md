@@ -186,10 +186,11 @@ Current GUI capabilities:
   to that workspace's tracked changes. Spotlight Sync manually refreshes the
   root checkout from the active workspace; the selected workspace page also
   polls and auto-syncs changed tracked patches. The app shell also polls active
-  Spotlight sessions across pages. Stop/Sync/Switch refuse to proceed when the
-  root has extra edits outside the active Spotlight patch. Repair Spotlight can
-  explicitly discard root-only edits and reapply the active patch. It is not
-  event-driven filesystem watching yet.
+  Spotlight sessions across pages and watches active Spotlight workspace trees
+  while the app is open, so nested file edits can trigger sync before the next
+  polling interval. Stop/Sync/Switch refuse to proceed when the root has extra
+  edits outside the active Spotlight patch. Repair Spotlight can explicitly
+  discard root-only edits and reapply the active patch.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -197,7 +198,7 @@ Still missing from the real MVP:
 - Embedded Conductor-native agent chat.
 - Polished PTY terminal emulator behavior.
 - More polished project onboarding and settings layout.
-- Full Spotlight testing parity with file watching/checkpoint sync.
+- Full Spotlight testing parity beyond app-open file watching/checkpoint sync.
 - Command palette, shortcuts, and deep links.
 - Agent controls, MCP status, checkpoints, and resumable session history.
 - Monorepo directory selection and linked-directory workflows.
@@ -383,7 +384,8 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
   tracked workspace changes, and the selected workspace page polls for changed
   active patches; the app shell also polls active Spotlight sessions across
   pages. Repair Spotlight can explicitly discard root-only edits and reapply the
-  active patch. Event-driven file watching/checkpoint sync is still MVP work.
+  active patch. The GTK app also watches active Spotlight workspace trees while
+  open and uses file events to trigger sync, with polling as a fallback.
 
 ### Environment variables available in scripts
 
@@ -523,9 +525,10 @@ Cursor interactive sessions, see
   root checkout to that workspace's tracked changes, and Spotlight Sync refreshes
   the active patch manually. The selected workspace page polls for active patch
   changes and auto-syncs them; the app shell also polls active sessions across
-  pages. It refuses to reverse the patch when root-only edits are present, and
-  Repair Spotlight can explicitly discard those root-only edits and reapply the
-  active patch. It does not yet use event-driven filesystem watching.
+  pages and watches active Spotlight workspace trees while the app is open. It
+  refuses to reverse the patch when root-only edits are present, and Repair
+  Spotlight can explicitly discard those root-only edits and reapply the active
+  patch.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and

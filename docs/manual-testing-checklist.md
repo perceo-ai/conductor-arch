@@ -242,8 +242,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   emulator/session restoration model or polished terminal history browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
-  polling sync and explicit destructive root repair, but does not run
-  event-driven file watching/checkpoint sync.
+  polling sync, app-open recursive file watching for active Spotlight workspace
+  trees, and explicit destructive root repair, but it is not full
+  Conductor-level Spotlight parity.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

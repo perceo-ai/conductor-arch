@@ -154,6 +154,13 @@ pub struct SpotlightSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotlightWatchTarget {
+    pub session_id: i64,
+    pub workspace_name: String,
+    pub workspace_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub id: i64,
     pub workspace_id: i64,
@@ -944,6 +951,20 @@ impl WorkspaceStore {
             }
         }
         Ok(synced)
+    }
+
+    pub fn spotlight_watch_targets(&self) -> Result<Vec<SpotlightWatchTarget>> {
+        self.active_spotlight_sessions()?
+            .into_iter()
+            .map(|session| {
+                let workspace = self.get_by_name(&session.workspace_name)?;
+                Ok(SpotlightWatchTarget {
+                    session_id: session.id,
+                    workspace_name: session.workspace_name,
+                    workspace_path: workspace.path,
+                })
+            })
+            .collect()
     }
 
     pub fn spotlight_status(&self, name: &str) -> Result<Option<SpotlightSession>> {
@@ -4789,6 +4810,79 @@ spotlight_testing = true
             "background change\n"
         );
         assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn spotlight_watch_targets_return_active_workspace_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "first change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let active = store.spotlight_start("berlin").unwrap();
+
+        let targets = store.spotlight_watch_targets().unwrap();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].session_id, active.id);
+        assert_eq!(targets[0].workspace_name, "berlin");
+        assert_eq!(targets[0].workspace_path, workspace.path);
     }
 
     #[test]

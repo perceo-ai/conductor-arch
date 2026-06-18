@@ -19,9 +19,13 @@ use gtk::{
 };
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::workspace::WorkspaceStore;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::mpsc::{self, Sender};
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
 
@@ -140,6 +144,30 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         refresh_hub.refresh(RefreshScope::All);
     }
 
+    let spotlight_event_tx = {
+        let (tx, rx) = mpsc::channel();
+        let hub_spotlight_events = refresh_hub.clone();
+        let db_path_spotlight_events = app_state.workspace_database_path();
+        glib::timeout_add_seconds_local(1, move || {
+            if rx.try_iter().next().is_some()
+                && reconcile_runtime_state(&db_path_spotlight_events)
+                    .map(|report| report.changed())
+                    .unwrap_or(false)
+            {
+                hub_spotlight_events.refresh(RefreshScope::All);
+            }
+            glib::ControlFlow::Continue
+        });
+        tx
+    };
+
+    let spotlight_watcher = Rc::new(RefCell::new(None));
+    let _ = refresh_spotlight_file_watcher(
+        &app_state.workspace_database_path(),
+        &spotlight_event_tx,
+        &spotlight_watcher,
+    );
+
     // Keyboard shortcut: Ctrl+R → refresh all panels
     let evk = gtk::EventControllerKey::new();
     let hub_kb = refresh_hub.clone();
@@ -164,6 +192,8 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
 
     let db_path_runtime_auto = app_state.workspace_database_path();
     let hub_runtime_auto = refresh_hub.clone();
+    let spotlight_watcher_auto = spotlight_watcher.clone();
+    let spotlight_event_tx_auto = spotlight_event_tx.clone();
     glib::timeout_add_seconds_local(5, move || {
         if reconcile_runtime_state(&db_path_runtime_auto)
             .map(|report| report.changed())
@@ -171,6 +201,11 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         {
             hub_runtime_auto.refresh(RefreshScope::All);
         }
+        let _ = refresh_spotlight_file_watcher(
+            &db_path_runtime_auto,
+            &spotlight_event_tx_auto,
+            &spotlight_watcher_auto,
+        );
         glib::ControlFlow::Continue
     });
 }
@@ -195,6 +230,66 @@ fn reconcile_runtime_state(db_path: &Path) -> anyhow::Result<RuntimeReconciliati
         spotlight_sessions_synced: synced.len(),
         terminal_processes_reconciled: reconciled.len(),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpotlightWatchTargetKey {
+    session_id: i64,
+    workspace_path: PathBuf,
+}
+
+struct SpotlightFileWatcher {
+    targets: Vec<SpotlightWatchTargetKey>,
+    _watcher: RecommendedWatcher,
+}
+
+fn refresh_spotlight_file_watcher(
+    db_path: &Path,
+    event_tx: &Sender<()>,
+    current: &Rc<RefCell<Option<SpotlightFileWatcher>>>,
+) -> anyhow::Result<()> {
+    let store = WorkspaceStore::open(db_path.to_path_buf())?;
+    let targets = store.spotlight_watch_targets()?;
+    let target_keys = targets
+        .iter()
+        .map(|target| SpotlightWatchTargetKey {
+            session_id: target.session_id,
+            workspace_path: target.workspace_path.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if current
+        .borrow()
+        .as_ref()
+        .map(|watcher| watcher.targets == target_keys)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    if targets.is_empty() {
+        *current.borrow_mut() = None;
+        return Ok(());
+    }
+
+    let tx = event_tx.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            if event.is_ok() {
+                let _ = tx.send(());
+            }
+        },
+        Config::default(),
+    )?;
+    for target in &targets {
+        watcher.watch(&target.workspace_path, RecursiveMode::Recursive)?;
+    }
+
+    *current.borrow_mut() = Some(SpotlightFileWatcher {
+        targets: target_keys,
+        _watcher: watcher,
+    });
+    Ok(())
 }
 
 pub(crate) fn title_case_workspace(name: &str) -> String {

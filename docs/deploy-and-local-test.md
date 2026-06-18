@@ -323,10 +323,10 @@ Known GUI MVP gaps:
   rows reconcile at startup and while the app is open, and shell records get
   distinct searchable raw transcript logs, but this is not full terminal session
   restoration or a polished terminal history browser.
-- Full Spotlight watching/checkpoint sync is not implemented; the current
-  Spotlight slice is manual checkpoint/apply/restore/switch/sync with
-  dirty-root refusal before patch reversal, explicit destructive root repair,
-  and app-wide polling sync.
+- Full Spotlight parity is not implemented; the current Spotlight slice is
+  manual checkpoint/apply/restore/switch/sync with dirty-root refusal before
+  patch reversal, explicit destructive root repair, app-wide polling sync, and
+  app-open recursive file watching for active Spotlight workspace trees.
 - No command palette, shortcut coverage, deep links, polished Big Terminal
   Mode, MCP status, checkpoint UI, or resumable session history yet.
 - Project settings can be edited from Projects for shared/local repository

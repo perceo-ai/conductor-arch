@@ -270,6 +270,10 @@ Verified Phase 3 evidence so far:
   its tracked patch changes while that workspace page is open.
 - GTK app shell also polls all active Spotlight sessions, so active workspaces
   can keep syncing while the user is on another page.
+- Core now exposes active Spotlight watch targets, and the GTK app installs
+  recursive filesystem watchers for active Spotlight workspace trees while the
+  app is open. File events trigger the same active-session sync path, with
+  polling still kept as fallback and target refresh.
 
 Still needs Phase 4 work:
 
@@ -277,10 +281,12 @@ Still needs Phase 4 work:
   transcript, multiple managed terminal tabs/sessions in the UI, a polished
   terminal history browser beyond basic transcript search, and true terminal
   session restoration after app restart.
-- Full Spotlight parity: event-driven filesystem watching/checkpoint sync.
-  Current support is manual checkpoint/apply/restore/switch/sync plus app-wide
-  polling sync of tracked changes, dirty-root refusal before patch reversal, and
-  an explicit destructive root repair action.
+- Full Spotlight parity: app-open recursive file watching now exists, but there
+  is still no app-closed/background watcher, rich conflict UI, or Conductor-level
+  parity around every checkpoint/watch edge case. Current support is manual
+  checkpoint/apply/restore/switch/sync plus event-triggered and app-wide polling
+  sync of tracked changes, dirty-root refusal before patch reversal, and an
+  explicit destructive root repair action.
 - Toasts and richer error/progress state.
 
 ## Next Step
