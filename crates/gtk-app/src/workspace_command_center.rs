@@ -93,7 +93,13 @@ pub(crate) fn build_workspace_command_center(
         ));
         body.append(&top_grid);
 
-        body.append(&lifecycle_panel(&db_path, &ws, &state, refresh_hub.clone()));
+        body.append(&lifecycle_panel(
+            &db_path,
+            &ws,
+            &state,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        ));
 
         body.append(&work_tabs(
             &db_path,
@@ -431,6 +437,7 @@ fn lifecycle_panel(
     ws: &Workspace,
     state: &AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 10);
     panel.add_css_class("command-panel");
@@ -455,6 +462,7 @@ fn lifecycle_panel(
     let state_after_rename = state.clone();
     let refresh_after_rename = refresh_hub.clone();
     let progress_rename = progress.clone();
+    let toast_rename = toast_overlay.clone();
     let rename_entry_clone = rename_entry.clone();
     rename_btn.connect_clicked(move |_| {
         let new_name = rename_entry_clone.text().trim().to_owned();
@@ -470,7 +478,11 @@ fn lifecycle_panel(
                 state_after_rename.set_selected_workspace(Some(workspace.name.clone()));
                 progress_rename.set_text(&format!("Renamed to {}", workspace.name));
             }
-            Err(err) => progress_rename.set_text(&format!("Rename failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &progress_rename,
+                &toast_rename,
+                lifecycle_action_failure_feedback("Rename", &err),
+            ),
         }
         refresh_after_rename.refresh(RefreshScope::All);
     });
@@ -485,6 +497,7 @@ fn lifecycle_panel(
         let refresh_after_action = refresh_hub.clone();
         let confirm_action = confirm.clone();
         let progress_action = progress.clone();
+        let toast_action = toast_overlay.clone();
         button.connect_clicked(move |_| {
             if matches!(action, "archive" | "discard") && !confirm_action.is_active() {
                 progress_action.set_text("Check confirm before archive/discard.");
@@ -503,7 +516,11 @@ fn lifecycle_panel(
                     title_case_workspace(action),
                     workspace.name
                 )),
-                Err(err) => progress_action.set_text(&format!("{action} failed: {err:#}")),
+                Err(err) => apply_runtime_action_feedback(
+                    &progress_action,
+                    &toast_action,
+                    lifecycle_action_failure_feedback(&title_case_workspace(action), &err),
+                ),
             }
             refresh_after_action.refresh(RefreshScope::All);
         });
@@ -966,6 +983,14 @@ fn runtime_action_failure_feedback(action: &str, err: &anyhow::Error) -> Runtime
     }
 }
 
+fn lifecycle_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
+    let text = format!("{action} failed: {err:#}");
+    RuntimeActionFeedback {
+        status_text: text.clone(),
+        toast_text: Some(text),
+    }
+}
+
 fn apply_runtime_action_feedback(
     status: &Label,
     toast_overlay: &ToastOverlay,
@@ -989,6 +1014,17 @@ mod tests {
         assert_eq!(
             feedback.toast_text.as_deref(),
             Some("Setup failed: missing setup")
+        );
+    }
+
+    #[test]
+    fn lifecycle_action_failure_feedback_includes_status_and_toast() {
+        let feedback = lifecycle_action_failure_feedback("Rename", &anyhow::anyhow!("bad name"));
+
+        assert_eq!(feedback.status_text, "Rename failed: bad name");
+        assert_eq!(
+            feedback.toast_text.as_deref(),
+            Some("Rename failed: bad name")
         );
     }
 }

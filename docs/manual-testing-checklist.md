@@ -236,7 +236,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   Spotlight Off/Sync fails without marking the session stopped.
 - [ ] Repair Spotlight explicitly discards root-only edits, reapplies the active
   Spotlight patch, and then Spotlight Off can restore the clean root.
-- [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
+- [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs and
+  show an app toast if the action fails.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
 - [ ] `Ctrl+R` refreshes the visible workspace state.

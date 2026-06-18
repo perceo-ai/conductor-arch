@@ -179,9 +179,9 @@ MVP is not complete until the normal workflow can be driven from the app.
   Spotlight workspace trees.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
-- Run/Stop and lifecycle buttons perform actions, and Runtime button failures
-  have first-slice error toasts, but confirmation, richer progress, lifecycle
-  toasts, and automatic targeted refresh still need polish.
+- Run/Stop and lifecycle buttons perform actions, and Runtime/lifecycle button
+  failures have first-slice error toasts, but richer progress and automatic
+  targeted refresh still need polish.
 - Changes/Checks/Todos/Processes are basic panels, not full Conductor review
   surfaces.
 - Settings, provider, MCP, command palette, keyboard shortcut, deep-link,

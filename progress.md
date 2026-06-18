@@ -183,6 +183,7 @@ MVP-critical missing work:
 - Work tabs separate changes, checks, review comments, todos, and processes.
 - Lifecycle controls support rename, archive, restore, and discard with visible
   progress text and confirmation gating for destructive archive/discard actions.
+- Lifecycle action failures now show both inline status text and app toasts.
 - The Projects page can create workspaces from branch/base, GitHub issue,
   GitHub PR, Linear issue, or prompt while reusing current core workspace APIs.
   GitHub PR creation fetches the PR head ref before creating the worktree.
@@ -298,8 +299,8 @@ Still needs Phase 4 work:
   checkpoint/apply/restore/switch/sync plus event-triggered and app-wide polling
   sync of tracked changes, dirty-root refusal before patch reversal, and an
   explicit destructive root repair action.
-- Toasts and richer error/progress state beyond first-slice Runtime button
-  failure toasts.
+- Toasts and richer error/progress state beyond Runtime and lifecycle failure
+  toasts.
 
 ## Next Step
 
