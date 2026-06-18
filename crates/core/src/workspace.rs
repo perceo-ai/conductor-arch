@@ -705,8 +705,13 @@ impl WorkspaceStore {
             settings.spotlight_testing.unwrap_or(false),
             "spotlight_testing must be enabled for this repository"
         );
+        if let Some(active) = self.active_spotlight_for_repository(repository.id)? {
+            if active.workspace_id == workspace.id {
+                return Ok(active);
+            }
+            self.stop_active_spotlight(&repository, &active)?;
+        }
         ensure_clean_git_tree(&repository.root_path, "repository root")?;
-        ensure_no_active_spotlight(&self.conn, repository.id)?;
 
         let patch = workspace_tracked_patch(&workspace)?;
         anyhow::ensure!(
@@ -1270,6 +1275,22 @@ impl WorkspaceStore {
                 row_to_checkpoint,
             )
             .with_context(|| format!("load checkpoint {id}"))
+    }
+
+    fn stop_active_spotlight(
+        &self,
+        repository: &RepositoryRecord,
+        active: &SpotlightSession,
+    ) -> Result<SpotlightSession> {
+        let patch = fs::read_to_string(&active.patch_path)
+            .with_context(|| format!("read {}", active.patch_path.display()))?;
+        reverse_git_patch(&repository.root_path, &patch)?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE spotlight_sessions SET status = 'stopped', ended_at = ?1 WHERE id = ?2",
+            params![now, active.id],
+        )?;
+        self.get_spotlight_session(active.id)
     }
 
     fn spotlight_checkpoint(&self, workspace: &Workspace, patch: &str) -> Result<Checkpoint> {
@@ -2360,19 +2381,6 @@ fn ensure_clean_git_tree(cwd: &Path, label: &str) -> Result<()> {
     anyhow::ensure!(
         status.trim().is_empty(),
         "{label} must be clean before Spotlight testing"
-    );
-    Ok(())
-}
-
-fn ensure_no_active_spotlight(conn: &Connection, repository_id: i64) -> Result<()> {
-    let active_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM spotlight_sessions WHERE repository_id = ?1 AND status = 'active'",
-        [repository_id],
-        |row| row.get(0),
-    )?;
-    anyhow::ensure!(
-        active_count == 0,
-        "another workspace is already active in Spotlight testing"
     );
     Ok(())
 }
@@ -4008,6 +4016,110 @@ spotlight_testing = true
         );
         assert!(!repo_path.join("new-tracked.txt").exists());
         assert!(store.spotlight_status("berlin").unwrap().is_none());
+    }
+
+    #[test]
+    fn spotlight_start_switches_active_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let berlin = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let oslo = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "oslo".to_owned(),
+                branch: "lc/oslo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(berlin.path.join("README.md"), "berlin change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&berlin.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        fs::write(oslo.path.join("README.md"), "oslo change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&oslo.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+
+        let berlin_active = store.spotlight_start("berlin").unwrap();
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "berlin change\n"
+        );
+
+        let oslo_active = store.spotlight_start("oslo").unwrap();
+
+        assert_eq!(oslo_active.workspace_name, "oslo");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "oslo change\n"
+        );
+        assert!(store.spotlight_status("berlin").unwrap().is_none());
+        assert_eq!(
+            store.spotlight_status("oslo").unwrap().unwrap(),
+            oslo_active
+        );
+        let stopped_berlin = store.get_spotlight_session(berlin_active.id).unwrap();
+        assert_eq!(stopped_berlin.status, "stopped");
+        assert!(stopped_berlin.ended_at.is_some());
+        assert_eq!(store.checkpoint_list("oslo").unwrap().len(), 1);
     }
 
     #[test]

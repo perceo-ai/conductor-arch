@@ -120,7 +120,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   running/stopped status, timestamps, and stop exit code.
 - First Spotlight testing slice: apply a workspace's tracked changes to the
   clean repository root when `spotlight_testing = true`, then reverse that patch
-  on stop, with a start-time checkpoint commit of the tracked workspace state.
+  on stop, with a start-time checkpoint commit of the tracked workspace state
+  and switching between active Spotlight workspaces.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.
 - Supervised background sessions with process records and logs.
 - Git diff/status/log helpers.
@@ -161,8 +162,7 @@ MVP is not complete until the normal workflow can be driven from the app.
   resize/cursor/scrollback/session management. Terminal process records are
   created and stopped, but app-crash reconciliation is still rough.
 - Spotlight support is start-time checkpoint plus manual apply/restore. It does
-  not yet watch files, continuously sync new checkpoint commits, or switch
-  active workspaces.
+  not yet watch files or continuously sync new checkpoint commits.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions but need confirmation,

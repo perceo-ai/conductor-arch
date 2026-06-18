@@ -55,6 +55,8 @@ security/privacy posture.
   reverse that patch.
 - Spotlight start now creates a checkpoint commit for the tracked workspace
   state before applying it to the repository root.
+- Spotlight start can switch the active Spotlight workspace by restoring the
+  previous workspace patch and applying the newly selected workspace patch.
 - Shell/Codex/Claude/Cursor session launch primitives.
 - Codex and Claude launches honor configured executable paths from repository
   settings.
@@ -231,6 +233,8 @@ Verified Phase 3 evidence so far:
   requiring a clean repository root, applying the workspace's tracked patch to
   the root checkout, recording the patch, creating a workspace checkpoint
   commit, and reversing the patch on stop.
+- Starting Spotlight for a different workspace in the same repository now
+  replaces the root checkout state with that workspace's tracked changes.
 - GTK Runtime now exposes Spotlight On/Off controls and active status.
 
 Still needs Phase 4 work:
@@ -239,9 +243,9 @@ Still needs Phase 4 work:
   transcript, multiple terminal sessions, persisted terminal history, and
   stronger automatic reconciliation for PTY processes if the whole app crashes.
 - Full Spotlight parity: file watching, repeated checkpoint sync after changes,
-  one-way continuous sync, switching active Spotlight workspaces, and stronger
-  root dirty-state recovery. Current support is start-time checkpoint plus
-  manual apply/restore of tracked changes.
+  one-way continuous sync, and stronger root dirty-state recovery. Current
+  support is start-time checkpoint plus manual apply/restore/switching of
+  tracked changes.
 - Toasts and richer error/progress state.
 
 ## Next Step
