@@ -122,7 +122,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   clean repository root when `spotlight_testing = true`, then reverse that patch
   on stop, with a start-time checkpoint commit of the tracked workspace state
   and manual sync/switching between active Spotlight workspaces. Stop/sync/switch
-  refuse to reverse the active patch when the root has extra edits.
+  refuse to reverse the active patch when the root has extra edits. The selected
+  workspace page polls for active patch changes and auto-syncs them.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.
 - Supervised background sessions with process records and logs.
 - Git diff/status/log helpers.
@@ -163,8 +164,9 @@ MVP is not complete until the normal workflow can be driven from the app.
   resize/cursor/scrollback/session management. Terminal process records are
   created and stopped, but app-crash reconciliation is still rough.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
-  dirty-root refusal before patch reversal. It does not yet watch files,
-  automatically sync new checkpoint commits, or repair root conflicts.
+  dirty-root refusal before patch reversal plus selected-page polling sync. It
+  does not yet run process-wide file watching, sync while the workspace page is
+  closed, or repair root conflicts.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions but need confirmation,

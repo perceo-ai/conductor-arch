@@ -179,9 +179,10 @@ Current GUI capabilities:
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
   state, and starting Spotlight for another workspace switches the root checkout
   to that workspace's tracked changes. Spotlight Sync manually refreshes the
-  root checkout from the active workspace. Stop/Sync/Switch refuse to proceed
-  when the root has extra edits outside the active Spotlight patch. It is not
-  continuous file watching yet.
+  root checkout from the active workspace; the selected workspace page also
+  polls and auto-syncs changed tracked patches. Stop/Sync/Switch refuse to
+  proceed when the root has extra edits outside the active Spotlight patch. It
+  is not process-wide background file watching yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -372,8 +373,8 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
 - Spotlight testing — use when the project must run from the repository root or
   one shared local stack instead of one app process per workspace. Current
   prototype support manually checkpoints and applies/restores/switches/syncs
-  tracked workspace changes; automatic file watching/checkpoint sync is still
-  MVP work.
+  tracked workspace changes, and the selected workspace page polls for changed
+  active patches; process-wide file watching/checkpoint sync is still MVP work.
 
 ### Environment variables available in scripts
 
@@ -510,9 +511,10 @@ Cursor interactive sessions, see
   changes against a clean repository root and creates a checkpoint when
   Spotlight starts. Starting Spotlight for a different workspace switches the
   root checkout to that workspace's tracked changes, and Spotlight Sync refreshes
-  the active patch manually. It refuses to reverse the patch when root-only edits
-  are present, but it does not yet watch files, automatically sync new
-  checkpoint commits, or repair root conflicts for you.
+  the active patch manually. The selected workspace page polls for active patch
+  changes and auto-syncs them. It refuses to reverse the patch when root-only
+  edits are present, but it does not yet run a process-wide watcher, sync while
+  the workspace page is closed, or repair root conflicts for you.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and

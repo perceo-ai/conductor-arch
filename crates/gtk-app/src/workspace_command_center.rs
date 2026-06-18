@@ -214,6 +214,33 @@ fn runtime_panel(
     status.set_xalign(0.0);
     status.set_wrap(true);
 
+    let autosync_workspace = ws.name.clone();
+    let autosync_db_path = db_path.to_path_buf();
+    let autosync_status = status.clone();
+    let autosync_refresh = refresh_hub.clone();
+    let autosync_panel = panel.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
+        if autosync_panel.root().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        match WorkspaceStore::open(autosync_db_path.clone())
+            .and_then(|store| store.spotlight_sync_if_changed(&autosync_workspace))
+        {
+            Ok(Some(session)) => {
+                autosync_status.set_text(&format!(
+                    "Spotlight auto-synced for {}",
+                    session.workspace_name
+                ));
+                autosync_refresh.refresh(RefreshScope::All);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                autosync_status.set_text(&format!("Spotlight auto-sync paused: {err:#}"));
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+
     let setup_workspace = ws.name.clone();
     let db_path_setup = db_path.to_path_buf();
     let refresh_setup = refresh_hub.clone();
