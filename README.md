@@ -200,7 +200,8 @@ Current GUI capabilities:
   while the app is open, so nested file edits can trigger sync before the next
   polling interval. Stop/Sync/Switch refuse to proceed when the root has extra
   edits outside the active Spotlight patch. Repair Spotlight can explicitly
-  discard root-only edits and reapply the active patch.
+  discard root-only edits and reapply the active patch, and dirty-root Spotlight
+  failures point users to Repair Spotlight or manual clean/save.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 

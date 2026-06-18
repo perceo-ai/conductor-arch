@@ -983,11 +983,27 @@ struct RuntimeActionFeedback {
 }
 
 fn runtime_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
+    if is_spotlight_dirty_root_error(err) {
+        return RuntimeActionFeedback {
+            status_text: format!(
+                "{action} blocked: repository root has extra edits outside the active Spotlight patch. Use Repair Spotlight to discard root-only edits and reapply the active patch, or clean/save root changes manually."
+            ),
+            toast_text: Some(
+                "Spotlight root has extra edits. Use Repair Spotlight or clean/save root changes."
+                    .to_owned(),
+            ),
+        };
+    }
     let text = format!("{action} failed: {err:#}");
     RuntimeActionFeedback {
         status_text: text.clone(),
         toast_text: Some(text),
     }
+}
+
+fn is_spotlight_dirty_root_error(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("repository root has changes outside the active Spotlight patch")
 }
 
 fn lifecycle_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
@@ -1021,6 +1037,25 @@ mod tests {
         assert_eq!(
             feedback.toast_text.as_deref(),
             Some("Setup failed: missing setup")
+        );
+    }
+
+    #[test]
+    fn spotlight_conflict_feedback_points_to_repair_action() {
+        let feedback = runtime_action_failure_feedback(
+            "Spotlight sync",
+            &anyhow::anyhow!(
+                "repository root has changes outside the active Spotlight patch; clean or save root changes before changing Spotlight state"
+            ),
+        );
+
+        assert!(feedback.status_text.contains("Spotlight sync blocked"));
+        assert!(feedback.status_text.contains("Repair Spotlight"));
+        assert_eq!(
+            feedback.toast_text.as_deref(),
+            Some(
+                "Spotlight root has extra edits. Use Repair Spotlight or clean/save root changes."
+            )
         );
     }
 

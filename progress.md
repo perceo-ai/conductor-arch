@@ -276,6 +276,9 @@ Verified Phase 3 evidence so far:
   setup/run process and log previews.
 - Runtime panel button failures for Setup, Run, Stop, and Spotlight controls now
   show both inline status text and app toasts.
+- Spotlight dirty-root Runtime failures now show targeted guidance that points
+  to Repair Spotlight or manually cleaning/saving root changes instead of only
+  echoing the raw backend error.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,
@@ -310,11 +313,11 @@ Still needs Phase 4 work:
   restart. Latest transcript restore is built, but that is not the same as
   reattaching to the old shell process.
 - Full Spotlight parity: app-open recursive file watching now exists, but there
-  is still no app-closed/background watcher, rich conflict UI, or Conductor-level
-  parity around every checkpoint/watch edge case. Current support is manual
-  checkpoint/apply/restore/switch/sync plus event-triggered and app-wide polling
-  sync of tracked changes, dirty-root refusal before patch reversal, and an
-  explicit destructive root repair action.
+  is still no app-closed/background watcher, rich conflict UI beyond targeted
+  dirty-root guidance, or Conductor-level parity around every checkpoint/watch
+  edge case. Current support is manual checkpoint/apply/restore/switch/sync plus
+  event-triggered and app-wide polling sync of tracked changes, dirty-root
+  refusal before patch reversal, and an explicit destructive root repair action.
 - Toasts and richer error/progress state beyond Runtime and lifecycle failure
   toasts.
 

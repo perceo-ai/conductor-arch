@@ -181,8 +181,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   reattach after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
-  app-wide polling sync, and app-open recursive filesystem watching for active
-  Spotlight workspace trees.
+  targeted dirty-root guidance in the Runtime panel, app-wide polling sync, and
+  app-open recursive filesystem watching for active Spotlight workspace trees.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions, and Runtime/lifecycle button

@@ -348,8 +348,9 @@ Known GUI MVP gaps:
   history/scrollback browser.
 - Full Spotlight parity is not implemented; the current Spotlight slice is
   manual checkpoint/apply/restore/switch/sync with dirty-root refusal before
-  patch reversal, explicit destructive root repair, app-wide polling sync, and
-  app-open recursive file watching for active Spotlight workspace trees.
+  patch reversal, targeted dirty-root guidance, explicit destructive root
+  repair, app-wide polling sync, and app-open recursive file watching for active
+  Spotlight workspace trees.
 - No command palette, shortcut coverage, deep links, polished Big Terminal
   Mode, MCP status, checkpoint UI, or resumable session history yet.
 - Project settings can be edited from Projects for shared/local repository
