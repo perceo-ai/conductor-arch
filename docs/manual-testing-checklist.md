@@ -203,6 +203,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] If an embedded terminal shell exits outside the app, the Processes tab
   eventually marks its terminal row exited after the app-wide reconciliation
   poller runs.
+- [ ] If the app starts with stale terminal process rows from an earlier crash,
+  those rows are marked exited during startup reconciliation.
 - [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
 - [ ] With `spotlight_testing = true`, Spotlight On applies tracked workspace
   changes to a clean repository root and Spotlight Off restores the root.
@@ -227,8 +229,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Embedded Conductor-native agent chat is not implemented.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
   has a PTY-backed shell but still renders as raw transcript text; stale
-  process rows reconcile while the app is open, not as a full emulator/session
-  recovery model.
+  process rows reconcile at startup and while the app is open, not as a full
+  emulator/session restoration model.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, and does not run event-driven file watching or repair root

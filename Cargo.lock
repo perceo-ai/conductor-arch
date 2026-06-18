@@ -881,6 +881,7 @@ dependencies = [
  "libadwaita",
  "linux-conductor-core",
  "rusqlite",
+ "tempfile",
 ]
 
 [[package]]

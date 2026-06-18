@@ -21,7 +21,7 @@ use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::workspace::WorkspaceStore;
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
 
@@ -133,6 +133,13 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     window.set_content(Some(&toolbar_view));
     window.present();
 
+    if reconcile_runtime_state(&app_state.workspace_database_path())
+        .map(|report| report.changed())
+        .unwrap_or(false)
+    {
+        refresh_hub.refresh(RefreshScope::All);
+    }
+
     // Keyboard shortcut: Ctrl+R → refresh all panels
     let evk = gtk::EventControllerKey::new();
     let hub_kb = refresh_hub.clone();
@@ -158,19 +165,36 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     let db_path_runtime_auto = app_state.workspace_database_path();
     let hub_runtime_auto = refresh_hub.clone();
     glib::timeout_add_seconds_local(5, move || {
-        if let Ok((synced, reconciled)) = WorkspaceStore::open(db_path_runtime_auto.clone())
-            .and_then(|store| {
-                let synced = store.spotlight_sync_active_sessions()?;
-                let reconciled = store.reconcile_terminal_processes()?;
-                Ok::<_, anyhow::Error>((synced, reconciled))
-            })
+        if reconcile_runtime_state(&db_path_runtime_auto)
+            .map(|report| report.changed())
+            .unwrap_or(false)
         {
-            if !synced.is_empty() || !reconciled.is_empty() {
-                hub_runtime_auto.refresh(RefreshScope::All);
-            }
+            hub_runtime_auto.refresh(RefreshScope::All);
         }
         glib::ControlFlow::Continue
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeReconciliationReport {
+    spotlight_sessions_synced: usize,
+    terminal_processes_reconciled: usize,
+}
+
+impl RuntimeReconciliationReport {
+    fn changed(self) -> bool {
+        self.spotlight_sessions_synced > 0 || self.terminal_processes_reconciled > 0
+    }
+}
+
+fn reconcile_runtime_state(db_path: &Path) -> anyhow::Result<RuntimeReconciliationReport> {
+    let store = WorkspaceStore::open(db_path.to_path_buf())?;
+    let synced = store.spotlight_sync_active_sessions()?;
+    let reconciled = store.reconcile_terminal_processes()?;
+    Ok(RuntimeReconciliationReport {
+        spotlight_sessions_synced: synced.len(),
+        terminal_processes_reconciled: reconciled.len(),
+    })
 }
 
 pub(crate) fn title_case_workspace(name: &str) -> String {
@@ -793,3 +817,91 @@ separator {
     border-color: #89b4fa;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linux_conductor_core::repository::{AddRepository, RepositoryStore};
+    use linux_conductor_core::workspace::{CreateWorkspace, ProcessStatus};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    #[test]
+    fn startup_runtime_reconciliation_marks_stale_terminal_rows_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_terminal_process("berlin", "shell", 999_999)
+            .unwrap();
+
+        let report = reconcile_runtime_state(&db_path).unwrap();
+
+        assert_eq!(report.terminal_processes_reconciled, 1);
+        assert_eq!(
+            WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+                .unwrap()
+                .list_terminals("berlin")
+                .unwrap()[0]
+                .status,
+            ProcessStatus::Exited
+        );
+    }
+
+    fn init_repo(path: PathBuf) -> PathBuf {
+        fs::create_dir(&path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        fs::write(path.join("README.md"), "demo\n").unwrap();
+        git(&path, ["add", "."]);
+        git(
+            &path,
+            [
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        path
+    }
+
+    fn git<const N: usize>(repo_path: &Path, args: [&str; N]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+}

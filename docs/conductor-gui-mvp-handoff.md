@@ -338,8 +338,9 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - There is no true embedded Conductor chat UI.
 - There is a basic PTY-backed workspace shell with process records, but not a
   polished terminal emulator with resize/cursor/scrollback/session management
-  yet. Stale terminal process rows are periodically reconciled while the app is
-  open, but startup recovery before the first refresh remains rough.
+  yet. Stale terminal process rows are reconciled on app startup and periodic
+  refresh, but true terminal session restoration after app restart is still
+  missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
   slice with app-wide polling sync and dirty-root refusal before patch reversal,
   but not event-driven file watching/checkpoint sync or automatic root repair.
