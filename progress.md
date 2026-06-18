@@ -247,6 +247,8 @@ Verified Phase 3 evidence so far:
   terminal transcript.
 - GTK terminal panels expose a basic Show History control that lists recorded
   terminal sessions, status, pid, exit code, log file, start time, and command.
+- GTK terminal history now fills a session selector and can load the selected
+  persisted transcript into the terminal view.
 - Core can read the latest terminal transcript, and GTK terminal panels restore
   that latest transcript into the initial terminal view after app restart.
 - GTK terminal display now strips common ANSI/OSC escape sequences and applies
@@ -293,9 +295,9 @@ Still needs Phase 4 work:
 - Terminal emulator polish: resize events, cursor-state emulation beyond common
   escape stripping and carriage-return line updates, multiple managed terminal
   tabs/sessions in the UI, a polished terminal history browser beyond basic
-  session listing/transcript search, and live PTY process reattach after app
-  restart. Latest transcript restore is built, but that is not the same as
-  reattaching to the old shell process.
+  session listing/transcript search/selected transcript loading, and live PTY
+  process reattach after app restart. Latest transcript restore is built, but
+  that is not the same as reattaching to the old shell process.
 - Full Spotlight parity: app-open recursive file watching now exists, but there
   is still no app-closed/background watcher, rich conflict UI, or Conductor-level
   parity around every checkpoint/watch edge case. Current support is manual

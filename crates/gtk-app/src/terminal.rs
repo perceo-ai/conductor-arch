@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use gtk::prelude::*;
-use gtk::{Box as GBox, Button, Entry, Label, Orientation, ScrolledWindow, TextBuffer, TextView};
+use gtk::{
+    Box as GBox, Button, ComboBoxText, Entry, Label, Orientation, ScrolledWindow, TextBuffer,
+    TextView,
+};
 use linux_conductor_core::pty::PtySession;
 use linux_conductor_core::workspace::{
     ProcessRecord, SessionKind, TerminalLogMatch, WorkspaceStore,
@@ -193,12 +196,19 @@ pub fn embedded_terminal_panel(
     search_entry.set_hexpand(true);
     let search_btn = Button::with_label("Search Logs");
     let history_btn = Button::with_label("Show History");
+    let history_combo = ComboBoxText::new();
+    history_combo.set_hexpand(true);
+    let load_history_btn = Button::with_label("Load Transcript");
+    let history_records: Rc<RefCell<Vec<ProcessRecord>>> = Rc::new(RefCell::new(Vec::new()));
     let search_buffer = transcript.buffer();
     let history_buffer = transcript.buffer();
+    let load_history_buffer = transcript.buffer();
     let search_workspace = workspace_name.to_owned();
     let history_workspace = workspace_name.to_owned();
+    let load_history_workspace = workspace_name.to_owned();
     let history_db = database_path.clone();
     let search_db = database_path;
+    let load_history_db = history_db.clone();
     let search_entry_clone = search_entry.clone();
     search_btn.connect_clicked(move |_| {
         let query = search_entry_clone.text().trim().to_owned();
@@ -212,16 +222,58 @@ pub fn embedded_terminal_panel(
             search_buffer.clone(),
         );
     });
+    let history_combo_for_load = history_combo.clone();
+    let history_records_for_load = history_records.clone();
+    load_history_btn.connect_clicked(move |_| {
+        let Some(active_id) = history_combo_for_load.active_id() else {
+            append_text(
+                &load_history_buffer,
+                "\n[terminal history]\nSelect a terminal session first.\n",
+            );
+            return;
+        };
+        let Ok(process_id) = active_id.as_str().parse::<i64>() else {
+            append_text(
+                &load_history_buffer,
+                "\n[terminal history]\nSelected terminal session is invalid.\n",
+            );
+            return;
+        };
+        let Some(record) = history_records_for_load
+            .borrow()
+            .iter()
+            .find(|record| record.id == process_id)
+            .cloned()
+        else {
+            append_text(
+                &load_history_buffer,
+                "\n[terminal history]\nSelected terminal session is no longer loaded.\n",
+            );
+            return;
+        };
+        run_terminal_transcript_load(
+            load_history_db.clone(),
+            load_history_workspace.clone(),
+            record,
+            load_history_buffer.clone(),
+        );
+    });
+    let history_combo_for_history = history_combo.clone();
+    let history_records_for_history = history_records;
     history_btn.connect_clicked(move |_| {
         run_terminal_history(
             history_db.clone(),
             history_workspace.clone(),
             history_buffer.clone(),
+            history_combo_for_history.clone(),
+            history_records_for_history.clone(),
         );
     });
     search_row.append(&search_entry);
     search_row.append(&search_btn);
     search_row.append(&history_btn);
+    search_row.append(&history_combo);
+    search_row.append(&load_history_btn);
     root.append(&search_row);
     root
 }
@@ -329,27 +381,81 @@ fn run_terminal_log_search(
     });
 }
 
-fn run_terminal_history(database_path: PathBuf, workspace_name: String, buffer: TextBuffer) {
+fn run_terminal_history(
+    database_path: PathBuf,
+    workspace_name: String,
+    buffer: TextBuffer,
+    history_combo: ComboBoxText,
+    history_records: Rc<RefCell<Vec<ProcessRecord>>>,
+) {
     append_text(&buffer, "\n[terminal history]\n[loading]\n");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let result = WorkspaceStore::open(database_path)
+            .and_then(|store| store.list_terminals(&workspace_name));
+        let _ = tx.send(result);
+    });
+
+    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+        Ok(Ok(records)) => {
+            history_combo.remove_all();
+            for record in &records {
+                history_combo.append(
+                    Some(&record.id.to_string()),
+                    &terminal_history_option_label(record),
+                );
+            }
+            if !records.is_empty() {
+                history_combo.set_active(Some(0));
+            }
+            *history_records.borrow_mut() = records.clone();
+            append_text(&buffer, &format_terminal_history(&records));
+            glib::ControlFlow::Break
+        }
+        Ok(Err(err)) => {
+            append_text(&buffer, &format!("[terminal history error]\n{err:#}\n"));
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            append_text(&buffer, "[error]\nterminal history worker disconnected\n");
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn run_terminal_transcript_load(
+    database_path: PathBuf,
+    workspace_name: String,
+    record: ProcessRecord,
+    buffer: TextBuffer,
+) {
+    append_text(
+        &buffer,
+        &format!("\n[terminal transcript #{}]\n[loading]\n", record.id),
+    );
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
         let message = match WorkspaceStore::open(database_path)
-            .and_then(|store| store.list_terminals(&workspace_name))
+            .and_then(|store| store.read_terminal_log(&workspace_name, record.id))
         {
-            Ok(records) => format_terminal_history(&records),
-            Err(err) => format!("[terminal history error]\n{err:#}\n"),
+            Ok(transcript) => format_selected_terminal_transcript(&record, &transcript),
+            Err(err) => format!("[terminal transcript error]\n{err:#}\n"),
         };
         let _ = tx.send(message);
     });
 
     glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
         Ok(message) => {
-            append_text(&buffer, &message);
+            buffer.set_text(&message);
             glib::ControlFlow::Break
         }
         Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
         Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal history worker disconnected\n");
+            append_text(
+                &buffer,
+                "[error]\nterminal transcript worker disconnected\n",
+            );
             glib::ControlFlow::Break
         }
     });
@@ -400,6 +506,34 @@ fn format_terminal_history(records: &[ProcessRecord]) -> String {
         ));
     }
     text
+}
+
+fn terminal_history_option_label(record: &ProcessRecord) -> String {
+    let file_name = record
+        .log_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("terminal.log");
+    format!(
+        "#{} {} pid={} {}",
+        record.id,
+        record.status.as_str(),
+        record.pid,
+        file_name
+    )
+}
+
+fn format_selected_terminal_transcript(record: &ProcessRecord, transcript: &str) -> String {
+    format!(
+        "[terminal transcript #{}]\nstatus={} pid={} exit={} started={}\ncommand: {}\n\n{}",
+        record.id,
+        record.status.as_str(),
+        record.pid,
+        terminal_exit_label(record.exit_code),
+        record.started_at,
+        record.command,
+        terminal_display_text(transcript)
+    )
 }
 
 fn terminal_exit_label(exit_code: Option<i32>) -> String {
@@ -654,6 +788,29 @@ mod tests {
         assert!(rendered.contains("#7 exited pid=4242 exit=0"));
         assert!(rendered.contains("terminal-4242.log"));
         assert!(rendered.contains("/bin/bash"));
+    }
+
+    #[test]
+    fn selected_terminal_transcript_renders_session_header() {
+        let record = ProcessRecord {
+            id: 7,
+            workspace_id: 1,
+            kind: ProcessKind::Terminal,
+            command: "/bin/bash".to_owned(),
+            pid: 4242,
+            log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
+            status: ProcessStatus::Exited,
+            started_at: "2026-06-18T02:00:00Z".to_owned(),
+            exit_code: Some(0),
+            ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
+        };
+
+        let rendered = format_selected_terminal_transcript(&record, "hello\n");
+
+        assert!(rendered.contains("[terminal transcript #7]"));
+        assert!(rendered.contains("status=exited pid=4242 exit=0"));
+        assert!(rendered.contains("/bin/bash"));
+        assert!(rendered.contains("hello"));
     }
 
     #[test]

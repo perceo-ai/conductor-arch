@@ -180,8 +180,8 @@ Current GUI capabilities:
   gets its own log path, and PTY command/output chunks are appended to that raw
   transcript log. The terminal panel can search persisted terminal transcript
   logs and append matching process/line results, list recorded terminal
-  sessions/logs, and restore the latest transcript into the terminal view after
-  app restart.
+  sessions/logs, load a selected past transcript into the terminal view, and
+  restore the latest transcript into the terminal view after app restart.
   The visible transcript strips common ANSI control sequences and applies
   carriage-return progress-line updates, but this is not a polished terminal
   emulator yet.

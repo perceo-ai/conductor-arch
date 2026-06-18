@@ -342,10 +342,11 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   refresh, each terminal process record has a distinct log path, and PTY
   command/output chunks are appended to that raw transcript log. The visible
   transcript strips common ANSI/OSC escape sequences, applies carriage-return
-  progress-line updates, can search persisted transcript logs, and restores the
-  latest transcript after app restart. The terminal panel can also list recorded
-  terminal sessions/logs; managed multi-terminal UI, a polished terminal history
-  browser, and live PTY process reattach after app restart are still missing.
+  progress-line updates, can search persisted transcript logs, load a selected
+  past transcript, and restore the latest transcript after app restart. The
+  terminal panel can also list recorded terminal sessions/logs; managed
+  multi-terminal UI, a more polished terminal history browser, and live PTY
+  process reattach after app restart are still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
   slice with app-wide polling sync, dirty-root refusal before patch reversal,
   explicit destructive root repair, and app-open recursive file watching for
