@@ -22,7 +22,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-22.04]
+        include:
+          - os: ubuntu-24.04
+            cargo_scope: "--workspace"
+            label: "full workspace"
+          - os: ubuntu-22.04
+            cargo_scope: "--workspace --exclude linux-conductor-gtk"
+            label: "core and CLI"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,12 +60,13 @@ jobs:
         run: |
           rustc --version
           cargo --version
+          echo "Scope: ${{ matrix.label }}"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Build workspace
-        run: cargo build --workspace --locked
+      - name: Build ${{ matrix.label }}
+        run: cargo build ${{ matrix.cargo_scope }} --locked
 
-      - name: Test core and CLI
-        run: cargo test --workspace --locked
+      - name: Test ${{ matrix.label }}
+        run: cargo test ${{ matrix.cargo_scope }} --locked
