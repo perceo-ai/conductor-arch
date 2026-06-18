@@ -6,6 +6,12 @@ The previous implementation work over-indexed on a CLI/backend workflow and
 underbuilt the actual Conductor product experience. The target MVP is a
 GUI-first Conductor-style desktop app, not a CLI tool with a dashboard.
 
+Phase 0 must keep this document aligned with the official Conductor docs at
+<https://www.conductor.build/docs>. Match Conductor first. Better-than-Conductor
+features should be explicit product decisions, not accidental scope drift.
+For the local crawl map, see
+[`docs/conductor-docs-parity-map.md`](conductor-docs-parity-map.md).
+
 ## Product Definition
 
 Conductor is a local desktop control plane for parallel coding agents.
@@ -17,6 +23,41 @@ juggling many terminal windows.
 
 The key product value is that agent coordination happens inside the Conductor
 GUI.
+
+## Conductor Parity Baseline
+
+The MVP should preserve the documented Conductor loop:
+
+1. Add or clone a repository.
+2. Configure shared project setup, run, archive, files-to-copy, environment,
+   provider, and durable prompt settings.
+3. Create one workspace per shippable unit, or multiple agent chats in one
+   workspace when they share one branch and code state.
+4. Run Claude Code, Codex, or Cursor inside the selected workspace.
+5. Run setup, app/dev scripts, terminal commands, and tests from the workspace
+   unless Spotlight testing is configured for repository-root execution.
+6. Review the diff, leave comments, send comments back to an agent, and inspect
+   checks/todos/comments/conflicts before merge.
+7. Create/update/merge the pull request from the GUI.
+8. Archive the workspace and keep chat/history restorable.
+
+Important documented behaviors to match:
+
+- Workspace isolation is development isolation, not a sandbox.
+- A workspace maps to one branch and one Git worktree.
+- A branch can be checked out in only one worktree at a time.
+- Settings are layered: managed, local project override, repository shared,
+  user shared, built-in defaults.
+- Repository shared settings live in `.conductor/settings.toml`; local
+  overrides live in `.conductor/settings.local.toml`.
+- `.worktreeinclude` and Files to copy copy gitignored local files only.
+- Setup/run/archive scripts and terminals receive `CONDUCTOR_*` variables.
+- `CONDUCTOR_PORT` is the base of a workspace-specific port range.
+- Normal run scripts execute from the workspace; Spotlight testing exists for
+  projects that must run from the repository root.
+- MCP, provider settings, model/agent modes, checkpoints, slash commands,
+  keyboard shortcuts, command palette, deep links, and tool approvals are part
+  of the product surface, even if some are post-MVP polish.
 
 ## Core Model
 
@@ -58,8 +99,22 @@ and commands still run on the user's machine with the user's permissions.
 - Native desktop window.
 - Left sidebar with projects, active workspaces, archived/history entry, search,
   and status badges.
-- Main area with navigable pages: Dashboard, Project, Workspace, History.
-- Keyboard shortcuts can come later, but basic navigation must be clickable.
+- Main area with navigable pages: Dashboard, Project, Workspace, Diff/Review,
+  Settings, History.
+- Command palette and keyboard-shortcut model for core actions:
+  - add repository
+  - create workspace
+  - open workspace
+  - start/stop run script
+  - show diff
+  - show checks
+  - create PR
+  - merge PR
+  - archive workspace
+  - open settings
+- Basic navigation must also be clickable.
+- Deep-link architecture should be planned for prompts, repository paths,
+  issues, and async plans even if not all links ship in the first MVP.
 - App should not require normal workflow coordination through CLI commands.
 
 ### 2. Project/Repository Onboarding
@@ -74,15 +129,31 @@ and commands still run on the user's machine with the user's permissions.
   - run script
   - archive script
   - run mode
+  - Spotlight testing
   - environment variables
   - files to copy / include globs
+  - `.worktreeinclude` preview/precedence
   - durable instructions/prompts
+  - provider executable/API settings
+  - Git behavior such as archive-after-merge and branch naming
+- Settings UI must reflect Conductor's layered model:
+  - managed settings
+  - local project override
+  - repository shared settings
+  - user shared settings
+  - built-in defaults
+- Do not commit secrets. Shared settings can hold patterns/prompts/scripts;
+  local overrides hold machine-specific secrets.
 
 ### 3. Workspace Management
 
 - Create a workspace from GUI.
 - Workspace creation creates a real Git worktree.
 - Workspace maps to one branch.
+- Workspace creation can start from a new task, branch, pull request, GitHub
+  issue, or Linear issue.
+- Workspace names should have durable friendly city-style names while the
+  branch/issue/PR remains the primary work identifier.
 - Workspace page shows:
   - project/repo
   - branch
@@ -92,6 +163,10 @@ and commands still run on the user's machine with the user's permissions.
   - PR/check status
   - changed file count
   - todos/comments/conflicts
+- Workspace page can select visible monorepo directories where sparse checkout
+  is needed.
+- Workspace page can link sibling workspaces/directories for multi-repository
+  work where an agent must read or edit related code.
 - Archive, restore, discard, and rename from GUI.
 - Destructive actions require confirmations.
 
@@ -104,6 +179,24 @@ and commands still run on the user's machine with the user's permissions.
 - Multiple agents can run in one workspace.
 - Multiple workspaces can run agents in parallel.
 - Agent output should be formatted in a Conductor-native chat surface.
+- Session controls should include the Conductor controls that apply by harness:
+  - Plan Mode
+  - Fast Mode
+  - reasoning/effort level
+  - Codex personality
+  - Codex goals where supported
+  - checkpoints where supported
+  - skills where supported
+  - tool approvals
+- Repository instructions and action prompts should be surfaced:
+  - general preferences
+  - code review preferences
+  - create PR preferences
+  - fix errors preferences
+  - resolve conflict preferences
+  - branch rename preferences
+- MCP status should be visible for Claude Code and Codex sessions; Cursor MCP
+  is managed by Cursor but should be documented in the UI.
 - MVP should avoid forcing users into many external terminals.
 - If the first implementation uses PTY-backed processes, the UI should still
   render a readable app-native transcript and session state.
@@ -111,12 +204,17 @@ and commands still run on the user's machine with the user's permissions.
 ### 5. Terminal And Runtime
 
 - Workspace page includes terminal access scoped to that workspace.
+- Big-terminal style mode should be part of the runtime direction: a terminal
+  can become the center panel and run common presets or arbitrary commands.
 - Run setup script from GUI.
 - Run app/dev script from GUI.
 - Stop run script from GUI.
 - Show process list.
 - Show logs.
 - Show ports and `CONDUCTOR_*` environment context.
+- Support `scripts.run_mode = "concurrent"` and `"nonconcurrent"`.
+- Support Spotlight testing for repositories that need root-checkout execution
+  or a single shared local stack.
 
 ### 6. Git And Review
 
@@ -129,6 +227,10 @@ and commands still run on the user's machine with the user's permissions.
   - side-by-side or inline diff
   - inline comments
   - send selected comments back to agent
+- Show GitHub review comments and local review comments in the same review
+  flow where possible.
+- Resolve comments/threads from the GUI when the issue is handled.
+- Revert selected files from the diff viewer where safe.
 - Detect conflicting active workspaces that changed the same files.
 
 ### 7. GitHub Integration
@@ -143,6 +245,7 @@ Required GUI workflows:
 - Show CI/check status.
 - Surface failing checks.
 - Show basic PR review/comment state.
+- Let the user send failing checks, unresolved comments, or todos to an agent.
 - Merge PR.
 - Archive workspace after merge.
 
@@ -163,6 +266,8 @@ Workspace page should answer:
 - Is this ready to PR/merge/archive?
 
 Todos should be editable from GUI and syncable from `.context`.
+Open todos, unresolved comments, failing checks, and conflicts should be
+treated as merge blockers unless the user explicitly clears or overrides them.
 
 ### 9. History
 
@@ -171,6 +276,26 @@ Todos should be editable from GUI and syncable from `.context`.
 - User can inspect old chats and restore archived workspaces.
 - Existing macOS Conductor DB import/read support is useful for migration, but
   the app needs its own unified local history model.
+
+### 10. App Controls, Integrations, And Safety
+
+- Command palette for all major app actions.
+- Keyboard shortcuts for navigation, workspace actions, chat, terminal, review,
+  Git, and settings.
+- `conductor://`-style deep links for:
+  - prompt
+  - prompt plus repository path
+  - issue id plus optional prompt
+  - async plan
+- Provider settings for Claude Code, Codex, and Cursor.
+- Cursor sessions use API-key configuration and can open the workspace in
+  Cursor/VS Code without replacing Conductor's workspace ownership.
+- Security/privacy model is explicit:
+  - agents run locally with the user's permissions
+  - approval prompts can gate risky actions
+  - model traffic goes to the selected provider
+  - enterprise data privacy disables features that require external AI
+    providers/custom MCP where applicable
 
 ## What Exists Now
 
@@ -214,6 +339,11 @@ Todos should be editable from GUI and syncable from `.context`.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.
 - Project settings editor is missing.
+- Command palette, keyboard shortcut coverage, and deep-link handling are
+  missing or incomplete.
+- MCP/provider/agent-control surfaces are incomplete.
+- Spotlight testing, monorepo directory selection, and linked-directory flows
+  are missing.
 - Error handling, progress, confirmations, refresh, and toasts are incomplete.
 
 ## What Is Not Built Yet
@@ -228,6 +358,11 @@ Todos should be editable from GUI and syncable from `.context`.
 - Diff viewer with inline comments.
 - GUI PR/check/review/merge flow.
 - Agent status model comparable to Conductor.
+- Command palette, keyboard shortcuts, and deep links.
+- MCP/provider settings and status UI.
+- Spotlight testing.
+- Monorepo sparse-checkout controls.
+- Linked-directory/multi-repository workspace context.
 - Safe, polished destructive action flows.
 - Release-ready packaging validation.
 
@@ -261,6 +396,16 @@ Correct interpretation:
 - Rewrite `progress.md` current-state section.
 - Keep this file as the full handoff spec.
 - Clearly mark current implementation as foundation/prototype.
+- Align all docs with the official Conductor docs crawl:
+  - workspace model
+  - workflow
+  - project settings
+  - Files to copy and `.worktreeinclude`
+  - run scripts and Spotlight testing
+  - agent controls and harness differences
+  - diff/checks/todos/review flow
+  - command palette, shortcuts, and deep links
+  - security/privacy model
 
 ### Phase 1: App Architecture Cleanup
 
@@ -281,6 +426,9 @@ Correct interpretation:
   - active page
   - active workspace tab
   - running sessions/processes
+  - selected agent session
+  - review/checks attention state
+  - settings layer being edited
 - Replace ad hoc refresh closures with an explicit refresh/event model.
 
 ### Phase 2: Project Onboarding And Settings
@@ -291,6 +439,9 @@ Correct interpretation:
   appropriate.
 - Validate setup/run/archive scripts.
 - Show file-copy settings and environment variables.
+- Show `.worktreeinclude` precedence and read-only state when present.
+- Add provider settings and durable action prompts.
+- Add Spotlight testing setting.
 
 ### Phase 3: Workspace Command Center
 
@@ -301,15 +452,18 @@ Correct interpretation:
   - changes/checks/review tabs
   - chat/terminal split
 - Create workspace from GUI with branch/base options.
+- Create workspace from branch, PR, GitHub issue, Linear issue, and prompt.
 - Archive/restore/discard/rename with confirmations and visible progress.
 
 ### Phase 4: Embedded Runtime
 
 - Add embedded terminal support.
+- Add Big Terminal Mode direction/preset support.
 - Run setup/run scripts from GUI and stream logs.
 - Show processes and ports.
 - Stop processes reliably.
 - Surface errors and exit codes.
+- Add Spotlight testing support for root-checkout execution.
 
 ### Phase 5: Agent Sessions
 
@@ -317,6 +471,9 @@ Correct interpretation:
 - Persist session metadata and transcript.
 - Render app-native messages.
 - Track status: idle, working, waiting, errored, done.
+- Support Plan Mode, Fast Mode, reasoning/effort controls, Codex personality,
+  Codex goals where supported, checkpoints, skills, and tool approvals.
+- Surface provider/auth/MCP status.
 - Support multiple sessions per workspace.
 - Support history/resume where possible.
 
@@ -337,6 +494,12 @@ Correct interpretation:
 - Let user ask agents to fix failing checks or review comments.
 - Archive after merge.
 
+### Phase 7b: App Controls
+
+- Add command palette.
+- Add core keyboard shortcuts.
+- Add deep-link handling for prompt, repo path, issue, and async plan flows.
+
 ### Phase 8: History And Restore
 
 - Create unified local history model.
@@ -354,9 +517,12 @@ Correct interpretation:
 
 ## Next Recommended Task
 
-Do Phase 0 only first:
+Phase 0 documentation reset is the baseline. Start Phase 1 next:
 
-1. Rewrite README.
-2. Rewrite `progress.md` current-state section.
-3. Update manual testing checklist to reflect GUI-first MVP requirements.
-4. Do not add more features until the docs/spec match the intended product.
+1. Refactor `crates/gtk-app/src/main.rs` into focused page/component modules.
+2. Define explicit app state for selected project, selected workspace, active
+   page, active tab, selected agent session, running processes, review/checks
+   attention state, and settings layer.
+3. Replace ad hoc refresh closures with a clear refresh/event model.
+4. Keep each change oriented toward the GUI-first Conductor parity baseline in
+   this document and `docs/conductor-docs-parity-map.md`.

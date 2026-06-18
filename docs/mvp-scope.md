@@ -2,6 +2,8 @@
 
 For the full corrected GUI-first handoff spec, see
 [`docs/conductor-gui-mvp-handoff.md`](conductor-gui-mvp-handoff.md).
+For the official Conductor docs map used by Phase 0, see
+[`docs/conductor-docs-parity-map.md`](conductor-docs-parity-map.md).
 
 This project is being refocused from a CLI-heavy Linux worktree tool into a
 full Conductor-style desktop app. The previous docs overstated the GUI as
@@ -9,14 +11,92 @@ full Conductor-style desktop app. The previous docs overstated the GUI as
 
 ## Product Goal
 
-The MVP should support the core Conductor loop:
+The MVP should match the core Conductor loop before adding speculative
+better-than-Conductor features:
 
-1. Add a repo. The app registers or clones a Git repository and keeps all work
-   local.
-2. Deploy agents. Each Claude Code, Codex, or Cursor session runs inside an
-   isolated Git worktree workspace.
-3. Conduct. The app shows who is working, what needs attention, code changes,
-   checks, todos, chat history, and workspace lifecycle actions.
+1. Add or clone a repository.
+2. Configure project setup, run, archive, Files to copy, environment, provider,
+   and durable prompt settings.
+3. Create one isolated workspace per shippable unit, or use multiple sessions in
+   one workspace when the agents must share a branch.
+4. Run Claude Code, Codex, or Cursor inside the workspace.
+5. Run setup, app/dev scripts, terminal commands, tests, and Spotlight testing
+   where appropriate.
+6. Review diffs, comments, checks, todos, conflicts, and PR state.
+7. Create/update/merge the PR and archive the workspace.
+8. Restore archived workspaces and old chats from History.
+
+The GUI is the product. CLI coverage is useful foundation and fallback, but the
+MVP is not complete until the normal workflow can be driven from the app.
+
+## Target MVP Product Surfaces
+
+### App Shell
+
+- Native GTK/libadwaita desktop window.
+- Sidebar with projects, active workspaces, archived/history entry, search, and
+  attention badges.
+- Main pages for Dashboard, Project, Workspace, Diff/Review, Settings, and
+  History.
+- Command palette and shortcuts for core actions.
+- Planned deep-link architecture for prompts, repository paths, issues, and
+  async plans.
+
+### Project Setup
+
+- Add local repositories and clone Git URLs from the GUI.
+- Detect default/base branch and fetch latest remote before workspace creation.
+- Project settings editor for setup/run/archive scripts, run mode, Spotlight
+  testing, Files to copy, `.worktreeinclude` precedence, environment variables,
+  provider settings, action prompts, and Git behavior.
+- Layer settings like Conductor: managed, local project override, repository
+  shared, user shared, built-in defaults.
+
+### Workspace Command Center
+
+- Create a workspace from a task, branch, pull request, GitHub issue, Linear
+  issue, or prompt.
+- Keep one workspace mapped to one Git worktree and branch.
+- Show project, branch, path, run state, active sessions, changed files,
+  PR/check state, todos, comments, conflicts, ports, and process state.
+- Archive, restore, discard, and rename with confirmations and progress.
+- Support monorepo directory selection and linked workspace/directory context
+  where needed for multi-repository changes.
+
+### Agents And Runtime
+
+- Launch Claude Code, Codex, and Cursor from the workspace page.
+- Render sessions in app-native chat surfaces with status, transcript, composer,
+  attachments, and resumable history.
+- Support multiple sessions per workspace and multiple active workspaces.
+- Surface relevant agent controls: Plan Mode, Fast Mode, effort/reasoning,
+  Codex personality, Codex goals, checkpoints, skills, approvals, provider
+  status, and MCP status.
+- Include embedded terminal access and Big Terminal Mode direction.
+- Run setup/run/archive scripts, stream logs, stop processes, show exit codes,
+  and expose `CONDUCTOR_*` context.
+
+### Review, Checks, And Merge
+
+- Changed-file tree, git status, recent commits, and unified or side-by-side
+  diff.
+- Inline local comments and GitHub review comments.
+- Send selected comments, failing checks, conflicts, and todos back to an agent.
+- Checks tab aggregates git status, PR metadata, CI/status checks, deployments,
+  GitHub comments/review threads, and todos.
+- Treat failing checks, unresolved comments, open todos, and conflicts as merge
+  blockers until explicitly resolved or overridden.
+- GUI PR create/view/update/merge/archive-after-merge workflow through local
+  `gh` auth for MVP.
+
+### History And Safety
+
+- Unified local history model for archived workspaces and chats.
+- Restore archived workspace state and chats.
+- Clear security/privacy posture: agents run locally with user permissions,
+  approval prompts can gate risky actions, model traffic goes to configured
+  providers, and enterprise data privacy disables external-AI/custom-MCP
+  features where applicable.
 
 ## Implemented Today
 
@@ -64,6 +144,9 @@ The MVP should support the core Conductor loop:
   progress, error toasts, and automatic targeted refresh.
 - Changes/Checks/Todos/Processes are basic panels, not full Conductor review
   surfaces.
+- Settings, provider, MCP, command palette, keyboard shortcut, deep-link,
+  Spotlight, monorepo, linked-directory, and rich History surfaces are missing
+  or incomplete.
 
 ## Not Yet Built
 
@@ -77,19 +160,25 @@ The MVP should support the core Conductor loop:
 - Embedded terminal panes.
 - Project/repository settings editor.
 - Agent status model comparable to Conductor's live session state.
+- Command palette, shortcut coverage, and deep links.
+- Provider configuration and MCP status surfaces.
+- Big Terminal Mode.
+- Spotlight testing.
+- Monorepo sparse-checkout controls and linked-directory workflows.
+- Unified local history model.
 - Safe confirmation flows for destructive actions.
 - Polished packaging/release readiness.
 
-## Current MVP Definition
+## Current Foundation Definition
 
-The current MVP is an early functional slice:
+The current implementation is an early functional slice:
 
 - Worktree-backed repository/workspace engine.
-- CLI for the complete workflow.
+- CLI coverage for the backend workflow.
 - GTK app with basic navigation and enough controls to create/select
   workspaces, launch agents externally, inspect changes/checks/history, and run
   lifecycle actions.
 
-It is not yet a full-fledged Conductor app. The next work should prioritize
-turning the rough GTK surfaces into the actual Conductor workflow experience
-instead of adding more backend-only commands.
+This is not the GUI-first MVP. The next work should prioritize turning the
+rough GTK surfaces into the actual Conductor workflow experience instead of
+adding more backend-only commands.

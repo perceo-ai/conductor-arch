@@ -5,6 +5,13 @@ prototype. It does not describe a finished GUI-first Conductor MVP. For the
 target product spec, see
 [`docs/conductor-gui-mvp-handoff.md`](conductor-gui-mvp-handoff.md).
 
+Use this only as a prototype validation path. Release readiness requires the
+target GUI-first acceptance path in
+[`docs/manual-testing-checklist.md`](manual-testing-checklist.md), including
+Conductor-style setup/settings, embedded sessions, terminal/runtime, review,
+checks, PR flow, history, command palette, shortcuts, deep links, provider/MCP
+status, and safety/privacy surfaces.
+
 This guide assumes `claude`, `codex`, `gh`, and `git` are already installed and
 authenticated on the machine where you test.
 
@@ -108,6 +115,8 @@ file_include_globs = """
 .env*
 """
 
+spotlight_testing = false
+
 [scripts]
 setup = "true"
 run = "true"
@@ -115,7 +124,10 @@ run_mode = "concurrent"
 ```
 
 Replace `true` with the repo's real setup and dev-server commands when testing a
-real app.
+real app. Put shared team settings in `.conductor/settings.toml`; put
+machine-local secrets or overrides in `.conductor/settings.local.toml` and keep
+that file untracked. If the project already uses `.worktreeinclude`, it should
+take precedence over `file_include_globs`.
 
 ## 5. Create Workspaces
 
@@ -273,10 +285,18 @@ Known GUI MVP gaps:
 - No embedded Conductor-native agent chat yet.
 - No embedded terminal yet.
 - No full project settings editor yet.
+- No command palette, shortcut coverage, deep links, Big Terminal Mode,
+  provider settings, MCP status, checkpoint UI, or resumable session history
+  yet.
+- No Files to copy / `.worktreeinclude` UI, Spotlight testing, settings-layer
+  visibility, monorepo directory selection, or linked-directory workflows yet.
 - No rich diff/review/comment GUI yet.
 - No full GUI-first GitHub PR/check/merge workflow yet.
 
 ## 12. Build Release Artifacts
+
+Packaging is prototype smoke only until the GUI-first MVP acceptance checklist
+passes. Do not treat successful package creation as product release readiness.
 
 Install `nfpm`:
 
@@ -317,9 +337,10 @@ Smoke the AppImage:
 ./dist/linux-conductor-0.1.0-x86_64.AppImage
 ```
 
-## 13. Publish
+## 13. CI Artifact Build
 
-Push the final branch, then tag a release:
+Only tag a release after the GUI-first acceptance checklist passes. Until then,
+use this as a CI artifact-build reference:
 
 ```bash
 git tag v0.1.0
@@ -327,4 +348,5 @@ git push origin v0.1.0
 ```
 
 The `Publish` workflow builds tarball, `.deb`, `.rpm`, and AppImage artifacts
-on Ubuntu 24.04 and attaches them to the GitHub release.
+on Ubuntu 24.04 and attaches them to the GitHub release. This proves packaging,
+not product readiness.
