@@ -657,10 +657,11 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
         Ok(records) => {
             for record in records {
                 out.push_str(&format!(
-                    "#{} {} pid={} started={} log={}\n",
+                    "#{} {} pid={} exit={} started={} log={}\n",
                     record.id,
                     record.status.as_str(),
                     record.pid,
+                    exit_code_label(record.exit_code),
                     record.started_at,
                     record.log_path.display()
                 ));
@@ -675,10 +676,11 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
         Ok(records) => {
             for record in records {
                 out.push_str(&format!(
-                    "#{} {} pid={} started={} log={}\n",
+                    "#{} {} pid={} exit={} started={} log={}\n",
                     record.id,
                     record.status.as_str(),
                     record.pid,
+                    exit_code_label(record.exit_code),
                     record.started_at,
                     record.log_path.display()
                 ));
@@ -692,11 +694,12 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
         Ok(records) => {
             for record in records {
                 out.push_str(&format!(
-                    "#{} {} {} pid={} started={} log={}\n",
+                    "#{} {} {} pid={} exit={} started={} log={}\n",
                     record.id,
                     record.command,
                     record.status.as_str(),
                     record.pid,
+                    exit_code_label(record.exit_code),
                     record.started_at,
                     record.log_path.display()
                 ));
@@ -714,9 +717,10 @@ fn latest_setup_line(store: &WorkspaceStore, name: &str) -> String {
             .next()
             .map(|record| {
                 format!(
-                    "{} pid={} log={}",
+                    "{} pid={} exit={} log={}",
                     record.status.as_str(),
                     record.pid,
+                    exit_code_label(record.exit_code),
                     record.log_path.display()
                 )
             })
@@ -732,9 +736,10 @@ fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
             .next()
             .map(|record| {
                 format!(
-                    "{} pid={} log={}",
+                    "{} pid={} exit={} log={}",
                     record.status.as_str(),
                     record.pid,
+                    exit_code_label(record.exit_code),
                     record.log_path.display()
                 )
             })
@@ -761,4 +766,10 @@ fn tail_lines(text: &str, max_lines: usize) -> String {
     let lines = text.lines().collect::<Vec<_>>();
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].join("\n")
+}
+
+fn exit_code_label(exit_code: Option<i32>) -> String {
+    exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "-".to_owned())
 }

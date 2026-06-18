@@ -40,6 +40,8 @@ security/privacy posture.
 - Stable per-workspace port allocation.
 - Background run scripts and logs.
 - Background setup scripts and logs.
+- Background setup/run/session process rows now update to `exited` after
+  natural process completion and record exit codes when the OS reports one.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
 - Shell/Codex/Claude/Cursor session launch primitives.
@@ -195,14 +197,15 @@ Verified Phase 3 evidence so far:
   Terminal Mode direction slice.
 - Runtime panel now has Setup, Run, Stop, Open Folder actions plus latest
   setup/run process and log previews.
+- Process rows and runtime summaries show exit codes after background processes
+  exit naturally.
 
 Still needs Phase 4 work:
 
 - True PTY-backed interactive terminal input/output.
 - Long-running terminal process management beyond setup/run process controls.
-- Automatic process exit-code monitoring for background setup/run/session
-  processes. Terminal commands report exit codes now; background process rows
-  still only mark stopped when the app stops them.
+- Exit-code reporting for signal-terminated background processes beyond the
+  current `signal`/missing-code state.
 - Spotlight testing execution from repository-root checkout.
 - Toasts and richer error/progress state.
 

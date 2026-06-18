@@ -110,6 +110,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Stable per-workspace `CONDUCTOR_PORT` allocation.
 - Run/stop/logs for background workspace processes.
 - Setup script runs and log capture as workspace runtime processes.
+- Background setup/run/session processes update to exited after natural
+  completion and store exit codes when available.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.

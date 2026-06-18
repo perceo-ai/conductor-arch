@@ -7,7 +7,7 @@ use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
@@ -113,6 +113,7 @@ pub struct ProcessRecord {
     pub log_path: PathBuf,
     pub status: ProcessStatus,
     pub started_at: String,
+    pub exit_code: Option<i32>,
     pub ended_at: Option<String>,
 }
 
@@ -216,6 +217,7 @@ struct RepositoryRecord {
 
 pub struct WorkspaceStore {
     conn: Connection,
+    db_path: PathBuf,
     logs_dir: PathBuf,
 }
 
@@ -235,10 +237,12 @@ impl WorkspaceStore {
                 .with_context(|| format!("create data directory {}", parent.display()))?;
         }
 
-        let conn = Connection::open(path.as_ref())
-            .with_context(|| format!("open database {}", path.as_ref().display()))?;
+        let db_path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("open database {}", db_path.display()))?;
         let store = Self {
             conn,
+            db_path,
             logs_dir: logs_dir.as_ref().to_path_buf(),
         };
         store.migrate()?;
@@ -417,7 +421,7 @@ impl WorkspaceStore {
                 stop_process(process.pid)?;
                 let now = timestamp();
                 self.conn.execute(
-                    "UPDATE processes SET status = ?1, ended_at = ?2 WHERE id = ?3",
+                    "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = NULL WHERE id = ?3",
                     params![ProcessStatus::Stopped.as_str(), now, process.id],
                 )?;
             }
@@ -536,7 +540,7 @@ impl WorkspaceStore {
         stop_process(process.pid)?;
         let now = timestamp();
         self.conn.execute(
-            "UPDATE processes SET status = ?1, ended_at = ?2 WHERE id = ?3",
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = NULL WHERE id = ?3",
             params![ProcessStatus::Stopped.as_str(), now, process.id],
         )?;
         self.get_process(process.id)
@@ -562,7 +566,7 @@ impl WorkspaceStore {
         stop_process(process.pid)?;
         let now = timestamp();
         self.conn.execute(
-            "UPDATE processes SET status = ?1, ended_at = ?2 WHERE id = ?3",
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = NULL WHERE id = ?3",
             params![ProcessStatus::Stopped.as_str(), now, process.id],
         )?;
         self.get_process(process.id)
@@ -1295,7 +1299,7 @@ impl WorkspaceStore {
         kind: ProcessKind,
     ) -> Result<Option<ProcessRecord>> {
         let result = self.conn.query_row(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
              FROM processes
              WHERE workspace_id = ?1 AND kind = ?2 AND status = 'running'
              ORDER BY id DESC LIMIT 1",
@@ -1439,7 +1443,7 @@ impl WorkspaceStore {
     fn list_processes(&self, name: &str, kind: ProcessKind) -> Result<Vec<ProcessRecord>> {
         let workspace = self.get_by_name(name)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
              FROM processes WHERE workspace_id = ?1 AND kind = ?2
              ORDER BY id DESC",
         )?;
@@ -1584,8 +1588,8 @@ impl WorkspaceStore {
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, kind, command, pid, log_path, status, started_at, ended_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
             params![
                 workspace.id,
                 kind.as_str(),
@@ -1597,7 +1601,9 @@ impl WorkspaceStore {
             ],
         )?;
 
-        self.latest_process(workspace.id, kind)
+        let process = self.latest_process(workspace.id, kind)?;
+        spawn_process_monitor(self.db_path.clone(), process.id, child);
+        Ok(process)
     }
 
     fn latest_running_process(
@@ -1612,7 +1618,7 @@ impl WorkspaceStore {
     fn latest_process(&self, workspace_id: i64, kind: ProcessKind) -> Result<ProcessRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
                  FROM processes
                  WHERE workspace_id = ?1 AND kind = ?2
                  ORDER BY id DESC LIMIT 1",
@@ -1625,7 +1631,7 @@ impl WorkspaceStore {
     fn get_process(&self, id: i64) -> Result<ProcessRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
                  FROM processes WHERE id = ?1",
                 [id],
                 row_to_process,
@@ -1716,8 +1722,48 @@ impl WorkspaceStore {
             );
             ",
         )?;
+        ensure_column(
+            &self.conn,
+            "processes",
+            "exit_code",
+            "ALTER TABLE processes ADD COLUMN exit_code INTEGER",
+        )?;
         Ok(())
     }
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !names.iter().any(|name| name == column) {
+        conn.execute(alter_sql, [])?;
+    }
+    Ok(())
+}
+
+fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
+    std::thread::spawn(move || {
+        let Ok(status) = child.wait() else {
+            return;
+        };
+        let Ok(conn) = Connection::open(db_path) else {
+            return;
+        };
+        let now = timestamp();
+        let _ = conn.execute(
+            "UPDATE processes
+             SET status = ?1, ended_at = ?2, exit_code = ?3
+             WHERE id = ?4 AND status = 'running'",
+            params![
+                ProcessStatus::Exited.as_str(),
+                now,
+                status.code(),
+                process_id
+            ],
+        );
+    });
 }
 
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
@@ -1766,7 +1812,8 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         log_path: PathBuf::from(row.get::<_, String>(5)?),
         status: ProcessStatus::from_str(&row.get::<_, String>(6)?)?,
         started_at: row.get(7)?,
-        ended_at: row.get(8)?,
+        exit_code: row.get(8)?,
+        ended_at: row.get(9)?,
     })
 }
 
@@ -3145,6 +3192,74 @@ run = "printf 'started\n'; while true; do sleep 1; done"
     }
 
     #[test]
+    fn run_workspace_records_exit_status_when_process_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[scripts]
+run = "printf 'done\n'; exit 3"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add exiting run script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let run = store.run_workspace("berlin").unwrap();
+        wait_for_log(&run.log_path, "done");
+        let exited =
+            wait_for_process_status(&store, "berlin", ProcessKind::Run, ProcessStatus::Exited);
+
+        assert_eq!(exited.id, run.id);
+        assert_eq!(exited.exit_code, Some(3));
+        assert!(exited.ended_at.is_some());
+    }
+
+    #[test]
     fn terminal_command_runs_in_workspace_with_conductor_environment_and_captures_output() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -3933,6 +4048,26 @@ setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\
             "timed out waiting for log {} to contain {needle}",
             path.display()
         );
+    }
+
+    fn wait_for_process_status(
+        store: &WorkspaceStore,
+        workspace: &str,
+        kind: ProcessKind,
+        status: ProcessStatus,
+    ) -> ProcessRecord {
+        for _ in 0..50 {
+            let records = match kind {
+                ProcessKind::Setup => store.list_setups(workspace).unwrap(),
+                ProcessKind::Run => store.list_runs(workspace).unwrap(),
+                ProcessKind::Session => store.list_sessions(workspace).unwrap(),
+            };
+            if let Some(record) = records.into_iter().find(|record| record.status == status) {
+                return record;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {kind:?} process to become {status:?}");
     }
 
     fn temp_env_var(key: &str, value: &Path, run: impl FnOnce()) {

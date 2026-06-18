@@ -192,6 +192,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   through the current external-process path.
 - [ ] Setup, Run, and Stop buttons call the current runtime process APIs and
   show latest setup/run log previews.
+- [ ] A short setup/run script that exits naturally changes from running to
+  exited and shows its exit code in runtime/process views.
 - [ ] Terminal tab runs a short command, shows stdout/stderr, and reports the
   exit code without freezing the app.
 - [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
