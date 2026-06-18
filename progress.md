@@ -220,6 +220,9 @@ Verified Phase 3 evidence so far:
   accepts input after spawn, and streams output back to the app.
 - Core now records PTY terminal shells as process rows and can mark them stopped
   with the same signal-style exit code used by other stopped runtime processes.
+- Core now gives each recorded PTY terminal shell its own log file instead of
+  sharing one `terminal-active.log`, which prevents multiple shell records from
+  pointing at the same transcript path.
 - Core can reconcile terminal process rows whose recorded PTY shell PID is no
   longer alive, marking those stale rows exited instead of leaving them running.
 - Core now tracks setup script runs as a separate process kind and can read the
@@ -260,8 +263,8 @@ Verified Phase 3 evidence so far:
 Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
-  transcript, multiple terminal sessions, persisted terminal history, and true
-  terminal session restoration after app restart.
+  transcript, multiple managed terminal tabs/sessions in the UI, persisted
+  terminal history, and true terminal session restoration after app restart.
 - Full Spotlight parity: event-driven filesystem watching and automatic root
   repair flows. Current support is manual checkpoint/apply/restore/switch/sync
   plus app-wide polling sync of tracked changes with dirty-root refusal before

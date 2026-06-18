@@ -625,10 +625,11 @@ impl WorkspaceStore {
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
         let workspace = self.get_by_name(name)?;
         let now = timestamp();
-        let log_path = self
-            .logs_dir
-            .join(&workspace.name)
-            .join("terminal-active.log");
+        let log_path = self.logs_dir.join(&workspace.name).join(format!(
+            "terminal-{}-{}.log",
+            timestamp_nanos(),
+            pid
+        ));
         if let Some(parent) = log_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create log directory {}", parent.display()))?;
@@ -3962,7 +3963,13 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(running.status, ProcessStatus::Running);
         assert_eq!(running.exit_code, None);
         assert!(running.ended_at.is_none());
-        assert!(running.log_path.ends_with("terminal-active.log"));
+        assert_eq!(running.log_path.extension().unwrap(), "log");
+        assert!(running
+            .log_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("terminal-"));
 
         let terminals = store.list_terminals("berlin").unwrap();
         assert_eq!(terminals.len(), 1);
@@ -4017,6 +4024,48 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(
             store.list_terminals("berlin").unwrap()[0].status,
             ProcessStatus::Exited
+        );
+    }
+
+    #[test]
+    fn terminal_process_records_use_distinct_log_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let first = store
+            .record_terminal_process("berlin", "shell", 4242)
+            .unwrap();
+        let second = store
+            .record_terminal_process("berlin", "shell", 4243)
+            .unwrap();
+
+        assert_ne!(first.log_path, second.log_path);
+        assert!(first.log_path.exists());
+        assert!(second.log_path.exists());
+        assert_eq!(
+            first.log_path.parent().unwrap(),
+            second.log_path.parent().unwrap()
         );
     }
 
