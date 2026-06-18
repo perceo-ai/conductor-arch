@@ -362,8 +362,34 @@ All plan phases are addressed and complete:
 - README: updated GUI section with comprehensive feature list
 - All 30 tests pass; all crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 11 — continuation)
+
+- core: `git_log_oneline(name, n)` — `git log --oneline --decorate -N <branch>`
+- Diff tab: shows "── Recent Commits ──" section with last 10 commits above unified diff
+- Review tab: inline "Add Comment" form (file path + body entry + button) at bottom of tab; wires to `store.add_review_comment`
+- `.gitignore`: added `.claude/` to prevent ralph-loop state from being committed
+- All 31 tests pass (30 unit + 1 integration); all crates build clean; `cargo fmt` clean
+
+## Current state (ready to pick up from another machine)
+
+**Build:** `cargo build --workspace --release --locked`  
+**Run GUI:** `./target/release/linux-conductor-gtk`  
+**Run GUI pre-selecting workspace:** `./target/release/linux-conductor-gtk --workspace <name>`
+
+**What's done (MVP complete):**
+- Full CLI: repo add/list/doctor, workspace create/list/archive/restore/discard/rename, run/stop/logs, session (shell/codex/claude), diff, pr create/view/checks/merge, todo, review, checkpoint, mcp status, conflicts, status
+- GTK4/libadwaita GUI with: sidebar (search, badges, repo grouping), center panel (toolbar, quick stats, task brief, repo overview), right panel (7 tabs: Diff/Checks/Todos/Sessions/Logs/Review/Checkpoints), agent prompt bar
+- GitHub Actions CI (ubuntu-24.04/22.04 matrix) and publish (ubuntu-24.04 + nfpm + AppImage)
+- Packaging: AppImage, .deb, .rpm (via nfpm), AUR PKGBUILD, Flatpak manifest
+- 59 commits ahead of origin/main
+
+**Remaining nice-to-haves (not MVP blocking):**
+- VTE embedded terminal widget (requires system GTK VTE4 package)
+- Screen recording for LinkedIn demo
+- Push to GitHub + cut v0.1.0 release tag (triggers publish workflow)
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
-- Workspace renaming dialog in GUI (available via CLI)
 - Screen recording for demo
+- Cut v0.1.0 tag → triggers GitHub Actions publish (AppImage + .deb + .rpm)
