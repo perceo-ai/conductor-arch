@@ -293,6 +293,8 @@ Manual GUI smoke:
   and creates another checkpoint.
 - Confirm the selected workspace page auto-syncs active Spotlight tracked
   changes after a short polling delay.
+- Confirm active Spotlight sessions keep auto-syncing after navigating away from
+  the workspace page.
 - Confirm root-only edits make Spotlight Off/Sync fail without marking the
   active session stopped.
 - Confirm Shell, Codex, Claude Code, and Cursor actions use the current
@@ -308,7 +310,7 @@ Known GUI MVP gaps:
   I/O and process records but renders as raw transcript text.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
   Spotlight slice is manual checkpoint/apply/restore/switch/sync with
-  dirty-root refusal before patch reversal plus selected-page polling sync.
+  dirty-root refusal before patch reversal plus app-wide polling sync.
 - No command palette, shortcut coverage, deep links, polished Big Terminal
   Mode, MCP status, checkpoint UI, or resumable session history yet.
 - Project settings can be edited from Projects for shared/local repository

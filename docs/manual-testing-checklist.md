@@ -210,6 +210,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   refreshes the root patch and creates another checkpoint.
 - [ ] With that workspace page open, editing tracked files in the active
   Spotlight workspace eventually auto-syncs the root patch.
+- [ ] After navigating away from the workspace page, active Spotlight sessions
+  still auto-sync changed tracked patches through the app-wide poller.
 - [ ] If the repository root has extra edits outside the active Spotlight patch,
   Spotlight Off/Sync fails without marking the session stopped.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
@@ -223,9 +225,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
   has a PTY-backed shell but still renders as raw transcript text.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
-  checkpoints/applies/restores/switches/syncs tracked changes plus selected-page
-  polling sync, and does not run process-wide watching, sync while the workspace
-  page is closed, or repair root conflicts.
+  checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
+  polling sync, and does not run event-driven file watching or repair root
+  conflicts.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

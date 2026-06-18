@@ -61,6 +61,8 @@ security/privacy posture.
   workspace's latest tracked changes and create another checkpoint.
 - Core can skip no-op Spotlight syncs and sync only when the active workspace
   patch differs from the active root patch.
+- Core can scan all active Spotlight sessions and sync only the sessions whose
+  workspace patch changed.
 - Spotlight stop/sync/switch now refuse to reverse the active patch when the
   repository root has extra edits outside that patch.
 - Shell/Codex/Claude/Cursor session launch primitives.
@@ -247,16 +249,18 @@ Verified Phase 3 evidence so far:
 - GTK Runtime now exposes Spotlight On/Sync/Off controls and active status.
 - GTK Runtime polls the selected active Spotlight workspace and auto-syncs when
   its tracked patch changes while that workspace page is open.
+- GTK app shell also polls all active Spotlight sessions, so active workspaces
+  can keep syncing while the user is on another page.
 
 Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
   transcript, multiple terminal sessions, persisted terminal history, and
   stronger automatic reconciliation for PTY processes if the whole app crashes.
-- Full Spotlight parity: process-wide file watching, background sync while the
-  workspace page is closed, and automatic root repair flows. Current support is
-  manual checkpoint/apply/restore/switch/sync plus selected-page polling sync of
-  tracked changes with dirty-root refusal before patch reversal.
+- Full Spotlight parity: event-driven filesystem watching and automatic root
+  repair flows. Current support is manual checkpoint/apply/restore/switch/sync
+  plus app-wide polling sync of tracked changes with dirty-root refusal before
+  patch reversal.
 - Toasts and richer error/progress state.
 
 ## Next Step

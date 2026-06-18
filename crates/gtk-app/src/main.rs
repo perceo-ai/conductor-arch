@@ -18,6 +18,7 @@ use gtk::{
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::paths::AppPaths;
+use linux_conductor_core::workspace::WorkspaceStore;
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState};
 use std::path::PathBuf;
@@ -151,6 +152,19 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         hub_auto.refresh(RefreshScope::Dashboard);
         hub_auto.refresh(RefreshScope::Projects);
         hub_auto.refresh(RefreshScope::Workspace);
+        glib::ControlFlow::Continue
+    });
+
+    let db_path_spotlight_auto = app_state.workspace_database_path();
+    let hub_spotlight_auto = refresh_hub.clone();
+    glib::timeout_add_seconds_local(5, move || {
+        if let Ok(synced) = WorkspaceStore::open(db_path_spotlight_auto.clone())
+            .and_then(|store| store.spotlight_sync_active_sessions())
+        {
+            if !synced.is_empty() {
+                hub_spotlight_auto.refresh(RefreshScope::All);
+            }
+        }
         glib::ControlFlow::Continue
     });
 }

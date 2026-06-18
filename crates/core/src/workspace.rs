@@ -831,6 +831,16 @@ impl WorkspaceStore {
         self.spotlight_sync(name).map(Some)
     }
 
+    pub fn spotlight_sync_active_sessions(&self) -> Result<Vec<SpotlightSession>> {
+        let mut synced = Vec::new();
+        for session in self.active_spotlight_sessions()? {
+            if let Some(updated) = self.spotlight_sync_if_changed(&session.workspace_name)? {
+                synced.push(updated);
+            }
+        }
+        Ok(synced)
+    }
+
     pub fn spotlight_status(&self, name: &str) -> Result<Option<SpotlightSession>> {
         let workspace = self.get_by_name(name)?;
         let active = self.active_spotlight_for_repository(workspace.repository_id)?;
@@ -1949,6 +1959,19 @@ impl WorkspaceStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(err) => Err(err.into()),
         }
+    }
+
+    fn active_spotlight_sessions(&self) -> Result<Vec<SpotlightSession>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repository_id, workspace_id, workspace_name, patch_path, status, started_at, ended_at
+             FROM spotlight_sessions
+             WHERE status = 'active'
+             ORDER BY id",
+        )?;
+        let sessions = stmt
+            .query_map([], row_to_spotlight_session)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(sessions)
     }
 
     fn get_spotlight_session(&self, id: i64) -> Result<SpotlightSession> {
@@ -4392,6 +4415,92 @@ spotlight_testing = true
         assert_eq!(
             fs::read_to_string(repo_path.join("README.md")).unwrap(),
             "second change\n"
+        );
+        assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn spotlight_sync_active_sessions_syncs_changed_active_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "first change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let active = store.spotlight_start("berlin").unwrap();
+
+        assert!(store.spotlight_sync_active_sessions().unwrap().is_empty());
+
+        fs::write(workspace.path.join("README.md"), "background change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+
+        let synced = store.spotlight_sync_active_sessions().unwrap();
+
+        assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].id, active.id);
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "background change\n"
         );
         assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 2);
     }
