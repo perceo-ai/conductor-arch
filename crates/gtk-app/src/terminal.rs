@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use gtk::prelude::*;
 use gtk::{Box as GBox, Button, Entry, Label, Orientation, ScrolledWindow, TextBuffer, TextView};
 use linux_conductor_core::pty::PtySession;
-use linux_conductor_core::workspace::{SessionKind, TerminalLogMatch, WorkspaceStore};
+use linux_conductor_core::workspace::{
+    ProcessRecord, SessionKind, TerminalLogMatch, WorkspaceStore,
+};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -181,8 +183,12 @@ pub fn embedded_terminal_panel(
     search_entry.set_placeholder_text(Some("search terminal history"));
     search_entry.set_hexpand(true);
     let search_btn = Button::with_label("Search Logs");
+    let history_btn = Button::with_label("Show History");
     let search_buffer = transcript.buffer();
+    let history_buffer = transcript.buffer();
     let search_workspace = workspace_name.to_owned();
+    let history_workspace = workspace_name.to_owned();
+    let history_db = database_path.clone();
     let search_db = database_path;
     let search_entry_clone = search_entry.clone();
     search_btn.connect_clicked(move |_| {
@@ -197,8 +203,16 @@ pub fn embedded_terminal_panel(
             search_buffer.clone(),
         );
     });
+    history_btn.connect_clicked(move |_| {
+        run_terminal_history(
+            history_db.clone(),
+            history_workspace.clone(),
+            history_buffer.clone(),
+        );
+    });
     search_row.append(&search_entry);
     search_row.append(&search_btn);
+    search_row.append(&history_btn);
     root.append(&search_row);
     root
 }
@@ -306,6 +320,32 @@ fn run_terminal_log_search(
     });
 }
 
+fn run_terminal_history(database_path: PathBuf, workspace_name: String, buffer: TextBuffer) {
+    append_text(&buffer, "\n[terminal history]\n[loading]\n");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let message = match WorkspaceStore::open(database_path)
+            .and_then(|store| store.list_terminals(&workspace_name))
+        {
+            Ok(records) => format_terminal_history(&records),
+            Err(err) => format!("[terminal history error]\n{err:#}\n"),
+        };
+        let _ = tx.send(message);
+    });
+
+    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+        Ok(message) => {
+            append_text(&buffer, &message);
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            append_text(&buffer, "[error]\nterminal history worker disconnected\n");
+            glib::ControlFlow::Break
+        }
+    });
+}
+
 fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> String {
     let mut text = format!("\n[terminal search] {query}\n");
     if matches.is_empty() {
@@ -324,6 +364,39 @@ fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> 
         ));
     }
     text
+}
+
+fn format_terminal_history(records: &[ProcessRecord]) -> String {
+    let mut text = "\n[terminal history]\n".to_owned();
+    if records.is_empty() {
+        text.push_str("No terminal shells recorded.\n");
+        return text;
+    }
+
+    for record in records {
+        let file_name = record
+            .log_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("terminal.log");
+        text.push_str(&format!(
+            "#{} {} pid={} exit={} log={} started={}\n{}\n",
+            record.id,
+            record.status.as_str(),
+            record.pid,
+            terminal_exit_label(record.exit_code),
+            file_name,
+            record.started_at,
+            record.command
+        ));
+    }
+    text
+}
+
+fn terminal_exit_label(exit_code: Option<i32>) -> String {
+    exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn initial_terminal_text(
@@ -496,6 +569,7 @@ fn display_command(program: &Path, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use linux_conductor_core::workspace::{ProcessKind, ProcessStatus};
 
     #[test]
     fn terminal_search_results_render_process_line_and_empty_state() {
@@ -544,5 +618,28 @@ mod tests {
         let rendered = terminal_display_text("Downloading 10%\rDownloading 100%\nnext\n");
 
         assert_eq!(rendered, "Downloading 100%\nnext\n");
+    }
+
+    #[test]
+    fn terminal_history_summary_lists_terminal_records() {
+        let records = vec![ProcessRecord {
+            id: 7,
+            workspace_id: 1,
+            kind: ProcessKind::Terminal,
+            command: "/bin/bash".to_owned(),
+            pid: 4242,
+            log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
+            status: ProcessStatus::Exited,
+            started_at: "2026-06-18T02:00:00Z".to_owned(),
+            exit_code: Some(0),
+            ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
+        }];
+
+        let rendered = format_terminal_history(&records);
+
+        assert!(rendered.contains("[terminal history]"));
+        assert!(rendered.contains("#7 exited pid=4242 exit=0"));
+        assert!(rendered.contains("terminal-4242.log"));
+        assert!(rendered.contains("/bin/bash"));
     }
 }

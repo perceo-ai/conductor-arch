@@ -178,10 +178,11 @@ Current GUI capabilities:
   when their recorded shell PID is no longer alive. Each recorded shell gets its
   own log path, and PTY command/output chunks are appended to that raw transcript
   log. The terminal panel can search persisted terminal transcript logs and
-  append matching process/line results, and it restores the latest transcript
-  into the terminal view after app restart. The visible transcript strips common
-  ANSI control sequences and applies carriage-return progress-line updates, but
-  this is not a polished terminal emulator yet.
+  append matching process/line results, list recorded terminal sessions/logs,
+  and restore the latest transcript into the terminal view after app restart.
+  The visible transcript strips common ANSI control sequences and applies
+  carriage-return progress-line updates, but this is not a polished terminal
+  emulator yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
@@ -516,8 +517,9 @@ Cursor interactive sessions, see
   PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
   chat, resize/cursor/scrollback polish beyond basic ANSI stripping and
   carriage-return line updates, managed multi-terminal UI, a polished history
-  browser beyond basic transcript search, and live PTY process reattach after
-  app restart are still MVP work. Latest transcript restore is built.
+  browser beyond basic session listing/transcript search, and live PTY process
+  reattach after app restart are still MVP work. Latest transcript restore is
+  built.
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
