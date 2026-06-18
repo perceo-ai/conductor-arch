@@ -1,11 +1,56 @@
 # linux-conductor
 
-A Linux-native parallel coding-agent workflow tool built around Git worktrees.
-Each task gets its own isolated workspace: a branch, a directory, a terminal,
-agent sessions, run scripts, diffs, checks, and a pull request path.
+Linux Conductor is being built as a GUI-first desktop control plane for
+parallel coding agents. The intended product is a Conductor-style app where a
+user adds a repository, creates isolated Git worktree workspaces, starts Claude
+Code, Codex, or Cursor from those workspaces, reviews changes/checks/PRs, and
+archives completed work without coordinating the normal workflow through many
+terminal windows.
 
-Inspired by [Conductor](https://conductor.build). Built for Ubuntu, Fedora,
-Arch Linux, and other common Linux distributions.
+The current codebase is not a finished GUI-first MVP. It has a strong
+Rust/SQLite/Git worktree foundation, a broad CLI, and an early GTK prototype.
+The corrected MVP direction and phase plan live in
+[`docs/conductor-gui-mvp-handoff.md`](docs/conductor-gui-mvp-handoff.md).
+The Conductor docs parity map lives in
+[`docs/conductor-docs-parity-map.md`](docs/conductor-docs-parity-map.md).
+
+Inspired by [Conductor](https://conductor.build). Target platforms are Ubuntu,
+Fedora, Arch Linux, and other common Linux distributions.
+
+---
+
+## Product Direction
+
+The MVP should match the documented Conductor workflow before adding speculative
+extensions:
+
+- Add or clone a repository from the GUI.
+- Configure project settings: setup/run/archive scripts, run mode, Spotlight
+  testing, Files to copy, `.worktreeinclude`, environment variables, provider
+  settings, durable prompts, and Git behavior.
+- Create one Git worktree workspace per shippable unit, or run multiple agent
+  sessions in one workspace when they must share one branch.
+- Run Claude Code, Codex, and Cursor inside the workspace with app-native chat,
+  agent status, controls, checkpoints, approvals, provider status, and MCP
+  status where supported.
+- Run workspace terminals, setup scripts, run scripts, logs, processes, tests,
+  and `CONDUCTOR_*` environment context from the workspace page.
+- Review changed files, diffs, comments, checks, todos, conflicts, and PR state
+  in the app.
+- Create/update/merge PRs and archive completed workspaces from the GUI.
+- Restore archived workspaces and chats from History.
+
+Useful Conductor docs for parity:
+
+- <https://www.conductor.build/docs/concepts/workspaces-and-branches>
+- <https://www.conductor.build/docs/concepts/workflow>
+- <https://www.conductor.build/docs/concepts/parallel-agents>
+- <https://www.conductor.build/docs/reference/settings>
+- <https://www.conductor.build/docs/reference/scripts>
+- <https://www.conductor.build/docs/reference/files-to-copy>
+- <https://www.conductor.build/docs/reference/diff-viewer>
+- <https://www.conductor.build/docs/reference/checks>
+- <https://www.conductor.build/docs/reference/agent-modes>
 
 ---
 
@@ -20,10 +65,10 @@ chmod +x linux-conductor.AppImage
 sudo mv linux-conductor.AppImage /usr/local/bin/linux-conductor
 ```
 
-The MVP AppImage launches the GTK GUI with no arguments and passes arguments
-through to the CLI. It expects common GTK4/libadwaita runtime libraries to be
-available on the host; use native packages if your distro does not provide them
-by default.
+The current prototype AppImage launches the GTK GUI with no arguments and
+passes arguments through to the CLI. It expects common GTK4/libadwaita runtime
+libraries to be available on the host; use native packages if your distro does
+not provide them by default.
 
 ### GTK4 GUI (native desktop app)
 
@@ -45,7 +90,7 @@ cargo build --release
 ./target/release/linux-conductor-gtk
 ```
 
-### Build from source (CLI only)
+### Build from source (CLI/backend foundation)
 
 ```bash
 # Install Rust if needed
@@ -98,26 +143,17 @@ sudo zypper install git gh sqlite3 openssh
 
 ---
 
-## Quickstart
+## Current Prototype Quickstart
 
-### 1. Add a repository
-
-```bash
-linux-conductor repo add ~/src/my-app
-```
-
-This registers the repository, detects the default branch, and sets up a
-workspace parent at `~/conductor/workspaces/my-app/`.
-
-### 1b. Launch the GUI
+Start with the GTK app when evaluating the product direction:
 
 ```bash
 linux-conductor-gtk
 ```
 
-The GTK app is currently a prototype toward the real GUI-first Conductor MVP.
-It has navigable Dashboard, Projects, History, and Workspace pages, but it is
-not yet a finished Conductor clone.
+The GTK app is currently a prototype toward the real GUI-first Conductor MVP,
+not the finished MVP. It has navigable Dashboard, Projects, History, and
+Workspace pages.
 
 Current GUI capabilities:
 - Dashboard with workspace columns.
@@ -134,19 +170,33 @@ Still missing from the real MVP:
 - Embedded Conductor-native agent chat.
 - Embedded terminal.
 - Full project settings editor.
+- Command palette, shortcuts, and deep links.
+- Agent controls, provider settings, MCP status, checkpoints, and resumable
+  session history.
+- Files to copy / `.worktreeinclude` UI, Spotlight testing, monorepo directory
+  selection, and linked-directory workflows.
 - Rich diff/review/comment UI.
 - GUI-first GitHub PR/check/merge workflow.
 - Polished Conductor visual parity.
-
-For the corrected MVP spec and handoff, read
-[`docs/conductor-gui-mvp-handoff.md`](docs/conductor-gui-mvp-handoff.md).
 
 Launch the GUI pre-selecting a workspace:
 ```bash
 linux-conductor-gtk --workspace berlin
 ```
 
-### 2. Create workspaces
+The CLI remains useful for validating the backend foundation while the GUI is
+brought up to the corrected MVP:
+
+### 1. Add a repository
+
+```bash
+linux-conductor repo add ~/src/my-app
+```
+
+This registers the repository, detects the default branch, and sets up a
+workspace parent at `~/conductor/workspaces/my-app/`.
+
+### 2. Create workspaces from the backend foundation
 
 ```bash
 linux-conductor workspace create my-app --name berlin --branch feat/search-refactor
@@ -159,10 +209,10 @@ Each workspace gets:
 - Gitignored files copied if listed in `.worktreeinclude` or `file_include_globs`
 - A stable port range (`berlin` → 3000, `tokyo` → 3010, …)
 
-### 3. Launch agents or a shell
+### 3. Launch agents or a shell through the current process path
 
-Interactive sessions open in your terminal emulator and use your existing local
-`codex` / `claude` authentication:
+Interactive sessions currently open in your terminal emulator and use your
+existing local `codex` / `claude` authentication:
 
 ```bash
 linux-conductor session open berlin --kind codex
@@ -246,7 +296,16 @@ linux-conductor workspace restore berlin
 
 ## Repository settings
 
-Place `.conductor/settings.toml` in your repository root:
+Conductor-style settings are layered:
+
+1. Managed settings.
+2. Local project override: `.conductor/settings.local.toml`.
+3. Repository shared settings: `.conductor/settings.toml`.
+4. User shared settings.
+5. Built-in defaults.
+
+Place shared project settings in `.conductor/settings.toml` at your repository
+root and commit them when teammates should get the same workflow:
 
 ```toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
@@ -255,6 +314,8 @@ file_include_globs = """
 .env*
 config/*.local.json
 """
+
+spotlight_testing = false
 
 [scripts]
 setup = "pnpm install"
@@ -271,13 +332,27 @@ code_review = "Focus on correctness, behaviour changes, and missing tests."
 create_pr  = "Write concise PR descriptions with test evidence."
 ```
 
-Override locally (untracked) in `.conductor/settings.local.toml`.
+Override locally, untracked, in `.conductor/settings.local.toml`. Do not commit
+secrets.
+
+Use `.worktreeinclude` when the project should share Files to copy patterns:
+
+```text
+.env*
+config/*.local.json
+certs/local/**
+```
+
+Only gitignored files are copied into new local workspaces. Generated files,
+dependencies, and fetched secrets usually belong in `scripts.setup` instead.
 
 ### run_mode
 
 - `concurrent` (default) — multiple workspaces can run simultaneously
 - `nonconcurrent` — only one workspace per repository may have an active run
   script; `linux-conductor run` will refuse to start if another is running
+- Spotlight testing — use when the project must run from the repository root or
+  one shared local stack instead of one app process per workspace
 
 ### Environment variables available in scripts
 
@@ -292,7 +367,11 @@ Override locally (untracked) in `.conductor/settings.local.toml`.
 
 ---
 
-## All commands
+## Current Backend/CLI Commands
+
+These commands expose the current backend foundation and are useful for testing
+or fallback automation while the GUI catches up. They are not the intended
+normal product workflow.
 
 ```
 linux-conductor doctor
@@ -382,14 +461,16 @@ linux-conductor checkpoint restore <workspace> <id>
 | Alpine | Not yet tested |
 | WSL | Not yet tested |
 
-## Manual testing
+## Manual Testing
 
-Before cutting a public release, run the MVP smoke path in
-[docs/manual-testing-checklist.md](docs/manual-testing-checklist.md). It covers
-the CLI demo, GTK GUI workflow, PR/checks path, and package smoke checks.
+Before cutting a public release, the target GUI-first MVP acceptance path in
+[docs/manual-testing-checklist.md](docs/manual-testing-checklist.md) must pass.
+The same checklist also keeps a separate current-prototype smoke path for the
+existing CLI/backend foundation and rough GTK app.
 
-For a complete local deployment walkthrough, including Claude Code, Codex, and Cursor
-interactive sessions, see [docs/deploy-and-local-test.md](docs/deploy-and-local-test.md).
+For a local prototype validation walkthrough, including Claude Code, Codex, and
+Cursor interactive sessions, see
+[docs/deploy-and-local-test.md](docs/deploy-and-local-test.md).
 
 ---
 
@@ -400,6 +481,12 @@ interactive sessions, see [docs/deploy-and-local-test.md](docs/deploy-and-local-
   the real Conductor-style embedded chat/terminal experience is still MVP work.
   Background `session start` remains available when you want supervised process
   records and captured logs.
+- **Conductor app controls are incomplete.** Command palette, shortcut coverage,
+  deep links, Big Terminal Mode, agent controls, provider settings, MCP status,
+  checkpoint UI, and resumable chat history are still MVP work.
+- **Project setup UI is incomplete.** Files to copy, `.worktreeinclude`
+  precedence, Spotlight testing, layered settings, durable prompts, monorepo
+  directory selection, and linked-directory flows need GUI support.
 - **`gh` required for PR operations.** `pr create`, `pr checks`, and `pr merge`
   shell out to the `gh` CLI. Run `gh auth login` before using these commands.
 - **Flatpak is experimental.** The Flatpak build uses `--filesystem=host` for

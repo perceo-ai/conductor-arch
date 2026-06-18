@@ -1,5 +1,15 @@
 # Packaging
 
+Packaging is not the MVP gate. These commands validate release artifacts for
+the current prototype, but public release readiness depends on the GUI-first
+Conductor acceptance path in `docs/manual-testing-checklist.md`.
+
+Do not call packaging release-ready until the app supports the normal workflow
+from the GUI: repository onboarding/settings, workspace creation, embedded
+agent sessions, terminal/runtime, diff/review/checks/todos, PR merge/archive,
+history, command palette, shortcuts, deep links, provider/MCP status, and
+safety/privacy surfaces.
+
 ## Build packages locally
 
 Install [nfpm](https://nfpm.goreleaser.com/):
