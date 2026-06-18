@@ -197,6 +197,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Terminal tab runs a short command, shows stdout/stderr, and reports the
   exit code without freezing the app.
 - [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
+- [ ] With `spotlight_testing = true`, Spotlight On applies tracked workspace
+  changes to a clean repository root and Spotlight Off restores the root.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
@@ -207,6 +209,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Embedded Conductor-native agent chat is not implemented.
 - [ ] PTY-backed embedded workspace terminal is not implemented. The current
   terminal is command-based and captures output/exit codes.
+- [ ] Full Spotlight parity is not implemented. The current slice manually
+  applies/restores tracked changes and does not watch files or create
+  checkpoint commits.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

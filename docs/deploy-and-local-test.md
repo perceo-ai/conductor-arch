@@ -278,6 +278,9 @@ Manual GUI smoke:
   reports the exit code.
 - Confirm Setup, Run, and Stop controls call the current runtime APIs and show
   latest setup/run log previews.
+- With `spotlight_testing = true` and a clean repository root, confirm
+  Spotlight On applies tracked workspace changes to the root and Spotlight Off
+  restores them.
 - Confirm Shell, Codex, Claude Code, and Cursor actions use the current
   external-process launch path.
 - Confirm History lists old Conductor chats when the macOS Conductor database is
@@ -288,6 +291,8 @@ Known GUI MVP gaps:
 
 - No embedded Conductor-native agent chat yet.
 - No PTY-backed interactive terminal yet; the current terminal is command-based.
+- Full Spotlight watching/checkpoint sync is not implemented; the current
+  Spotlight slice is manual apply/restore.
 - No command palette, shortcut coverage, deep links, polished Big Terminal
   Mode, MCP status, checkpoint UI, or resumable session history yet.
 - Project settings can be edited from Projects for shared/local repository

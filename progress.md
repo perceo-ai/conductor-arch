@@ -44,6 +44,9 @@ security/privacy posture.
   natural process completion and record exit codes when the OS reports one.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
+- First Spotlight testing slice: when enabled in repository settings, the app
+  can apply a workspace's tracked changes to the repository root and later
+  reverse that patch.
 - Shell/Codex/Claude/Cursor session launch primitives.
 - Codex and Claude launches honor configured executable paths from repository
   settings.
@@ -69,6 +72,8 @@ security/privacy posture.
   tab with presets for Conductor environment, git status, diff, and file list.
 - Runtime panel can start setup/run scripts, stop run scripts, and show latest
   setup/run log tails.
+- Runtime panel can start/stop the first Spotlight testing slice and show the
+  active Spotlight patch/status.
 - History page can read old chats from the macOS Conductor database when
   available.
 
@@ -199,6 +204,10 @@ Verified Phase 3 evidence so far:
   setup/run process and log previews.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
+- Core can start/stop a Spotlight session when `spotlight_testing = true`,
+  requiring a clean repository root, applying the workspace's tracked patch to
+  the root checkout, recording the patch, and reversing it on stop.
+- GTK Runtime now exposes Spotlight On/Off controls and active status.
 
 Still needs Phase 4 work:
 
@@ -206,7 +215,9 @@ Still needs Phase 4 work:
 - Long-running terminal process management beyond setup/run process controls.
 - Exit-code reporting for signal-terminated background processes beyond the
   current `signal`/missing-code state.
-- Spotlight testing execution from repository-root checkout.
+- Full Spotlight parity: file watching, checkpoint commits, one-way continuous
+  sync, switching active Spotlight workspaces, and stronger root dirty-state
+  recovery. Current support is manual apply/restore of tracked changes.
 - Toasts and richer error/progress state.
 
 ## Next Step

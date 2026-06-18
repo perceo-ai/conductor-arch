@@ -114,6 +114,9 @@ MVP is not complete until the normal workflow can be driven from the app.
   completion and store exit codes when available.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
+- First Spotlight testing slice: apply a workspace's tracked changes to the
+  clean repository root when `spotlight_testing = true`, then reverse that patch
+  on stop.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.
 - Supervised background sessions with process records and logs.
 - Git diff/status/log helpers.
@@ -134,6 +137,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Workspace tabs for Chats, Changes, Terminal, Checks, Todos, and Processes.
 - Basic embedded command terminal with presets for Conductor env, git status,
   diff, and file list. This is not a PTY yet.
+- Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Off.
 - History page that reads prior Conductor chats/messages from the macOS
   Conductor database when available.
 - Imported Conductor repositories/workspaces are visible in the app.
@@ -149,6 +153,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Embedded terminal support is command-based and non-PTY. It captures output and
   exit codes for completed commands but does not yet manage interactive
   long-running terminal sessions.
+- Spotlight support is manual apply/restore only. It does not yet watch files,
+  create checkpoint commits, continuously sync, or switch active workspaces.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions but need confirmation,
@@ -174,7 +180,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Command palette, shortcut coverage, and deep links.
 - Provider configuration and MCP status surfaces.
 - Polished Big Terminal Mode beyond the first full-width terminal tab/presets.
-- Spotlight testing.
+- Full Spotlight testing parity.
 - Monorepo sparse-checkout controls and linked-directory workflows.
 - Unified local history model.
 - Safe confirmation flows for destructive actions.

@@ -205,6 +205,8 @@ fn runtime_panel(
     let setup_btn = Button::with_label("Setup");
     let run_btn = Button::with_label("Run");
     let stop_btn = Button::with_label("Stop");
+    let spotlight_on_btn = Button::with_label("Spotlight On");
+    let spotlight_off_btn = Button::with_label("Spotlight Off");
     let folder_btn = Button::with_label("Open Folder");
     let status = Label::new(None);
     status.add_css_class("card-meta");
@@ -256,6 +258,38 @@ fn runtime_panel(
         refresh_stop.refresh(RefreshScope::All);
     });
 
+    let spotlight_workspace = ws.name.clone();
+    let db_path_spotlight_on = db_path.to_path_buf();
+    let refresh_spotlight_on = refresh_hub.clone();
+    let status_spotlight_on = status.clone();
+    spotlight_on_btn.connect_clicked(move |_| {
+        status_spotlight_on.set_text("Starting Spotlight...");
+        match WorkspaceStore::open(db_path_spotlight_on.clone())
+            .and_then(|store| store.spotlight_start(&spotlight_workspace))
+        {
+            Ok(session) => status_spotlight_on
+                .set_text(&format!("Spotlight active for {}", session.workspace_name)),
+            Err(err) => status_spotlight_on.set_text(&format!("Spotlight failed: {err:#}")),
+        }
+        refresh_spotlight_on.refresh(RefreshScope::All);
+    });
+
+    let spotlight_stop_workspace = ws.name.clone();
+    let db_path_spotlight_off = db_path.to_path_buf();
+    let refresh_spotlight_off = refresh_hub.clone();
+    let status_spotlight_off = status.clone();
+    spotlight_off_btn.connect_clicked(move |_| {
+        status_spotlight_off.set_text("Stopping Spotlight...");
+        match WorkspaceStore::open(db_path_spotlight_off.clone())
+            .and_then(|store| store.spotlight_stop(&spotlight_stop_workspace))
+        {
+            Ok(session) => status_spotlight_off
+                .set_text(&format!("Spotlight stopped for {}", session.workspace_name)),
+            Err(err) => status_spotlight_off.set_text(&format!("Spotlight stop failed: {err:#}")),
+        }
+        refresh_spotlight_off.refresh(RefreshScope::All);
+    });
+
     let path = ws.path.clone();
     folder_btn.connect_clicked(move |_| {
         let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
@@ -264,10 +298,13 @@ fn runtime_panel(
     actions.append(&setup_btn);
     actions.append(&run_btn);
     actions.append(&stop_btn);
+    actions.append(&spotlight_on_btn);
+    actions.append(&spotlight_off_btn);
     actions.append(&folder_btn);
     panel.append(&actions);
     panel.append(&detail_row("Setup", &latest_setup_line(store, &ws.name)));
     panel.append(&detail_row("Latest", &latest_runtime_line(store, &ws.name)));
+    panel.append(&detail_row("Spotlight", &spotlight_line(store, &ws.name)));
     panel.append(&detail_row(
         "Setup Log",
         &latest_setup_log_line(store, &ws.name),
@@ -745,6 +782,19 @@ fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
             })
             .unwrap_or_else(|| "No runs recorded.".to_owned()),
         Err(err) => format!("Could not read runtime: {err:#}"),
+    }
+}
+
+fn spotlight_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.spotlight_status(name) {
+        Ok(Some(session)) => format!(
+            "{} since {} patch={}",
+            session.status,
+            session.started_at,
+            session.patch_path.display()
+        ),
+        Ok(None) => "Inactive".to_owned(),
+        Err(err) => format!("Could not read Spotlight status: {err:#}"),
     }
 }
 

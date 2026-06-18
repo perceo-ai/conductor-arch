@@ -338,6 +338,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - There is no true embedded Conductor chat UI.
 - There is a basic embedded command terminal, but no true PTY-backed
   interactive terminal yet.
+- Spotlight testing has a first manual apply/restore slice, but not continuous
+  file watching/checkpoint sync or workspace switching.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.
@@ -365,7 +367,7 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Agent status model comparable to Conductor.
 - Command palette, keyboard shortcuts, and deep links.
 - MCP/provider settings and status UI.
-- Spotlight testing.
+- Full Spotlight testing parity.
 - Monorepo sparse-checkout controls.
 - Linked-directory/multi-repository workspace context.
 - Safe, polished destructive action flows.

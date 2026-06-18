@@ -167,12 +167,15 @@ Current GUI capabilities:
   basic Git behavior flags. Saves validate run mode and environment variable
   names.
 - Workspace page with basic Shell/Codex/Claude/Cursor launch actions,
-  setup/run/stop, open-folder, archive/restore/discard, and rough tabs for
-  chats, terminal, changes, checks, todos, and processes.
+  setup/run/stop, Spotlight On/Off, open-folder, archive/restore/discard, and
+  rough tabs for chats, terminal, changes, checks, todos, and processes.
 - Basic embedded command terminal scoped to the workspace. It runs commands with
   `CONDUCTOR_*` environment variables, captures stdout/stderr, reports exit
   codes, and includes presets for env, git status, diff, and file list. This is
   not a PTY-backed interactive terminal yet.
+- First-slice Spotlight testing can apply tracked workspace changes to a clean
+  repository root when `spotlight_testing = true`, then reverse that patch on
+  stop. It is not continuous file watching yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -180,6 +183,7 @@ Still missing from the real MVP:
 - Embedded Conductor-native agent chat.
 - PTY-backed interactive terminal.
 - More polished project onboarding and settings layout.
+- Full Spotlight testing parity with file watching/checkpoint sync.
 - Command palette, shortcuts, and deep links.
 - Agent controls, MCP status, checkpoints, and resumable session history.
 - Monorepo directory selection and linked-directory workflows.
@@ -360,7 +364,9 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
 - `nonconcurrent` — only one workspace per repository may have an active run
   script; `linux-conductor run` will refuse to start if another is running
 - Spotlight testing — use when the project must run from the repository root or
-  one shared local stack instead of one app process per workspace
+  one shared local stack instead of one app process per workspace. Current
+  prototype support manually applies/restores tracked workspace changes; full
+  file watching/checkpoint sync is still MVP work.
 
 ### Environment variables available in scripts
 
@@ -491,6 +497,9 @@ Cursor interactive sessions, see
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
   deep links, Big Terminal Mode, agent controls, MCP status, checkpoint UI, and
   resumable chat history are still MVP work.
+- **Spotlight is partial.** It can manually apply and restore tracked workspace
+  changes against a clean repository root, but it does not yet watch files,
+  create checkpoint commits, or continuously sync.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and

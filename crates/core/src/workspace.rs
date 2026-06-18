@@ -129,6 +129,18 @@ pub struct TerminalCommandResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotlightSession {
+    pub id: i64,
+    pub repository_id: i64,
+    pub workspace_id: i64,
+    pub workspace_name: String,
+    pub patch_path: PathBuf,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub id: i64,
     pub workspace_id: i64,
@@ -605,6 +617,79 @@ impl WorkspaceStore {
             started_at,
             ended_at,
         })
+    }
+
+    pub fn spotlight_start(&self, name: &str) -> Result<SpotlightSession> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        anyhow::ensure!(
+            settings.spotlight_testing.unwrap_or(false),
+            "spotlight_testing must be enabled for this repository"
+        );
+        ensure_clean_git_tree(&repository.root_path, "repository root")?;
+        ensure_no_active_spotlight(&self.conn, repository.id)?;
+
+        let patch = workspace_tracked_patch(&workspace)?;
+        anyhow::ensure!(
+            !patch.trim().is_empty(),
+            "workspace {name} has no tracked changes to spotlight"
+        );
+
+        apply_git_patch(&repository.root_path, &patch)?;
+        let now = timestamp();
+        let patch_path = self
+            .logs_dir
+            .join(&workspace.name)
+            .join(format!("spotlight-{now}.patch"));
+        if let Some(parent) = patch_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create spotlight directory {}", parent.display()))?;
+        }
+        fs::write(&patch_path, patch).with_context(|| format!("write {}", patch_path.display()))?;
+
+        self.conn.execute(
+            "INSERT INTO spotlight_sessions (
+                repository_id, workspace_id, workspace_name, patch_path, status, started_at, ended_at
+            ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, NULL)",
+            params![
+                repository.id,
+                workspace.id,
+                workspace.name,
+                patch_path.to_string_lossy().to_string(),
+                now,
+            ],
+        )?;
+        self.get_spotlight_session(self.conn.last_insert_rowid())
+    }
+
+    pub fn spotlight_stop(&self, name: &str) -> Result<SpotlightSession> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let active = self
+            .active_spotlight_for_repository(repository.id)?
+            .with_context(|| format!("no active spotlight session for workspace {name}"))?;
+        anyhow::ensure!(
+            active.workspace_id == workspace.id,
+            "active spotlight is for workspace {}, not {name}",
+            active.workspace_name
+        );
+
+        let patch = fs::read_to_string(&active.patch_path)
+            .with_context(|| format!("read {}", active.patch_path.display()))?;
+        reverse_git_patch(&repository.root_path, &patch)?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE spotlight_sessions SET status = 'stopped', ended_at = ?1 WHERE id = ?2",
+            params![now, active.id],
+        )?;
+        self.get_spotlight_session(active.id)
+    }
+
+    pub fn spotlight_status(&self, name: &str) -> Result<Option<SpotlightSession>> {
+        let workspace = self.get_by_name(name)?;
+        let active = self.active_spotlight_for_repository(workspace.repository_id)?;
+        Ok(active.filter(|session| session.workspace_id == workspace.id))
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {
@@ -1639,6 +1724,36 @@ impl WorkspaceStore {
             .with_context(|| format!("load process {id}"))
     }
 
+    fn active_spotlight_for_repository(
+        &self,
+        repository_id: i64,
+    ) -> Result<Option<SpotlightSession>> {
+        let result = self.conn.query_row(
+            "SELECT id, repository_id, workspace_id, workspace_name, patch_path, status, started_at, ended_at
+             FROM spotlight_sessions
+             WHERE repository_id = ?1 AND status = 'active'
+             ORDER BY id DESC LIMIT 1",
+            [repository_id],
+            row_to_spotlight_session,
+        );
+        match result {
+            Ok(session) => Ok(Some(session)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn get_spotlight_session(&self, id: i64) -> Result<SpotlightSession> {
+        self.conn
+            .query_row(
+                "SELECT id, repository_id, workspace_id, workspace_name, patch_path, status, started_at, ended_at
+                 FROM spotlight_sessions WHERE id = ?1",
+                [id],
+                row_to_spotlight_session,
+            )
+            .with_context(|| format!("load spotlight session {id}"))
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "
@@ -1719,6 +1834,17 @@ impl WorkspaceStore {
               git_ref TEXT NOT NULL,
               message TEXT NOT NULL,
               created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS spotlight_sessions (
+              id INTEGER PRIMARY KEY,
+              repository_id INTEGER NOT NULL REFERENCES repositories(id),
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              workspace_name TEXT NOT NULL,
+              patch_path TEXT NOT NULL,
+              status TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              ended_at TEXT
             );
             ",
         )?;
@@ -1814,6 +1940,19 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         started_at: row.get(7)?,
         exit_code: row.get(8)?,
         ended_at: row.get(9)?,
+    })
+}
+
+fn row_to_spotlight_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpotlightSession> {
+    Ok(SpotlightSession {
+        id: row.get(0)?,
+        repository_id: row.get(1)?,
+        workspace_id: row.get(2)?,
+        workspace_name: row.get(3)?,
+        patch_path: PathBuf::from(row.get::<_, String>(4)?),
+        status: row.get(5)?,
+        started_at: row.get(6)?,
+        ended_at: row.get(7)?,
     })
 }
 
@@ -2088,6 +2227,79 @@ fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
 
 fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
     command_output(cwd, "git", args)
+}
+
+fn ensure_clean_git_tree(cwd: &Path, label: &str) -> Result<()> {
+    let status = git_output_dynamic(cwd, &["status", "--porcelain"])?;
+    anyhow::ensure!(
+        status.trim().is_empty(),
+        "{label} must be clean before Spotlight testing"
+    );
+    Ok(())
+}
+
+fn ensure_no_active_spotlight(conn: &Connection, repository_id: i64) -> Result<()> {
+    let active_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM spotlight_sessions WHERE repository_id = ?1 AND status = 'active'",
+        [repository_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        active_count == 0,
+        "another workspace is already active in Spotlight testing"
+    );
+    Ok(())
+}
+
+fn workspace_tracked_patch(workspace: &Workspace) -> Result<String> {
+    let mut patch = String::new();
+    patch.push_str(&git_output_dynamic(
+        &workspace.path,
+        &["diff", "--binary", &workspace.base_ref, "HEAD"],
+    )?);
+    patch.push_str(&git_output_dynamic(
+        &workspace.path,
+        &["diff", "--binary", "--cached", "HEAD"],
+    )?);
+    patch.push_str(&git_output_dynamic(&workspace.path, &["diff", "--binary"])?);
+    Ok(patch)
+}
+
+fn apply_git_patch(cwd: &Path, patch: &str) -> Result<()> {
+    git_patch(cwd, &["apply", "--binary", "-"], patch)
+}
+
+fn reverse_git_patch(cwd: &Path, patch: &str) -> Result<()> {
+    git_patch(cwd, &["apply", "--binary", "--reverse", "-"], patch)
+}
+
+fn git_patch(cwd: &Path, args: &[&str], patch: &str) -> Result<()> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run git patch command in {}", cwd.display()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(patch.as_bytes())
+            .context("write patch to git apply")?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for git patch command in {}", cwd.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git patch command failed in {}: {}\n{}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
 }
 
 fn command_output(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
@@ -3401,6 +3613,96 @@ setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\
             .read_latest_setup_log("berlin")
             .unwrap()
             .contains("setup:berlin:3000"));
+    }
+
+    #[test]
+    fn spotlight_start_applies_workspace_tracked_changes_and_stop_restores_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "spotlight change\n").unwrap();
+        fs::write(workspace.path.join("new-tracked.txt"), "new file\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md", "new-tracked.txt"])
+            .status()
+            .unwrap();
+
+        let active = store.spotlight_start("berlin").unwrap();
+
+        assert_eq!(active.workspace_name, "berlin");
+        assert_eq!(active.status, "active");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "spotlight change\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo_path.join("new-tracked.txt")).unwrap(),
+            "new file\n"
+        );
+        assert_eq!(store.spotlight_status("berlin").unwrap().unwrap(), active);
+
+        let stopped = store.spotlight_stop("berlin").unwrap();
+
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "demo\n"
+        );
+        assert!(!repo_path.join("new-tracked.txt").exists());
+        assert!(store.spotlight_status("berlin").unwrap().is_none());
     }
 
     #[test]
