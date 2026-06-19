@@ -172,10 +172,11 @@ Current GUI capabilities:
   Runtime and lifecycle action failures now show both inline status text and app
   toasts.
 - Basic embedded terminal scoped to the workspace. It can run one-shot commands
-  with `CONDUCTOR_*` environment variables and can start a PTY-backed workspace
+  with `CONDUCTOR_*` environment variables and can start PTY-backed workspace
   shells that accept input after launch and stream output. The terminal panel
-  has a basic active-shell selector so Start Shell can create more than one
-  live PTY shell and Stop Shell targets the selected shell. Started/stopped
+  has clickable live-shell tabs with running/stopped labels, so Start Shell can
+  create more than one live PTY shell and Stop Shell targets the selected tab.
+  Started/stopped
   embedded shells refresh into the Processes tab immediately, and the app marks
   stale terminal process rows exited on startup and during periodic runtime
   refresh when their recorded shell PID is no longer alive. Each recorded shell
@@ -525,10 +526,10 @@ Cursor interactive sessions, see
 - **No native agent chat or polished terminal emulator yet.** The GUI has a
   PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
   chat, broader cursor polish beyond basic ANSI stripping and common line
-  redraws, polished multi-terminal tabs beyond the basic selector, a polished
-  history/scrollback browser beyond basic session listing/transcript search, and
-  live PTY process reattach after app restart are still MVP work. Latest
-  transcript restore is built.
+  redraws, a full multi-terminal tab model beyond clickable live-shell tabs, a
+  polished history/scrollback browser beyond basic session listing/transcript
+  search, and live PTY process reattach after app restart are still MVP work.
+  Latest transcript restore is built.
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,

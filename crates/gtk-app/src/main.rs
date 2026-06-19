@@ -723,6 +723,16 @@ window {
     padding: 18px;
 }
 
+.terminal-tab-strip {
+    padding: 2px 0;
+}
+
+.terminal-tab-strip button {
+    font-size: 12px;
+    border-radius: 6px;
+    padding: 5px 10px;
+}
+
 .workspace-toolbar {
     background-color: #1e1e2e;
     padding: 8px 12px;

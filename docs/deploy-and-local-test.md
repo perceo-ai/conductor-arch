@@ -343,8 +343,9 @@ Known GUI MVP gaps:
   stripping, carriage-return/cursor-up line redraws, and resize propagation.
   Stale process rows reconcile at startup and while the app is open, and shell
   records get distinct searchable raw transcript logs with capped on-screen
-  scrollback and latest-transcript restore, but this is not live PTY process
-  reattach, a polished terminal tab model, or a polished terminal
+  scrollback, latest-transcript restore, and clickable live-shell tabs, but this
+  is not live PTY process reattach, a full terminal tab model, or a polished
+  terminal
   history/scrollback browser.
 - Full Spotlight parity is not implemented; the current Spotlight slice is
   manual checkpoint/apply/restore/switch/sync with dirty-root refusal before

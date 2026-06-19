@@ -92,12 +92,18 @@ pub fn embedded_terminal_panel(
     let stop_pty_btn = Button::with_label("Stop Shell");
     let active_pty_combo = ComboBoxText::new();
     active_pty_combo.set_hexpand(true);
+    active_pty_combo.set_visible(false);
+    let terminal_tabs = GBox::new(Orientation::Horizontal, 6);
+    terminal_tabs.add_css_class("terminal-tab-strip");
+    let tab_buttons: Rc<RefCell<Vec<Button>>> = Rc::new(RefCell::new(Vec::new()));
     let db_for_pty = database_path.clone();
     let workspace_for_pty = workspace_name.to_owned();
     let ptys_for_start = active_ptys.clone();
     let buffer_for_start = transcript.buffer();
     let refresh_for_start = refresh_hub.clone();
     let active_pty_combo_for_start = active_pty_combo.clone();
+    let terminal_tabs_for_start = terminal_tabs.clone();
+    let tab_buttons_for_start = tab_buttons.clone();
     let last_size_for_start = last_pty_size.clone();
     let cols = if full_mode { 120 } else { 80 };
     start_pty_btn.connect_clicked(move |_| {
@@ -134,6 +140,18 @@ pub fn embedded_terminal_panel(
                     &active_terminal_session_option_label(index, Some(process_id)),
                 );
                 active_pty_combo_for_start.set_active(Some(index as u32));
+                let tab =
+                    Button::with_label(&active_terminal_tab_label(index, Some(process_id), true));
+                tab.add_css_class("flat");
+                let active_pty_combo_for_tab = active_pty_combo_for_start.clone();
+                let tab_buttons_for_tab = tab_buttons_for_start.clone();
+                tab.connect_clicked(move |_| {
+                    active_pty_combo_for_tab.set_active(Some(index as u32));
+                    set_terminal_tab_active(&tab_buttons_for_tab.borrow(), Some(index));
+                });
+                terminal_tabs_for_start.append(&tab);
+                tab_buttons_for_start.borrow_mut().push(tab);
+                set_terminal_tab_active(&tab_buttons_for_start.borrow(), Some(index));
                 *last_size_for_start.borrow_mut() = None;
                 append_text(
                     &buffer_for_start,
@@ -148,6 +166,7 @@ pub fn embedded_terminal_panel(
     let buffer_for_stop = transcript.buffer();
     let refresh_for_stop = refresh_hub.clone();
     let active_pty_combo_for_stop = active_pty_combo.clone();
+    let tab_buttons_for_stop = tab_buttons.clone();
     stop_pty_btn.connect_clicked(move |_| {
         let Some(active_id) = active_pty_combo_for_stop.active_id() else {
             append_text(&buffer_for_stop, "\n[no pty shell selected]\n");
@@ -163,6 +182,7 @@ pub fn embedded_terminal_panel(
             return;
         };
         if let Some(session) = session_slot.take() {
+            let process_id = session.process_id;
             match session.stop() {
                 Ok(()) => append_text(
                     &buffer_for_stop,
@@ -172,11 +192,16 @@ pub fn embedded_terminal_panel(
                     append_text(&buffer_for_stop, &format!("\n[pty stop error]\n{err:#}\n"))
                 }
             }
+            if let Some(tab) = tab_buttons_for_stop.borrow().get(index) {
+                tab.set_label(&active_terminal_tab_label(index, process_id, false));
+            }
+            set_terminal_tab_active(&tab_buttons_for_stop.borrow(), Some(index));
             refresh_for_stop.refresh(terminal_process_refresh_scope());
         } else {
             append_text(&buffer_for_stop, "\n[selected pty shell already stopped]\n");
         }
     });
+    root.append(&terminal_tabs);
     pty_controls.append(&start_pty_btn);
     pty_controls.append(&stop_pty_btn);
     pty_controls.append(&active_pty_combo);
@@ -598,6 +623,24 @@ fn active_terminal_session_option_label(index: usize, process_id: Option<i64>) -
     }
 }
 
+fn active_terminal_tab_label(index: usize, process_id: Option<i64>, running: bool) -> String {
+    let status = if running { "running" } else { "stopped" };
+    match process_id {
+        Some(process_id) => format!("Shell {} #{} {}", index + 1, process_id, status),
+        None => format!("Shell {} {}", index + 1, status),
+    }
+}
+
+fn set_terminal_tab_active(tabs: &[Button], active_index: Option<usize>) {
+    for (index, tab) in tabs.iter().enumerate() {
+        if Some(index) == active_index {
+            tab.add_css_class("suggested-action");
+        } else {
+            tab.remove_css_class("suggested-action");
+        }
+    }
+}
+
 fn format_selected_terminal_transcript(record: &ProcessRecord, transcript: &str) -> String {
     trim_terminal_scrollback(
         &format!(
@@ -1007,6 +1050,18 @@ mod tests {
             "Shell 2 #42"
         );
         assert_eq!(active_terminal_session_option_label(0, None), "Shell 1");
+    }
+
+    #[test]
+    fn active_terminal_tab_labels_include_state() {
+        assert_eq!(
+            active_terminal_tab_label(1, Some(42), true),
+            "Shell 2 #42 running"
+        );
+        assert_eq!(
+            active_terminal_tab_label(0, Some(7), false),
+            "Shell 1 #7 stopped"
+        );
     }
 
     #[test]

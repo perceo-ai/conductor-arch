@@ -346,10 +346,11 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   caps on-screen scrollback while keeping persisted logs raw. The terminal panel
   can search persisted transcript logs, load a selected past transcript, restore
   the latest transcript after app restart, and list recorded terminal
-  sessions/logs. The terminal panel has a basic active-shell selector for
-  multiple live PTY shells; broader cursor/session emulation, polished terminal
-  tabs beyond the selector, a more polished terminal history/scrollback browser,
-  and live PTY process reattach after app restart are still missing.
+  sessions/logs. The terminal panel has clickable live-shell tabs for multiple
+  live PTY shells; broader cursor/session emulation, a full multi-terminal tab
+  model beyond clickable live-shell tabs, a more polished terminal
+  history/scrollback browser, and live PTY process reattach after app restart
+  are still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
   slice with app-wide polling sync, dirty-root refusal before patch reversal,
   affected-path dirty-root guidance in the Runtime panel, explicit destructive

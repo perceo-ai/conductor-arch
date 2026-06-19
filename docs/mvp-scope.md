@@ -175,11 +175,11 @@ MVP is not complete until the normal workflow can be driven from the app.
   keeping persisted logs raw. It can search persisted transcript logs, list
   recorded terminal sessions/logs, load a selected past transcript into the
   terminal view, and restore the latest transcript into the terminal view after
-  app restart. The terminal panel has a basic active-shell selector so multiple
-  live PTY shells can run and Stop Shell targets the selected shell. Broader
-  cursor/session emulation, polished multi-terminal tabs beyond the selector, a
-  more polished terminal history/scrollback browser, and live PTY process
-  reattach after app restart are still missing.
+  app restart. The terminal panel has clickable live-shell tabs so multiple live
+  PTY shells can run and Stop Shell targets the selected tab. Broader
+  cursor/session emulation, a full multi-terminal tab model beyond clickable
+  live-shell tabs, a more polished terminal history/scrollback browser, and live
+  PTY process reattach after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
   affected-path dirty-root guidance in the Runtime panel, app-wide polling sync,

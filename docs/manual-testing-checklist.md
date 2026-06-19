@@ -263,9 +263,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   ANSI-control stripping, carriage-return/cursor-up line redraws, and resize
   propagation; stale process rows reconcile at startup and while the app is
   open, and shell records get distinct searchable raw transcript logs with
-  capped on-screen scrollback and latest-transcript restore, but this is not a
-  full emulator/live PTY reattach model, polished terminal tab model, or
-  polished terminal history/scrollback browser.
+  capped on-screen scrollback, latest-transcript restore, and clickable
+  live-shell tabs, but this is not a full emulator/live PTY reattach model, full
+  terminal tab model, or polished terminal history/scrollback browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, app-open recursive file watching for active Spotlight workspace
