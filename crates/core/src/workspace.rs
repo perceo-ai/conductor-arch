@@ -140,6 +140,8 @@ pub struct TerminalLogMatch {
     pub log_path: PathBuf,
     pub line_number: usize,
     pub line: String,
+    pub context_before: Vec<String>,
+    pub context_after: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -736,14 +738,26 @@ impl WorkspaceStore {
         for process in self.list_terminals(name)? {
             let contents = fs::read_to_string(&process.log_path)
                 .with_context(|| format!("read log {}", process.log_path.display()))?;
-            for (index, line) in contents.lines().enumerate() {
+            let lines = contents.lines().collect::<Vec<_>>();
+            for (index, line) in lines.iter().enumerate() {
                 if line.to_lowercase().contains(&needle) {
+                    let context_before = index
+                        .checked_sub(1)
+                        .and_then(|before| lines.get(before))
+                        .map(|line| vec![(*line).to_owned()])
+                        .unwrap_or_default();
+                    let context_after = lines
+                        .get(index + 1)
+                        .map(|line| vec![(*line).to_owned()])
+                        .unwrap_or_default();
                     matches.push(TerminalLogMatch {
                         process_id: process.id,
                         command: process.command.clone(),
                         log_path: process.log_path.clone(),
                         line_number: index + 1,
-                        line: line.to_owned(),
+                        line: (*line).to_owned(),
+                        context_before,
+                        context_after,
                     });
                 }
             }
@@ -4303,9 +4317,13 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(matches[0].process_id, second.id);
         assert_eq!(matches[0].line_number, 1);
         assert_eq!(matches[0].line, "NEEDLE second");
+        assert_eq!(matches[0].context_before, Vec::<String>::new());
+        assert_eq!(matches[0].context_after, vec!["no match".to_owned()]);
         assert_eq!(matches[1].process_id, first.id);
         assert_eq!(matches[1].line_number, 2);
         assert_eq!(matches[1].line, "needle first");
+        assert_eq!(matches[1].context_before, vec!["build ok".to_owned()]);
+        assert_eq!(matches[1].context_after, Vec::<String>::new());
     }
 
     #[test]

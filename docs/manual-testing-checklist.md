@@ -211,7 +211,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] PTY shell command echoes and output appear in that terminal process log,
   not only in the on-screen transcript.
 - [ ] Terminal history search finds matching persisted transcript lines and
-  appends process/line matches into the terminal transcript.
+  appends process/line matches with one-line before/after context into the
+  terminal transcript.
 - [ ] Terminal Show History lists recorded terminal sessions with status, pid,
   exit code, log file, start time, and command.
 - [ ] Terminal Show History displays running/stopped/exited counts and orders

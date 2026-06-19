@@ -251,8 +251,8 @@ Verified Phase 3 evidence so far:
   terminal process log, so recorded shell logs contain a usable raw transcript
   instead of only an empty placeholder file.
 - GTK terminal panels expose a basic terminal history search field that searches
-  persisted transcript logs and appends matching process/line results into the
-  terminal transcript.
+  persisted transcript logs and appends matching process/line results with
+  one-line before/after context into the terminal transcript.
 - GTK terminal panels expose a basic Show History control that lists recorded
   terminal sessions, status, pid, exit code, log file, start time, and command.
 - GTK terminal history now shows session counts by status and sorts listed

@@ -290,7 +290,8 @@ Manual GUI smoke:
 - Confirm PTY shell command echoes and output are appended to that terminal
   process log, not only shown in the on-screen transcript.
 - Confirm terminal history search finds matching persisted transcript lines and
-  appends process/line matches into the terminal transcript.
+  appends process/line matches with one-line before/after context into the
+  terminal transcript.
 - Confirm Terminal Show History lists recorded terminal sessions with status,
   pid, exit code, log file, start time, and command.
 - Confirm Terminal Show History displays running/stopped/exited counts and

@@ -345,9 +345,10 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   sequences, applies carriage-return, backspace, cursor-up, cursor-left/right
   overwrite, saved-cursor restore, and erase-line plus clear-screen/home
   redraws, and caps on-screen scrollback while keeping persisted logs raw. The
-  terminal panel can search persisted transcript logs, load a selected past
-  transcript, restore the latest transcript after app restart, and list recorded
-  terminal sessions/logs with status counts newest first. The terminal history
+  terminal panel can search persisted transcript logs with one-line before/after
+  context, load a selected past transcript, restore the latest transcript after
+  app restart, and list recorded terminal sessions/logs with status counts
+  newest first. The terminal history
   selector uses the same newest-first order. The terminal panel has clickable
   live-shell tabs for multiple live PTY shells and auto-selects another running
   tab after a stop; broader cursor/session emulation, a full multi-terminal tab

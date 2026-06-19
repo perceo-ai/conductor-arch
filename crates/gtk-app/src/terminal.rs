@@ -579,6 +579,14 @@ fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> 
             "#{} {} {}:{}\n{}\n",
             item.process_id, item.command, file_name, item.line_number, item.line
         ));
+        if !item.context_before.is_empty() || !item.context_after.is_empty() {
+            for line in &item.context_before {
+                text.push_str(&format!("  before: {line}\n"));
+            }
+            for line in &item.context_after {
+                text.push_str(&format!("  after: {line}\n"));
+            }
+        }
     }
     text
 }
@@ -1114,6 +1122,8 @@ mod tests {
             log_path: PathBuf::from("/tmp/logs/terminal.log"),
             line_number: 3,
             line: "needle found".to_owned(),
+            context_before: vec!["before line".to_owned()],
+            context_after: vec!["after line".to_owned()],
         }];
 
         let rendered = format_terminal_search_results("needle", &matches);
@@ -1122,6 +1132,8 @@ mod tests {
         assert!(rendered.contains("#42 /bin/sh"));
         assert!(rendered.contains("terminal.log:3"));
         assert!(rendered.contains("needle found"));
+        assert!(rendered.contains("before: before line"));
+        assert!(rendered.contains("after: after line"));
         assert_eq!(
             format_terminal_search_results("missing", &[]),
             "\n[terminal search] missing\nNo terminal transcript matches.\n"
