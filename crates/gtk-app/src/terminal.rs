@@ -195,7 +195,15 @@ pub fn embedded_terminal_panel(
             if let Some(tab) = tab_buttons_for_stop.borrow().get(index) {
                 tab.set_label(&active_terminal_tab_label(index, process_id, false));
             }
-            set_terminal_tab_active(&tab_buttons_for_stop.borrow(), Some(index));
+            let running_tabs = sessions
+                .iter()
+                .map(|session| session.is_some())
+                .collect::<Vec<_>>();
+            let next_index = next_active_terminal_tab(index, &running_tabs);
+            if let Some(next_index) = next_index {
+                active_pty_combo_for_stop.set_active(Some(next_index as u32));
+            }
+            set_terminal_tab_active(&tab_buttons_for_stop.borrow(), next_index);
             refresh_for_stop.refresh(terminal_process_refresh_scope());
         } else {
             append_text(&buffer_for_stop, "\n[selected pty shell already stopped]\n");
@@ -662,6 +670,26 @@ fn set_terminal_tab_active(tabs: &[Button], active_index: Option<usize>) {
             tab.remove_css_class("suggested-action");
         }
     }
+}
+
+fn next_active_terminal_tab(current_index: usize, running_tabs: &[bool]) -> Option<usize> {
+    if running_tabs.is_empty() {
+        return None;
+    }
+
+    running_tabs
+        .iter()
+        .enumerate()
+        .skip(current_index.saturating_add(1))
+        .find_map(|(index, running)| (*running).then_some(index))
+        .or_else(|| {
+            running_tabs
+                .iter()
+                .enumerate()
+                .take(current_index)
+                .find_map(|(index, running)| (*running).then_some(index))
+        })
+        .or_else(|| Some(current_index.min(running_tabs.len() - 1)))
 }
 
 fn format_selected_terminal_transcript(record: &ProcessRecord, transcript: &str) -> String {
@@ -1178,6 +1206,13 @@ mod tests {
             active_terminal_tab_label(0, Some(7), false),
             "Shell 1 #7 stopped"
         );
+    }
+
+    #[test]
+    fn next_active_terminal_tab_prefers_running_shell_after_stopped_tab() {
+        assert_eq!(next_active_terminal_tab(1, &[true, false, true]), Some(2));
+        assert_eq!(next_active_terminal_tab(2, &[true, false, false]), Some(0));
+        assert_eq!(next_active_terminal_tab(0, &[false, false]), Some(0));
     }
 
     #[test]

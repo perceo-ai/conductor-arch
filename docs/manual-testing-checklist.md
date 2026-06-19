@@ -201,6 +201,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   shell starts, stream output, and stop the shell.
 - [ ] Terminal tab can start multiple PTY shells, select the active shell, send
   input to the selected shell, and stop only the selected shell.
+- [ ] Stopping one selected shell leaves its tab visible as stopped and
+  auto-selects another running shell when one exists.
 - [ ] Processes tab shows the embedded terminal shell as running after Start
   Shell and stopped with exit code `143` after Stop Shell without waiting for
   the global polling refresh.

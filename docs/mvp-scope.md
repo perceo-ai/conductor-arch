@@ -178,7 +178,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   selected past transcript into the terminal view, and restore the latest
   transcript into the terminal view after app restart. The terminal panel has
   clickable live-shell tabs so multiple live
-  PTY shells can run and Stop Shell targets the selected tab. Broader
+  PTY shells can run, Stop Shell targets the selected tab, and stopping one tab
+  automatically selects another running tab when available. Broader
   cursor/session emulation, a full multi-terminal tab model beyond clickable
   live-shell tabs, a more polished terminal history/scrollback browser, and live
   PTY process reattach after app restart are still missing.

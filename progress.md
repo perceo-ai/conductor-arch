@@ -237,6 +237,9 @@ Verified Phase 3 evidence so far:
   workspace shell.
 - GTK terminal panels now show clickable shell tabs for live PTY shells, with
   running/stopped labels; command input and Stop Shell target the selected tab.
+- Stop Shell now keeps the stopped tab visible but automatically selects the
+  next running shell tab when one exists, so follow-up commands do not stay
+  pointed at a stopped shell.
 - GTK terminal panels propagate terminal view size changes to the active PTY
   shell, so child processes can observe the resized row/column grid.
 - GTK terminal panels create terminal process records on Start Shell and mark

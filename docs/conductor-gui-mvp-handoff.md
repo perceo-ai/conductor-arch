@@ -347,8 +347,9 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   panel can search persisted transcript logs, load a selected past transcript,
   restore the latest transcript after app restart, and list recorded terminal
   sessions/logs with status counts newest first. The terminal panel has
-  clickable live-shell tabs for multiple
-  live PTY shells; broader cursor/session emulation, a full multi-terminal tab
+  clickable live-shell tabs for multiple live PTY shells and auto-selects
+  another running tab after a stop; broader cursor/session emulation, a full
+  multi-terminal tab
   model beyond clickable live-shell tabs, a more polished terminal
   history/scrollback browser, and live PTY process reattach after app restart
   are still missing.

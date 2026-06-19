@@ -280,6 +280,8 @@ Manual GUI smoke:
   command, streams output, and Stop Shell terminates it.
 - Confirm starting multiple PTY shells lets you select the active shell, send
   input to the selected shell, and stop only the selected shell.
+- Confirm stopping one selected shell leaves its tab visible as stopped and
+  auto-selects another running shell when one exists.
 - Confirm the Processes tab shows that terminal shell as running after Start
   Shell and stopped with exit code `143` after Stop Shell without waiting for
   the global polling refresh.

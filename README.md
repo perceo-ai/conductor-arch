@@ -176,7 +176,8 @@ Current GUI capabilities:
   shells that accept input after launch and stream output. The terminal panel
   has clickable live-shell tabs with running/stopped labels, so Start Shell can
   create more than one live PTY shell and Stop Shell targets the selected tab.
-  Started/stopped
+  After a tab is stopped, the terminal automatically selects another running
+  shell tab when one exists. Started/stopped
   embedded shells refresh into the Processes tab immediately, and the app marks
   stale terminal process rows exited on startup and during periodic runtime
   refresh when their recorded shell PID is no longer alive. Each recorded shell
