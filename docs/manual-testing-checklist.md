@@ -212,6 +212,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   appends process/line matches into the terminal transcript.
 - [ ] Terminal Show History lists recorded terminal sessions with status, pid,
   exit code, log file, start time, and command.
+- [ ] Terminal Show History displays running/stopped/exited counts and orders
+  terminal sessions newest first.
 - [ ] Selecting a recorded terminal session and clicking Load Transcript
   replaces the terminal view with that session's persisted transcript.
 - [ ] Reopening the GTK app after terminal output exists restores the latest

@@ -252,6 +252,8 @@ Verified Phase 3 evidence so far:
   terminal transcript.
 - GTK terminal panels expose a basic Show History control that lists recorded
   terminal sessions, status, pid, exit code, log file, start time, and command.
+- GTK terminal history now shows session counts by status and sorts listed
+  sessions newest first.
 - GTK terminal history now fills a session selector and can load the selected
   persisted transcript into the terminal view.
 - Core can read the latest terminal transcript, and GTK terminal panels restore

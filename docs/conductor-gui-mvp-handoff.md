@@ -346,7 +346,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   and caps on-screen scrollback while keeping persisted logs raw. The terminal
   panel can search persisted transcript logs, load a selected past transcript,
   restore the latest transcript after app restart, and list recorded terminal
-  sessions/logs. The terminal panel has clickable live-shell tabs for multiple
+  sessions/logs with status counts newest first. The terminal panel has
+  clickable live-shell tabs for multiple
   live PTY shells; broader cursor/session emulation, a full multi-terminal tab
   model beyond clickable live-shell tabs, a more polished terminal
   history/scrollback browser, and live PTY process reattach after app restart

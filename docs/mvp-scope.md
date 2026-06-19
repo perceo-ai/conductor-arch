@@ -173,9 +173,10 @@ MVP is not complete until the normal workflow can be driven from the app.
   transcript strips common ANSI/OSC escape sequences, applies carriage-return,
   cursor-up, and clear-screen/home redraws, and caps on-screen scrollback while
   keeping persisted logs raw. It can search persisted transcript logs, list
-  recorded terminal sessions/logs, load a selected past transcript into the
-  terminal view, and restore the latest transcript into the terminal view after
-  app restart. The terminal panel has clickable live-shell tabs so multiple live
+  recorded terminal sessions/logs with status counts newest first, load a
+  selected past transcript into the terminal view, and restore the latest
+  transcript into the terminal view after app restart. The terminal panel has
+  clickable live-shell tabs so multiple live
   PTY shells can run and Stop Shell targets the selected tab. Broader
   cursor/session emulation, a full multi-terminal tab model beyond clickable
   live-shell tabs, a more polished terminal history/scrollback browser, and live

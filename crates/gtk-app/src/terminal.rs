@@ -6,7 +6,7 @@ use gtk::{
 };
 use linux_conductor_core::pty::PtySession;
 use linux_conductor_core::workspace::{
-    ProcessRecord, SessionKind, TerminalLogMatch, WorkspaceStore,
+    ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -581,7 +581,30 @@ fn format_terminal_history(records: &[ProcessRecord]) -> String {
         return text;
     }
 
-    for record in records {
+    let running = records
+        .iter()
+        .filter(|record| record.status == ProcessStatus::Running)
+        .count();
+    let stopped = records
+        .iter()
+        .filter(|record| record.status == ProcessStatus::Stopped)
+        .count();
+    let exited = records
+        .iter()
+        .filter(|record| record.status == ProcessStatus::Exited)
+        .count();
+    text.push_str(&format!(
+        "{} sessions: {} running, {} stopped, {} exited\n",
+        records.len(),
+        running,
+        stopped,
+        exited
+    ));
+
+    let mut sorted_records = records.to_vec();
+    sorted_records.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+
+    for record in &sorted_records {
         let file_name = record
             .log_path
             .file_name()
@@ -1083,6 +1106,57 @@ mod tests {
         assert!(rendered.contains("#7 exited pid=4242 exit=0"));
         assert!(rendered.contains("terminal-4242.log"));
         assert!(rendered.contains("/bin/bash"));
+    }
+
+    #[test]
+    fn terminal_history_summary_counts_statuses_and_lists_newest_first() {
+        let records = vec![
+            ProcessRecord {
+                id: 7,
+                workspace_id: 1,
+                kind: ProcessKind::Terminal,
+                command: "/bin/bash".to_owned(),
+                pid: 4242,
+                log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
+                status: ProcessStatus::Exited,
+                started_at: "2026-06-18T02:00:00Z".to_owned(),
+                exit_code: Some(0),
+                ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
+            },
+            ProcessRecord {
+                id: 9,
+                workspace_id: 1,
+                kind: ProcessKind::Terminal,
+                command: "/bin/zsh".to_owned(),
+                pid: 5252,
+                log_path: PathBuf::from("/tmp/logs/terminal-5252.log"),
+                status: ProcessStatus::Running,
+                started_at: "2026-06-18T03:00:00Z".to_owned(),
+                exit_code: None,
+                ended_at: None,
+            },
+            ProcessRecord {
+                id: 8,
+                workspace_id: 1,
+                kind: ProcessKind::Terminal,
+                command: "/bin/fish".to_owned(),
+                pid: 4343,
+                log_path: PathBuf::from("/tmp/logs/terminal-4343.log"),
+                status: ProcessStatus::Stopped,
+                started_at: "2026-06-18T02:30:00Z".to_owned(),
+                exit_code: Some(143),
+                ended_at: Some("2026-06-18T02:35:00Z".to_owned()),
+            },
+        ];
+
+        let rendered = format_terminal_history(&records);
+
+        assert!(rendered.contains("3 sessions: 1 running, 1 stopped, 1 exited"));
+        let zsh = rendered.find("#9 running").unwrap();
+        let fish = rendered.find("#8 stopped").unwrap();
+        let bash = rendered.find("#7 exited").unwrap();
+        assert!(zsh < fish);
+        assert!(fish < bash);
     }
 
     #[test]
