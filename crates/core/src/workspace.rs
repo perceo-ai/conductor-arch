@@ -2649,9 +2649,17 @@ fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -
 }
 
 fn spotlight_conflict_detail(current_patch: &str, expected_patch: &str) -> String {
-    let mut paths = patch_changed_paths(current_patch);
     let expected_paths = patch_changed_paths(expected_patch);
-    paths.extend(expected_paths);
+    let current_paths = patch_changed_paths(current_patch);
+    let root_only_paths = current_paths
+        .difference(&expected_paths)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let paths = if root_only_paths.is_empty() {
+        current_paths.union(&expected_paths).cloned().collect()
+    } else {
+        root_only_paths
+    };
 
     if paths.is_empty() {
         return String::new();
@@ -5096,6 +5104,40 @@ spotlight_testing = true
             fs::read_to_string(repo_path.join("root-only.txt")).unwrap(),
             "root edit\n"
         );
+    }
+
+    #[test]
+    fn spotlight_conflict_detail_prefers_root_only_paths_over_active_patch_paths() {
+        let expected_patch = "\
+diff --git a/README.md b/README.md
+index 1111111..2222222 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++spotlight
+";
+        let current_patch = "\
+diff --git a/README.md b/README.md
+index 1111111..2222222 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++spotlight
+diff --git a/root-only.txt b/root-only.txt
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/root-only.txt
+@@ -0,0 +1 @@
++root edit
+";
+
+        let detail = spotlight_conflict_detail(current_patch, expected_patch);
+
+        assert!(detail.contains("root-only.txt"));
+        assert!(!detail.contains("README.md"));
     }
 
     #[test]

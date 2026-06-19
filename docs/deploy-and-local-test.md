@@ -340,8 +340,8 @@ Manual GUI smoke:
 - Confirm active Spotlight sessions keep auto-syncing after navigating away from
   the workspace page.
 - Confirm root-only edits make Spotlight Off/Sync fail without marking the
-  active session stopped and the Runtime status lists affected root paths with a
-  destructive Repair Spotlight warning.
+  active session stopped and the Runtime status prioritizes root-only affected
+  paths with a destructive Repair Spotlight warning.
 - Confirm Repair Spotlight explicitly discards root-only edits, reapplies the
   active Spotlight patch, and then Spotlight Off restores the clean root.
 - Confirm Shell, Codex, Claude Code, and Cursor actions use the current

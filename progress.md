@@ -295,9 +295,10 @@ Verified Phase 3 evidence so far:
 - Spotlight dirty-root Runtime failures now show targeted guidance that points
   to Repair Spotlight or manually cleaning/saving root changes instead of only
   echoing the raw backend error. Core dirty-root failures also include the
-  changed root paths when Git can identify them, and GTK shows those affected
-  paths as a review-style inline list with an explicit warning that Repair
-  Spotlight discards root-only edits.
+  changed root paths when Git can identify them, prioritizing root-only paths
+  over active Spotlight patch paths, and GTK shows those affected paths as a
+  review-style inline list with an explicit warning that Repair Spotlight
+  discards root-only edits.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

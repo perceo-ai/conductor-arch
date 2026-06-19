@@ -123,7 +123,7 @@ MVP is not complete until the normal workflow can be driven from the app.
   on stop, with a start-time checkpoint commit of the tracked workspace state
   and manual sync/switching between active Spotlight workspaces. Stop/sync/switch
   refuse to reverse the active patch when the root has extra edits and dirty-root
-  failures include a review-style affected path list and destructive Repair
+  failures prioritize root-only affected paths plus a destructive Repair
   Spotlight warning when Git can identify paths. The selected workspace page
   polls for active patch changes and auto-syncs them; the app shell also polls
   active Spotlight sessions across pages.

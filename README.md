@@ -206,8 +206,8 @@ Current GUI capabilities:
   polling interval. Stop/Sync/Switch refuse to proceed when the root has extra
   edits outside the active Spotlight patch. Repair Spotlight can explicitly
   discard root-only edits and reapply the active patch, and dirty-root Spotlight
-  failures list affected root paths and warn that Repair Spotlight discards
-  root-only edits before reapplying the active patch.
+  failures prioritize root-only affected paths and warn that Repair Spotlight
+  discards root-only edits before reapplying the active patch.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
