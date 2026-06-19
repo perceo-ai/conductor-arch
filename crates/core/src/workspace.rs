@@ -145,6 +145,14 @@ pub struct TerminalLogMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSessionSummary {
+    pub process: ProcessRecord,
+    pub line_count: usize,
+    pub byte_count: usize,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotlightSession {
     pub id: i64,
     pub repository_id: i64,
@@ -763,6 +771,22 @@ impl WorkspaceStore {
             }
         }
         Ok(matches)
+    }
+
+    pub fn list_terminal_summaries(&self, name: &str) -> Result<Vec<TerminalSessionSummary>> {
+        self.list_terminals(name)?
+            .into_iter()
+            .map(|process| {
+                let contents = fs::read_to_string(&process.log_path)
+                    .with_context(|| format!("read log {}", process.log_path.display()))?;
+                Ok(TerminalSessionSummary {
+                    process,
+                    line_count: contents.lines().count(),
+                    byte_count: contents.len(),
+                    preview: terminal_log_preview(&contents),
+                })
+            })
+            .collect()
     }
 
     pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
@@ -2454,6 +2478,17 @@ fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     let after_quote = after_colon.strip_prefix('"')?;
     let end = after_quote.find('"')?;
     Some(after_quote[..end].to_owned())
+}
+
+fn terminal_log_preview(contents: &str) -> String {
+    contents
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        })
+        .unwrap_or_else(|| "(empty transcript)".to_owned())
 }
 
 fn slugify(text: &str) -> String {
@@ -4438,6 +4473,57 @@ CUSTOM_VALUE = "from-settings"
         let transcript = store.read_terminal_log("berlin", older.id).unwrap();
 
         assert_eq!(transcript, "older transcript\n");
+    }
+
+    #[test]
+    fn list_terminal_summaries_includes_counts_and_preview_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let older = store
+            .record_terminal_process("berlin", "older shell", 4242)
+            .unwrap();
+        let newer = store
+            .record_terminal_process("berlin", "newer shell", 4243)
+            .unwrap();
+        store
+            .append_terminal_process_output(older.id, "older first\nolder last\n")
+            .unwrap();
+        store
+            .append_terminal_process_output(newer.id, "newer first\n\nnewer last\n")
+            .unwrap();
+
+        let summaries = store.list_terminal_summaries("berlin").unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].process.id, newer.id);
+        assert_eq!(summaries[0].line_count, 3);
+        assert_eq!(summaries[0].byte_count, 24);
+        assert_eq!(summaries[0].preview, "newer last");
+        assert_eq!(summaries[1].process.id, older.id);
+        assert_eq!(summaries[1].line_count, 2);
+        assert_eq!(summaries[1].byte_count, 23);
+        assert_eq!(summaries[1].preview, "older last");
     }
 
     #[test]

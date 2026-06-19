@@ -214,7 +214,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   appends process/line matches with one-line before/after context into the
   terminal transcript.
 - [ ] Terminal Show History lists recorded terminal sessions with status, pid,
-  exit code, log file, start time, and command.
+  exit code, log file, start time, line/byte counts, last-output preview, and
+  command.
 - [ ] Terminal Show History displays running/stopped/exited counts and orders
   terminal sessions newest first.
 - [ ] Load Transcript selector uses the same newest-first ordering as the

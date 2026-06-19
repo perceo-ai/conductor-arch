@@ -301,6 +301,9 @@ Verified Phase 3 evidence so far:
   discards root-only edits.
 - Runtime Spotlight status now passively shows `root clean` or root-only extra
   edit paths for the active Spotlight root before the user clicks Stop/Sync.
+- Terminal history now uses core-provided session summaries so Show History
+  includes line counts, byte counts, and last-output previews alongside status
+  counts and newest-first ordering.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

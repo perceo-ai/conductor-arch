@@ -6,7 +6,8 @@ use gtk::{
 };
 use linux_conductor_core::pty::PtySession;
 use linux_conductor_core::workspace::{
-    ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, WorkspaceStore,
+    ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
+    WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -493,25 +494,28 @@ fn run_terminal_history(
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = WorkspaceStore::open(database_path)
-            .and_then(|store| store.list_terminals(&workspace_name));
+            .and_then(|store| store.list_terminal_summaries(&workspace_name));
         let _ = tx.send(result);
     });
 
     glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(Ok(records)) => {
-            let display_records = terminal_history_records_for_display(&records);
+        Ok(Ok(summaries)) => {
+            let display_summaries = terminal_history_summaries_for_display(&summaries);
             history_combo.remove_all();
-            for record in &display_records {
+            for summary in &display_summaries {
                 history_combo.append(
-                    Some(&record.id.to_string()),
-                    &terminal_history_option_label(record),
+                    Some(&summary.process.id.to_string()),
+                    &terminal_history_option_label(summary),
                 );
             }
-            if !display_records.is_empty() {
+            if !display_summaries.is_empty() {
                 history_combo.set_active(Some(0));
             }
-            *history_records.borrow_mut() = display_records.clone();
-            append_text(&buffer, &format_terminal_history(&display_records));
+            *history_records.borrow_mut() = display_summaries
+                .iter()
+                .map(|summary| summary.process.clone())
+                .collect();
+            append_text(&buffer, &format_terminal_history(&display_summaries));
             glib::ControlFlow::Break
         }
         Ok(Err(err)) => {
@@ -591,72 +595,80 @@ fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> 
     text
 }
 
-fn format_terminal_history(records: &[ProcessRecord]) -> String {
+fn format_terminal_history(summaries: &[TerminalSessionSummary]) -> String {
     let mut text = "\n[terminal history]\n".to_owned();
-    if records.is_empty() {
+    if summaries.is_empty() {
         text.push_str("No terminal shells recorded.\n");
         return text;
     }
 
-    let running = records
+    let running = summaries
         .iter()
-        .filter(|record| record.status == ProcessStatus::Running)
+        .filter(|summary| summary.process.status == ProcessStatus::Running)
         .count();
-    let stopped = records
+    let stopped = summaries
         .iter()
-        .filter(|record| record.status == ProcessStatus::Stopped)
+        .filter(|summary| summary.process.status == ProcessStatus::Stopped)
         .count();
-    let exited = records
+    let exited = summaries
         .iter()
-        .filter(|record| record.status == ProcessStatus::Exited)
+        .filter(|summary| summary.process.status == ProcessStatus::Exited)
         .count();
     text.push_str(&format!(
         "{} sessions: {} running, {} stopped, {} exited\n",
-        records.len(),
+        summaries.len(),
         running,
         stopped,
         exited
     ));
 
-    let sorted_records = terminal_history_records_for_display(records);
+    let sorted_summaries = terminal_history_summaries_for_display(summaries);
 
-    for record in &sorted_records {
+    for summary in &sorted_summaries {
+        let record = &summary.process;
         let file_name = record
             .log_path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("terminal.log");
         text.push_str(&format!(
-            "#{} {} pid={} exit={} log={} started={}\n{}\n",
+            "#{} {} pid={} exit={} log={} started={}\n{} lines, {} bytes\npreview: {}\n{}\n",
             record.id,
             record.status.as_str(),
             record.pid,
             terminal_exit_label(record.exit_code),
             file_name,
             record.started_at,
+            summary.line_count,
+            summary.byte_count,
+            summary.preview,
             record.command
         ));
     }
     text
 }
 
-fn terminal_history_records_for_display(records: &[ProcessRecord]) -> Vec<ProcessRecord> {
-    let mut sorted_records = records.to_vec();
-    sorted_records.sort_by(|left, right| right.started_at.cmp(&left.started_at));
-    sorted_records
+fn terminal_history_summaries_for_display(
+    summaries: &[TerminalSessionSummary],
+) -> Vec<TerminalSessionSummary> {
+    let mut sorted_summaries = summaries.to_vec();
+    sorted_summaries.sort_by(|left, right| right.process.started_at.cmp(&left.process.started_at));
+    sorted_summaries
 }
 
-fn terminal_history_option_label(record: &ProcessRecord) -> String {
+fn terminal_history_option_label(summary: &TerminalSessionSummary) -> String {
+    let record = &summary.process;
     let file_name = record
         .log_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("terminal.log");
     format!(
-        "#{} {} pid={} {}",
+        "#{} {} pid={} {} lines {}",
         record.id,
         record.status.as_str(),
         record.pid,
+        summary.line_count,
         file_name
     )
 }
@@ -1114,6 +1126,35 @@ mod tests {
     use super::*;
     use linux_conductor_core::workspace::{ProcessKind, ProcessStatus};
 
+    fn terminal_summary(
+        id: i64,
+        command: &str,
+        status: ProcessStatus,
+        started_at: &str,
+        line_count: usize,
+        byte_count: usize,
+        preview: &str,
+    ) -> TerminalSessionSummary {
+        TerminalSessionSummary {
+            process: ProcessRecord {
+                id,
+                workspace_id: 1,
+                kind: ProcessKind::Terminal,
+                command: command.to_owned(),
+                pid: 4_000 + id as u32,
+                log_path: PathBuf::from(format!("/tmp/logs/terminal-{id}.log")),
+                status,
+                started_at: started_at.to_owned(),
+                exit_code: (status != ProcessStatus::Running).then_some(0),
+                ended_at: (status != ProcessStatus::Running)
+                    .then(|| "2026-06-18T04:00:00Z".to_owned()),
+            },
+            line_count,
+            byte_count,
+            preview: preview.to_owned(),
+        }
+    }
+
     #[test]
     fn terminal_search_results_render_process_line_and_empty_state() {
         let matches = vec![TerminalLogMatch {
@@ -1225,69 +1266,59 @@ mod tests {
 
     #[test]
     fn terminal_history_summary_lists_terminal_records() {
-        let records = vec![ProcessRecord {
-            id: 7,
-            workspace_id: 1,
-            kind: ProcessKind::Terminal,
-            command: "/bin/bash".to_owned(),
-            pid: 4242,
-            log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
-            status: ProcessStatus::Exited,
-            started_at: "2026-06-18T02:00:00Z".to_owned(),
-            exit_code: Some(0),
-            ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
-        }];
+        let summaries = vec![terminal_summary(
+            7,
+            "/bin/bash",
+            ProcessStatus::Exited,
+            "2026-06-18T02:00:00Z",
+            2,
+            21,
+            "build finished",
+        )];
 
-        let rendered = format_terminal_history(&records);
+        let rendered = format_terminal_history(&summaries);
 
         assert!(rendered.contains("[terminal history]"));
-        assert!(rendered.contains("#7 exited pid=4242 exit=0"));
-        assert!(rendered.contains("terminal-4242.log"));
+        assert!(rendered.contains("#7 exited pid=4007 exit=0"));
+        assert!(rendered.contains("2 lines, 21 bytes"));
+        assert!(rendered.contains("preview: build finished"));
+        assert!(rendered.contains("terminal-7.log"));
         assert!(rendered.contains("/bin/bash"));
     }
 
     #[test]
     fn terminal_history_summary_counts_statuses_and_lists_newest_first() {
-        let records = vec![
-            ProcessRecord {
-                id: 7,
-                workspace_id: 1,
-                kind: ProcessKind::Terminal,
-                command: "/bin/bash".to_owned(),
-                pid: 4242,
-                log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
-                status: ProcessStatus::Exited,
-                started_at: "2026-06-18T02:00:00Z".to_owned(),
-                exit_code: Some(0),
-                ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
-            },
-            ProcessRecord {
-                id: 9,
-                workspace_id: 1,
-                kind: ProcessKind::Terminal,
-                command: "/bin/zsh".to_owned(),
-                pid: 5252,
-                log_path: PathBuf::from("/tmp/logs/terminal-5252.log"),
-                status: ProcessStatus::Running,
-                started_at: "2026-06-18T03:00:00Z".to_owned(),
-                exit_code: None,
-                ended_at: None,
-            },
-            ProcessRecord {
-                id: 8,
-                workspace_id: 1,
-                kind: ProcessKind::Terminal,
-                command: "/bin/fish".to_owned(),
-                pid: 4343,
-                log_path: PathBuf::from("/tmp/logs/terminal-4343.log"),
-                status: ProcessStatus::Stopped,
-                started_at: "2026-06-18T02:30:00Z".to_owned(),
-                exit_code: Some(143),
-                ended_at: Some("2026-06-18T02:35:00Z".to_owned()),
-            },
+        let summaries = vec![
+            terminal_summary(
+                7,
+                "/bin/bash",
+                ProcessStatus::Exited,
+                "2026-06-18T02:00:00Z",
+                1,
+                7,
+                "bash",
+            ),
+            terminal_summary(
+                9,
+                "/bin/zsh",
+                ProcessStatus::Running,
+                "2026-06-18T03:00:00Z",
+                1,
+                6,
+                "zsh",
+            ),
+            terminal_summary(
+                8,
+                "/bin/fish",
+                ProcessStatus::Stopped,
+                "2026-06-18T02:30:00Z",
+                1,
+                7,
+                "fish",
+            ),
         ];
 
-        let rendered = format_terminal_history(&records);
+        let rendered = format_terminal_history(&summaries);
 
         assert!(rendered.contains("3 sessions: 1 running, 1 stopped, 1 exited"));
         let zsh = rendered.find("#9 running").unwrap();
@@ -1298,38 +1329,35 @@ mod tests {
     }
 
     #[test]
-    fn terminal_history_records_for_display_are_newest_first() {
-        let records = vec![
-            ProcessRecord {
-                id: 7,
-                workspace_id: 1,
-                kind: ProcessKind::Terminal,
-                command: "/bin/bash".to_owned(),
-                pid: 4242,
-                log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
-                status: ProcessStatus::Exited,
-                started_at: "2026-06-18T02:00:00Z".to_owned(),
-                exit_code: Some(0),
-                ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
-            },
-            ProcessRecord {
-                id: 9,
-                workspace_id: 1,
-                kind: ProcessKind::Terminal,
-                command: "/bin/zsh".to_owned(),
-                pid: 5252,
-                log_path: PathBuf::from("/tmp/logs/terminal-5252.log"),
-                status: ProcessStatus::Running,
-                started_at: "2026-06-18T03:00:00Z".to_owned(),
-                exit_code: None,
-                ended_at: None,
-            },
+    fn terminal_history_summaries_for_display_are_newest_first() {
+        let summaries = vec![
+            terminal_summary(
+                7,
+                "/bin/bash",
+                ProcessStatus::Exited,
+                "2026-06-18T02:00:00Z",
+                1,
+                7,
+                "bash",
+            ),
+            terminal_summary(
+                9,
+                "/bin/zsh",
+                ProcessStatus::Running,
+                "2026-06-18T03:00:00Z",
+                1,
+                6,
+                "zsh",
+            ),
         ];
 
-        let sorted = terminal_history_records_for_display(&records);
+        let sorted = terminal_history_summaries_for_display(&summaries);
 
         assert_eq!(
-            sorted.iter().map(|record| record.id).collect::<Vec<_>>(),
+            sorted
+                .iter()
+                .map(|summary| summary.process.id)
+                .collect::<Vec<_>>(),
             vec![9, 7]
         );
     }

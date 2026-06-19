@@ -293,7 +293,8 @@ Manual GUI smoke:
   appends process/line matches with one-line before/after context into the
   terminal transcript.
 - Confirm Terminal Show History lists recorded terminal sessions with status,
-  pid, exit code, log file, start time, and command.
+  pid, exit code, log file, start time, line/byte counts, last-output preview,
+  and command.
 - Confirm Terminal Show History displays running/stopped/exited counts and
   orders terminal sessions newest first.
 - Confirm the Load Transcript selector uses the same newest-first ordering as
