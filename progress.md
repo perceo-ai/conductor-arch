@@ -311,6 +311,8 @@ Verified Phase 3 evidence so far:
 - Local review comments now render as actionable rows in the GTK Review tab,
   can be added from the GUI with file/line/body fields, and open comments can be
   marked resolved from the GUI.
+- Checks tab now has a first-slice PR creation form with title/body/draft
+  fields wired to the existing core GitHub PR creation flow.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

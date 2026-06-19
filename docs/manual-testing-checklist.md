@@ -85,9 +85,9 @@ They are intentionally stricter than the current prototype smoke path.
 - [ ] Resolved comments can be marked resolved from the GUI.
 - [ ] Selected files can be reverted from the review flow where safe.
 - [ ] The app detects sibling workspaces that changed the same files.
-- [ ] The GitHub workflow is usable from the GUI: push branch, create PR, view
-  PR state, show checks, surface failures, show comments/reviews, merge PR, and
-  archive after merge.
+- [ ] The GitHub workflow is usable from the GUI: create PR, view PR state,
+  show checks, surface failures, show comments/reviews, merge PR, and archive
+  after merge.
 - [ ] Failing checks, unresolved comments, open todos, and conflicts can be sent
   to an agent with the relevant context.
 - [x] Project settings can be viewed and edited from the GUI: setup/run/archive

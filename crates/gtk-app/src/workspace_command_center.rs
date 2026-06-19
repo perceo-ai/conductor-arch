@@ -618,7 +618,7 @@ fn changes_checks_review_tabs(
         "Changes",
     );
     tabs.add_titled(
-        &text_panel(&workspace_checks_text(store, name)),
+        &workspace_checks_panel(db_path, store, name, refresh_hub.clone()),
         Some("checks"),
         "Checks",
     );
@@ -782,6 +782,78 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
             )
         }
         Err(err) => format!("Could not read checks: {err:#}"),
+    }
+}
+
+fn workspace_checks_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.append(&text_panel(&workspace_checks_text(store, name)));
+
+    let pr_form = GBox::new(Orientation::Horizontal, 8);
+    let title_entry = Entry::new();
+    title_entry.set_placeholder_text(Some("PR title (blank = gh --fill)"));
+    title_entry.set_hexpand(true);
+    let body_entry = Entry::new();
+    body_entry.set_placeholder_text(Some("PR body"));
+    body_entry.set_hexpand(true);
+    let draft = CheckButton::with_label("Draft");
+    let create_btn = Button::with_label("Create PR");
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    let db_for_create = db_path.to_path_buf();
+    let workspace_for_create = name.to_owned();
+    let refresh_after_create = refresh_hub;
+    let title_for_create = title_entry.clone();
+    let body_for_create = body_entry.clone();
+    let draft_for_create = draft.clone();
+    let feedback_for_create = feedback.clone();
+    create_btn.connect_clicked(move |_| {
+        let title = optional_entry_text(&title_for_create);
+        let body = optional_entry_text(&body_for_create);
+        let result = WorkspaceStore::open(db_for_create.clone()).and_then(|store| {
+            store.create_pull_request(
+                &workspace_for_create,
+                title.as_deref(),
+                body.as_deref(),
+                draft_for_create.is_active(),
+            )
+        });
+        feedback_for_create.set_text(&pull_request_create_feedback(result));
+        refresh_after_create.refresh(RefreshScope::All);
+    });
+
+    pr_form.append(&title_entry);
+    pr_form.append(&body_entry);
+    pr_form.append(&draft);
+    pr_form.append(&create_btn);
+    panel.append(&pr_form);
+    panel.append(&feedback);
+    panel
+}
+
+fn optional_entry_text(entry: &Entry) -> Option<String> {
+    let value = entry.text().trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
+    match result {
+        Ok(output) => output
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| line.starts_with("https://"))
+            .map(|url| format!("Created PR: {url}"))
+            .unwrap_or_else(|| "Created PR.".to_owned()),
+        Err(err) => format!("Create PR failed: {err:#}"),
     }
 }
 
@@ -1317,6 +1389,25 @@ mod tests {
         assert_eq!(
             parse_review_comment_line("0").unwrap_err(),
             "line must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn pull_request_create_feedback_summarizes_output() {
+        let success = pull_request_create_feedback(Ok(
+            "Creating pull request\nhttps://github.com/example/demo/pull/42\n".to_owned(),
+        ));
+        assert_eq!(
+            success,
+            "Created PR: https://github.com/example/demo/pull/42"
+        );
+
+        let failure = pull_request_create_feedback(Err(anyhow::anyhow!(
+            "workspace berlin has no changed files"
+        )));
+        assert_eq!(
+            failure,
+            "Create PR failed: workspace berlin has no changed files"
         );
     }
 

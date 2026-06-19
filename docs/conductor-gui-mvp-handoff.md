@@ -363,7 +363,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   Spotlight workspace trees, but it is not full Conductor-level Spotlight parity.
 - Changes/checks/todos/process panels are basic, not review-grade. Local review
   comments can be added and marked resolved from the Review tab.
-- GitHub integration is backend/CLI-heavy and not a real GUI workflow.
+- GitHub integration is still backend/CLI-heavy; GTK can create a PR through
+  the Checks tab, but review/check/merge workflow is not complete.
 - History reads old Conductor DB but is not a first-class app history model.
 - Project settings editor is functional but still needs Conductor-level polish,
   validation, and full managed/user layer visibility.
