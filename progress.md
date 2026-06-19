@@ -283,7 +283,8 @@ Verified Phase 3 evidence so far:
   to Repair Spotlight or manually cleaning/saving root changes instead of only
   echoing the raw backend error. Core dirty-root failures also include the
   changed root paths when Git can identify them, and GTK shows those affected
-  paths inline.
+  paths as a review-style inline list with an explicit warning that Repair
+  Spotlight discards root-only edits.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,
@@ -319,13 +320,14 @@ Still needs Phase 4 work:
   restart. Latest transcript restore is built, but that is not the same as
   reattaching to the old shell process.
 - Full Spotlight parity: app-open recursive file watching now exists, and
-  dirty-root conflicts now name affected paths, but there is still no
-  app-closed/background watcher, polished conflict review/merge UI, or
+  dirty-root conflicts now list affected paths with a destructive repair
+  warning, but there is still no app-closed/background watcher, merge/diff
+  conflict resolution UI, or
   Conductor-level parity around every checkpoint/watch edge case. Current
   support is manual checkpoint/apply/restore/switch/sync plus event-triggered
   and app-wide polling sync of tracked changes, dirty-root refusal before patch
-  reversal, affected-path conflict details, and an explicit destructive root
-  repair action.
+  reversal, review-style affected-path conflict details, and an explicit
+  destructive root repair action.
 - Toasts and richer error/progress state beyond Runtime and lifecycle failure
   toasts.
 

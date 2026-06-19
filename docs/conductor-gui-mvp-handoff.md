@@ -354,9 +354,10 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   are still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
   slice with app-wide polling sync, dirty-root refusal before patch reversal,
-  affected-path dirty-root guidance in the Runtime panel, explicit destructive
-  root repair, and app-open recursive file watching for active Spotlight
-  workspace trees, but it is not full Conductor-level Spotlight parity.
+  review-style affected-path dirty-root guidance in the Runtime panel, explicit
+  destructive root repair, and app-open recursive file watching for active
+  Spotlight workspace trees, but it is not full Conductor-level Spotlight
+  parity.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.

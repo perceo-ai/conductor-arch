@@ -203,8 +203,8 @@ Current GUI capabilities:
   polling interval. Stop/Sync/Switch refuse to proceed when the root has extra
   edits outside the active Spotlight patch. Repair Spotlight can explicitly
   discard root-only edits and reapply the active patch, and dirty-root Spotlight
-  failures point users to affected root paths, Repair Spotlight, or manual
-  clean/save.
+  failures list affected root paths and warn that Repair Spotlight discards
+  root-only edits before reapplying the active patch.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -398,8 +398,9 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
   tracked workspace changes, and the selected workspace page polls for changed
   active patches; the app shell also polls active Spotlight sessions across
   pages. Repair Spotlight can explicitly discard root-only edits and reapply the
-  active patch, and dirty-root failures can name affected root paths. The GTK
-  app also watches active Spotlight workspace trees while open and uses file
+  active patch, and dirty-root failures list affected root paths with a
+  destructive repair warning. The GTK app also watches active Spotlight
+  workspace trees while open and uses file
   events to trigger sync, with polling as a fallback.
 
 ### Environment variables available in scripts

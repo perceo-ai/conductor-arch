@@ -984,12 +984,18 @@ struct RuntimeActionFeedback {
 
 fn runtime_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
     if is_spotlight_dirty_root_error(err) {
-        let detail = spotlight_dirty_root_detail(err)
-            .map(|detail| format!(" Affected paths: {detail}."))
+        let detail = spotlight_dirty_root_paths(err)
+            .map(|paths| {
+                let list = paths
+                    .into_iter()
+                    .map(|path| format!("\n- {path}"))
+                    .collect::<String>();
+                format!("\nConflicting root edits:{list}")
+            })
             .unwrap_or_default();
         return RuntimeActionFeedback {
             status_text: format!(
-                "{action} blocked: repository root has extra edits outside the active Spotlight patch.{detail} Use Repair Spotlight to discard root-only edits and reapply the active patch, or clean/save root changes manually."
+                "{action} blocked: repository root has extra edits outside the active Spotlight patch.{detail}\nRepair Spotlight discards root-only edits and reapplies the active patch. Clean/save root changes manually if you need to keep them."
             ),
             toast_text: Some(
                 "Spotlight root has extra edits. Use Repair Spotlight or clean/save root changes."
@@ -1018,6 +1024,17 @@ fn spotlight_dirty_root_detail(err: &anyhow::Error) -> Option<String> {
         .unwrap_or(detail)
         .trim();
     (!detail.is_empty()).then(|| detail.to_owned())
+}
+
+fn spotlight_dirty_root_paths(err: &anyhow::Error) -> Option<Vec<String>> {
+    let detail = spotlight_dirty_root_detail(err)?;
+    let paths = detail
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    (!paths.is_empty()).then_some(paths)
 }
 
 fn lifecycle_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
@@ -1072,6 +1089,21 @@ mod tests {
                 "Spotlight root has extra edits. Use Repair Spotlight or clean/save root changes."
             )
         );
+    }
+
+    #[test]
+    fn spotlight_conflict_feedback_lists_paths_and_warns_repair_discards_root_edits() {
+        let feedback = runtime_action_failure_feedback(
+            "Spotlight stop",
+            &anyhow::anyhow!(
+                "repository root has changes outside the active Spotlight patch; changed root paths: root-only.txt, config/local.env; clean or save root changes before changing Spotlight state"
+            ),
+        );
+
+        assert!(feedback.status_text.contains("Conflicting root edits:"));
+        assert!(feedback.status_text.contains("- root-only.txt"));
+        assert!(feedback.status_text.contains("- config/local.env"));
+        assert!(feedback.status_text.contains("Repair Spotlight discards"));
     }
 
     #[test]
