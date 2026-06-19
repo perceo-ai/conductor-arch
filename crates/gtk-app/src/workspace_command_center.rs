@@ -1,8 +1,8 @@
 use adw::{Toast, ToastOverlay};
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, CheckButton, Entry, Label, Orientation, Paned, PolicyType, ScrolledWindow,
-    Stack, StackSwitcher, TextView,
+    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, Paned, PolicyType,
+    ScrolledWindow, Stack, StackSwitcher, TextView,
 };
 use linux_conductor_core::workspace::{DiffFileSummary, ReviewComment, Workspace, WorkspaceStore};
 use std::path::Path;
@@ -803,6 +803,13 @@ fn workspace_checks_panel(
     body_entry.set_hexpand(true);
     let draft = CheckButton::with_label("Draft");
     let create_btn = Button::with_label("Create PR");
+    let merge_row = GBox::new(Orientation::Horizontal, 8);
+    let merge_method = ComboBoxText::new();
+    merge_method.append(Some("squash"), "Squash");
+    merge_method.append(Some("merge"), "Merge");
+    merge_method.append(Some("rebase"), "Rebase");
+    merge_method.set_active_id(Some("squash"));
+    let merge_btn = Button::with_label("Merge PR");
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
@@ -810,7 +817,7 @@ fn workspace_checks_panel(
 
     let db_for_create = db_path.to_path_buf();
     let workspace_for_create = name.to_owned();
-    let refresh_after_create = refresh_hub;
+    let refresh_after_create = refresh_hub.clone();
     let title_for_create = title_entry.clone();
     let body_for_create = body_entry.clone();
     let draft_for_create = draft.clone();
@@ -830,11 +837,30 @@ fn workspace_checks_panel(
         refresh_after_create.refresh(RefreshScope::All);
     });
 
+    let db_for_merge = db_path.to_path_buf();
+    let workspace_for_merge = name.to_owned();
+    let refresh_after_merge = refresh_hub;
+    let merge_method_for_merge = merge_method.clone();
+    let feedback_for_merge = feedback.clone();
+    merge_btn.connect_clicked(move |_| {
+        let method = merge_method_for_merge
+            .active_id()
+            .map(|method| method.to_string())
+            .unwrap_or_else(|| "squash".to_owned());
+        let result = WorkspaceStore::open(db_for_merge.clone())
+            .and_then(|store| store.merge_pull_request(&workspace_for_merge, &method));
+        feedback_for_merge.set_text(&pull_request_merge_feedback(result));
+        refresh_after_merge.refresh(RefreshScope::All);
+    });
+
     pr_form.append(&title_entry);
     pr_form.append(&body_entry);
     pr_form.append(&draft);
     pr_form.append(&create_btn);
     panel.append(&pr_form);
+    merge_row.append(&merge_method);
+    merge_row.append(&merge_btn);
+    panel.append(&merge_row);
     panel.append(&feedback);
     panel
 }
@@ -854,6 +880,18 @@ fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
             .map(|url| format!("Created PR: {url}"))
             .unwrap_or_else(|| "Created PR.".to_owned()),
         Err(err) => format!("Create PR failed: {err:#}"),
+    }
+}
+
+fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
+    match result {
+        Ok(output) => output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| format!("Merged PR: {line}"))
+            .unwrap_or_else(|| "Merged PR.".to_owned()),
+        Err(err) => format!("Merge PR failed: {err:#}"),
     }
 }
 
@@ -1408,6 +1446,22 @@ mod tests {
         assert_eq!(
             failure,
             "Create PR failed: workspace berlin has no changed files"
+        );
+    }
+
+    #[test]
+    fn pull_request_merge_feedback_summarizes_output() {
+        let success = pull_request_merge_feedback(Ok(
+            "Merged pull request #42\nDeleted branch lc/berlin\n".to_owned(),
+        ));
+        assert_eq!(success, "Merged PR: Merged pull request #42");
+
+        let failure = pull_request_merge_feedback(Err(anyhow::anyhow!(
+            "2 open todo(s) remain in workspace berlin"
+        )));
+        assert_eq!(
+            failure,
+            "Merge PR failed: 2 open todo(s) remain in workspace berlin"
         );
     }
 

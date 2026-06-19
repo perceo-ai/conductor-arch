@@ -275,7 +275,7 @@ Manual GUI smoke:
 - Confirm the Workspace page opens from the sidebar and shows rough Chats,
   Terminal, Changes, Checks, Todos, and Processes tabs.
 - Confirm the Checks tab exposes the Create PR form with title, body, and draft
-  controls.
+  controls plus a Merge PR control with squash/merge/rebase methods.
 - Confirm the Review tab can add a local file/line/body comment, lists local
   review comments, and the Resolve button marks an open comment resolved.
 - Confirm the Terminal tab runs a short command, shows stdout/stderr, and
@@ -389,7 +389,8 @@ Known GUI MVP gaps:
   validation, monorepo directory selection, and linked-directory workflows are
   still pending.
 - No rich diff/review/comment GUI yet.
-- No full GUI-first GitHub PR/check/merge workflow yet.
+- No full GUI-first GitHub PR/check/archive workflow yet; the Checks tab only
+  has first-slice PR create/merge controls.
 
 ## 12. Build Release Artifacts
 

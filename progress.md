@@ -313,6 +313,8 @@ Verified Phase 3 evidence so far:
   marked resolved from the GUI.
 - Checks tab now has a first-slice PR creation form with title/body/draft
   fields wired to the existing core GitHub PR creation flow.
+- Checks tab now exposes first-slice PR merge controls with squash/merge/rebase
+  methods wired to the existing core GitHub merge flow and todo-blocking guard.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

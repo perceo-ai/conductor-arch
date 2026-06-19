@@ -226,7 +226,7 @@ Still missing from the real MVP:
 - Monorepo directory selection and linked-directory workflows.
 - Rich diff/review/comment UI beyond the current file summary, raw unified diff,
   local review comments, staged review prompts, and local comment resolution.
-- GUI-first GitHub PR/check/merge workflow beyond first-slice PR creation.
+- GUI-first GitHub PR/check workflow beyond first-slice create/merge controls.
 - Polished Conductor visual parity.
 
 Launch the GUI pre-selecting a workspace:
