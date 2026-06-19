@@ -202,55 +202,55 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   reports the exit code without freezing the app.
 - [ ] Terminal tab can start a workspace shell, accept typed input after the
   shell starts, stream output, and stop the shell.
-- [ ] Terminal tab can start multiple PTY shells, select the active shell, send
+- [x] Terminal tab can start multiple PTY shells, select the active shell, send
   input to the selected shell, and stop only the selected shell.
-- [ ] Stopping one selected shell leaves its tab visible as stopped and
+- [x] Stopping one selected shell leaves its tab visible as stopped and
   auto-selects another running shell when one exists.
-- [ ] Processes tab shows the embedded terminal shell as running after Start
+- [x] Processes tab shows the embedded terminal shell as running after Start
   Shell and stopped with exit code `143` after Stop Shell without waiting for
   the global polling refresh.
-- [ ] Starting more than one embedded shell records distinct terminal log paths
+- [x] Starting more than one embedded shell records distinct terminal log paths
   in the Processes tab instead of reusing one shared terminal log.
-- [ ] PTY shell command echoes and output appear in that terminal process log,
+- [x] PTY shell command echoes and output appear in that terminal process log,
   not only in the on-screen transcript.
-- [ ] Terminal history search finds matching persisted transcript lines and
+- [x] Terminal history search finds matching persisted transcript lines and
   appends process/line matches with one-line before/after context into the
   terminal transcript.
-- [ ] Terminal Show History lists recorded terminal sessions with status, pid,
+- [x] Terminal Show History lists recorded terminal sessions with status, pid,
   exit code, log file, start time, line/byte counts, last-output preview, and
   command.
-- [ ] Terminal Show History displays running/stopped/exited counts and orders
+- [x] Terminal Show History displays running/stopped/exited counts and orders
   terminal sessions newest first.
-- [ ] Load Transcript selector uses the same newest-first ordering as the
+- [x] Load Transcript selector uses the same newest-first ordering as the
   rendered history list.
-- [ ] Selecting a recorded terminal session and clicking Load Transcript
+- [x] Selecting a recorded terminal session and clicking Load Transcript
   replaces the terminal view with that session's persisted transcript.
-- [ ] Reopening the GTK app after terminal output exists restores the latest
+- [x] Reopening the GTK app after terminal output exists restores the latest
   terminal transcript into the terminal view.
-- [ ] Terminal commands that emit ANSI color/control sequences show readable
+- [x] Terminal commands that emit ANSI color/control sequences show readable
   text in the GTK transcript instead of raw escape codes.
-- [ ] Terminal commands that redraw progress with carriage returns show the
+- [x] Terminal commands that redraw progress with carriage returns show the
   latest progress line instead of raw `\r` artifacts.
-- [ ] Terminal commands that redraw a spinner with backspaces show the latest
+- [x] Terminal commands that redraw a spinner with backspaces show the latest
   spinner character instead of raw backspace artifacts.
-- [ ] Terminal commands that redraw one line using cursor-up plus clear-line
+- [x] Terminal commands that redraw one line using cursor-up plus clear-line
   sequences show the latest line instead of stale duplicate lines.
-- [ ] Terminal commands that save and restore the cursor position overwrite at
+- [x] Terminal commands that save and restore the cursor position overwrite at
   the restored location instead of appending at the end.
-- [ ] Terminal commands that use erase-line modes clear the intended part of
+- [x] Terminal commands that use erase-line modes clear the intended part of
   the visible transcript line instead of appending stale text.
-- [ ] Terminal commands that clear the screen and move the cursor home show only
+- [x] Terminal commands that clear the screen and move the cursor home show only
   the fresh screen contents instead of stale previous output.
-- [ ] Resizing the GTK terminal area updates the active PTY shell size; `stty
+- [x] Resizing the GTK terminal area updates the active PTY shell size; `stty
   size` from the shell reflects the resized grid.
-- [ ] Long terminal output caps the on-screen transcript with a scrollback
+- [x] Long terminal output caps the on-screen transcript with a scrollback
   trimmed marker while the persisted raw terminal log remains complete.
-- [ ] If an embedded terminal shell exits outside the app, the Processes tab
+- [x] If an embedded terminal shell exits outside the app, the Processes tab
   eventually marks its terminal row exited after the app-wide reconciliation
   poller runs.
-- [ ] If the app starts with stale terminal process rows from an earlier crash,
+- [x] If the app starts with stale terminal process rows from an earlier crash,
   those rows are marked exited during startup reconciliation.
-- [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
+- [x] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
 - [ ] With `spotlight_testing = true`, Spotlight On applies tracked workspace
   changes to a clean repository root and Spotlight Off restores the root.
 - [ ] Spotlight On creates a checkpoint entry for the tracked workspace state.
@@ -288,9 +288,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   line redraws, saved-cursor restore, erase-line redraws, clear-screen/home
   redraws, and resize propagation; stale process rows reconcile at startup and while the
   app is open, and shell records get distinct searchable raw transcript logs with
-  capped on-screen scrollback, latest-transcript restore, and clickable
-  live-shell tabs, but this is not a full emulator/live PTY reattach model, full
-  terminal tab model, or polished terminal history/scrollback browser.
+  capped on-screen scrollback, latest-transcript restore, and clickable tabs
+  showing recent stopped sessions. But this is not a full emulator or polished
+  terminal history/scrollback browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, app-open recursive file watching for active Spotlight workspace

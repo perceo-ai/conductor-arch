@@ -187,9 +187,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   The terminal panel has clickable live-shell
   tabs so multiple live PTY shells can run, Stop Shell targets the selected tab,
   and stopping one tab automatically selects another running tab when available.
-  Broader cursor/session emulation, a full multi-terminal tab model beyond
-  clickable live-shell tabs, a more polished terminal history/scrollback
-  browser, and live PTY process reattach after app restart are still missing.
+  Broader cursor/session emulation, richer terminal tab lifecycle controls, a more polished terminal history/scrollback
+  browser are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
   review-style affected-path dirty-root guidance in the Runtime panel,

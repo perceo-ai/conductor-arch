@@ -537,11 +537,10 @@ Cursor interactive sessions, see
 - **No native agent chat or polished terminal emulator yet.** The GUI has a
   PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
   chat, broader cursor/session polish beyond basic ANSI stripping and common
-  redraws, a full multi-terminal tab model beyond clickable live-shell tabs, a
-  polished history/scrollback browser beyond summarized session
-  listing/transcript search, and live PTY process reattach after app restart are
-  still MVP work. Open review comments can be staged as an agent prompt, but
-  they are not sent into a live bidirectional chat yet.
+  redraws, richer multi-terminal session management than basic live-tab switching,
+  and a polished history/scrollback browser beyond summarized session listing/transcript
+  search are still MVP work. Open review comments can be staged as an agent
+  prompt, but they are not sent into a live bidirectional chat yet.
   Latest transcript restore is built.
   Background `session start` remains available when you want supervised process
   records and captured logs.

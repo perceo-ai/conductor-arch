@@ -172,6 +172,37 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         &spotlight_watcher,
     );
 
+    {
+        let db_path_on_close = app_state.workspace_database_path();
+        let hub_on_close = refresh_hub.clone();
+        let spotlight_watcher_on_close = spotlight_watcher.clone();
+        window.connect_destroy(move |_| {
+            *spotlight_watcher_on_close.borrow_mut() = None;
+            if reconcile_runtime_state(&db_path_on_close)
+                .map(|report| report.changed())
+                .unwrap_or(false)
+            {
+                hub_on_close.refresh(RefreshScope::All);
+            }
+        });
+    }
+
+    {
+        let db_path_on_focus = app_state.workspace_database_path();
+        let hub_on_focus = refresh_hub.clone();
+        window.connect_is_active_notify(move |window| {
+            if !window.is_active() {
+                return;
+            }
+            if reconcile_runtime_state(&db_path_on_focus)
+                .map(|report| report.changed())
+                .unwrap_or(false)
+            {
+                hub_on_focus.refresh(RefreshScope::All);
+            }
+        });
+    }
+
     // Keyboard shortcut: Ctrl+R → refresh all panels
     let evk = gtk::EventControllerKey::new();
     let hub_kb = refresh_hub.clone();

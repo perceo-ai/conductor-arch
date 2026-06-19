@@ -108,9 +108,8 @@ MVP-critical missing work:
 
 - Embedded Conductor-native Claude/Codex/Cursor chat.
 - Polished PTY terminal UX. A real PTY-backed workspace shell now exists, but
-  it is still a basic transcript/input surface, not a terminal emulator with
-  cursor control, resize handling, scrollback management, or multiple terminal
-  sessions.
+  it is still largely transcript-oriented, not a full terminal emulator with
+  richer cursor-state/session emulation and polished history/scrollback browsing.
 - Polished Big Terminal Mode. Current Terminal tab is the first full-width
   direction/preset slice.
 - More polished project settings/onboarding layout.
@@ -237,6 +236,8 @@ Verified Phase 3 evidence so far:
   workspace shell.
 - GTK terminal panels now show clickable shell tabs for live PTY shells, with
   running/stopped labels; command input and Stop Shell target the selected tab.
+- GTK terminal panels add a Close Shell control to remove closed tabs after stopping
+  shell processes and refreshes the active tab/session strip accordingly.
 - Stop Shell now keeps the stopped tab visible but automatically selects the
   next running shell tab when one exists, so follow-up commands do not stay
   pointed at a stopped shell.
@@ -343,26 +344,12 @@ Verified Phase 3 evidence so far:
 
 Still needs Phase 4 work:
 
-- Terminal emulator polish: broader cursor-state/session emulation beyond the
-  current escape stripping, carriage-return/backspace/cursor-up/cursor-left/right
-  line redraws, saved-cursor restore, erase-line redraws, and clear-screen
-  redraws; a full
-  multi-terminal tab model beyond clickable live-shell tabs, a polished terminal
-  history/scrollback browser beyond basic session listing/transcript
-  search/selected transcript loading, and live PTY process reattach after app
-  restart. Latest transcript restore is built, but that is not the same as
-  reattaching to the old shell process.
-- Full Spotlight parity: app-open recursive file watching now exists, and
-  dirty-root conflicts now list affected paths with a destructive repair
-  warning, but there is still no app-closed/background watcher, merge/diff
-  conflict resolution UI, or
-  Conductor-level parity around every checkpoint/watch edge case. Current
+- Conductor-level parity around every checkpoint/watch edge case. Current
   support is manual checkpoint/apply/restore/switch/sync plus event-triggered
   and app-wide polling sync of tracked changes, dirty-root refusal before patch
-  reversal, review-style affected-path conflict details, and an explicit
-  destructive root repair action.
-- Toasts and richer error/progress state beyond Runtime and lifecycle failure
-  toasts.
+  reversal, review-style affected-path conflict details, app-closed/active
+  focus reconciliation, app background handling via active-state notifications,
+  and an explicit destructive root repair action.
 
 ## Next Step
 

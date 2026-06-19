@@ -18,6 +18,7 @@ pub enum AppPage {
 pub enum WorkspaceTab {
     Chats,
     Changes,
+    Checkpoints,
     Checks,
     Todos,
     Processes,

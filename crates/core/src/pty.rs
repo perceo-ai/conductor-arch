@@ -106,6 +106,10 @@ impl PtySession {
             .context("resize pty")
     }
 
+    pub fn has_exited(&mut self) -> Result<bool> {
+        Ok(self.child.try_wait().context("poll pty child")?.is_some())
+    }
+
     pub fn read_available(&mut self) -> String {
         let Ok(output) = self.output.lock() else {
             return String::new();

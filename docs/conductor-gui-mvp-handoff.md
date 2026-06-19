@@ -350,11 +350,10 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   app restart, and list recorded terminal sessions/logs with status counts,
   line/byte counts, and last-output previews newest first. The terminal history
   selector uses the same newest-first order. The terminal panel has clickable
-  live-shell tabs for multiple live PTY shells and auto-selects another running
-  tab after a stop; broader cursor/session emulation, a full multi-terminal tab
-  model beyond clickable live-shell tabs, a more polished terminal
-  history/scrollback browser, and live PTY process reattach after app restart
-  are still missing.
+  tabs for recent shells (including stopped sessions) and auto-selects another
+  running tab after a stop; broader cursor/session emulation and a more polished
+  terminal history/scrollback browser has a clickable session list, but richer
+  scrollback browsing beyond basic session loading is still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
   slice with app-wide polling sync, dirty-root refusal before patch reversal,
   review-style root-only affected-path dirty-root guidance in the Runtime panel,

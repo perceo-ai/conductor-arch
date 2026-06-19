@@ -109,6 +109,7 @@ pub(crate) fn build_workspace_command_center(
             &ws,
             &state,
             refresh_hub.clone(),
+            toast_overlay.clone(),
         ));
     };
     refresh();
@@ -269,7 +270,10 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_setup.clone())
             .and_then(|store| store.setup_workspace(&setup_workspace))
         {
-            Ok(record) => status_setup.set_text(&format!("Setup started: pid {}", record.pid)),
+            Ok(record) => {
+                let message = format!("Setup started: pid {}", record.pid);
+                apply_action_feedback(&status_setup, &toast_setup, &message, true);
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_setup,
                 &toast_setup,
@@ -289,7 +293,10 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_run.clone())
             .and_then(|store| store.run_workspace(&run_workspace))
         {
-            Ok(record) => status_run.set_text(&format!("Run started: pid {}", record.pid)),
+            Ok(record) => {
+                let message = format!("Run started: pid {}", record.pid);
+                apply_action_feedback(&status_run, &toast_run, &message, true);
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_run,
                 &toast_run,
@@ -309,7 +316,10 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_stop.clone())
             .and_then(|store| store.stop_workspace(&stop_workspace))
         {
-            Ok(record) => status_stop.set_text(&format!("Stopped pid {}", record.pid)),
+            Ok(record) => {
+                let message = format!("Stopped pid {}", record.pid);
+                apply_action_feedback(&status_stop, &toast_stop, &message, true);
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_stop,
                 &toast_stop,
@@ -329,8 +339,10 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_spotlight_on.clone())
             .and_then(|store| store.spotlight_start(&spotlight_workspace))
         {
-            Ok(session) => status_spotlight_on
-                .set_text(&format!("Spotlight active for {}", session.workspace_name)),
+            Ok(session) => {
+                let message = format!("Spotlight active for {}", session.workspace_name);
+                apply_action_feedback(&status_spotlight_on, &toast_spotlight_on, &message, true);
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_spotlight_on,
                 &toast_spotlight_on,
@@ -350,8 +362,15 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_spotlight_sync.clone())
             .and_then(|store| store.spotlight_sync(&spotlight_sync_workspace))
         {
-            Ok(session) => status_spotlight_sync
-                .set_text(&format!("Spotlight synced for {}", session.workspace_name)),
+            Ok(session) => {
+                let message = format!("Spotlight synced for {}", session.workspace_name);
+                apply_action_feedback(
+                    &status_spotlight_sync,
+                    &toast_spotlight_sync,
+                    &message,
+                    true,
+                );
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_spotlight_sync,
                 &toast_spotlight_sync,
@@ -371,10 +390,13 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_spotlight_repair.clone())
             .and_then(|store| store.spotlight_repair_root(&spotlight_repair_workspace))
         {
-            Ok(session) => status_spotlight_repair.set_text(&format!(
-                "Spotlight root repaired for {}",
-                session.workspace_name
-            )),
+            Ok(session) => {
+                let message = format!(
+                    "Spotlight root repaired for {}",
+                    session.workspace_name
+                );
+                apply_action_feedback(&status_spotlight_repair, &toast_spotlight_repair, &message, true);
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_spotlight_repair,
                 &toast_spotlight_repair,
@@ -394,8 +416,10 @@ fn runtime_panel(
         match WorkspaceStore::open(db_path_spotlight_off.clone())
             .and_then(|store| store.spotlight_stop(&spotlight_stop_workspace))
         {
-            Ok(session) => status_spotlight_off
-                .set_text(&format!("Spotlight stopped for {}", session.workspace_name)),
+            Ok(session) => {
+                let message = format!("Spotlight stopped for {}", session.workspace_name);
+                apply_action_feedback(&status_spotlight_off, &toast_spotlight_off, &message, true);
+            }
             Err(err) => apply_runtime_action_feedback(
                 &status_spotlight_off,
                 &toast_spotlight_off,
@@ -545,6 +569,7 @@ fn work_tabs(
     ws: &Workspace,
     state: &AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let tabs = Stack::new();
@@ -555,7 +580,14 @@ fn work_tabs(
     panel.append(&switcher);
 
     tabs.add_titled(
-        &changes_checks_review_tabs(db_path, store, &ws.name, refresh_hub.clone()),
+        &changes_checks_review_tabs(
+            db_path,
+            store,
+            &ws.name,
+            state.clone(),
+            refresh_hub.clone(),
+            toast_overlay,
+        ),
         Some("work"),
         "Changes",
     );
@@ -581,6 +613,16 @@ fn work_tabs(
         "Todos",
     );
     tabs.add_titled(
+        &workspace_checkpoint_panel(
+            db_path,
+            &ws.name,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        ),
+        Some("checkpoints"),
+        "Checkpoints",
+    );
+    tabs.add_titled(
         &text_panel(&workspace_processes_text(store, &ws.name)),
         Some("processes"),
         "Processes",
@@ -594,6 +636,7 @@ fn work_tabs(
             Some("processes") => state_tabs.set_active_workspace_tab(WorkspaceTab::Processes),
             Some("terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Terminal),
             Some("chat-terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
+            Some("checkpoints") => state_tabs.set_active_workspace_tab(WorkspaceTab::Checkpoints),
             _ => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
         }
     });
@@ -601,11 +644,146 @@ fn work_tabs(
     panel
 }
 
+fn workspace_checkpoint_panel(
+    db_path: &Path,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.add_css_class("command-panel");
+    panel.append(&section_title("Checkpoints"));
+
+    let create_row = GBox::new(Orientation::Horizontal, 8);
+    let message = Entry::new();
+    message.set_placeholder_text(Some("Checkpoint message"));
+    message.set_hexpand(true);
+    let create_btn = Button::with_label("Create");
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    let db_for_create = db_path.to_path_buf();
+    let workspace_for_create = name.to_owned();
+    let refresh_after_create = refresh_hub.clone();
+    let feedback_for_create = feedback.clone();
+    let toast_for_create = toast_overlay.clone();
+    let message_for_create = message.clone();
+    create_btn.connect_clicked(move |_| {
+        let message = message_for_create.text().trim().to_owned();
+        if message.is_empty() {
+            apply_action_feedback(&feedback_for_create, &toast_for_create, "Checkpoint message required.", true);
+            return;
+        }
+        match WorkspaceStore::open(db_for_create.clone())
+            .and_then(|store| store.checkpoint_create(&workspace_for_create, &message, None))
+        {
+            Ok(cp) => {
+                apply_action_feedback(
+                    &feedback_for_create,
+                    &toast_for_create,
+                    &format!("Created checkpoint #{}", cp.id),
+                    true,
+                );
+                message_for_create.set_text("");
+                refresh_after_create.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_create,
+                &toast_for_create,
+                &format!("Create checkpoint failed: {err:#}"),
+                true,
+            ),
+        }
+    });
+    create_row.append(&message);
+    create_row.append(&create_btn);
+    panel.append(&create_row);
+    panel.append(&feedback);
+
+    let mut checkpoints_loaded = Vec::new();
+    let mut list_error = None;
+    match WorkspaceStore::open(db_path.to_path_buf()).and_then(|store| store.checkpoint_list(name)) {
+        Ok(checkpoints) => {
+            checkpoints_loaded = checkpoints;
+        }
+        Err(err) => {
+            list_error = Some(err.to_string());
+        }
+    }
+
+    if let Some(err) = list_error {
+        panel.append(&detail_row(
+            "Checkpoint list",
+            &format!("Could not load checkpoints: {err}"),
+        ));
+        return panel;
+    }
+
+    if checkpoints_loaded.is_empty() {
+        panel.append(&detail_row("Checkpoints", "No checkpoints yet."));
+        return panel;
+    }
+
+    let header = GBox::new(Orientation::Horizontal, 8);
+    header.append(&detail_row("ID", "Status"));
+    panel.append(&header);
+
+    for checkpoint in checkpoints_loaded {
+        let row = GBox::new(Orientation::Horizontal, 8);
+        let label = Label::new(Some(&format!(
+            "#{} {} - {}",
+            checkpoint.id, checkpoint.created_at, checkpoint.message
+        )));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_hexpand(true);
+        let restore_btn = Button::with_label("Restore");
+        let checkpoint_id = checkpoint.id;
+        let workspace_for_restore = name.to_owned();
+        let db_for_restore = db_path.to_path_buf();
+        let refresh_after_restore = refresh_hub.clone();
+        let feedback_for_restore = feedback.clone();
+        let toast_for_restore = toast_overlay.clone();
+        restore_btn.connect_clicked(move |_| {
+            match WorkspaceStore::open(db_for_restore.clone())
+                .and_then(|store| store.checkpoint_restore(&workspace_for_restore, checkpoint_id))
+            {
+                Ok(cp) => {
+                    apply_action_feedback(
+                        &feedback_for_restore,
+                        &toast_for_restore,
+                        &format!("Restored checkpoint #{}", cp.id),
+                        true,
+                    );
+                    refresh_after_restore.refresh(RefreshScope::Workspace);
+                }
+                Err(err) => {
+                    apply_action_feedback(
+                        &feedback_for_restore,
+                        &toast_for_restore,
+                        &format!("Restore checkpoint failed: {err:#}"),
+                        true,
+                    );
+                }
+            }
+        });
+        row.append(&label);
+        row.append(&restore_btn);
+        panel.append(&row);
+    }
+
+    panel
+}
+
 fn changes_checks_review_tabs(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
+    app_state: AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let tabs = Stack::new();
@@ -620,12 +798,25 @@ fn changes_checks_review_tabs(
         "Changes",
     );
     tabs.add_titled(
-        &workspace_checks_panel(db_path, store, name, refresh_hub.clone()),
+        &workspace_checks_panel(
+            db_path,
+            store,
+            name,
+            app_state,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        ),
         Some("checks"),
         "Checks",
     );
     tabs.add_titled(
-        &workspace_review_panel(db_path, store, name, refresh_hub),
+        &workspace_review_panel(
+            db_path,
+            store,
+            name,
+            refresh_hub,
+            toast_overlay,
+        ),
         Some("review"),
         "Review",
     );
@@ -791,7 +982,9 @@ fn workspace_checks_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
+    app_state: AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.append(&text_panel(&workspace_checks_text(store, name)));
@@ -815,6 +1008,7 @@ fn workspace_checks_panel(
     merge_method.append(Some("rebase"), "Rebase");
     merge_method.set_active_id(Some("squash"));
     let merge_btn = Button::with_label("Merge PR");
+    let archive_after_merge_btn = Button::with_label("Archive Workspace");
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
@@ -832,6 +1026,7 @@ fn workspace_checks_panel(
     let body_for_create = body_entry.clone();
     let draft_for_create = draft.clone();
     let feedback_for_create = feedback.clone();
+    let toast_for_create = toast_overlay.clone();
     create_btn.connect_clicked(move |_| {
         let title = optional_entry_text(&title_for_create);
         let body = optional_entry_text(&body_for_create);
@@ -843,7 +1038,12 @@ fn workspace_checks_panel(
                 draft_for_create.is_active(),
             )
         });
-        feedback_for_create.set_text(&pull_request_create_feedback(result));
+        apply_action_feedback(
+            &feedback_for_create,
+            &toast_for_create,
+            &pull_request_create_feedback(result),
+            true,
+        );
         refresh_after_create.refresh(RefreshScope::All);
     });
 
@@ -851,10 +1051,16 @@ fn workspace_checks_panel(
     let workspace_for_refresh = name.to_owned();
     let refresh_after_pr_refresh = refresh_hub.clone();
     let feedback_for_refresh = feedback.clone();
+    let toast_for_refresh = toast_overlay.clone();
     refresh_pr_btn.connect_clicked(move |_| {
         let result = WorkspaceStore::open(db_for_refresh.clone())
             .and_then(|store| store.refresh_pull_request_state(&workspace_for_refresh));
-        feedback_for_refresh.set_text(&pull_request_refresh_feedback(result));
+        apply_action_feedback(
+            &feedback_for_refresh,
+            &toast_for_refresh,
+            &pull_request_refresh_feedback(result),
+            true,
+        );
         refresh_after_pr_refresh.refresh(RefreshScope::All);
     });
 
@@ -862,19 +1068,26 @@ fn workspace_checks_panel(
     let workspace_for_checks = name.to_owned();
     let checks_output_for_checks = checks_output.clone();
     let feedback_for_checks = feedback.clone();
+    let toast_for_checks = toast_overlay.clone();
     view_checks_btn.connect_clicked(move |_| {
         let result = WorkspaceStore::open(db_for_checks.clone())
             .and_then(|store| store.pull_request_checks(&workspace_for_checks));
         let text = pull_request_checks_feedback(result);
-        feedback_for_checks.set_text("Checks output updated.");
+        apply_action_feedback(
+            &feedback_for_checks,
+            &toast_for_checks,
+            &text,
+            true,
+        );
         checks_output_for_checks.set_text(&text);
     });
 
     let db_for_merge = db_path.to_path_buf();
     let workspace_for_merge = name.to_owned();
-    let refresh_after_merge = refresh_hub;
+    let refresh_after_merge = refresh_hub.clone();
     let merge_method_for_merge = merge_method.clone();
     let feedback_for_merge = feedback.clone();
+    let toast_for_merge = toast_overlay.clone();
     merge_btn.connect_clicked(move |_| {
         let method = merge_method_for_merge
             .active_id()
@@ -882,8 +1095,30 @@ fn workspace_checks_panel(
             .unwrap_or_else(|| "squash".to_owned());
         let result = WorkspaceStore::open(db_for_merge.clone())
             .and_then(|store| store.merge_pull_request(&workspace_for_merge, &method));
-        feedback_for_merge.set_text(&pull_request_merge_feedback(result));
+        apply_action_feedback(
+            &feedback_for_merge,
+            &toast_for_merge,
+            &pull_request_merge_feedback(result),
+            true,
+        );
         refresh_after_merge.refresh(RefreshScope::All);
+    });
+
+    let db_for_archive = db_path.to_path_buf();
+    let workspace_for_archive = name.to_owned();
+    let refresh_after_archive = refresh_hub;
+    let feedback_for_archive = feedback.clone();
+    let toast_for_archive = toast_overlay;
+    archive_after_merge_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_archive.clone())
+            .and_then(|store| store.archive(&workspace_for_archive, false));
+        apply_action_feedback(
+            &feedback_for_archive,
+            &toast_for_archive,
+            &pull_request_archive_feedback(result),
+            true,
+        );
+        refresh_after_archive.refresh(RefreshScope::All);
     });
 
     pr_form.append(&title_entry);
@@ -896,15 +1131,249 @@ fn workspace_checks_panel(
     panel.append(&inspect_row);
     merge_row.append(&merge_method);
     merge_row.append(&merge_btn);
+    merge_row.append(&archive_after_merge_btn);
     panel.append(&merge_row);
     panel.append(&feedback);
     panel.append(&checks_output);
+    panel.append(&workspace_conflict_resolution_panel(
+        db_path,
+        store,
+        name,
+        app_state,
+        refresh_hub,
+    ));
     panel
 }
 
 fn optional_entry_text(entry: &Entry) -> Option<String> {
     let value = entry.text().trim().to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+fn workspace_conflict_resolution_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    app_state: AppState,
+    refresh_hub: RefreshHub,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.add_css_class("command-panel");
+    panel.append(&section_title("Conflict Resolution"));
+
+    let summary = match store.checks_summary(name) {
+        Ok(summary) => summary,
+        Err(err) => {
+            panel.append(&detail_row(
+                "Conflict resolution",
+                &format!("Could not load conflicts: {err:#}"),
+            ));
+            return panel;
+        }
+    };
+
+    if summary.conflicting_workspaces.is_empty() {
+        panel.append(&detail_row("Conflicts", "No sibling workspace conflicts."));
+        return panel;
+    }
+
+    let diff_preview = TextView::new();
+    diff_preview.set_editable(false);
+    diff_preview.set_monospace(true);
+    diff_preview.set_hexpand(true);
+    diff_preview.set_vexpand(true);
+    diff_preview.buffer().set_text("Select a conflict file to preview its diff.");
+    let conflict_feedback = Label::new(None);
+    conflict_feedback.add_css_class("card-meta");
+    conflict_feedback.set_xalign(0.0);
+    conflict_feedback.set_wrap(true);
+    conflict_feedback.set_text("No conflict action run yet.");
+    let diff_container = ScrolledWindow::new();
+    diff_container.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    diff_container.set_min_content_height(180);
+    diff_container.set_child(Some(&diff_preview));
+
+    for (conflict_workspace, files) in summary.conflicting_workspaces {
+        let workspace_group = GBox::new(Orientation::Vertical, 6);
+        let title = Label::new(Some(&format!(
+            "{} ({})",
+            conflict_workspace,
+            if files.len() == 1 {
+                "1 file".to_owned()
+            } else {
+                format!("{} files", files.len())
+            }
+        )));
+        title.set_xalign(0.0);
+        title.add_css_class("detail-label");
+
+        let open_workspace_btn = Button::with_label("Open workspace");
+        let app_state_for_open = app_state.clone();
+        let refresh_for_open = refresh_hub.clone();
+        let conflict_workspace_for_open = conflict_workspace.clone();
+        open_workspace_btn.connect_clicked(move |_| {
+            app_state_for_open.set_selected_workspace(Some(conflict_workspace_for_open.clone()));
+            refresh_for_open.refresh(RefreshScope::All);
+        });
+
+        let action_row = GBox::new(Orientation::Horizontal, 8);
+        action_row.append(&title);
+        action_row.append(&open_workspace_btn);
+        let diff_all_btn = Button::with_label("View all diffs");
+        let files_for_diff_all = files.clone();
+        let source_workspace_for_diff_all = conflict_workspace.clone();
+        let feedback_for_diff_all = conflict_feedback.clone();
+        let diff_buffer_for_diff_all = diff_preview.buffer();
+        let db_for_diff_all = db_path.to_path_buf();
+        diff_all_btn.connect_clicked(move |_| {
+            let mut sections = Vec::new();
+            for file in &files_for_diff_all {
+                let file_path = Path::new(file).to_path_buf();
+                match WorkspaceStore::open(db_for_diff_all.clone())
+                    .and_then(|store| store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path())))
+                {
+                    Ok(output) => {
+                        sections.push(format!("# {}:{}\n{}\n", source_workspace_for_diff_all, file_path.display(), output));
+                    }
+                    Err(err) => {
+                        feedback_for_diff_all.set_text(&format!("Could not read diff for {file}: {err:#}"));
+                        return;
+                    }
+                }
+            }
+            if sections.is_empty() {
+                diff_buffer_for_diff_all.set_text("No conflicting files to diff.");
+            } else {
+                diff_buffer_for_diff_all.set_text(&sections.join("\n"));
+            }
+        });
+        let copy_all_btn = Button::with_label("Copy all from sibling");
+        let files_for_copy_all = files.clone();
+        let source_workspace = conflict_workspace.clone();
+        let destination_workspace = name.to_owned();
+        let db_for_copy_all = db_path.to_path_buf();
+        let feedback_for_copy_all = conflict_feedback.clone();
+        let refresh_after_copy_all = refresh_hub.clone();
+        copy_all_btn.connect_clicked(move |_| {
+            let mut copied = 0usize;
+            let mut failures = Vec::new();
+            for file in &files_for_copy_all {
+                let result = WorkspaceStore::open(db_for_copy_all.clone()).and_then(|store| {
+                    store.copy_conflict_file_from_workspace(
+                        &destination_workspace,
+                        &source_workspace,
+                        file,
+                    )
+                });
+                match result {
+                    Ok(()) => copied += 1,
+                    Err(err) => failures.push(format!("{file}: {err:#}")),
+                }
+            }
+            match (copied, failures.is_empty()) {
+                (0, true) => {
+                    feedback_for_copy_all
+                        .set_text(&format!("No files available to copy from {source_workspace}."));
+                }
+                (0, false) => {
+                    feedback_for_copy_all.set_text(&format!(
+                        "Failed to copy files from {source_workspace}: {}",
+                        failures.join("; ")
+                    ));
+                }
+                (_, true) => {
+                    refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                    feedback_for_copy_all.set_text(&format!(
+                        "Copied {} conflicting file(s) from {source_workspace}.",
+                        copied
+                    ));
+                }
+                (_, false) => {
+                    refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                    feedback_for_copy_all.set_text(&format!(
+                        "Copied {copied} file(s) from {source_workspace}, but {} failed: {}",
+                        failures.len(),
+                        failures.join("; ")
+                    ));
+                }
+            }
+        });
+
+        action_row.append(&copy_all_btn);
+        action_row.append(&diff_all_btn);
+        workspace_group.append(&action_row);
+
+        for file in files {
+            let file_row = GBox::new(Orientation::Horizontal, 8);
+            let file_label = Label::new(Some(&file));
+            file_label.set_xalign(0.0);
+            file_label.set_wrap(true);
+            file_label.set_hexpand(true);
+
+            let diff_btn = Button::with_label("View diff");
+            let db_for_diff = db_path.to_path_buf();
+            let source_workspace_for_diff = conflict_workspace.clone();
+            let file_for_diff = Path::new(&file).to_path_buf();
+            let diff_buffer = diff_preview.buffer();
+            diff_btn.connect_clicked(move |_| {
+                let output = WorkspaceStore::open(db_for_diff.clone())
+                    .and_then(|store| {
+                        store.unified_diff(
+                            &source_workspace_for_diff,
+                            Some(file_for_diff.as_path()),
+                        )
+                    })
+                    .unwrap_or_else(|err| format!("Could not read diff for {}: {err:#}", file_for_diff.display()));
+                let formatted = format!(
+                    "# {}:{}\n{}",
+                    source_workspace_for_diff,
+                    file_for_diff.display(),
+                    output
+                );
+                diff_buffer.set_text(&formatted);
+            });
+
+            let copy_btn = Button::with_label("Copy from sibling");
+            let file_for_copy = file.clone();
+            let db_for_copy = db_path.to_path_buf();
+            let destination_workspace = name.to_owned();
+            let source_workspace = conflict_workspace.clone();
+            let feedback_for_copy = conflict_feedback.clone();
+            let refresh_after_copy = refresh_hub.clone();
+            copy_btn.connect_clicked(move |_| {
+                let result = WorkspaceStore::open(db_for_copy.clone()).and_then(|store| {
+                    store.copy_conflict_file_from_workspace(
+                        &destination_workspace,
+                        &source_workspace,
+                        &file_for_copy,
+                    )
+                });
+                match result {
+                    Ok(()) => {
+                        feedback_for_copy.set_text(&format!(
+                            "Copied {file_for_copy} from {source_workspace} into {destination_workspace}"
+                        ));
+                        refresh_after_copy.refresh(RefreshScope::Workspace);
+                    }
+                    Err(err) => {
+                        feedback_for_copy
+                            .set_text(&format!("Could not copy {file_for_copy}: {err:#}"));
+                    }
+                }
+            });
+
+            file_row.append(&file_label);
+            file_row.append(&diff_btn);
+            file_row.append(&copy_btn);
+            workspace_group.append(&file_row);
+        }
+
+        panel.append(&workspace_group);
+    }
+
+    panel.append(&conflict_feedback);
+    panel.append(&diff_container);
+    panel
 }
 
 fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
@@ -954,11 +1423,19 @@ fn pull_request_checks_feedback(result: anyhow::Result<String>) -> String {
     }
 }
 
+fn pull_request_archive_feedback(result: anyhow::Result<Workspace>) -> String {
+    match result {
+        Ok(workspace) => format!("Archived workspace {}.", workspace.name),
+        Err(err) => format!("Archive failed: {err:#}"),
+    }
+}
+
 fn workspace_review_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let form = GBox::new(Orientation::Horizontal, 8);
@@ -982,17 +1459,18 @@ fn workspace_review_panel(
     let line_for_add = line_entry.clone();
     let body_for_add = body_entry.clone();
     let feedback_for_add = feedback.clone();
+    let toast_for_add = toast_overlay.clone();
     add_btn.connect_clicked(move |_| {
         let file = file_for_add.text().trim().to_owned();
         let body = body_for_add.text().trim().to_owned();
         if file.is_empty() || body.is_empty() {
-            feedback_for_add.set_text("File and comment are required.");
+            apply_action_feedback(&feedback_for_add, &toast_for_add, "File and comment are required.", true);
             return;
         }
         let line = match parse_review_comment_line(line_for_add.text().as_ref()) {
             Ok(line) => line,
             Err(err) => {
-                feedback_for_add.set_text(err);
+                apply_action_feedback(&feedback_for_add, &toast_for_add, err, true);
                 return;
             }
         };
@@ -1000,13 +1478,23 @@ fn workspace_review_panel(
             .and_then(|store| store.add_review_comment(&workspace_for_add, &file, line, &body))
         {
             Ok(comment) => {
-                feedback_for_add.set_text(&format!("Added review comment #{}", comment.id));
+                apply_action_feedback(
+                    &feedback_for_add,
+                    &toast_for_add,
+                    &format!("Added review comment #{}", comment.id),
+                    true,
+                );
                 file_for_add.set_text("");
                 line_for_add.set_text("");
                 body_for_add.set_text("");
                 refresh_after_add.refresh(RefreshScope::All);
             }
-            Err(err) => feedback_for_add.set_text(&format!("Could not add comment: {err:#}")),
+            Err(err) => apply_action_feedback(
+                &feedback_for_add,
+                &toast_for_add,
+                &format!("Could not add comment: {err:#}"),
+                true,
+            ),
         }
     });
     form.append(&file_entry);
@@ -1031,9 +1519,17 @@ fn workspace_review_panel(
                     let db_for_resolve = db_path.to_path_buf();
                     let refresh_after_resolve = refresh_hub.clone();
                     let comment_id = comment.id;
+                    let feedback_for_resolve = feedback.clone();
+                    let toast_for_resolve = toast_overlay.clone();
                     button.connect_clicked(move |_| {
-                        if let Ok(store) = WorkspaceStore::open(db_for_resolve.clone()) {
-                            let _ = store.resolve_review_comment(comment_id);
+                        let result = WorkspaceStore::open(db_for_resolve.clone())
+                            .and_then(|store| store.resolve_review_comment(comment_id));
+                        let message = match result {
+                            Ok(comment) => format!("Resolved review comment #{}", comment.id),
+                            Err(err) => format!("Could not resolve comment: {err:#}"),
+                        };
+                        apply_action_feedback(&feedback_for_resolve, &toast_for_resolve, &message, true);
+                        if result.is_ok() {
                             refresh_after_resolve.refresh(RefreshScope::All);
                         }
                     });
@@ -1371,6 +1867,13 @@ fn apply_runtime_action_feedback(
     }
 }
 
+fn apply_action_feedback(status: &Label, toast_overlay: &ToastOverlay, text: &str, show_toast: bool) {
+    status.set_text(text);
+    if show_toast {
+        toast_overlay.add_toast(Toast::new(text));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,6 +2064,27 @@ mod tests {
 
         let failure = pull_request_checks_feedback(Err(anyhow::anyhow!("no pull requests found")));
         assert_eq!(failure, "View checks failed: no pull requests found");
+    }
+
+    #[test]
+    fn pull_request_archive_feedback_summarizes_workspace_status() {
+        let success = pull_request_archive_feedback(Ok(Workspace {
+            id: 1,
+            repository_id: 2,
+            name: "berlin".to_owned(),
+            path: std::path::PathBuf::from("/tmp/berlin"),
+            branch: "lc/berlin".to_owned(),
+            base_ref: "main".to_owned(),
+            port_base: 4200,
+            status: "archived".to_owned(),
+            archived_at: Some("now".to_owned()),
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        }));
+        assert_eq!(success, "Archived workspace berlin.");
+
+        let failure = pull_request_archive_feedback(Err(anyhow::anyhow!("archive script failed")));
+        assert_eq!(failure, "Archive failed: archive script failed");
     }
 
     #[test]
