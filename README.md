@@ -190,9 +190,10 @@ Current GUI capabilities:
   restart.
   Active PTY shells are resized from the GTK terminal allocation.
   The visible transcript strips common ANSI control sequences and applies
-  carriage-return, cursor-up, and clear-screen/home redraws. The on-screen
-  scrollback is capped while raw transcript logs stay complete, but this is not
-  a polished terminal emulator yet.
+  carriage-return, cursor-up, cursor-left/right overwrite, and
+  clear-screen/home redraws. The on-screen scrollback is capped while raw
+  transcript logs stay complete, but this is not a polished terminal emulator
+  yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace

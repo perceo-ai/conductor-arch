@@ -839,6 +839,20 @@ fn terminal_display_text(text: &str) -> String {
                             csi_first_number(&sequence, 1),
                         ));
                     }
+                    Some('C') => {
+                        cursor = Some(move_terminal_display_cursor_right(
+                            &rendered,
+                            cursor.unwrap_or(rendered.len()),
+                            csi_first_number(&sequence, 1),
+                        ));
+                    }
+                    Some('D') => {
+                        cursor = Some(move_terminal_display_cursor_left(
+                            &rendered,
+                            cursor.unwrap_or(rendered.len()),
+                            csi_first_number(&sequence, 1),
+                        ));
+                    }
                     Some('G') => {
                         cursor = Some(move_terminal_display_cursor_to_column(
                             &rendered,
@@ -922,6 +936,16 @@ fn move_terminal_display_cursor_up(rendered: &[char], cursor: usize, lines: usiz
         start = line_start_before(rendered, start.saturating_sub(1));
     }
     (start + column).min(line_end_after(rendered, start))
+}
+
+fn move_terminal_display_cursor_right(rendered: &[char], cursor: usize, columns: usize) -> usize {
+    (cursor + columns).min(line_end_after(rendered, cursor))
+}
+
+fn move_terminal_display_cursor_left(rendered: &[char], cursor: usize, columns: usize) -> usize {
+    cursor
+        .saturating_sub(columns)
+        .max(line_start_before(rendered, cursor))
 }
 
 fn move_terminal_display_cursor_to_column(
@@ -1104,6 +1128,13 @@ mod tests {
         let rendered = terminal_display_text("old line\n\u{1b}[2J\u{1b}[Hfresh\n");
 
         assert_eq!(rendered, "fresh\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_cursor_left_and_right_overwrites() {
+        let rendered = terminal_display_text("abcd\u{1b}[2DXY\u{1b}[1CZ\n");
+
+        assert_eq!(rendered, "abXYZ\n");
     }
 
     #[test]

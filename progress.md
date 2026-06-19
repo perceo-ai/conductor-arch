@@ -268,6 +268,8 @@ Verified Phase 3 evidence so far:
   the persisted terminal logs raw.
 - GTK terminal display now handles simple cursor-up plus clear-line redraws for
   common progress/status output that rewrites the previous line.
+- GTK terminal display now handles cursor-left/right inline overwrites for
+  terminal output that rewrites characters within the current line.
 - GTK terminal display now handles full-screen redraws that clear the visible
   screen and move the cursor home before writing fresh output.
 - GTK terminal display caps the on-screen scrollback and shows a trim marker
