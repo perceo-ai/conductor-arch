@@ -309,6 +309,8 @@ Manual GUI smoke:
   sequences shows the latest line instead of stale duplicate lines.
 - Confirm a command that saves and restores the cursor position overwrites at
   the restored location instead of appending at the end.
+- Confirm commands that use erase-line modes clear the intended part of the
+  visible transcript line instead of appending stale text.
 - Confirm a command that clears the screen and moves the cursor home shows only
   the fresh screen contents instead of stale previous output.
 - Confirm resizing the GTK terminal area updates the active PTY shell size;
@@ -352,7 +354,8 @@ Known GUI MVP gaps:
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders transcript text with basic ANSI-control
   stripping, carriage-return/cursor-up/cursor-left/right line redraws,
-  saved-cursor restore, clear-screen/home redraws, and resize propagation.
+  saved-cursor restore, erase-line redraws, clear-screen/home redraws, and
+  resize propagation.
   Stale process rows reconcile at startup and while the app is open, and shell
   records get distinct searchable raw transcript logs with capped on-screen
   scrollback, latest-transcript restore, and clickable live-shell tabs, but this

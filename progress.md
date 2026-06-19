@@ -272,6 +272,8 @@ Verified Phase 3 evidence so far:
   terminal output that rewrites characters within the current line.
 - GTK terminal display now handles CSI saved-cursor restore for terminal output
   that returns to an earlier cursor position before writing more text.
+- GTK terminal display now handles erase-line modes for terminal output that
+  clears part or all of the current line before redrawing it.
 - GTK terminal display now handles full-screen redraws that clear the visible
   screen and move the cursor home before writing fresh output.
 - GTK terminal display caps the on-screen scrollback and shows a trim marker
@@ -322,7 +324,8 @@ Still needs Phase 4 work:
 
 - Terminal emulator polish: broader cursor-state/session emulation beyond the
   current escape stripping, carriage-return/cursor-up/cursor-left/right line
-  redraws, saved-cursor restore, and clear-screen redraws; a full
+  redraws, saved-cursor restore, erase-line redraws, and clear-screen redraws; a
+  full
   multi-terminal tab model beyond clickable live-shell tabs, a polished terminal
   history/scrollback browser beyond basic session listing/transcript
   search/selected transcript loading, and live PTY process reattach after app

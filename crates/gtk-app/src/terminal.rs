@@ -874,7 +874,13 @@ fn terminal_display_text(text: &str) -> String {
                         }
                     }
                     Some('K') => {
-                        clear_terminal_display_line(&mut rendered, cursor);
+                        let cursor_position = cursor.unwrap_or(rendered.len());
+                        let mode = csi_first_number_with_zero(&sequence, 0);
+                        cursor = Some(clear_terminal_display_line(
+                            &mut rendered,
+                            cursor_position,
+                            mode,
+                        ));
                     }
                     Some('s') => {
                         saved_cursor = Some(cursor.unwrap_or(rendered.len()));
@@ -921,16 +927,34 @@ fn push_terminal_display_char(rendered: &mut Vec<char>, cursor: &mut Option<usiz
     *cursor = Some(position + 1);
 }
 
-fn clear_terminal_display_line(rendered: &mut Vec<char>, cursor: Option<usize>) {
-    let Some(start) = cursor else {
-        return;
+fn clear_terminal_display_line(rendered: &mut Vec<char>, cursor: usize, mode: usize) -> usize {
+    let line_start = line_start_before(rendered, cursor);
+    let line_end = line_end_after(rendered, cursor);
+    let start = match mode {
+        1 | 2 => line_start,
+        _ => cursor.min(rendered.len()),
     };
-    let end = rendered[start..]
+    let end = if mode == 1 {
+        cursor.saturating_add(1).min(line_end)
+    } else {
+        line_end
+    };
+    if start >= end {
+        return cursor.min(rendered.len());
+    }
+    rendered.drain(start..end);
+    match mode {
+        1 | 2 => line_start,
+        _ => start,
+    }
+}
+
+fn line_end_after(rendered: &[char], start: usize) -> usize {
+    rendered[start.min(rendered.len())..]
         .iter()
         .position(|ch| *ch == '\n')
         .map(|offset| start + offset)
-        .unwrap_or(rendered.len());
-    rendered.drain(start..end);
+        .unwrap_or(rendered.len())
 }
 
 fn move_terminal_display_cursor_up(rendered: &[char], cursor: usize, lines: usize) -> usize {
@@ -974,6 +998,14 @@ fn csi_first_number(sequence: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn csi_first_number_with_zero(sequence: &str, default: usize) -> usize {
+    sequence
+        .split(';')
+        .next()
+        .and_then(|part| part.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
 fn csi_numbers(sequence: &str) -> Vec<usize> {
     sequence
         .split(';')
@@ -1011,14 +1043,6 @@ fn line_start_before(rendered: &[char], cursor: usize) -> usize {
         .rposition(|ch| *ch == '\n')
         .map(|index| index + 1)
         .unwrap_or(0)
-}
-
-fn line_end_after(rendered: &[char], start: usize) -> usize {
-    rendered[start.min(rendered.len())..]
-        .iter()
-        .position(|ch| *ch == '\n')
-        .map(|offset| start + offset)
-        .unwrap_or(rendered.len())
 }
 
 struct TerminalSession {
@@ -1128,6 +1152,14 @@ mod tests {
         let rendered = terminal_display_text("step 1\nstep 2\n\u{1b}[1A\u{1b}[2Kdone\n");
 
         assert_eq!(rendered, "step 1\ndone\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_erase_line_modes() {
+        let rendered =
+            terminal_display_text("abcdef\u{1b}[3G\u{1b}[1KXYZ\nold line\u{1b}[2Kdone\n");
+
+        assert_eq!(rendered, "XYZ\ndone\n");
     }
 
     #[test]
