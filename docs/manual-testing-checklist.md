@@ -26,9 +26,15 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Edit local `.conductor/settings.local.toml` from Projects.
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
   environment variables, provider executable fields, prompts, and Git behavior.
+- [ ] Confirm all repository action prompts are editable from the GUI: general,
+  code review, create PR, fix errors, resolve conflicts, and rename branch.
+- [ ] Confirm repository setup can be fully automated with setup/run/archive
+  scripts and no manual terminal-only step for a normal workspace.
 - [ ] Confirm `.worktreeinclude` wins over Files to copy settings and is shown
   as a read-only preview when present.
 - [ ] Confirm shared settings do not encourage committing secrets.
+- [ ] Confirm advanced view/theme/customization settings are documented as
+  config-file editable when they do not have GUI controls.
 
 ## Workspace Creation
 
@@ -126,6 +132,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   message UI with attachments.
 - [ ] Terminal rendering is not a full terminal emulator.
 - [ ] Command palette, broad shortcuts, and deep links are not complete.
+- [ ] Theme/view customization is not complete.
 - [ ] Monorepo directory selection and linked-directory workflows are not
   complete.
 - [ ] GitHub review-thread sync and deployment/check aggregation are still raw.

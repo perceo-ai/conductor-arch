@@ -33,11 +33,14 @@ The current app supports the core Conductor-style loop, with some rough edges:
   local `gh` auth.
 - Restore archived workspaces and read older macOS Conductor chat history when
   that database is available.
+- Customize repository behavior with editable prompts, scripts, environment,
+  provider paths, Git behavior, and file-copy rules.
 
 The GUI is usable, but not fully polished. Agent sessions and terminals are
 PTY/transcript based rather than rich message surfaces. Command palette,
 shortcut coverage, deep links, monorepo directory selection, linked-directory
-workflows, and full Conductor visual parity are still in progress.
+workflows, theme/view configuration, and full Conductor visual parity are still
+in progress.
 
 ## The Workflow
 
@@ -193,6 +196,35 @@ root. The current implementation can checkpoint, apply, sync, switch, repair,
 and restore tracked workspace changes, but it is still less polished than the
 normal worktree runtime.
 
+## Customization
+
+Linux users should be able to make the app fit their workflow. The rule of
+thumb is:
+
+- Frequently edited workflow prompts should be editable in the app.
+- Repository setup should be automated through committed setup/run/archive
+  scripts.
+- Advanced appearance, layout, theme, and view preferences can live in config
+  files instead of crowding the UI.
+- Team defaults belong in shared repository settings.
+- Machine-specific preferences and secrets belong in local or user settings.
+
+Prompts that should remain first-class and editable:
+
+- General agent instructions.
+- Code review instructions.
+- PR creation instructions.
+- Failing check repair instructions.
+- Merge conflict resolution instructions.
+- Branch naming/rename instructions.
+- Staged prompts generated from local review comments, PR comments, checks,
+  todos, and conflicts.
+
+The current implemented settings format is TOML. Future theme/view
+customization can use the same settings model or a dedicated file format, but
+the public docs should not require every advanced knob to have a custom GUI
+control.
+
 ## CLI Reference
 
 The CLI mirrors the app backend and is useful for smoke tests:
@@ -271,7 +303,8 @@ linux-conductor checkpoint restore <workspace> <id>
 - GitHub PR workflows use the local `gh` CLI and require `gh auth login`.
 - Linear workspace creation requires `LINEAR_API_KEY`.
 - Command palette, broad shortcuts, deep links, monorepo directory selection,
-  linked directories, and unified local history are not finished.
+  linked directories, theme/view configuration, and unified local history are
+  not finished.
 - `checkpoint restore` is destructive: it resets the workspace and removes
   untracked files.
 - Flatpak is experimental because arbitrary repository access needs broad

@@ -109,6 +109,22 @@ Replace `true` with real project commands. Commit shared settings. Put
 machine-local overrides and secrets in `.conductor/settings.local.toml`.
 If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
 
+Repository prompts are part of the customization surface and should be editable
+from the Projects settings UI:
+
+```toml
+[prompts]
+general = "Prefer small, reviewable changes."
+code_review = "Focus on correctness and missing tests."
+create_pr = "Write concise PR descriptions with test evidence."
+fix_errors = "Fix failing checks with the smallest safe change."
+resolve_merge_conflicts = "Preserve both sides when possible and explain tradeoffs."
+rename_branch = "Use short kebab-case branch names."
+```
+
+Advanced view/theme preferences do not all need first-class UI controls. Keep
+them file-editable and documented as the schema evolves.
+
 ## 6. CLI Smoke Path
 
 Register a repository:

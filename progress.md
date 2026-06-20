@@ -44,6 +44,8 @@ should be run before release artifacts.
 - Shared/local repository settings load/save, including scripts, run mode,
   Spotlight testing, Files to copy, environment variables, durable prompts,
   provider executable/provider fields, and Git behavior flags.
+- Repository action prompts are part of the editable settings model; the app
+  should keep them first-class because prompt iteration is core to agent work.
 - `.worktreeinclude` precedence over `file_include_globs`.
 - Stable per-workspace port allocation.
 - Background setup/run/session process rows, logs, exit codes, stop handling,
@@ -111,6 +113,8 @@ should be run before release artifacts.
 - Unified local history for all new chats is not complete.
 - Project onboarding/settings need more polish and fuller user/managed settings
   visibility.
+- Theme/view customization needs a documented config-file model. Not every
+  advanced visual or layout option needs a bespoke GUI control.
 - Visual parity with Conductor is not complete.
 - Release packaging still needs full manual validation on target distros.
 

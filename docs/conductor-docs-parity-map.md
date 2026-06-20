@@ -45,6 +45,11 @@ Key expectation: setup/run/archive scripts, run mode, Spotlight testing, copied
 gitignored files, environment variables, prompts, providers, and Git behavior
 are visible and editable from the app, not only through CLI flags.
 
+Linux-specific expectation: customization should go deeper than the default app
+surface. Prompts should be GUI-editable because they are part of daily agent
+work. Advanced theme, view, layout, and power-user preferences may be
+file-editable instead of having dedicated controls for every option.
+
 ## Agents And Tools
 
 - Agent modes: <https://www.conductor.build/docs/concepts/agent-modes>
@@ -123,4 +128,3 @@ Key expectation: the app is explicit that agents run locally with user
 permissions, approvals can gate risky actions, model traffic goes to configured
 providers, enterprise data privacy changes feature availability, and common
 auth/script/workspace/review blockers are surfaced in the UI.
-
