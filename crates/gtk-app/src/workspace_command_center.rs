@@ -85,7 +85,7 @@ pub(crate) fn build_workspace_command_center(
         body.append(&workspace_status_strip(&ws, checks.as_ref()));
 
         let top_grid = GBox::new(Orientation::Horizontal, 14);
-        top_grid.append(&agents_panel(&db_path, &ws, refresh_hub.clone()));
+        top_grid.append(&agents_panel(&db_path, &ws, &state, refresh_hub.clone()));
         top_grid.append(&runtime_panel(
             &db_path,
             &ws,
@@ -167,7 +167,12 @@ fn metric_card(label: &str, value: &str) -> GBox {
     card
 }
 
-fn agents_panel(db_path: &Path, ws: &Workspace, refresh_hub: RefreshHub) -> GBox {
+fn agents_panel(
+    db_path: &Path,
+    ws: &Workspace,
+    app_state: &AppState,
+    refresh_hub: RefreshHub,
+) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 10);
     panel.add_css_class("command-panel");
     panel.set_hexpand(true);
@@ -201,6 +206,7 @@ fn agents_panel(db_path: &Path, ws: &Workspace, refresh_hub: RefreshHub) -> GBox
     session_box.append(&session_surface::agent_session_panel(
         db_for_sessions,
         &workspace_for_sessions,
+        app_state.clone(),
         move || refresh_sessions.refresh(RefreshScope::Workspace),
     ));
     panel.append(&session_box);
@@ -588,13 +594,13 @@ fn work_tabs(
             &ws.name,
             state.clone(),
             refresh_hub.clone(),
-            toast_overlay,
+            toast_overlay.clone(),
         ),
         Some("work"),
         "Changes",
     );
     tabs.add_titled(
-        &chat_terminal_split(db_path, ws, refresh_hub.clone()),
+        &chat_terminal_split(db_path, ws, state.clone(), refresh_hub.clone()),
         Some("chat-terminal"),
         "Chat / Terminal",
     );
@@ -672,17 +678,17 @@ fn workspace_checkpoint_panel(
     let feedback_for_create = feedback.clone();
     let toast_for_create = toast_overlay.clone();
     let message_for_create = message.clone();
-        create_btn.connect_clicked(move |_| {
-            let message = message_for_create.text().trim().to_owned();
-            if message.is_empty() {
-                apply_action_feedback(
-                    &feedback_for_create,
-                    &toast_for_create,
-                    "Checkpoint message required.",
-                    true,
-                );
-                return;
-            }
+    create_btn.connect_clicked(move |_| {
+        let message = message_for_create.text().trim().to_owned();
+        if message.is_empty() {
+            apply_action_feedback(
+                &feedback_for_create,
+                &toast_for_create,
+                "Checkpoint message required.",
+                true,
+            );
+            return;
+        }
         match WorkspaceStore::open(db_for_create.clone())
             .and_then(|store| store.checkpoint_create(&workspace_for_create, &message, None))
         {
@@ -801,7 +807,13 @@ fn changes_checks_review_tabs(
     switcher.add_css_class("panel-switcher");
     panel.append(&switcher);
     tabs.add_titled(
-        &text_panel(&workspace_changes_text(store, name)),
+        &workspace_changes_panel(
+            db_path,
+            store,
+            name,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        ),
         Some("changes"),
         "Changes",
     );
@@ -810,7 +822,7 @@ fn changes_checks_review_tabs(
             db_path,
             store,
             name,
-            app_state,
+            app_state.clone(),
             refresh_hub.clone(),
             toast_overlay.clone(),
         ),
@@ -818,7 +830,7 @@ fn changes_checks_review_tabs(
         "Checks",
     );
     tabs.add_titled(
-        &workspace_review_panel(db_path, store, name, refresh_hub, toast_overlay),
+        &workspace_review_panel(db_path, store, name, app_state, refresh_hub, toast_overlay),
         Some("review"),
         "Review",
     );
@@ -826,7 +838,12 @@ fn changes_checks_review_tabs(
     panel
 }
 
-fn chat_terminal_split(db_path: &Path, ws: &Workspace, refresh_hub: RefreshHub) -> Paned {
+fn chat_terminal_split(
+    db_path: &Path,
+    ws: &Workspace,
+    app_state: AppState,
+    refresh_hub: RefreshHub,
+) -> Paned {
     let split = Paned::new(Orientation::Horizontal);
     split.set_wide_handle(true);
     split.set_position(520);
@@ -840,6 +857,7 @@ fn chat_terminal_split(db_path: &Path, ws: &Workspace, refresh_hub: RefreshHub) 
     chat_box.append(&session_surface::agent_session_panel(
         db_for_sessions,
         &workspace_for_sessions,
+        app_state,
         move || refresh_sessions.refresh(RefreshScope::Workspace),
     ));
     for chat in history::conductor_sessions_for_workspace_path(&ws.path)
@@ -885,6 +903,288 @@ fn text_panel(text: &str) -> ScrolledWindow {
     scroll
 }
 
+fn workspace_changes_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.append(&detail_row(
+        "Branch",
+        &workspace_branch_state_text(store, name),
+    ));
+    panel.append(&detail_row(
+        "Status",
+        &store
+            .git_status_short(name)
+            .unwrap_or_else(|err| format!("Could not read status: {err:#}")),
+    ));
+
+    let commits = TextView::new();
+    commits.set_editable(false);
+    commits.set_monospace(true);
+    commits.add_css_class("history-view");
+    commits.buffer().set_text(
+        &store
+            .git_log_oneline(name, 12)
+            .unwrap_or_else(|err| format!("Could not read log: {err:#}\n")),
+    );
+    let commits_scroll = ScrolledWindow::new();
+    commits_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    commits_scroll.set_min_content_height(120);
+    commits_scroll.set_child(Some(&commits));
+    panel.append(&section_title("Recent commits"));
+    panel.append(&commits_scroll);
+
+    let summary = store.diff_file_summaries(name).unwrap_or_default();
+    let selected_file = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+    let diff_view = TextView::new();
+    diff_view.set_editable(false);
+    diff_view.set_monospace(true);
+    diff_view.set_vexpand(true);
+    diff_view
+        .buffer()
+        .set_text(&workspace_diff_text(store, name, None));
+    let diff_scroll = ScrolledWindow::new();
+    diff_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    diff_scroll.set_vexpand(true);
+    diff_scroll.set_child(Some(&diff_view));
+
+    let selection_status = Label::new(Some("Showing full workspace diff."));
+    selection_status.add_css_class("card-meta");
+    selection_status.set_xalign(0.0);
+    selection_status.set_wrap(true);
+    let feedback = Label::new(Some("No file action run yet."));
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    let action_row = GBox::new(Orientation::Horizontal, 8);
+    let show_all_btn = Button::with_label("Show All");
+    let revert_btn = Button::with_label("Revert Selected");
+    action_row.append(&show_all_btn);
+    action_row.append(&revert_btn);
+    panel.append(&selection_status);
+    panel.append(&action_row);
+
+    let comment_row = GBox::new(Orientation::Horizontal, 8);
+    let comment_line = Entry::new();
+    comment_line.set_placeholder_text(Some("line"));
+    let comment_body = Entry::new();
+    comment_body.set_placeholder_text(Some("Add comment on selected file"));
+    comment_body.set_hexpand(true);
+    let comment_btn = Button::with_label("Comment");
+    comment_row.append(&comment_line);
+    comment_row.append(&comment_body);
+    comment_row.append(&comment_btn);
+    panel.append(&comment_row);
+
+    let comments_view = TextView::new();
+    comments_view.set_editable(false);
+    comments_view.set_monospace(true);
+    comments_view.set_vexpand(false);
+    comments_view
+        .buffer()
+        .set_text("Select a changed file to view inline comments.");
+    let comments_scroll = ScrolledWindow::new();
+    comments_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    comments_scroll.set_min_content_height(96);
+    comments_scroll.set_child(Some(&comments_view));
+    panel.append(&section_title("Inline comments"));
+    panel.append(&comments_scroll);
+
+    let list_box = GBox::new(Orientation::Vertical, 6);
+    if summary.is_empty() {
+        list_box.append(&detail_row("Files", "No changed files."));
+    } else {
+        for row in diff_tree_rows(&summary) {
+            match row {
+                DiffTreeRow::Directory(label) => {
+                    let directory = Label::new(Some(&label));
+                    directory.add_css_class("detail-label");
+                    directory.set_xalign(0.0);
+                    list_box.append(&directory);
+                }
+                DiffTreeRow::File(file) => {
+                    let row_box = GBox::new(Orientation::Horizontal, 8);
+                    let open_btn = Button::with_label(&diff_tree_file_label(&file));
+                    open_btn.set_hexpand(true);
+                    let selected_file_for_open = selected_file.clone();
+                    let db_for_open = db_path.to_path_buf();
+                    let workspace_for_open = name.to_owned();
+                    let diff_buffer = diff_view.buffer();
+                    let comments_buffer = comments_view.buffer();
+                    let selection_status_for_open = selection_status.clone();
+                    let path_for_open = file.path.clone();
+                    open_btn.connect_clicked(move |_| {
+                        *selected_file_for_open.borrow_mut() = Some(path_for_open.clone());
+                        diff_buffer.set_text(&workspace_diff_text_for_path(
+                            &db_for_open,
+                            &workspace_for_open,
+                            Some(path_for_open.as_str()),
+                        ));
+                        comments_buffer.set_text(&workspace_file_comments_text(
+                            &db_for_open,
+                            &workspace_for_open,
+                            &path_for_open,
+                        ));
+                        selection_status_for_open
+                            .set_text(&format!("Showing diff for {}.", path_for_open));
+                    });
+                    row_box.append(&open_btn);
+                    list_box.append(&row_box);
+                }
+            }
+        }
+    }
+    let list_scroll = ScrolledWindow::new();
+    list_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    list_scroll.set_min_content_width(260);
+    list_scroll.set_child(Some(&list_box));
+
+    let split = Paned::new(Orientation::Horizontal);
+    split.set_start_child(Some(&list_scroll));
+    split.set_end_child(Some(&diff_scroll));
+    split.set_position(280);
+    split.set_wide_handle(true);
+    panel.append(&split);
+    panel.append(&feedback);
+
+    let diff_buffer_for_all = diff_view.buffer();
+    let db_for_all = db_path.to_path_buf();
+    let workspace_for_all = name.to_owned();
+    let selected_file_for_all = selected_file.clone();
+    let comments_buffer_for_all = comments_view.buffer();
+    let selection_status_for_all = selection_status.clone();
+    show_all_btn.connect_clicked(move |_| {
+        *selected_file_for_all.borrow_mut() = None;
+        diff_buffer_for_all.set_text(&workspace_diff_text_for_path(
+            &db_for_all,
+            &workspace_for_all,
+            None,
+        ));
+        comments_buffer_for_all.set_text("Select a changed file to view inline comments.");
+        selection_status_for_all.set_text("Showing full workspace diff.");
+    });
+
+    let db_for_revert = db_path.to_path_buf();
+    let workspace_for_revert = name.to_owned();
+    let selected_file_for_revert = selected_file.clone();
+    let diff_buffer_for_revert = diff_view.buffer();
+    let comments_buffer_for_revert = comments_view.buffer();
+    let feedback_for_revert = feedback.clone();
+    let toast_for_revert = toast_overlay.clone();
+    let selection_status_for_revert = selection_status.clone();
+    let refresh_after_revert = refresh_hub.clone();
+    revert_btn.connect_clicked(move |_| {
+        let Some(path) = selected_file_for_revert.borrow().clone() else {
+            apply_action_feedback(
+                &feedback_for_revert,
+                &toast_for_revert,
+                "Select one tracked file before reverting.",
+                true,
+            );
+            return;
+        };
+        match WorkspaceStore::open(db_for_revert.clone())
+            .and_then(|store| store.revert_workspace_file(&workspace_for_revert, &path))
+        {
+            Ok(()) => {
+                *selected_file_for_revert.borrow_mut() = None;
+                diff_buffer_for_revert.set_text(&workspace_diff_text_for_path(
+                    &db_for_revert,
+                    &workspace_for_revert,
+                    None,
+                ));
+                comments_buffer_for_revert
+                    .set_text("Select a changed file to view inline comments.");
+                selection_status_for_revert.set_text("Showing full workspace diff.");
+                apply_action_feedback(
+                    &feedback_for_revert,
+                    &toast_for_revert,
+                    &format!("Reverted {} back to HEAD.", path),
+                    true,
+                );
+                refresh_after_revert.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_revert,
+                &toast_for_revert,
+                &format!("Could not revert {}: {err:#}", path),
+                true,
+            ),
+        }
+    });
+
+    let db_for_comment = db_path.to_path_buf();
+    let workspace_for_comment = name.to_owned();
+    let selected_file_for_comment = selected_file.clone();
+    let comment_line_for_add = comment_line.clone();
+    let comment_body_for_add = comment_body.clone();
+    let comments_buffer_for_comment = comments_view.buffer();
+    let feedback_for_comment = feedback.clone();
+    let toast_for_comment = toast_overlay.clone();
+    let refresh_after_comment = refresh_hub.clone();
+    comment_btn.connect_clicked(move |_| {
+        let Some(path) = selected_file_for_comment.borrow().clone() else {
+            apply_action_feedback(
+                &feedback_for_comment,
+                &toast_for_comment,
+                "Select a file diff before adding a comment.",
+                true,
+            );
+            return;
+        };
+        let body = comment_body_for_add.text().trim().to_owned();
+        if body.is_empty() {
+            apply_action_feedback(
+                &feedback_for_comment,
+                &toast_for_comment,
+                "Comment text is required.",
+                true,
+            );
+            return;
+        }
+        let line = match parse_review_comment_line(comment_line_for_add.text().as_ref()) {
+            Ok(line) => line,
+            Err(err) => {
+                apply_action_feedback(&feedback_for_comment, &toast_for_comment, err, true);
+                return;
+            }
+        };
+        match WorkspaceStore::open(db_for_comment.clone())
+            .and_then(|store| store.add_review_comment(&workspace_for_comment, &path, line, &body))
+        {
+            Ok(comment) => {
+                comment_line_for_add.set_text("");
+                comment_body_for_add.set_text("");
+                comments_buffer_for_comment.set_text(&workspace_file_comments_text(
+                    &db_for_comment,
+                    &workspace_for_comment,
+                    &path,
+                ));
+                apply_action_feedback(
+                    &feedback_for_comment,
+                    &toast_for_comment,
+                    &format!("Added review comment #{} on {}.", comment.id, path),
+                    true,
+                );
+                refresh_after_comment.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_comment,
+                &toast_for_comment,
+                &format!("Could not add review comment: {err:#}"),
+                true,
+            ),
+        }
+    });
+
+    panel
+}
+
 fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
     let mut out = String::new();
     out.push_str("Recent commits\n");
@@ -912,6 +1212,113 @@ fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
             .unified_diff(name, None)
             .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
     );
+    out
+}
+
+fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
+    match store.checks_summary(name) {
+        Ok(summary) => summary
+            .branch_push_state
+            .map(|state| {
+                if state.has_upstream {
+                    format!("ahead {} / behind {}", state.ahead, state.behind)
+                } else {
+                    "no upstream".to_owned()
+                }
+            })
+            .unwrap_or_else(|| "unavailable".to_owned()),
+        Err(err) => format!("Could not read branch state: {err:#}"),
+    }
+}
+
+fn workspace_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+    match path {
+        Some(path) => store
+            .unified_diff(name, Some(Path::new(path)))
+            .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
+        None => store
+            .unified_diff(name, None)
+            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
+    }
+}
+
+fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) -> String {
+    WorkspaceStore::open(db_path.to_path_buf())
+        .map(|store| workspace_diff_text(&store, name, path))
+        .unwrap_or_else(|err| format!("Could not open workspace database: {err:#}\n"))
+}
+
+fn workspace_file_comments_text(db_path: &Path, name: &str, path: &str) -> String {
+    WorkspaceStore::open(db_path.to_path_buf())
+        .and_then(|store| store.list_review_comments(name))
+        .map(|comments| file_inline_comments_text(&comments, path))
+        .unwrap_or_else(|err| format!("Could not read comments for {path}: {err:#}\n"))
+}
+
+fn diff_summary_label(summary: &DiffFileSummary) -> String {
+    let counts = match (summary.additions, summary.deletions) {
+        (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
+        _ => "binary".to_owned(),
+    };
+    format!("{} {}", summary.path, counts)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiffTreeRow {
+    Directory(String),
+    File(DiffFileSummary),
+}
+
+fn diff_tree_rows(summaries: &[DiffFileSummary]) -> Vec<DiffTreeRow> {
+    let mut rows = Vec::new();
+    let mut seen_directories = std::collections::BTreeSet::new();
+    for summary in summaries {
+        let parts = summary.path.split('/').collect::<Vec<_>>();
+        if parts.len() > 1 {
+            let mut prefix = String::new();
+            for (depth, part) in parts[..parts.len() - 1].iter().enumerate() {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                if seen_directories.insert(prefix.clone()) {
+                    rows.push(DiffTreeRow::Directory(format!(
+                        "{}{}/",
+                        "  ".repeat(depth),
+                        part
+                    )));
+                }
+            }
+        }
+        rows.push(DiffTreeRow::File(summary.clone()));
+    }
+    rows
+}
+
+fn diff_tree_file_label(summary: &DiffFileSummary) -> String {
+    let depth = summary.path.matches('/').count();
+    format!("{}{}", "  ".repeat(depth), diff_summary_label(summary))
+}
+
+fn file_inline_comments_text(comments: &[ReviewComment], path: &str) -> String {
+    let filtered = comments
+        .iter()
+        .filter(|comment| comment.file_path == path)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return format!("No inline comments for {path}.");
+    }
+    let mut out = format!("Inline comments for {path}\n");
+    for comment in filtered {
+        let line = comment
+            .line_number
+            .map(|line| format!(":{line}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "#{} [{}] {}{} - {}\n",
+            comment.id, comment.status, comment.file_path, line, comment.body
+        ));
+    }
     out
 }
 
@@ -1103,9 +1510,9 @@ fn workspace_checks_panel(
 
     let db_for_archive = db_path.to_path_buf();
     let workspace_for_archive = name.to_owned();
-    let refresh_after_archive = refresh_hub;
+    let refresh_after_archive = refresh_hub.clone();
     let feedback_for_archive = feedback.clone();
-    let toast_for_archive = toast_overlay;
+    let toast_for_archive = toast_overlay.clone();
     archive_after_merge_btn.connect_clicked(move |_| {
         let result = WorkspaceStore::open(db_for_archive.clone())
             .and_then(|store| store.archive(&workspace_for_archive, false));
@@ -1226,13 +1633,11 @@ fn workspace_conflict_resolution_panel(
         let db_for_diff_all = db_path.to_path_buf();
         diff_all_btn.connect_clicked(move |_| {
             let mut sections = Vec::new();
-                for file in &files_for_diff_all {
-                    let file_path = Path::new(file).to_path_buf();
-                match WorkspaceStore::open(db_for_diff_all.clone())
-                    .and_then(|store| {
-                        store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path()))
-                    })
-                {
+            for file in &files_for_diff_all {
+                let file_path = Path::new(file).to_path_buf();
+                match WorkspaceStore::open(db_for_diff_all.clone()).and_then(|store| {
+                    store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path()))
+                }) {
                     Ok(output) => {
                         sections.push(format!(
                             "# {}:{}\n{}\n",
@@ -1279,8 +1684,9 @@ fn workspace_conflict_resolution_panel(
             }
             match (copied, failures.is_empty()) {
                 (0, true) => {
-                    feedback_for_copy_all
-                        .set_text(&format!("No files available to copy from {source_workspace}."));
+                    feedback_for_copy_all.set_text(&format!(
+                        "No files available to copy from {source_workspace}."
+                    ));
                 }
                 (0, false) => {
                     feedback_for_copy_all.set_text(&format!(
@@ -1324,18 +1730,16 @@ fn workspace_conflict_resolution_panel(
             let diff_buffer = diff_preview.buffer();
             diff_btn.connect_clicked(move |_| {
                 let output = WorkspaceStore::open(db_for_diff.clone())
-                .and_then(|store| {
-                    store.unified_diff(
-                        &source_workspace_for_diff,
-                        Some(file_for_diff.as_path()),
-                    )
-                })
-                .unwrap_or_else(|err| {
-                    format!(
-                        "Could not read diff for {}: {err:#}",
-                        file_for_diff.display()
-                    )
-                });
+                    .and_then(|store| {
+                        store
+                            .unified_diff(&source_workspace_for_diff, Some(file_for_diff.as_path()))
+                    })
+                    .unwrap_or_else(|err| {
+                        format!(
+                            "Could not read diff for {}: {err:#}",
+                            file_for_diff.display()
+                        )
+                    });
                 let formatted = format!(
                     "# {}:{}\n{}",
                     source_workspace_for_diff,
@@ -1446,6 +1850,7 @@ fn workspace_review_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
+    app_state: AppState,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
 ) -> GBox {
@@ -1519,6 +1924,38 @@ fn workspace_review_panel(
     form.append(&body_entry);
     form.append(&add_btn);
     panel.append(&form);
+
+    let stage_btn = Button::with_label("Stage Open Comments");
+    let stage_feedback = feedback.clone();
+    let stage_toast = toast_overlay.clone();
+    let db_for_stage = db_path.to_path_buf();
+    let workspace_for_stage = name.to_owned();
+    stage_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+            let prompt = store.review_comments_agent_prompt(&workspace_for_stage)?;
+            if prompt.contains("No open review comments.") {
+                anyhow::bail!("No open review comments to stage");
+            }
+            Ok(prompt)
+        }) {
+            Ok(prompt) => {
+                app_state.set_staged_review_prompt(Some(prompt));
+                apply_action_feedback(
+                    &stage_feedback,
+                    &stage_toast,
+                    "Staged open review comments for the selected agent session.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &stage_feedback,
+                &stage_toast,
+                &format!("Could not stage review prompt: {err:#}"),
+                true,
+            ),
+        }
+    });
+    panel.append(&stage_btn);
     panel.append(&feedback);
 
     match store.list_review_comments(name) {
@@ -1542,8 +1979,10 @@ fn workspace_review_panel(
                         let result = WorkspaceStore::open(db_for_resolve.clone())
                             .and_then(|store| store.resolve_review_comment(comment_id));
                         let message = match result {
-                            Ok(comment) => format!("Resolved review comment #{}", comment.id),
-                            Err(err) => format!("Could not resolve comment: {err:#}"),
+                            Ok(ref comment) => {
+                                format!("Resolved review comment #{}", comment.id)
+                            }
+                            Err(ref err) => format!("Could not resolve comment: {err:#}"),
                         };
                         apply_action_feedback(
                             &feedback_for_resolve,
@@ -2003,6 +2442,72 @@ mod tests {
 
         assert_eq!(summary, "#7 [open] src/lib.rs:42 - handle empty input");
         assert!(review_comment_can_resolve(&comment));
+    }
+
+    #[test]
+    fn file_inline_comments_text_filters_to_selected_file() {
+        let comments = vec![
+            linux_conductor_core::workspace::ReviewComment {
+                id: 7,
+                workspace_id: 1,
+                file_path: "src/lib.rs".to_owned(),
+                line_number: Some(42),
+                body: "handle empty input".to_owned(),
+                status: "open".to_owned(),
+                github_thread_id: None,
+                created_at: "2026-06-19T00:00:00Z".to_owned(),
+                updated_at: "2026-06-19T00:00:00Z".to_owned(),
+            },
+            linux_conductor_core::workspace::ReviewComment {
+                id: 8,
+                workspace_id: 1,
+                file_path: "README.md".to_owned(),
+                line_number: None,
+                body: "clarify setup".to_owned(),
+                status: "resolved".to_owned(),
+                github_thread_id: None,
+                created_at: "2026-06-19T00:00:00Z".to_owned(),
+                updated_at: "2026-06-19T00:00:00Z".to_owned(),
+            },
+        ];
+
+        let rendered = file_inline_comments_text(&comments, "src/lib.rs");
+
+        assert!(rendered.contains("Inline comments for src/lib.rs"));
+        assert!(rendered.contains("#7 [open] src/lib.rs:42 - handle empty input"));
+        assert!(!rendered.contains("clarify setup"));
+    }
+
+    #[test]
+    fn diff_tree_rows_insert_directory_headers_once() {
+        let summaries = vec![
+            linux_conductor_core::workspace::DiffFileSummary {
+                path: "src/lib.rs".to_owned(),
+                additions: Some(1),
+                deletions: Some(0),
+            },
+            linux_conductor_core::workspace::DiffFileSummary {
+                path: "src/ui/panel.rs".to_owned(),
+                additions: Some(3),
+                deletions: Some(1),
+            },
+        ];
+
+        let rows = diff_tree_rows(&summaries);
+
+        assert_eq!(
+            rows,
+            vec![
+                DiffTreeRow::Directory("src/".to_owned()),
+                DiffTreeRow::File(summaries[0].clone()),
+                DiffTreeRow::Directory("  ui/".to_owned()),
+                DiffTreeRow::File(summaries[1].clone()),
+            ]
+        );
+        assert_eq!(
+            diff_tree_file_label(&summaries[1]),
+            "    src/ui/panel.rs +3 -1"
+        );
     }
 
     #[test]

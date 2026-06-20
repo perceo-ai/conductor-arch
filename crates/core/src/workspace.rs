@@ -53,6 +53,7 @@ pub struct SessionLaunch {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, OsString)>,
+    pub harness_metadata: Option<String>,
 }
 
 impl SessionLaunch {
@@ -61,6 +62,128 @@ impl SessionLaunch {
             .iter()
             .find(|(name, _)| name == key)
             .and_then(|(_, value)| value.to_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionHarnessOptions {
+    pub plan_mode: bool,
+    pub fast_mode: bool,
+    pub approval_mode: Option<String>,
+    pub reasoning_mode: Option<String>,
+    pub effort_mode: Option<String>,
+    pub codex_personality: Option<String>,
+    pub codex_goals: Option<String>,
+    pub codex_skills: Option<String>,
+}
+
+impl SessionHarnessOptions {
+    pub fn is_empty(&self) -> bool {
+        !self.plan_mode
+            && !self.fast_mode
+            && self.approval_mode.is_none()
+            && self.reasoning_mode.is_none()
+            && self.effort_mode.is_none()
+            && self.codex_personality.is_none()
+            && self.codex_goals.is_none()
+            && self.codex_skills.is_none()
+    }
+
+    pub fn apply_to_env(&self, env: &mut Vec<(String, OsString)>) {
+        if self.plan_mode {
+            env.push((
+                "CONDUCTOR_SESSION_PLAN_MODE".to_owned(),
+                OsString::from("true"),
+            ));
+        }
+        if self.fast_mode {
+            env.push((
+                "CONDUCTOR_SESSION_FAST_MODE".to_owned(),
+                OsString::from("true"),
+            ));
+        }
+        if let Some(value) = sanitize_empty_text(self.approval_mode.as_deref()) {
+            env.push((
+                "CONDUCTOR_SESSION_APPROVAL_MODE".to_owned(),
+                OsString::from(value),
+            ));
+        }
+        if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
+            env.push((
+                "CONDUCTOR_SESSION_REASONING_MODE".to_owned(),
+                OsString::from(value),
+            ));
+        }
+        if let Some(value) = sanitize_empty_text(self.effort_mode.as_deref()) {
+            env.push((
+                "CONDUCTOR_SESSION_EFFORT_MODE".to_owned(),
+                OsString::from(value),
+            ));
+        }
+        if let Some(value) = sanitize_empty_text(self.codex_personality.as_deref()) {
+            env.push((
+                "CONDUCTOR_SESSION_CODEX_PERSONALITY".to_owned(),
+                OsString::from(value),
+            ));
+        }
+        if let Some(value) = sanitize_empty_text(self.codex_goals.as_deref()) {
+            env.push((
+                "CONDUCTOR_SESSION_CODEX_GOALS".to_owned(),
+                OsString::from(value),
+            ));
+        }
+        if let Some(value) = sanitize_empty_text(self.codex_skills.as_deref()) {
+            env.push((
+                "CONDUCTOR_SESSION_CODEX_SKILLS".to_owned(),
+                OsString::from(value),
+            ));
+        }
+    }
+
+    pub fn metadata(&self) -> Option<String> {
+        let mut entries = Vec::new();
+        if self.plan_mode {
+            entries.push("plan=true".to_owned());
+        }
+        if self.fast_mode {
+            entries.push("fast=true".to_owned());
+        }
+        if let Some(value) = sanitize_empty_text(self.approval_mode.as_deref()) {
+            entries.push(format!("approvals={value}"));
+        }
+        if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
+            entries.push(format!("reasoning={value}"));
+        }
+        if let Some(value) = sanitize_empty_text(self.effort_mode.as_deref()) {
+            entries.push(format!("effort={value}"));
+        }
+        if let Some(value) = sanitize_empty_text(self.codex_personality.as_deref()) {
+            entries.push(format!("personality={value}"));
+        }
+        if let Some(value) = sanitize_empty_text(self.codex_goals.as_deref()) {
+            entries.push(format!("goals={}", sanitize_metadata_value(&value)));
+        }
+        if let Some(value) = sanitize_empty_text(self.codex_skills.as_deref()) {
+            entries.push(format!("skills={}", sanitize_metadata_value(&value)));
+        }
+        if entries.is_empty() {
+            None
+        } else {
+            Some(entries.join(";"))
+        }
+    }
+}
+
+fn sanitize_metadata_value(value: &str) -> String {
+    value.replace(['\n', '\r', ';'], " ")
+}
+
+fn sanitize_empty_text(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
     }
 }
 
@@ -121,6 +244,7 @@ pub struct ProcessRecord {
     pub started_at: String,
     pub exit_code: Option<i32>,
     pub ended_at: Option<String>,
+    pub session_harness_metadata: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,7 +703,14 @@ impl WorkspaceStore {
             }
         }
 
-        self.start_process(ProcessKind::Run, run, &settings, &repository, &workspace)
+        self.start_process(
+            ProcessKind::Run,
+            run,
+            &settings,
+            &repository,
+            &workspace,
+            None,
+        )
     }
 
     pub fn setup_workspace(&self, name: &str) -> Result<ProcessRecord> {
@@ -596,6 +727,7 @@ impl WorkspaceStore {
             &settings,
             &repository,
             &workspace,
+            None,
         )
     }
 
@@ -651,18 +783,52 @@ impl WorkspaceStore {
     pub fn stop_session(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let process = self.latest_running_process(workspace.id, ProcessKind::Session)?;
+        self.stop_session_process(name, process.id)
+    }
+
+    pub fn stop_session_process(&self, name: &str, process_id: i64) -> Result<ProcessRecord> {
+        let process = self
+            .list_sessions(name)?
+            .into_iter()
+            .find(|session| session.id == process_id)
+            .with_context(|| {
+                format!("session process {process_id} not found for workspace {name}")
+            })?;
+        if process.status != ProcessStatus::Running {
+            return Ok(process);
+        }
+        anyhow::ensure!(
+            process.pid > 0,
+            "session process {process_id} has invalid pid"
+        );
         stop_process(process.pid)?;
+        self.mark_session_process_stopped(process.id, Some(SIGTERM_EXIT_CODE))
+    }
+
+    pub fn mark_session_process_stopped(
+        &self,
+        process_id: i64,
+        exit_code: Option<i32>,
+    ) -> Result<ProcessRecord> {
         let now = timestamp();
         self.conn.execute(
             "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
-            params![
-                ProcessStatus::Stopped.as_str(),
-                now,
-                SIGTERM_EXIT_CODE,
-                process.id
-            ],
+            params![ProcessStatus::Stopped.as_str(), now, exit_code, process_id,],
         )?;
-        self.get_process(process.id)
+        self.get_process(process_id)
+    }
+
+    pub fn mark_session_process_exited(
+        &self,
+        process_id: i64,
+        exit_code: Option<i32>,
+    ) -> Result<ProcessRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+            params![ProcessStatus::Exited.as_str(), now, exit_code, process_id,],
+        )?;
+        self.get_process(process_id)
     }
 
     pub fn read_latest_session_log(&self, name: &str) -> Result<String> {
@@ -670,6 +836,58 @@ impl WorkspaceStore {
         let process = self.latest_process(workspace.id, ProcessKind::Session)?;
         fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))
+    }
+
+    pub fn append_session_process_output(&self, process_id: i64, output: &str) -> Result<()> {
+        if output.is_empty() {
+            return Ok(());
+        }
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        if let Some(parent) = process.log_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create log directory {}", parent.display()))?;
+        }
+        use std::io::Write;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&process.log_path)
+            .with_context(|| format!("open log {}", process.log_path.display()))?
+            .write_all(output.as_bytes())
+            .with_context(|| format!("write log {}", process.log_path.display()))
+    }
+
+    pub fn reconcile_session_processes(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+             FROM processes
+             WHERE kind = ?1 AND status = 'running'
+             ORDER BY id",
+        )?;
+        let running = stmt
+            .query_map([ProcessKind::Session.as_str()], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut reconciled = Vec::new();
+        for process in running {
+            if process_alive(process.pid) {
+                continue;
+            }
+            let now = timestamp();
+            self.conn.execute(
+                "UPDATE processes
+                 SET status = ?1, ended_at = ?2, exit_code = NULL
+                 WHERE id = ?3 AND status = 'running'",
+                params![ProcessStatus::Exited.as_str(), now, process.id],
+            )?;
+            reconciled.push(self.get_process(process.id)?);
+        }
+        Ok(reconciled)
     }
 
     pub fn record_terminal_process(
@@ -681,9 +899,30 @@ impl WorkspaceStore {
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
         let workspace = self.get_by_name(name)?;
+        self.record_process(
+            ProcessKind::Terminal,
+            &workspace,
+            command,
+            pid,
+            "terminal",
+            None,
+        )
+    }
+
+    fn record_process(
+        &self,
+        kind: ProcessKind,
+        workspace: &Workspace,
+        command: &str,
+        pid: u32,
+        file_prefix: &str,
+        session_harness_metadata: Option<&str>,
+    ) -> Result<ProcessRecord> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "process command is required");
         let now = timestamp();
         let log_path = self.logs_dir.join(&workspace.name).join(format!(
-            "terminal-{}-{}.log",
+            "{file_prefix}-{}-{}.log",
             timestamp_nanos(),
             pid
         ));
@@ -699,16 +938,17 @@ impl WorkspaceStore {
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
+                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)",
             params![
                 workspace.id,
-                ProcessKind::Terminal.as_str(),
+                kind.as_str(),
                 command,
                 i64::from(pid),
                 log_path.to_string_lossy().to_string(),
                 ProcessStatus::Running.as_str(),
                 now,
+                session_harness_metadata,
             ],
         )?;
         self.get_process(self.conn.last_insert_rowid())
@@ -895,7 +1135,7 @@ impl WorkspaceStore {
 
     pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
              FROM processes
              WHERE kind = ?1 AND status = 'running'
              ORDER BY id",
@@ -1110,7 +1350,10 @@ impl WorkspaceStore {
         self.spotlight_sync_if_changed_session(active.id)
     }
 
-    fn spotlight_sync_if_changed_session(&self, session_id: i64) -> Result<Option<SpotlightSession>> {
+    fn spotlight_sync_if_changed_session(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<SpotlightSession>> {
         let active = self.get_spotlight_session(session_id)?;
         if active.status != "active" {
             return Ok(None);
@@ -1226,6 +1469,24 @@ impl WorkspaceStore {
             return git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()]);
         }
         git_output(&workspace.path, ["diff", "--"])
+    }
+
+    pub fn revert_workspace_file(&self, name: &str, relative_path: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let validated = validate_workspace_relative_path(relative_path)?;
+        ensure_tracked_in_head(&workspace.path, relative_path)?;
+        let path_value = validated.to_string_lossy().to_string();
+        git_dynamic(
+            &workspace.path,
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                path_value.as_str(),
+            ],
+        )
     }
 
     pub fn diff_file_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
@@ -1975,7 +2236,7 @@ impl WorkspaceStore {
         kind: ProcessKind,
     ) -> Result<Option<ProcessRecord>> {
         let result = self.conn.query_row(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
              FROM processes
              WHERE workspace_id = ?1 AND kind = ?2 AND status = 'running'
              ORDER BY id DESC LIMIT 1",
@@ -2056,13 +2317,25 @@ impl WorkspaceStore {
             args: vec![workspace.path.to_string_lossy().to_string()],
             cwd: workspace.path.clone(),
             env: conductor_environment(&settings, &repository, &workspace),
+            harness_metadata: None,
         })
     }
 
     pub fn session_launch(&self, name: &str, kind: SessionKind) -> Result<SessionLaunch> {
+        self.session_launch_with_options(name, kind, SessionHarnessOptions::default())
+    }
+
+    pub fn session_launch_with_options(
+        &self,
+        name: &str,
+        kind: SessionKind,
+        harness: SessionHarnessOptions,
+    ) -> Result<SessionLaunch> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
+        let mut env = conductor_environment(&settings, &repository, &workspace);
+        harness.apply_to_env(&mut env);
         let (program, args) = match kind {
             SessionKind::Shell => (
                 std::env::var_os("SHELL")
@@ -2100,7 +2373,8 @@ impl WorkspaceStore {
             program,
             args,
             cwd: workspace.path.clone(),
-            env: conductor_environment(&settings, &repository, &workspace),
+            env,
+            harness_metadata: harness.metadata(),
         })
     }
 
@@ -2123,7 +2397,7 @@ impl WorkspaceStore {
     fn list_processes(&self, name: &str, kind: ProcessKind) -> Result<Vec<ProcessRecord>> {
         let workspace = self.get_by_name(name)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
              FROM processes WHERE workspace_id = ?1 AND kind = ?2
              ORDER BY id DESC",
         )?;
@@ -2134,7 +2408,16 @@ impl WorkspaceStore {
     }
 
     pub fn start_session(&self, name: &str, kind: SessionKind) -> Result<ProcessRecord> {
-        let launch = self.session_launch(name, kind)?;
+        self.start_session_with_options(name, kind, SessionHarnessOptions::default())
+    }
+
+    pub fn start_session_with_options(
+        &self,
+        name: &str,
+        kind: SessionKind,
+        harness: SessionHarnessOptions,
+    ) -> Result<ProcessRecord> {
+        let launch = self.session_launch_with_options(name, kind, harness)?;
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
@@ -2145,6 +2428,26 @@ impl WorkspaceStore {
             &settings,
             &repository,
             &workspace,
+            launch.harness_metadata.as_deref(),
+        )
+    }
+
+    pub fn record_session_process(
+        &self,
+        name: &str,
+        launch: &SessionLaunch,
+        pid: u32,
+    ) -> Result<ProcessRecord> {
+        anyhow::ensure!(pid > 0, "session process id is required");
+        let workspace = self.get_by_name(name)?;
+        let command = shell_words(&launch.program, &launch.args);
+        self.record_process(
+            ProcessKind::Session,
+            &workspace,
+            &command,
+            pid,
+            "session",
+            launch.harness_metadata.as_deref(),
         )
     }
 
@@ -2241,6 +2544,7 @@ impl WorkspaceStore {
         settings: &crate::settings::RepositorySettings,
         repository: &RepositoryRecord,
         workspace: &Workspace,
+        session_harness_metadata: Option<&str>,
     ) -> Result<ProcessRecord> {
         let now = timestamp();
         let log_path = self
@@ -2279,8 +2583,8 @@ impl WorkspaceStore {
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
+                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)",
             params![
                 workspace.id,
                 kind.as_str(),
@@ -2289,6 +2593,7 @@ impl WorkspaceStore {
                 log_path.to_string_lossy().to_string(),
                 ProcessStatus::Running.as_str(),
                 now,
+                session_harness_metadata,
             ],
         )?;
 
@@ -2309,7 +2614,7 @@ impl WorkspaceStore {
     fn latest_process(&self, workspace_id: i64, kind: ProcessKind) -> Result<ProcessRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
                  FROM processes
                  WHERE workspace_id = ?1 AND kind = ?2
                  ORDER BY id DESC LIMIT 1",
@@ -2322,7 +2627,7 @@ impl WorkspaceStore {
     fn get_process(&self, id: i64) -> Result<ProcessRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
                  FROM processes WHERE id = ?1",
                 [id],
                 row_to_process,
@@ -2410,7 +2715,8 @@ impl WorkspaceStore {
               log_path TEXT NOT NULL,
               status TEXT NOT NULL,
               started_at TEXT NOT NULL,
-              ended_at TEXT
+              ended_at TEXT,
+              session_harness_metadata TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pull_requests (
@@ -2472,6 +2778,12 @@ impl WorkspaceStore {
             "processes",
             "exit_code",
             "ALTER TABLE processes ADD COLUMN exit_code INTEGER",
+        )?;
+        ensure_column(
+            &self.conn,
+            "processes",
+            "session_harness_metadata",
+            "ALTER TABLE processes ADD COLUMN session_harness_metadata TEXT",
         )?;
         Ok(())
     }
@@ -2543,6 +2855,10 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     let pid = row.get::<_, i64>(4)?;
+    let session_harness_metadata = row
+        .get::<_, Option<String>>("session_harness_metadata")
+        .ok()
+        .flatten();
     Ok(ProcessRecord {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
@@ -2560,6 +2876,7 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         started_at: row.get(7)?,
         exit_code: row.get(8)?,
         ended_at: row.get(9)?,
+        session_harness_metadata,
     })
 }
 
@@ -2743,6 +3060,35 @@ fn parse_numstat_count(value: &str) -> Option<Option<usize>> {
         return Some(None);
     }
     value.parse::<usize>().ok().map(Some)
+}
+
+fn validate_workspace_relative_path(relative_path: &str) -> Result<&Path> {
+    let path = Path::new(relative_path);
+    anyhow::ensure!(
+        path.is_relative(),
+        "workspace file path must be relative: {relative_path}",
+    );
+    for component in path.components() {
+        anyhow::ensure!(
+            !matches!(component, Component::ParentDir | Component::CurDir),
+            "workspace file path may not use path traversal: {relative_path}",
+        );
+    }
+    Ok(path)
+}
+
+fn ensure_tracked_in_head(cwd: &Path, relative_path: &str) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["ls-files", "--error-unmatch", "--", relative_path])
+        .output()
+        .with_context(|| format!("check tracked file in {}", cwd.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{relative_path} is not tracked in HEAD and cannot be safely reverted"
+    );
+    Ok(())
 }
 
 fn slugify(text: &str) -> String {
@@ -6291,6 +6637,103 @@ spotlight_testing = true
     }
 
     #[test]
+    fn stop_session_process_targets_explicit_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_shell = temp.path().join("fake-shell");
+        fs::write(
+            &fake_shell,
+            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
+        )
+        .unwrap();
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_shell)
+            .status()
+            .unwrap();
+
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        temp_env_var("SHELL", &fake_shell, || {
+            let session = store.start_session("berlin", SessionKind::Shell).unwrap();
+            let stopped = store
+                .stop_session_process("berlin", session.id)
+                .expect("stop_session_process should mark a running session");
+            assert_eq!(stopped.id, session.id);
+            assert_eq!(stopped.status, ProcessStatus::Stopped);
+
+            let idempotent = store
+                .stop_session_process("berlin", session.id)
+                .expect("stop_session_process should be idempotent");
+            assert_eq!(idempotent.id, session.id);
+            assert_eq!(idempotent.status, ProcessStatus::Stopped);
+        });
+    }
+
+    #[test]
+    fn reconcile_session_processes_marks_dead_process_as_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let process = store
+            .record_session_process("berlin", &launch, u32::MAX)
+            .expect("seed dead session record");
+
+        let reconciled = store
+            .reconcile_session_processes()
+            .expect("reconcile should process dead records");
+        let reconciled = reconciled
+            .into_iter()
+            .find(|entry| entry.id == process.id)
+            .expect("dead session should be marked exited");
+        assert_eq!(reconciled.id, process.id);
+        assert_eq!(reconciled.status, ProcessStatus::Exited);
+        assert!(reconciled.ended_at.is_some());
+    }
+
+    #[test]
     fn changed_files_and_unified_diff_read_workspace_git_state() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -6415,6 +6858,92 @@ spotlight_testing = true
         assert!(prompt.contains("Address these open review comments for workspace berlin."));
         assert!(prompt.contains(&format!("- #{} src/lib.rs:12: handle empty input", open.id)));
         assert!(!prompt.contains("clarify setup"));
+    }
+
+    #[test]
+    fn revert_workspace_file_restores_tracked_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
+        assert!(store
+            .changed_files("berlin")
+            .unwrap()
+            .contains(&"README.md".to_owned()));
+
+        store.revert_workspace_file("berlin", "README.md").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("README.md")).unwrap(),
+            "demo\n"
+        );
+        assert!(!store
+            .changed_files("berlin")
+            .unwrap()
+            .contains(&"README.md".to_owned()));
+    }
+
+    #[test]
+    fn revert_workspace_file_rejects_untracked_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+
+        let err = store
+            .revert_workspace_file("berlin", "notes.txt")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("is not tracked in HEAD"));
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("notes.txt")).unwrap(),
+            "new\n"
+        );
     }
 
     #[test]

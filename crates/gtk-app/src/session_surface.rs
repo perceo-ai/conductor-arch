@@ -1,17 +1,112 @@
 use gtk::prelude::*;
-use gtk::{Box as GBox, Button, Entry, Label, Orientation, ScrolledWindow, TextView};
-use linux_conductor_core::workspace::{SessionKind, WorkspaceStore};
+use gtk::{
+    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, ScrolledWindow,
+    TextBuffer, TextView,
+};
+use linux_conductor_core::pty::PtySession;
+use linux_conductor_core::workspace::{
+    ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, WorkspaceStore,
+};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use crate::state::AppState;
+use crate::terminal::terminal_display_text;
+
+const SESSION_SCROLLBACK_LINES: usize = 2_000;
+const SESSION_TAIL_HISTORY: usize = 120;
+const SESSION_POLL_INTERVAL_MS: u64 = 100;
+const SESSION_RECONCILE_EVERY_TICKS: u32 = 10;
 
 pub fn agent_session_panel(
     database_path: PathBuf,
     workspace_name: &str,
+    app_state: AppState,
     refresh: impl Fn() + Clone + 'static,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 10);
     root.add_css_class("agent-panel");
 
-    let controls = GBox::new(Orientation::Horizontal, 8);
+    let title = Label::new(Some("Agent sessions"));
+    title.add_css_class("section-title");
+    title.set_xalign(0.0);
+    root.append(&title);
+
+    let provider_status = Label::new(Some("Loading provider and MCP status..."));
+    provider_status.add_css_class("card-meta");
+    provider_status.set_xalign(0.0);
+    provider_status.set_wrap(true);
+    root.append(&provider_status);
+
+    let active_status = Label::new(Some("No active session."));
+    active_status.add_css_class("card-meta");
+    active_status.set_xalign(0.0);
+    root.append(&active_status);
+
+    let control_wrapper = GBox::new(Orientation::Vertical, 8);
+    let harness_row = GBox::new(Orientation::Horizontal, 8);
+    let plan_mode = CheckButton::with_label("Plan mode");
+    let fast_mode = CheckButton::with_label("Fast mode");
+    let approval_mode = ComboBoxText::new();
+    approval_mode.append(Some("default"), "Approvals: default");
+    approval_mode.append(Some("ask"), "Approvals: ask");
+    approval_mode.append(Some("never"), "Approvals: never");
+    approval_mode.set_active(Some(0));
+    let reasoning_mode = ComboBoxText::new();
+    reasoning_mode.append(Some("default"), "Reasoning: default");
+    reasoning_mode.append(Some("low"), "Reasoning: low");
+    reasoning_mode.append(Some("medium"), "Reasoning: medium");
+    reasoning_mode.append(Some("high"), "Reasoning: high");
+    reasoning_mode.set_active(Some(0));
+    let effort_mode = ComboBoxText::new();
+    effort_mode.append(Some("default"), "Effort: default");
+    effort_mode.append(Some("low"), "Effort: low");
+    effort_mode.append(Some("medium"), "Effort: medium");
+    effort_mode.append(Some("high"), "Effort: high");
+    effort_mode.set_active(Some(0));
+
+    plan_mode.set_tooltip_text(Some("Plan mode applies to session startup."));
+    fast_mode.set_tooltip_text(Some("Fast mode applies to session startup."));
+    approval_mode.set_tooltip_text(Some("Tool approval preference for this session."));
+    reasoning_mode.set_tooltip_text(Some("Reasoning preference for this session."));
+    effort_mode.set_tooltip_text(Some("Effort preference for this session."));
+
+    harness_row.append(&plan_mode);
+    harness_row.append(&fast_mode);
+    harness_row.append(&approval_mode);
+    harness_row.append(&reasoning_mode);
+    harness_row.append(&effort_mode);
+
+    let codex_row = GBox::new(Orientation::Horizontal, 8);
+    let codex_personality = ComboBoxText::new();
+    codex_personality.append(Some("default"), "Personality: default");
+    codex_personality.append(Some("careful"), "Personality: careful");
+    codex_personality.append(Some("fast"), "Personality: fast");
+    codex_personality.append(Some("thorough"), "Personality: thorough");
+    codex_personality.set_active(Some(0));
+    let codex_goals = Entry::new();
+    codex_goals.set_placeholder_text(Some("Codex goals"));
+    let codex_skills = Entry::new();
+    codex_skills.set_placeholder_text(Some("Codex skills"));
+    codex_personality.set_tooltip_text(Some("Codex personality for session startup."));
+    codex_goals.set_tooltip_text(Some("Codex goals for this session."));
+    codex_skills.set_tooltip_text(Some("Codex skills for this session."));
+    codex_row.append(&codex_personality);
+    codex_row.append(&codex_goals);
+    codex_row.append(&codex_skills);
+
+    control_wrapper.append(&harness_row);
+    control_wrapper.append(&codex_row);
+    root.append(&control_wrapper);
+
+    let launch_row = GBox::new(Orientation::Horizontal, 8);
+    let mut agent_buttons: Vec<(Button, SessionKind)> = Vec::new();
     for (label, kind) in [
         ("Shell", SessionKind::Shell),
         ("Codex", SessionKind::Codex),
@@ -19,107 +114,1032 @@ pub fn agent_session_panel(
         ("Cursor", SessionKind::Cursor),
     ] {
         let button = Button::with_label(label);
-        button.set_tooltip_text(Some("Start supervised in-app session"));
-        let db_path = database_path.clone();
-        let workspace = workspace_name.to_owned();
-        let refresh_after_start = refresh.clone();
-        button.connect_clicked(move |_| {
-            if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
-                let _ = store.start_session(&workspace, kind);
-                refresh_after_start();
-            }
-        });
-        controls.append(&button);
+        let tooltip = match kind {
+            SessionKind::Shell => "Open a PTY shell inside this workspace.",
+            SessionKind::Codex => "Open a PTY Codex session inside this workspace.",
+            SessionKind::Claude => "Open a PTY Claude session inside this workspace.",
+            SessionKind::Cursor => "Open a PTY Cursor session inside this workspace.",
+        };
+        button.set_tooltip_text(Some(tooltip));
+        agent_buttons.push((button, kind));
     }
-    root.append(&controls);
+    for (button, _) in &agent_buttons {
+        launch_row.append(button);
+    }
+    root.append(&launch_row);
 
     let transcript = TextView::new();
     transcript.set_editable(false);
     transcript.set_monospace(true);
     transcript.add_css_class("history-view");
-    transcript
-        .buffer()
-        .set_text(&latest_session_text(&database_path, workspace_name));
+    transcript.set_vexpand(true);
+    let transcript_buffer = transcript.buffer();
+    let transcript_text = initial_session_text(&database_path, workspace_name);
+    transcript_buffer.set_text(&transcript_text);
 
     let transcript_scroll = ScrolledWindow::new();
     transcript_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    transcript_scroll.set_vexpand(true);
     transcript_scroll.set_child(Some(&transcript));
     root.append(&transcript_scroll);
 
-    let composer = GBox::new(Orientation::Horizontal, 8);
-    let input = Entry::new();
-    input.set_placeholder_text(Some("Prompt draft or review context"));
-    input.set_hexpand(true);
-    let stage_reviews = Button::with_label("Stage Reviews");
-    let queue = Button::with_label("Stage");
-    let buffer = transcript.buffer();
-    let review_buffer = transcript.buffer();
-    let review_db_path = database_path.clone();
-    let review_workspace = workspace_name.to_owned();
-    stage_reviews.connect_clicked(move |_| {
-        let text = match WorkspaceStore::open(review_db_path.clone())
-            .and_then(|store| store.review_comments_agent_prompt(&review_workspace))
-        {
-            Ok(prompt) => staged_review_prompt_text(&prompt),
-            Err(err) => format!("\n[review prompt error]\n{err:#}\n"),
-        };
-        let mut end = review_buffer.end_iter();
-        review_buffer.insert(&mut end, &text);
-    });
-    let input_clone = input.clone();
-    queue.connect_clicked(move |_| {
-        let draft = input_clone.text().trim().to_owned();
-        if draft.is_empty() {
-            return;
-        }
-        let mut end = buffer.end_iter();
-        buffer.insert(&mut end, &format!("\n[staged prompt]\n{draft}\n"));
-        input_clone.set_text("");
-    });
-    composer.append(&input);
-    composer.append(&stage_reviews);
-    composer.append(&queue);
-    root.append(&composer);
+    let history_row = GBox::new(Orientation::Horizontal, 8);
+    let sessions_combo = ComboBoxText::new();
+    sessions_combo.set_hexpand(true);
+    let refresh_btn = Button::with_label("Refresh");
+    let stop_btn = Button::with_label("Stop session");
+    stop_btn.set_tooltip_text(Some("Stop the selected running session."));
+    history_row.append(&sessions_combo);
+    history_row.append(&refresh_btn);
+    history_row.append(&stop_btn);
+    root.append(&history_row);
 
-    let hint = Label::new(Some(
-        "Supervised sessions are captured as process logs now; PTY streaming and bidirectional chat attach here next.",
+    let input_row = GBox::new(Orientation::Horizontal, 8);
+    let input = Entry::new();
+    input.set_placeholder_text(Some("Type session input..."));
+    input.set_hexpand(true);
+    let send_btn = Button::with_label("Send");
+    send_btn.set_tooltip_text(Some("Send a line to the selected session."));
+    input_row.append(&input);
+    input_row.append(&send_btn);
+    root.append(&input_row);
+
+    let staged_review_row = GBox::new(Orientation::Horizontal, 8);
+    let staged_review_status = Label::new(Some("No staged review prompt."));
+    staged_review_status.add_css_class("card-meta");
+    staged_review_status.set_xalign(0.0);
+    staged_review_status.set_wrap(true);
+    staged_review_status.set_hexpand(true);
+    let send_review_btn = Button::with_label("Send review prompt");
+    send_review_btn.set_tooltip_text(Some(
+        "Send the staged review prompt to the selected session.",
     ));
-    hint.add_css_class("card-meta");
-    hint.set_xalign(0.0);
-    hint.set_wrap(true);
-    root.append(&hint);
+    staged_review_row.append(&staged_review_status);
+    staged_review_row.append(&send_review_btn);
+    root.append(&staged_review_row);
+
+    let checkpoint_row = GBox::new(Orientation::Horizontal, 8);
+    let checkpoint_message = Entry::new();
+    checkpoint_message.set_placeholder_text(Some("Checkpoint message (optional)"));
+    checkpoint_message.set_hexpand(true);
+    let checkpoint_btn = Button::with_label("Create checkpoint");
+    checkpoint_btn.set_tooltip_text(Some(
+        "Create workspace checkpoint tied to selected session.",
+    ));
+    checkpoint_row.append(&checkpoint_message);
+    checkpoint_row.append(&checkpoint_btn);
+    root.append(&checkpoint_row);
+
+    let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
+    let selected_session: Rc<RefCell<Option<i64>>> =
+        Rc::new(RefCell::new(app_state.selected_agent_session()));
+    let active_sessions: Rc<RefCell<HashMap<i64, SessionConnection>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let last_output = Rc::new(RefCell::new(HashMap::<i64, Instant>::new()));
+    let last_size = Rc::new(RefCell::new(None::<(u16, u16)>));
+    let reconcile_tick = Rc::new(RefCell::new(0_u32));
+
+    let refresh_view = {
+        let db_path = database_path.clone();
+        let workspace = workspace_name.to_owned();
+        let combo = sessions_combo.clone();
+        let selected = selected_session.clone();
+        let records = record_state.clone();
+        let status = active_status.clone();
+        let transcript_buffer = transcript_buffer.clone();
+        let provider_status = provider_status.clone();
+        let active_sessions = active_sessions.clone();
+        let last_output = last_output.clone();
+        let app_state = app_state.clone();
+        Rc::new(move || {
+            let loaded = WorkspaceStore::open(db_path.clone())
+                .and_then(|store| store.list_sessions(&workspace))
+                .unwrap_or_default();
+
+            {
+                let mut current = records.borrow_mut();
+                current.clear();
+                current.extend(loaded);
+            }
+
+            let preserved = *selected.borrow();
+            let attached_sessions = active_sessions
+                .borrow()
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>();
+            let active_record = {
+                let current = records.borrow();
+                preserve_combo_selection(&combo, &current, preserved, &attached_sessions)
+            };
+            *selected.borrow_mut() = active_record;
+            app_state.set_selected_agent_session(active_record);
+
+            match active_record {
+                Some(process_id) => {
+                    let current = records.borrow();
+                    let Some(record) = current.iter().find(|record| record.id == process_id) else {
+                        status.set_text("No session selected.");
+                        transcript_buffer.set_text("No session selected.");
+                        return;
+                    };
+                    let attached = attached_sessions.contains(&process_id);
+                    let last_seen = last_output.borrow().get(&process_id).copied();
+                    let contents = fs::read_to_string(&record.log_path)
+                        .map(|text| {
+                            terminal_display_text(&trim_session_scrollback(&text)).to_string()
+                        })
+                        .unwrap_or_else(|_| "Could not read selected session log.".to_string());
+                    if contents.trim().is_empty() {
+                        transcript_buffer.set_text("No output yet.");
+                    } else {
+                        transcript_buffer.set_text(&contents);
+                    }
+                    status.set_text(&format!(
+                        "Selected #{}: {} (status={}, state={}, pid={}, started={}{})",
+                        process_id,
+                        session_kind_label(&record.command),
+                        record.status.as_str(),
+                        session_runtime_state(
+                            record,
+                            if record.status == ProcessStatus::Running {
+                                last_seen
+                            } else {
+                                None
+                            },
+                            attached,
+                        ),
+                        record.pid,
+                        record.started_at,
+                        session_harness_metadata_label(&record.session_harness_metadata),
+                    ));
+                }
+                None => {
+                    status.set_text("No session selected.");
+                    transcript_buffer
+                        .set_text("No local sessions yet. Start Shell/Codex/Claude/Cursor above.");
+                }
+            }
+
+            if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+                if let Ok(mcp_status) = store.mcp_status(&workspace) {
+                    provider_status.set_text(&provider_status_text(&mcp_status));
+                }
+            }
+            staged_review_status.set_text(&staged_review_status_text(
+                app_state.staged_review_prompt().as_deref(),
+            ));
+        }) as Rc<dyn Fn()>
+    };
+
+    refresh_view();
+    seed_running_sessions(
+        &database_path,
+        workspace_name,
+        &active_sessions,
+        &transcript_buffer,
+    );
+    refresh_view();
+
+    let db_for_refresh = database_path.clone();
+    let refresh_view_for_btn = refresh_view.clone();
+    let active_sessions_for_refresh = active_sessions.clone();
+    let transcript_buffer_for_refresh = transcript_buffer.clone();
+    let workspace_for_refresh = workspace_name.to_owned();
+    let refresh_after_refresh = refresh.clone();
+    refresh_btn.connect_clicked(move |_| {
+        let _ = WorkspaceStore::open(db_for_refresh.clone())
+            .and_then(|store| store.reconcile_session_processes())
+            .map(|_| ());
+        seed_running_sessions(
+            &db_for_refresh,
+            &workspace_for_refresh,
+            &active_sessions_for_refresh,
+            &transcript_buffer_for_refresh,
+        );
+        refresh_view_for_btn();
+        refresh_after_refresh();
+    });
+
+    let db_for_send = database_path.clone();
+    let workspace_for_send = workspace_name.to_owned();
+    let active_sessions_send = active_sessions.clone();
+    let selected_send = selected_session.clone();
+    let last_output_send = last_output.clone();
+    let transcript_buffer_send = transcript_buffer.clone();
+    let refresh_view_send = refresh_view.clone();
+    let refresh_send = refresh.clone();
+    let app_state_for_send = app_state.clone();
+    let send_text = Rc::new({
+        move |text: String, staged_review: bool| {
+            let Some(process_id) = *selected_send.borrow() else {
+                append_text(
+                    &transcript_buffer_send,
+                    "[session send] No session selected; cannot send input.\n",
+                );
+                return;
+            };
+            let command = text.trim().to_owned();
+            if command.is_empty() {
+                return;
+            }
+            {
+                let mut sessions = active_sessions_send.borrow_mut();
+                let Some(session) = sessions.get_mut(&process_id) else {
+                    append_text(
+                        &transcript_buffer_send,
+                        &format!(
+                            "[session send] Session #{process_id} is detached from this UI.\n"
+                        ),
+                    );
+                    return;
+                };
+                if let Err(err) = session.write(&(command.clone() + "\n")) {
+                    append_text(
+                        &transcript_buffer_send,
+                        &format!("[session send error for #{process_id}] {err:#}\n"),
+                    );
+                    return;
+                }
+            }
+            let log_text = if staged_review {
+                staged_review_prompt_text(&command)
+            } else {
+                command.clone() + "\n"
+            };
+            if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
+                let _ = writer.append_session_process_output(process_id, &log_text);
+            }
+            last_output_send
+                .borrow_mut()
+                .insert(process_id, Instant::now());
+            if staged_review {
+                append_text(&transcript_buffer_send, &log_text);
+                app_state_for_send.set_staged_review_prompt(None);
+            } else {
+                append_text(
+                    &transcript_buffer_send,
+                    &format!("[{workspace_for_send}#{process_id}]> {command}\n"),
+                );
+            }
+            refresh_view_send();
+            refresh_send();
+        }
+    });
+    send_btn.connect_clicked({
+        let send_text = send_text.clone();
+        let input = input.clone();
+        move |_| {
+            let command = input.text().to_string();
+            if command.trim().is_empty() {
+                return;
+            }
+            input.set_text("");
+            (send_text)(command, false);
+        }
+    });
+    input.connect_activate({
+        let send_text = send_text.clone();
+        let input = input.clone();
+        move |_| {
+            let command = input.text().to_string();
+            if command.trim().is_empty() {
+                return;
+            }
+            input.set_text("");
+            (send_text)(command, false);
+        }
+    });
+    send_review_btn.connect_clicked({
+        let send_text = send_text.clone();
+        let app_state = app_state.clone();
+        move |_| {
+            let Some(prompt) = app_state.staged_review_prompt() else {
+                return;
+            };
+            (send_text)(prompt, true);
+        }
+    });
+
+    let db_for_stop = database_path.clone();
+    let workspace_for_stop = workspace_name.to_owned();
+    let active_sessions_stop = active_sessions.clone();
+    let selected_session_stop = selected_session.clone();
+    let last_output_stop = last_output.clone();
+    let transcript_buffer_stop = transcript_buffer.clone();
+    let refresh_view_stop = refresh_view.clone();
+    let refresh_stop = refresh.clone();
+    stop_btn.connect_clicked(move |_| {
+        let Some(process_id) = *selected_session_stop.borrow() else {
+            append_text(
+                &transcript_buffer_stop,
+                "[session stop] No session selected.\n",
+            );
+            return;
+        };
+
+        if let Some(mut session) = active_sessions_stop.borrow_mut().remove(&process_id) {
+            if let Err(err) = session.stop() {
+                append_text(
+                    &transcript_buffer_stop,
+                    &format!("[session stop local #{process_id}] {err:#}\n"),
+                );
+            }
+        }
+
+        last_output_stop.borrow_mut().remove(&process_id);
+        let result = WorkspaceStore::open(db_for_stop.clone())
+            .and_then(|store| store.stop_session_process(&workspace_for_stop, process_id));
+        match result {
+            Ok(process) => append_text(
+                &transcript_buffer_stop,
+                &format!(
+                    "[session stop] #{process_id} status={} pid={}\n",
+                    process.status.as_str(),
+                    process.pid
+                ),
+            ),
+            Err(err) => append_text(
+                &transcript_buffer_stop,
+                &format!("[session stop #{process_id}] {err:#}\n"),
+            ),
+        }
+        refresh_view_stop();
+        refresh_stop();
+    });
+
+    let selected_checkpoint = selected_session.clone();
+    let db_for_checkpoint = database_path.clone();
+    let workspace_for_checkpoint = workspace_name.to_owned();
+    let transcript_buffer_checkpoint = transcript_buffer.clone();
+    let checkpoint_message_field = checkpoint_message.clone();
+    checkpoint_btn.connect_clicked(move |_| {
+        let Some(process_id) = *selected_checkpoint.borrow() else {
+            append_text(
+                &transcript_buffer_checkpoint,
+                "[session checkpoint] Select a session to attach checkpoint metadata.\n",
+            );
+            return;
+        };
+        let mut message = checkpoint_message_field.text().to_string();
+        if message.trim().is_empty() {
+            message = format!("Session {process_id} checkpoint");
+        }
+        match WorkspaceStore::open(db_for_checkpoint.clone()).and_then(|store| {
+            store.checkpoint_create(&workspace_for_checkpoint, &message, Some(process_id))
+        }) {
+            Ok(checkpoint) => append_text(
+                &transcript_buffer_checkpoint,
+                &format!(
+                    "[checkpoint] created #{}: {}\n",
+                    checkpoint.id, checkpoint.message
+                ),
+            ),
+            Err(err) => append_text(
+                &transcript_buffer_checkpoint,
+                &format!("[checkpoint error] {err:#}\n"),
+            ),
+        }
+    });
+
+    sessions_combo.connect_changed({
+        let selected_for_change = selected_session.clone();
+        let app_state = app_state.clone();
+        let refresh_view = refresh_view.clone();
+        move |combo| {
+            let selected = combo
+                .active_id()
+                .and_then(|value| value.as_str().parse::<i64>().ok());
+            *selected_for_change.borrow_mut() = selected;
+            app_state.set_selected_agent_session(selected);
+            refresh_view();
+        }
+    });
+
+    for (button, kind) in agent_buttons {
+        let db_path_for_launch = database_path.clone();
+        let workspace_for_launch = workspace_name.to_owned();
+        let active_sessions_for_launch = active_sessions.clone();
+        let refresh_view_for_launch = refresh_view.clone();
+        let last_output_for_launch = last_output.clone();
+        let transcript_for_launch = transcript.clone();
+        let buffer_for_launch = transcript_buffer.clone();
+        let refresh_for_launch = refresh.clone();
+        let selected_for_launch = selected_session.clone();
+        let app_state_for_launch = app_state.clone();
+        let plan_mode_for_launch = plan_mode.clone();
+        let fast_mode_for_launch = fast_mode.clone();
+        let approval_mode_for_launch = approval_mode.clone();
+        let reasoning_mode_for_launch = reasoning_mode.clone();
+        let effort_mode_for_launch = effort_mode.clone();
+        let codex_personality_for_launch = codex_personality.clone();
+        let codex_goals_for_launch = codex_goals.clone();
+        let codex_skills_for_launch = codex_skills.clone();
+        button.connect_clicked(move |_| {
+            let launch_options = collect_session_harness_options(
+                &plan_mode_for_launch,
+                &fast_mode_for_launch,
+                &approval_mode_for_launch,
+                &reasoning_mode_for_launch,
+                &effort_mode_for_launch,
+                &codex_personality_for_launch,
+                &codex_goals_for_launch,
+                &codex_skills_for_launch,
+            );
+            let launch = match WorkspaceStore::open(db_path_for_launch.clone()).and_then(|store| {
+                store.session_launch_with_options(&workspace_for_launch, kind, launch_options)
+            }) {
+                Ok(launch) => launch,
+                Err(err) => {
+                    append_text(&buffer_for_launch, &format!("[session start] {err:#}\n"));
+                    return;
+                }
+            };
+
+            let (rows, cols) = session_size_from_widget(
+                transcript_for_launch.allocated_width(),
+                transcript_for_launch.allocated_height(),
+            );
+
+            let mut pty = match PtySession::spawn(
+                launch.program.clone(),
+                launch.args.clone(),
+                &launch.cwd,
+                launch.env.clone(),
+                rows,
+                cols,
+            ) {
+                Ok(session) => session,
+                Err(err) => {
+                    append_text(
+                        &buffer_for_launch,
+                        &format!("[session start] {kind:?} launch failed: {err:#}\n"),
+                    );
+                    return;
+                }
+            };
+
+            let pid = match pty.process_id() {
+                Some(pid) => pid,
+                None => {
+                    let _ = pty.stop();
+                    append_text(
+                        &buffer_for_launch,
+                        "[session start] failed to allocate process id.\n",
+                    );
+                    return;
+                }
+            };
+
+            let session_record = match WorkspaceStore::open(db_path_for_launch.clone())
+                .and_then(|store| store.record_session_process(&workspace_for_launch, &launch, pid))
+            {
+                Ok(record) => record,
+                Err(err) => {
+                    let _ = pty.stop();
+                    append_text(
+                        &buffer_for_launch,
+                        &format!("[session start] failed to record process: {err:#}\n"),
+                    );
+                    return;
+                }
+            };
+
+            active_sessions_for_launch
+                .borrow_mut()
+                .insert(session_record.id, SessionConnection::Live(pty));
+            last_output_for_launch
+                .borrow_mut()
+                .insert(session_record.id, Instant::now());
+            append_text(
+                &buffer_for_launch,
+                &format!(
+                    "[session started] #{} kind={} pid={}\n",
+                    session_record.id,
+                    session_kind_label(&session_record.command),
+                    pid
+                ),
+            );
+            *selected_for_launch.borrow_mut() = Some(session_record.id);
+            app_state_for_launch.set_selected_agent_session(Some(session_record.id));
+            refresh_view_for_launch();
+            refresh_for_launch();
+        });
+    }
+
+    let db_for_poll = database_path.clone();
+    let active_sessions_for_poll = active_sessions.clone();
+    let transcript_buffer_for_poll = transcript_buffer.clone();
+    let transcript_for_poll = transcript.clone();
+    let selected_for_poll = selected_session.clone();
+    let last_output_for_poll = last_output.clone();
+    let last_size_for_poll = last_size.clone();
+    let reconcile_tick_for_poll = reconcile_tick.clone();
+    let refresh_view_for_poll = refresh_view.clone();
+    let refresh_for_poll = refresh.clone();
+    glib::timeout_add_local(Duration::from_millis(SESSION_POLL_INTERVAL_MS), move || {
+        let size = session_size_from_widget(
+            transcript_for_poll.allocated_width(),
+            transcript_for_poll.allocated_height(),
+        );
+        let should_resize = match *last_size_for_poll.borrow() {
+            Some(previous) => previous != size,
+            None => true,
+        };
+        *last_size_for_poll.borrow_mut() = Some(size);
+
+        let mut ended = Vec::<i64>::new();
+        let mut should_sync = false;
+        {
+            let mut sessions = active_sessions_for_poll.borrow_mut();
+            for (process_id, session) in sessions.iter_mut() {
+                let output = session.read_available();
+                if !output.is_empty() {
+                    let _ = WorkspaceStore::open(db_for_poll.clone()).and_then(|store| {
+                        store.append_session_process_output(*process_id, &output)
+                    });
+                    let is_selected = *selected_for_poll.borrow() == Some(*process_id);
+                    if is_selected {
+                        append_text(&transcript_buffer_for_poll, &terminal_display_text(&output));
+                    }
+                    last_output_for_poll
+                        .borrow_mut()
+                        .insert(*process_id, Instant::now());
+                    if is_selected {
+                        should_sync = true;
+                    }
+                }
+
+                if should_resize {
+                    if let Err(err) = session.resize(size.0, size.1) {
+                        append_text(
+                            &transcript_buffer_for_poll,
+                            &format!("[session resize error] {err:#}\n"),
+                        );
+                    }
+                }
+
+                match session.has_exited() {
+                    Ok(true) => ended.push(*process_id),
+                    Ok(false) => {}
+                    Err(err) => append_text(
+                        &transcript_buffer_for_poll,
+                        &format!("[session poll error] {err:#}\n"),
+                    ),
+                }
+            }
+        }
+
+        for process_id in ended {
+            let was_active = *selected_for_poll.borrow() == Some(process_id);
+            active_sessions_for_poll.borrow_mut().remove(&process_id);
+            let _ = WorkspaceStore::open(db_for_poll.clone())
+                .and_then(|store| store.mark_session_process_exited(process_id, None));
+            last_output_for_poll.borrow_mut().remove(&process_id);
+            if was_active {
+                append_text(
+                    &transcript_buffer_for_poll,
+                    &format!("[session finished] #{process_id}\n"),
+                );
+            }
+            should_sync = true;
+        }
+
+        *reconcile_tick_for_poll.borrow_mut() += 1;
+        if *reconcile_tick_for_poll.borrow() % SESSION_RECONCILE_EVERY_TICKS == 0 {
+            if let Ok(reconciled) = WorkspaceStore::open(db_for_poll.clone())
+                .and_then(|store| store.reconcile_session_processes())
+            {
+                if reconciled
+                    .iter()
+                    .any(|process| process.status != ProcessStatus::Running)
+                {
+                    for process in reconciled {
+                        active_sessions_for_poll.borrow_mut().remove(&process.id);
+                        last_output_for_poll.borrow_mut().remove(&process.id);
+                    }
+                    should_sync = true;
+                }
+            }
+        }
+
+        if should_sync {
+            refresh_view_for_poll();
+            refresh_for_poll();
+        }
+        glib::ControlFlow::Continue
+    });
 
     root
+}
+
+fn preserve_combo_selection(
+    combo: &ComboBoxText,
+    records: &[ProcessRecord],
+    preserve: Option<i64>,
+    attached_sessions: &HashSet<i64>,
+) -> Option<i64> {
+    combo.remove_all();
+    for record in records {
+        combo.append(
+            Some(&record.id.to_string()),
+            &session_summary_label(record, attached_sessions.contains(&record.id)),
+        );
+    }
+
+    if records.is_empty() {
+        return None;
+    }
+
+    let selected_index = preserve
+        .and_then(|id| records.iter().position(|record| record.id == id))
+        .or_else(|| Some(0));
+
+    if let Some(index) = selected_index.filter(|index| *index < records.len()) {
+        combo.set_active(Some(index as u32));
+        return Some(records[index].id);
+    }
+
+    combo.set_active(Some(0));
+    records.first().map(|record| record.id)
+}
+
+fn initial_session_text(database_path: &Path, workspace_name: &str) -> String {
+    let sessions = WorkspaceStore::open(database_path)
+        .and_then(|store| store.list_sessions(workspace_name))
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        return format!("No local sessions yet for {workspace_name}. Start a session above.\n\n");
+    }
+
+    let mut out = format!("Recent sessions for {workspace_name}:\n");
+    for record in sessions.iter().take(SESSION_TAIL_HISTORY) {
+        out.push_str(&format!(
+            "#{} {} status={} pid={} started={}\n",
+            record.id,
+            session_kind_label(&record.command),
+            record.status.as_str(),
+            record.pid,
+            record.started_at,
+        ));
+    }
+    out
+}
+
+fn seed_running_sessions(
+    database_path: &Path,
+    workspace_name: &str,
+    active_sessions: &Rc<RefCell<HashMap<i64, SessionConnection>>>,
+    transcript_buffer: &TextBuffer,
+) {
+    let Ok(store) = WorkspaceStore::open(database_path.to_path_buf()) else {
+        return;
+    };
+    let _ = store.reconcile_session_processes();
+    let Ok(records) = store.list_sessions(workspace_name) else {
+        return;
+    };
+
+    let mut attached = 0usize;
+    let mut detached = 0usize;
+    let mut sessions = active_sessions.borrow_mut();
+    for record in records {
+        if record.status != ProcessStatus::Running || sessions.contains_key(&record.id) {
+            continue;
+        }
+        match SessionConnection::try_reattach_running(record.pid) {
+            Ok(session) => {
+                sessions.insert(record.id, session);
+                attached += 1;
+            }
+            Err(_) => detached += 1,
+        }
+    }
+    drop(sessions);
+
+    if attached > 0 {
+        append_text(
+            transcript_buffer,
+            &format!("[session resume] reattached {attached} running session(s).\n"),
+        );
+    }
+    if detached > 0 {
+        append_text(
+            transcript_buffer,
+            &format!("[session resume] {detached} running session(s) are visible but detached.\n"),
+        );
+    }
+}
+
+fn provider_status_text(status: &linux_conductor_core::mcp::McpStatus) -> String {
+    let codex_servers = status.codex_user.len() + status.codex_project.len();
+    let claude_servers = status.claude_user.len() + status.claude_project.len();
+    let cursor_servers = status.cursor_user.len() + status.cursor_project.len();
+    let codex_provider = status.codex_provider.as_deref().unwrap_or("auto");
+    let claude_provider = status.claude_provider.as_deref().unwrap_or("auto");
+    let codex_exec = if status.codex_executable_available {
+        "available"
+    } else {
+        "missing"
+    };
+    let claude_exec = if status.claude_executable_available {
+        "available"
+    } else {
+        "missing"
+    };
+    let cursor_exec = if status.cursor_executable_available {
+        "available"
+    } else {
+        "missing"
+    };
+    let codex_auth = if status.codex_authenticated {
+        "yes"
+    } else {
+        "no"
+    };
+    let claude_auth = if status.claude_authenticated {
+        "yes"
+    } else {
+        "no"
+    };
+    let cursor_auth = if status.cursor_authenticated {
+        "yes"
+    } else {
+        "no"
+    };
+    format!(
+        "MCP configured: claude={claude_servers}, codex={codex_servers}, cursor={cursor_servers}. Providers: codex={codex_provider}/{codex_exec}/{codex_auth}, claude={claude_provider}/{claude_exec}/{claude_auth}, cursor=cli-{cursor_exec}/{cursor_auth}. Cursor MCP is managed by Cursor.",
+    )
+}
+
+fn collect_session_harness_options(
+    plan_mode: &CheckButton,
+    fast_mode: &CheckButton,
+    approval_mode: &ComboBoxText,
+    reasoning_mode: &ComboBoxText,
+    effort_mode: &ComboBoxText,
+    codex_personality: &ComboBoxText,
+    codex_goals: &Entry,
+    codex_skills: &Entry,
+) -> SessionHarnessOptions {
+    SessionHarnessOptions {
+        plan_mode: plan_mode.is_active(),
+        fast_mode: fast_mode.is_active(),
+        approval_mode: combo_active_value_or_none(approval_mode, Some("default")),
+        reasoning_mode: combo_active_value_or_none(reasoning_mode, Some("default")),
+        effort_mode: combo_active_value_or_none(effort_mode, Some("default")),
+        codex_personality: combo_active_value_or_none(codex_personality, Some("default")),
+        codex_goals: entry_value_or_none(codex_goals),
+        codex_skills: entry_value_or_none(codex_skills),
+    }
+}
+
+fn combo_active_value_or_none(combo: &ComboBoxText, omit: Option<&str>) -> Option<String> {
+    combo.active_id().and_then(|value| {
+        let value = value.to_string();
+        let omitted = omit.filter(|omit| !omit.is_empty()).unwrap_or("");
+        if value.is_empty() || value == omitted {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn entry_value_or_none(entry: &Entry) -> Option<String> {
+    let value = entry.text().trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn session_harness_metadata_label(metadata: &Option<String>) -> String {
+    if let Some(value) = metadata.as_ref() {
+        let value = value.trim();
+        if !value.is_empty() {
+            return format!(" harness={value}");
+        }
+    }
+    String::new()
+}
+
+fn session_summary_label(record: &ProcessRecord, attached: bool) -> String {
+    let attached_label = if record.status == ProcessStatus::Running {
+        if attached {
+            "attached"
+        } else {
+            "detached"
+        }
+    } else {
+        "saved"
+    };
+    format!(
+        "#{} {} {} {}",
+        record.id,
+        session_kind_label(&record.command),
+        record.status.as_str(),
+        attached_label,
+    )
+}
+
+fn session_kind_label(command: &str) -> &'static str {
+    let executable = command.split_whitespace().next().unwrap_or("").trim();
+    match PathBuf::from(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+    {
+        "codex" => "Codex",
+        "claude" => "Claude",
+        "cursor" => "Cursor",
+        _ => "Shell",
+    }
+}
+
+fn session_size_from_widget(width: i32, height: i32) -> (u16, u16) {
+    let cols = (width.max(0) / 8).clamp(80, u16::MAX as i32) as u16;
+    let rows = (height.max(0) / 20).clamp(20, u16::MAX as i32) as u16;
+    (rows, cols)
+}
+
+fn session_runtime_state(
+    record: &ProcessRecord,
+    last_output: Option<Instant>,
+    attached: bool,
+) -> &'static str {
+    match record.status {
+        ProcessStatus::Running => {
+            if !attached {
+                return "detached";
+            }
+            if let Some(last_seen) = last_output {
+                if last_seen.elapsed() > Duration::from_secs(2) {
+                    "waiting"
+                } else {
+                    "working"
+                }
+            } else {
+                "idle"
+            }
+        }
+        ProcessStatus::Stopped => "done",
+        ProcessStatus::Exited => match record.exit_code {
+            Some(0) | None => "done",
+            Some(_) => "errored",
+        },
+    }
+}
+
+fn append_text(buffer: &TextBuffer, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let mut end = buffer.end_iter();
+    buffer.insert(&mut end, &terminal_display_text(text));
+    let full = buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string();
+    let trimmed = trim_session_scrollback(&full);
+    if trimmed != full {
+        buffer.set_text(&trimmed);
+    }
+}
+
+fn trim_session_scrollback(text: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= SESSION_SCROLLBACK_LINES {
+        return text.to_owned();
+    }
+    let start = lines.len().saturating_sub(SESSION_SCROLLBACK_LINES);
+    let mut trimmed = String::from("[session scrollback trimmed]\n");
+    trimmed.push_str(&lines[start..].join("\n"));
+    if !trimmed.ends_with('\n') {
+        trimmed.push('\n');
+    }
+    trimmed
 }
 
 fn staged_review_prompt_text(prompt: &str) -> String {
     format!("\n[staged review prompt]\n{}\n", prompt.trim())
 }
 
-fn latest_session_text(database_path: &Path, workspace_name: &str) -> String {
-    let Ok(store) = WorkspaceStore::open(database_path) else {
-        return "Could not open workspace database.".to_owned();
-    };
-    let sessions = store.list_sessions(workspace_name).unwrap_or_default();
-    let latest = sessions
-        .into_iter()
-        .max_by_key(|record| record.started_at.clone());
-    let Some(record) = latest else {
-        return "No local sessions yet. Start Shell, Codex, Claude, or Cursor above.".to_owned();
-    };
-    let log = store
-        .read_latest_session_log(workspace_name)
-        .unwrap_or_else(|err| format!("Could not read latest session log: {err:#}"));
-    format!(
-        "#{} {} pid={} status={}\nlog={}\n\n{}",
-        record.id,
-        record.command,
-        record.pid,
-        record.status.as_str(),
-        record.log_path.display(),
-        log
-    )
+fn staged_review_status_text(prompt: Option<&str>) -> String {
+    match prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        Some(prompt) => format!("Staged review prompt ready ({} chars).", prompt.len()),
+        None => "No staged review prompt.".to_owned(),
+    }
+}
+
+enum SessionConnection {
+    Live(PtySession),
+    Reattached {
+        write: std::fs::File,
+        output: Arc<Mutex<String>>,
+        read_cursor: usize,
+        pid: u32,
+    },
+}
+
+impl SessionConnection {
+    fn try_reattach_running(pid: u32) -> anyhow::Result<Self> {
+        let path = terminal_device_path_for_pid(pid)?;
+        let mut reader = OpenOptions::new().read(true).open(&path)?;
+        let write = OpenOptions::new().write(true).open(&path)?;
+        let output = Arc::new(Mutex::new(String::new()));
+        let reader_output = Arc::clone(&output);
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut output) = reader_output.lock() {
+                            output.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self::Reattached {
+            write,
+            output,
+            read_cursor: 0,
+            pid,
+        })
+    }
+
+    fn write(&mut self, input: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Live(session) => session.write(input),
+            Self::Reattached { write, .. } => {
+                write.write_all(input.as_bytes())?;
+                write.flush()?;
+                Ok(())
+            }
+        }
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Live(session) => session.stop(),
+            Self::Reattached { .. } => Ok(()),
+        }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) -> anyhow::Result<()> {
+        match self {
+            Self::Live(session) => session.resize(rows, cols),
+            Self::Reattached { .. } => Ok(()),
+        }
+    }
+
+    fn has_exited(&mut self) -> anyhow::Result<bool> {
+        match self {
+            Self::Live(session) => session.has_exited(),
+            Self::Reattached { pid, .. } => Ok(!terminal_process_alive(*pid)),
+        }
+    }
+
+    fn read_available(&mut self) -> String {
+        match self {
+            Self::Live(session) => session.read_available(),
+            Self::Reattached {
+                output,
+                read_cursor,
+                ..
+            } => {
+                let Ok(output) = output.lock() else {
+                    return String::new();
+                };
+                let next = output.get(*read_cursor..).unwrap_or_default().to_owned();
+                *read_cursor = output.len();
+                next
+            }
+        }
+    }
+}
+
+fn terminal_process_alive(process_id: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(process_id.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn terminal_device_path_for_pid(process_id: u32) -> anyhow::Result<PathBuf> {
+    let fd = format!("/proc/{process_id}/fd/0");
+    let target = fs::read_link(&fd)?;
+    let path = target
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("terminal fd path is not valid UTF-8"))?
+        .to_owned();
+    anyhow::ensure!(
+        !path.is_empty() && path.starts_with("/dev/pts/"),
+        "process {process_id} is not attached to a PTY slave"
+    );
+    Ok(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -135,5 +1155,17 @@ mod tests {
         assert!(text.contains("[staged review prompt]"));
         assert!(text.contains("workspace berlin"));
         assert!(text.contains("#1 src/lib.rs"));
+    }
+
+    #[test]
+    fn staged_review_status_text_summarizes_presence() {
+        assert_eq!(
+            staged_review_status_text(Some("  fix it  ")),
+            "Staged review prompt ready (6 chars)."
+        );
+        assert_eq!(
+            staged_review_status_text(Some("   ")),
+            "No staged review prompt."
+        );
     }
 }

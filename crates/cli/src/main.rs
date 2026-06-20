@@ -5,7 +5,8 @@ use linux_conductor_core::import::{default_conductor_app_database, import_conduc
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
 use linux_conductor_core::workspace::{
-    CreateWorkspace, SessionKind, SessionLaunch, WorkspaceStatusLine, WorkspaceStore,
+    CreateWorkspace, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStatusLine,
+    WorkspaceStore,
 };
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -202,6 +203,22 @@ enum SessionCommand {
         workspace: String,
         #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
         kind: CliSessionKind,
+        #[arg(long)]
+        plan_mode: bool,
+        #[arg(long)]
+        fast_mode: bool,
+        #[arg(long)]
+        approval_mode: Option<String>,
+        #[arg(long)]
+        reasoning_mode: Option<String>,
+        #[arg(long)]
+        effort_mode: Option<String>,
+        #[arg(long)]
+        codex_personality: Option<String>,
+        #[arg(long)]
+        codex_goals: Option<String>,
+        #[arg(long)]
+        codex_skills: Option<String>,
     },
     Open {
         workspace: String,
@@ -211,6 +228,22 @@ enum SessionCommand {
         terminal: Option<String>,
         #[arg(long)]
         print_command: bool,
+        #[arg(long)]
+        plan_mode: bool,
+        #[arg(long)]
+        fast_mode: bool,
+        #[arg(long)]
+        approval_mode: Option<String>,
+        #[arg(long)]
+        reasoning_mode: Option<String>,
+        #[arg(long)]
+        effort_mode: Option<String>,
+        #[arg(long)]
+        codex_personality: Option<String>,
+        #[arg(long)]
+        codex_goals: Option<String>,
+        #[arg(long)]
+        codex_skills: Option<String>,
     },
     Stop {
         workspace: String,
@@ -599,8 +632,32 @@ fn main() -> Result<()> {
         Command::Session { command } => {
             let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
-                SessionCommand::Start { workspace, kind } => {
-                    let process = store.start_session(&workspace, kind.into())?;
+                SessionCommand::Start {
+                    workspace,
+                    kind,
+                    plan_mode,
+                    fast_mode,
+                    approval_mode,
+                    reasoning_mode,
+                    effort_mode,
+                    codex_personality,
+                    codex_goals,
+                    codex_skills,
+                } => {
+                    let process = store.start_session_with_options(
+                        &workspace,
+                        kind.into(),
+                        SessionHarnessOptions {
+                            plan_mode,
+                            fast_mode,
+                            approval_mode,
+                            reasoning_mode,
+                            effort_mode,
+                            codex_personality,
+                            codex_goals,
+                            codex_skills,
+                        },
+                    )?;
                     println!(
                         "Started session for {} as pid {} (log: {})",
                         workspace,
@@ -613,8 +670,29 @@ fn main() -> Result<()> {
                     kind,
                     terminal,
                     print_command,
+                    plan_mode,
+                    fast_mode,
+                    approval_mode,
+                    reasoning_mode,
+                    effort_mode,
+                    codex_personality,
+                    codex_goals,
+                    codex_skills,
                 } => {
-                    let launch = store.session_launch(&workspace, kind.into())?;
+                    let launch = store.session_launch_with_options(
+                        &workspace,
+                        kind.into(),
+                        SessionHarnessOptions {
+                            plan_mode,
+                            fast_mode,
+                            approval_mode,
+                            reasoning_mode,
+                            effort_mode,
+                            codex_personality,
+                            codex_goals,
+                            codex_skills,
+                        },
+                    )?;
                     if print_command {
                         println!("{}", render_manual_session_command(&launch));
                     } else {
@@ -1165,6 +1243,7 @@ mod tests {
                 ),
                 ("CONDUCTOR_PORT".to_owned(), OsString::from("3000")),
             ],
+            harness_metadata: None,
         };
 
         let command = render_manual_session_command(&launch);

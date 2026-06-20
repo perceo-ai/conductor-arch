@@ -4,13 +4,13 @@ use gtk::{
     Box as GBox, Button, ComboBoxText, Entry, Label, ListBox, Orientation, PolicyType,
     ScrolledWindow, TextBuffer, TextView,
 };
-use std::collections::{HashMap, HashSet};
 use linux_conductor_core::pty::PtySession;
 use linux_conductor_core::workspace::{
     ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
     WorkspaceStore,
 };
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::io::Write;
@@ -280,6 +280,8 @@ pub fn embedded_terminal_panel(
     let tab_buttons_for_prune = tab_buttons.clone();
     let refresh_for_prune = refresh_hub.clone();
     let buffer_for_prune = transcript.buffer();
+    let jump_history_pages: Rc<RefCell<HashMap<i64, usize>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     let jump_history_pages_for_close = jump_history_pages.clone();
     let jump_history_pages_for_prune = jump_history_pages.clone();
     let cols = if full_mode { 120 } else { 80 };
@@ -793,11 +795,9 @@ pub fn embedded_terminal_panel(
             return;
         };
         let mut sessions = ptys_for_interrupt.borrow_mut();
-        let Some(state) = terminal_tab_states_for_interrupt.borrow().get(index) else {
-            append_text(
-                &buffer_for_interrupt,
-                "\n[selected pty shell is missing]\n",
-            );
+        let states = terminal_tab_states_for_interrupt.borrow();
+        let Some(state) = states.get(index) else {
+            append_text(&buffer_for_interrupt, "\n[selected pty shell is missing]\n");
             return;
         };
         if !(state.is_running() && state.attached) {
@@ -850,7 +850,7 @@ pub fn embedded_terminal_panel(
             return;
         }
         let mut history = command_history_for_run.borrow_mut();
-        if !history.ends_with(&command) {
+        if history.last() != Some(&command) {
             history.push(command.clone());
             if history.len() > 64 {
                 history.remove(0);
@@ -882,6 +882,7 @@ pub fn embedded_terminal_panel(
     let command_history_for_keys = Rc::clone(&command_history);
     let command_history_position_for_keys = Rc::clone(&command_history_position);
     let command_history_draft_for_keys = Rc::clone(&command_history_draft);
+    let entry_for_keys = entry.clone();
     entry_key_controller.connect_key_pressed(move |_, keyval, _, modifiers| {
         let is_ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
         if is_ctrl && keyval == gtk::gdk::Key::c {
@@ -889,42 +890,43 @@ pub fn embedded_terminal_panel(
             return gtk::glib::Propagation::Stop;
         }
         if is_ctrl && keyval == gtk::gdk::Key::Up {
-            let mut history = command_history_for_keys.borrow_mut();
+            let history = command_history_for_keys.borrow_mut();
             if history.is_empty() {
                 return gtk::glib::Propagation::Proceed;
             }
             let mut position = command_history_position_for_keys.borrow_mut();
             let next_position = match *position {
                 None => {
-                    *command_history_draft_for_keys.borrow_mut() = entry.text().to_string();
+                    *command_history_draft_for_keys.borrow_mut() =
+                        entry_for_keys.text().to_string();
                     history.len() - 1
                 }
                 Some(position) => position.saturating_sub(1),
             };
             *position = Some(next_position);
-            if let Some(command) = history.get(*position).cloned() {
-                entry.set_text(&command);
-                entry.set_position(command.len() as i32);
+            if let Some(command) = history.get(next_position).cloned() {
+                entry_for_keys.set_text(&command);
+                entry_for_keys.set_position(command.len() as i32);
             }
             return gtk::glib::Propagation::Stop;
         }
         if is_ctrl && keyval == gtk::gdk::Key::Down {
             let mut position = command_history_position_for_keys.borrow_mut();
-            let mut history = command_history_for_keys.borrow_mut();
+            let history = command_history_for_keys.borrow_mut();
             match *position {
                 None => return gtk::glib::Propagation::Proceed,
-                Some(position) if position + 1 >= history.len() => {
+                Some(history_index) if history_index + 1 >= history.len() => {
                     *position = None;
                     let draft = command_history_draft_for_keys.borrow();
-                    entry.set_text(draft.as_str());
-                    entry.set_position(draft.len() as i32);
+                    entry_for_keys.set_text(draft.as_str());
+                    entry_for_keys.set_position(draft.len() as i32);
                     return gtk::glib::Propagation::Stop;
                 }
-                Some(position) => {
-                    *position = position + 1;
-                    if let Some(command) = history.get(*position).cloned() {
-                        entry.set_text(&command);
-                        entry.set_position(command.len() as i32);
+                Some(history_index) => {
+                    *position = Some(history_index + 1);
+                    if let Some(command) = history.get(history_index + 1).cloned() {
+                        entry_for_keys.set_text(&command);
+                        entry_for_keys.set_position(command.len() as i32);
                     }
                     return gtk::glib::Propagation::Stop;
                 }
@@ -932,7 +934,7 @@ pub fn embedded_terminal_panel(
         }
         gtk::glib::Propagation::Proceed
     });
-    entry.add_controller(&entry_key_controller);
+    entry.add_controller(entry_key_controller);
 
     command_row.append(&entry);
     command_row.append(&run_btn);
@@ -967,8 +969,6 @@ pub fn embedded_terminal_panel(
         Button::with_label(&format!("Previous {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
     let jump_history_next_btn =
         Button::with_label(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
-    let jump_history_pages: Rc<RefCell<HashMap<i64, usize>>> =
-        Rc::new(RefCell::new(HashMap::new()));
     let history_records: Rc<RefCell<Vec<TerminalSessionSummary>>> =
         Rc::new(RefCell::new(Vec::new()));
     let history_records_all: Rc<RefCell<Vec<TerminalSessionSummary>>> =
@@ -1019,10 +1019,11 @@ pub fn embedded_terminal_panel(
     }
     let history_browser_for_clear = history_browser_for_filter.clone();
     let search_entry_for_clear = search_entry.clone();
+    let history_buffer_for_clear = history_buffer.clone();
     clear_search_btn.connect_clicked(move |_| {
         clear_search_results(&history_browser_for_clear);
         search_entry_for_clear.set_text("");
-        append_text(&history_buffer, "\n[terminal search] cleared\n");
+        append_text(&history_buffer_for_clear, "\n[terminal search] cleared\n");
     });
     let history_combo_for_load = history_combo.clone();
     let history_records_for_load = history_records.clone();
@@ -1080,13 +1081,13 @@ pub fn embedded_terminal_panel(
                 );
                 return;
             };
-        let Ok(process_id) = active_id.as_str().parse::<i64>() else {
-            append_text(
-                &jump_history_buffer,
-                "\n[terminal history]\nSelected terminal session is invalid.\n",
-            );
-            return;
-        };
+            let Ok(process_id) = active_id.as_str().parse::<i64>() else {
+                append_text(
+                    &jump_history_buffer,
+                    "\n[terminal history]\nSelected terminal session is invalid.\n",
+                );
+                return;
+            };
             let existing_line = jump_history_pages.borrow().get(&process_id).copied();
             let line_text = jump_history_entry.text().trim().to_owned();
             let mut line_number = if line_text.is_empty() {
@@ -1517,9 +1518,9 @@ fn run_terminal_log_search(
 
     let buffer_for_ui = buffer.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-                Ok(result) => {
-                    match result {
-                        Ok(matches) => {
+        Ok(result) => {
+            match result {
+                Ok(matches) => {
                     append_text(
                         &buffer_for_ui,
                         &format_terminal_search_results(&query, &matches),
@@ -1653,10 +1654,7 @@ fn run_terminal_line_transcript(
         }
         Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
         Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(
-                &buffer,
-                "[error]\nterminal line-jump worker disconnected\n",
-            );
+            append_text(&buffer, "[error]\nterminal line-jump worker disconnected\n");
             glib::ControlFlow::Break
         }
     });
@@ -1940,10 +1938,7 @@ fn run_terminal_history(
             let display_summaries = terminal_history_summaries_for_display(&summaries);
             let filter = terminal_history_filter_status(&history_filter);
             let query = history_session_filter.text().to_string();
-            let filtered = terminal_history_summaries_for_filter(
-                &display_summaries,
-                filter,
-            );
+            let filtered = terminal_history_summaries_for_filter(&display_summaries, filter);
             let filtered = terminal_history_summaries_for_filter_with_query(
                 &filtered,
                 filter,
@@ -2086,7 +2081,10 @@ fn set_terminal_search_results_browser(
 
     let mut grouped_matches: Vec<(i64, Vec<&TerminalLogMatch>)> = Vec::new();
     for item in matches {
-        match grouped_matches.iter_mut().find(|(pid, _)| *pid == item.process_id) {
+        match grouped_matches
+            .iter_mut()
+            .find(|(pid, _)| *pid == item.process_id)
+        {
             Some((_, grouped_items)) => grouped_items.push(item),
             None => grouped_matches.push((item.process_id, vec![item])),
         }
@@ -2170,8 +2168,8 @@ fn set_terminal_search_results_browser(
             );
             let snippet = terminal_search_match_snippet(item);
             let label = format!(
-                "#{} {}:{} [{}]\n{}\n{}",
-                item.process_id, item.command, file_name, context, snippet
+                "#{} {} [{}]\n{}\n{}",
+                item.process_id, item.command, context, file_name, snippet
             );
             let row = GBox::new(Orientation::Horizontal, 8);
             let match_row = Button::with_label(&label);
@@ -2478,16 +2476,21 @@ fn set_terminal_history_browser(
             let row_workspace = workspace_name.clone();
             let row_buffer = buffer.clone();
             let row_record = record.clone();
+            let row_button_db = row_db.clone();
+            let row_button_workspace = row_workspace.clone();
+            let row_button_buffer = row_buffer.clone();
+            let row_button_record = row_record.clone();
+            let row_button_jump_pages = jump_history_pages.clone();
             row_button.connect_clicked(move |_| {
-                row_combo_for_row_button.set_active_id(Some(&row_record.id.to_string()));
-                jump_history_pages
+                row_combo_for_row_button.set_active_id(Some(&row_button_record.id.to_string()));
+                row_button_jump_pages
                     .borrow_mut()
-                    .insert(row_record.id, latest_line);
+                    .insert(row_button_record.id, latest_line);
                 run_terminal_transcript_load(
-                    row_db.clone(),
-                    row_workspace.clone(),
-                    row_record.clone(),
-                    row_buffer.clone(),
+                    row_button_db.clone(),
+                    row_button_workspace.clone(),
+                    row_button_record.clone(),
+                    row_button_buffer.clone(),
                 );
             });
 
@@ -2499,13 +2502,14 @@ fn set_terminal_history_browser(
             let open_btn_record = row_record.clone();
             let open_btn_combo = row_combo_for_open_btn.clone();
             let open_btn_latest_line = latest_line;
+            let open_btn_jump_pages = jump_history_pages.clone();
             let tail_btn_db = row_db.clone();
             let tail_btn_workspace = row_workspace.clone();
             let tail_btn_buffer = row_buffer.clone();
             let tail_btn_record = row_record.clone();
             open_btn.connect_clicked(move |_| {
                 open_btn_combo.set_active_id(Some(&open_btn_record.id.to_string()));
-                jump_history_pages
+                open_btn_jump_pages
                     .borrow_mut()
                     .insert(open_btn_record.id, open_btn_latest_line);
                 run_terminal_transcript_load(
@@ -2519,9 +2523,10 @@ fn set_terminal_history_browser(
             let tail_btn = Button::with_label("Tail output");
             tail_btn.set_tooltip_text(Some("Load latest lines only"));
             let tail_btn_latest_line = latest_line;
+            let tail_btn_jump_pages = jump_history_pages.clone();
             tail_btn.connect_clicked(move |_| {
                 row_combo_for_tail_btn.set_active_id(Some(&tail_btn_record.id.to_string()));
-                jump_history_pages
+                tail_btn_jump_pages
                     .borrow_mut()
                     .insert(tail_btn_record.id, tail_btn_latest_line);
                 run_terminal_tail_transcript(
@@ -2540,9 +2545,10 @@ fn set_terminal_history_browser(
             let head_btn_record = row_record.clone();
             let head_btn_combo = row_combo_for_head_btn.clone();
             let head_btn_latest_line = latest_line;
+            let head_btn_jump_pages = jump_history_pages.clone();
             head_btn.connect_clicked(move |_| {
                 head_btn_combo.set_active_id(Some(&head_btn_record.id.to_string()));
-                jump_history_pages
+                head_btn_jump_pages
                     .borrow_mut()
                     .insert(head_btn_record.id, head_btn_latest_line);
                 run_terminal_head_transcript(
@@ -2690,7 +2696,7 @@ fn terminal_history_summaries_for_filter_with_query(
                 return true;
             }
             let haystack = format!(
-                "{} {} {} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 summary.process.id,
                 summary.process.command,
                 summary.process.status.as_str(),
@@ -2955,7 +2961,7 @@ fn trim_terminal_scrollback(text: &str, max_lines: usize) -> String {
     trimmed
 }
 
-fn terminal_display_text(text: &str) -> String {
+pub(crate) fn terminal_display_text(text: &str) -> String {
     let mut rendered = Vec::new();
     let mut cursor = None;
     let mut saved_cursor = None;
@@ -3794,6 +3800,7 @@ mod tests {
                 exit_code: (status != ProcessStatus::Running).then_some(0),
                 ended_at: (status != ProcessStatus::Running)
                     .then(|| "2026-06-18T04:00:00Z".to_owned()),
+                session_harness_metadata: None,
             },
             line_count,
             byte_count,
@@ -4204,6 +4211,7 @@ mod tests {
             started_at: "2026-06-18T02:00:00Z".to_owned(),
             exit_code: None,
             ended_at: None,
+            session_harness_metadata: None,
         };
 
         let formatted = format_terminal_tail_transcript(&record, "tail line\n");
@@ -4226,6 +4234,7 @@ mod tests {
             started_at: "2026-06-18T02:00:00Z".to_owned(),
             exit_code: None,
             ended_at: None,
+            session_harness_metadata: None,
         };
 
         let formatted = format_terminal_head_transcript(&record, "first line\n");
@@ -4248,6 +4257,7 @@ mod tests {
             started_at: "2026-06-18T02:00:00Z".to_owned(),
             exit_code: None,
             ended_at: None,
+            session_harness_metadata: None,
         };
 
         let formatted = format_terminal_line_transcript(&record, 17, 5, "ctx\n");
@@ -4379,7 +4389,8 @@ mod tests {
             ),
         ];
 
-        let filtered = terminal_history_summaries_for_filter_with_query(&summaries, None, Some("shell"));
+        let filtered =
+            terminal_history_summaries_for_filter_with_query(&summaries, None, Some("shell"));
         let filtered_ids = filtered
             .iter()
             .map(|summary| summary.process.id)
@@ -4531,6 +4542,7 @@ mod tests {
             started_at: "2026-06-18T02:00:00Z".to_owned(),
             exit_code: Some(0),
             ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
+            session_harness_metadata: None,
         };
 
         let rendered = format_selected_terminal_transcript(&record, "hello\n");

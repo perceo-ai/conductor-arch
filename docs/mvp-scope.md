@@ -164,10 +164,12 @@ MVP is not complete until the normal workflow can be driven from the app.
 - The GTK layout is functional but not yet a close visual clone of Conductor.
 - History is read-only and sourced directly from the macOS Conductor database;
   it is not yet a unified local chat model.
-- Agent sessions still launch through external terminals or supervised log
-  capture. The chat composer is only a staged prompt surface, not a live
-  bidirectional agent chat. Open review comments can be converted into a staged
-  agent prompt from the agent panel.
+- Agent sessions now launch in the workspace page through PTY-backed local
+  session panels with persisted transcripts, basic send/stop/checkpoint
+  controls, harness metadata, provider/auth/MCP status, and best-effort
+  reattach for still-running prior sessions. The chat surface is still
+  transcript-oriented rather than a richer Conductor-style message UI with
+  attachments.
 - Embedded terminal support now has a PTY-backed shell, but the UI is still a
   transcript/input surface rather than a polished terminal emulator with
   cursor/session management. Terminal process records are created, stopped, and
@@ -202,7 +204,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Changes/Checks/Todos/Processes are basic panels, not full Conductor review
   surfaces. Local review comments can be added and resolved in the Review tab,
   but inline diff anchoring and GitHub review-thread sync are still missing.
-- Settings, provider, MCP, command palette, keyboard shortcut, deep-link,
+- Settings, command palette, keyboard shortcut, deep-link,
   Spotlight, monorepo, linked-directory, and rich History surfaces are missing
   or incomplete.
 
@@ -210,7 +212,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 
 - Exact Conductor UI parity.
 - In-app chat threads for new Claude/Codex/Cursor sessions.
-- Resuming old chats inside the app.
+- Rich resumable chat threads inside the app.
 - Live GitHub/Linear workspace creation verification with real credentials.
 - Diff viewer with inline comments that can be sent back to an agent.
 - Full checks tab with CI/deployment/comment/todo aggregation.
@@ -219,7 +221,6 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Project/repository settings editor.
 - Agent status model comparable to Conductor's live session state.
 - Command palette, shortcut coverage, and deep links.
-- Provider configuration and MCP status surfaces.
 - Polished Big Terminal Mode beyond the first full-width terminal tab/presets.
 - Full Spotlight testing parity.
 - Monorepo sparse-checkout controls and linked-directory workflows.

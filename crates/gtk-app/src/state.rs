@@ -32,6 +32,7 @@ pub struct AppStateSnapshot {
     pub active_page: AppPage,
     pub active_workspace_tab: WorkspaceTab,
     pub selected_agent_session: Option<i64>,
+    pub staged_review_prompt: Option<String>,
     pub running_processes: Vec<i64>,
     pub attention_state: AttentionState,
     pub settings_layer: SettingsLayer,
@@ -74,6 +75,7 @@ impl AppState {
                 active_page,
                 active_workspace_tab: WorkspaceTab::Chats,
                 selected_agent_session: None,
+                staged_review_prompt: None,
                 running_processes: Vec::new(),
                 attention_state: AttentionState::default(),
                 settings_layer: SettingsLayer::BuiltInDefaults,
@@ -88,8 +90,28 @@ impl AppState {
 
     pub fn set_selected_workspace(&self, workspace: Option<String>) {
         let mut state = self.inner.borrow_mut();
+        if state.selected_workspace != workspace {
+            state.selected_agent_session = None;
+            state.staged_review_prompt = None;
+        }
         state.selected_workspace = workspace;
         state.active_page = AppPage::Workspace;
+    }
+
+    pub fn selected_agent_session(&self) -> Option<i64> {
+        self.inner.borrow().selected_agent_session
+    }
+
+    pub fn set_selected_agent_session(&self, session_id: Option<i64>) {
+        self.inner.borrow_mut().selected_agent_session = session_id;
+    }
+
+    pub fn staged_review_prompt(&self) -> Option<String> {
+        self.inner.borrow().staged_review_prompt.clone()
+    }
+
+    pub fn set_staged_review_prompt(&self, prompt: Option<String>) {
+        self.inner.borrow_mut().staged_review_prompt = prompt;
     }
 
     pub fn set_active_page(&self, page: AppPage) {

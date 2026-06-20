@@ -189,8 +189,16 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Workspace page opens when selecting a workspace.
 - [ ] Workspace page shows metadata and rough tabs for Chats, Changes, Checks,
   Todos, and Processes.
+- [ ] Changes tab lists changed files, loads a selected file diff, and can
+  restore the full workspace diff.
+- [ ] Selecting a changed file also shows that file's local inline comments in
+  the review area and can add another file/line comment there.
+- [ ] Changes tab can revert a tracked selected file back to `HEAD` and refuses
+  unsafe untracked-file revert attempts with a visible error.
 - [ ] Checks tab exposes first-slice PR controls: create with title/body/draft,
   refresh PR state, view raw checks, and merge with squash/merge/rebase methods.
+- [ ] Review tab can stage open review comments, and the session surface can
+  send that staged review prompt to the selected live session.
 - [ ] Workspace page buttons can launch Shell, Codex, Claude Code, and Cursor
   through the current external-process path.
 - [ ] Setup, Run, and Stop buttons call the current runtime process APIs, show
@@ -298,9 +306,12 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   Conductor-level Spotlight parity.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
-- [ ] Monorepo directory selection, linked-directory workflows, and MCP status
-  are not fully implemented.
-- [ ] Rich diff viewer with inline comments is not implemented.
+- [ ] Monorepo directory selection and linked-directory workflows are not fully
+  implemented.
+- [ ] Fully polished rich diff viewer is not implemented. The current slice has
+  a changed-file list, per-file unified diff preview, tracked-file revert, and
+  local review comment staging/sending, but not side-by-side diff, GitHub
+  review comments, or true inline line-anchored commenting in the diff pane.
 - [ ] GitHub PR/check/merge workflow is not fully available from the GUI.
 - [ ] Command palette, shortcuts, deep links, polished Big Terminal Mode,
   monorepo controls, linked directories, and unified local history are not

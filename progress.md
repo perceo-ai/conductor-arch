@@ -4,9 +4,11 @@
 
 This project has completed the Phase 0 documentation reset, Phase 1 app
 architecture cleanup slice, Phase 2 project settings slice, and a usable Phase
-3 Workspace Command Center slice. Phase 4 Embedded Runtime is now active. Phase
-3 still lacks live connector proof for GitHub/Linear credentials, but the
-source creation code path is no longer placeholder-only.
+3 Workspace Command Center slice. Phase 4 Embedded Runtime, Phase 5 Agent
+Sessions, and the current Phase 6 Git/Diff/Review slice are now in place for
+the GUI-first MVP path. Phase 3 still lacks live connector proof for
+GitHub/Linear credentials, but the source creation code path is no longer
+placeholder-only.
 
 The codebase is being redirected from a CLI-heavy worktree tool into a
 GUI-first Conductor-style desktop app. The CLI and core backend are useful
@@ -114,16 +116,12 @@ MVP-critical missing work:
   direction/preset slice.
 - More polished project settings/onboarding layout.
 - Monorepo directory selection and linked-directory workflows.
-- GUI-visible MCP status. The core can inspect known MCP config files, but the
-  GUI does not expose or validate live MCP reachability yet.
-- Agent controls: Plan Mode, Fast Mode, reasoning/effort, Codex personality,
-  Codex goals, checkpoints, skills, and tool approvals where supported.
 - Fully polished repository/workspace creation flows.
 - Real diff/review/comment surface.
 - GUI-first GitHub PR/check/review/merge flow.
 - Command palette, keyboard shortcuts, and deep links.
 - Monorepo sparse-checkout controls and linked-directory workflows.
-- Agent status model and resumable in-app session history.
+- Rich message rendering with attachments and stronger in-app session history.
 - Unified local history model for archived workspaces and chats.
 - Toast-backed progress/error states and deeper per-action refresh polish.
 - Visual parity with Conductor.
@@ -307,11 +305,18 @@ Verified Phase 3 evidence so far:
   counts and newest-first ordering.
 - Changes tab now includes a file-level diff summary with additions/deletions
   and untracked-file counts before the raw unified diff.
+- Changes tab now has a first-slice file tree with selectable per-file diff
+  preview, a full-diff fallback, recent commits, branch push state, and safe
+  revert for tracked files back to `HEAD`.
+- The selected diff file now shows file-scoped inline comments in the same
+  review area and can add another file/line comment without switching tabs.
 - Open review comments can now be converted into an agent-ready staged review
   prompt from the agent panel; this is not live bidirectional agent chat yet.
 - Local review comments now render as actionable rows in the GTK Review tab,
   can be added from the GUI with file/line/body fields, and open comments can be
   marked resolved from the GUI.
+- Review comments can now be staged from the Review tab and sent to the
+  selected live agent session from the session surface without leaving the app.
 - Checks tab now has a first-slice PR creation form with title/body/draft
   fields wired to the existing core GitHub PR creation flow.
 - Checks tab now exposes first-slice PR merge controls with squash/merge/rebase
@@ -351,6 +356,47 @@ Still needs Phase 4 work:
   focus reconciliation, app background handling via active-state notifications,
   and an explicit destructive root repair action.
 
+## Phase 5 Agent Sessions Done
+
+- Workspace agent panel now starts PTY-backed Shell, Codex, Claude, and Cursor
+  sessions inside the selected workspace and records them as session processes.
+- Session transcripts persist to per-session logs, remain selectable in the
+  app, and show readable app-native transcript output instead of requiring a
+  separate terminal window.
+- The session panel supports send, stop, and checkpoint actions and derives
+  idle/working/waiting/detached/done/errored state from the recorded process
+  plus recent output activity.
+- Harness controls are visible where supported: Plan Mode, Fast Mode,
+  approvals, reasoning, effort, Codex personality, Codex goals, and Codex
+  skills.
+- Launch metadata for those harness controls is stored with the session process
+  record and shown for the selected session.
+- Provider/auth/MCP status is visible above the session panel for Claude,
+  Codex, and Cursor, including executable/auth presence and the note that
+  Cursor MCP is managed by Cursor.
+- Multiple sessions per workspace are supported through the session selector.
+- The selected agent session now persists in app state across workspace page
+  refreshes and revisits instead of resetting to the newest session each time.
+- Running sessions from a previous app run can now be reattached when their
+  PTY device is still available; otherwise they remain visible as detached
+  saved transcripts.
+
+## Phase 6 Git Diff Review Done
+
+- The Changes tab now shows a selectable changed-file list instead of only a
+  raw monolithic transcript dump.
+- Selecting a changed file loads that file's unified diff; Show All restores
+  the full workspace diff.
+- The Changes tab also exposes recent commits, current branch push state, and
+  current git status alongside the diff review flow.
+- Tracked changed files can now be reverted from the GUI back to `HEAD`; the
+  app refuses untracked-file revert attempts instead of pretending they are safe.
+- The Review tab still owns local file/line comments and comment resolution.
+- Open review comments can now be staged and sent into the selected live agent
+  session from the app-native session surface.
+- Sibling workspace conflict detection and copy/diff actions remain available
+  in the Checks tab for overlapping files.
+
 ## Next Step
 
 Do not continue adding backend-only commands unless they unblock the GUI-first
@@ -364,5 +410,5 @@ Recommended next work:
 3. Finish live Phase 3 connector proof when `gh` auth and `LINEAR_API_KEY` are
    available.
 4. Continue Phase 4 toward a true PTY terminal and Spotlight testing.
-5. Start Phase 5 only after the runtime base can support app-native
-   Claude/Codex/Cursor session streams.
+5. Start Phase 7 GitHub workflow polish instead of adding more backend-only
+   commands.

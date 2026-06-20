@@ -15,12 +15,40 @@ pub struct McpStatus {
     pub codex_project: Vec<McpServer>,
     pub cursor_user: Vec<McpServer>,
     pub cursor_project: Vec<McpServer>,
+    pub codex_provider: Option<String>,
+    pub claude_provider: Option<String>,
+    pub codex_executable_available: bool,
+    pub claude_executable_available: bool,
+    pub cursor_executable_available: bool,
+    pub codex_authenticated: bool,
+    pub claude_authenticated: bool,
+    pub cursor_authenticated: bool,
 }
 
 pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/root"));
+    let settings = crate::settings::load_repository_settings(workspace_path).ok();
+    let codex_provider = settings
+        .as_ref()
+        .and_then(|settings| settings.providers.codex_provider.clone());
+    let claude_provider = settings
+        .as_ref()
+        .and_then(|settings| settings.providers.claude_provider.clone());
+    let codex_executable = settings
+        .as_ref()
+        .and_then(|settings| settings.providers.codex_executable_path.as_deref())
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or("codex");
+    let claude_executable = settings
+        .as_ref()
+        .and_then(|settings| settings.providers.claude_code_executable_path.as_deref())
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or("claude");
+    let codex_authenticated = is_codex_auth_present(codex_provider.as_deref());
+    let claude_authenticated = is_claude_auth_present(claude_provider.as_deref());
+    let cursor_authenticated = is_file_non_empty(home.join(".cursor/mcp.json").as_path());
 
     McpStatus {
         workspace_path: workspace_path.to_path_buf(),
@@ -30,7 +58,72 @@ pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
         codex_project: read_codex_mcp(&workspace_path.join(".codex/config.toml")),
         cursor_user: read_cursor_mcp(&home.join(".cursor/mcp.json")),
         cursor_project: read_cursor_mcp(&workspace_path.join(".cursor/mcp.json")),
+        codex_provider,
+        claude_provider,
+        codex_executable_available: command_or_file_exists(codex_executable),
+        claude_executable_available: command_or_file_exists(claude_executable),
+        cursor_executable_available: command_or_file_exists("cursor"),
+        codex_authenticated,
+        claude_authenticated,
+        cursor_authenticated,
     }
+}
+
+fn is_file_non_empty(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| {
+            if metadata.len() == 0 {
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn command_or_file_exists(path_or_command: &str) -> bool {
+    if Path::new(path_or_command).exists() {
+        true
+    } else {
+        command_exists(path_or_command)
+    }
+}
+
+fn is_codex_auth_present(provider: Option<&str>) -> bool {
+    let configured_openai = provider
+        .map(|value| {
+            value.to_ascii_lowercase().contains("openai")
+                || value.to_ascii_lowercase().contains("open-ai")
+        })
+        .unwrap_or(true);
+    if configured_openai {
+        std::env::var_os("OPENAI_API_KEY").is_some()
+            || std::env::var_os("OPENAI_API_TOKEN").is_some()
+    } else {
+        false
+    }
+}
+
+fn is_claude_auth_present(provider: Option<&str>) -> bool {
+    let configured_anthropic = provider
+        .map(|value| {
+            value.to_ascii_lowercase().contains("anthropic")
+                || value.to_ascii_lowercase().contains("claude")
+        })
+        .unwrap_or(true);
+    if configured_anthropic {
+        std::env::var_os("ANTHROPIC_API_KEY").is_some()
+    } else {
+        false
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(command)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn read_claude_mcp(path: &Path) -> Vec<McpServer> {

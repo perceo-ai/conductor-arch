@@ -363,8 +363,10 @@ Manual GUI smoke:
 
 Known GUI MVP gaps:
 
-- No embedded Conductor-native agent chat yet. Open review comments can be
-  staged as an agent prompt, but they are not sent into a live chat.
+- The agent panel now has PTY-backed session launch, transcript, send, stop,
+  checkpoint, harness metadata, provider/auth/MCP status, and best-effort
+  resume of prior running sessions. It is still not a richer bubble-based
+  Conductor chat UI with attachments.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders transcript text with basic ANSI-control
   stripping, carriage-return/backspace/cursor-up/cursor-left/right line redraws,
@@ -381,8 +383,8 @@ Known GUI MVP gaps:
   patch reversal, review-style affected-path dirty-root guidance, explicit
   destructive root repair, app-wide polling sync, and app-open recursive file
   watching for active Spotlight workspace trees.
-- No command palette, shortcut coverage, deep links, polished Big Terminal
-  Mode, MCP status, checkpoint UI, or resumable session history yet.
+- No command palette, shortcut coverage, deep links, or polished Big Terminal
+  Mode yet.
 - Project settings can be edited from Projects for shared/local repository
   settings, including Files to copy, `.worktreeinclude` precedence, Spotlight
   testing, provider executable/provider fields, durable prompts, environment
