@@ -1,21 +1,13 @@
-# Deploy And Test The Current Prototype Locally
+# Deploy And Test Locally
 
-This guide validates the current backend/CLI foundation and rough GTK
-prototype. It does not describe a finished GUI-first Conductor MVP. For the
-target product spec, see
-[`docs/conductor-gui-mvp-handoff.md`](conductor-gui-mvp-handoff.md).
+This guide validates Linux Conductor on a local machine. It covers both the GTK
+app and the CLI backend used by the app.
 
-Use this only as a prototype validation path. Release readiness requires the
-target GUI-first acceptance path in
-[`docs/manual-testing-checklist.md`](manual-testing-checklist.md), including
-Conductor-style setup/settings, embedded sessions, terminal/runtime, review,
-checks, PR flow, history, command palette, shortcuts, deep links, provider/MCP
-status, and safety/privacy surfaces.
+The happy path is app-first: add a repository, create workspaces, run agent
+sessions, review changes, create/merge a GitHub PR, archive, and repeat. The
+CLI commands below are useful for setup and fallback checks.
 
-This guide assumes `claude`, `codex`, `gh`, and `git` are already installed and
-authenticated on the machine where you test.
-
-## 1. Install System Dependencies
+## 1. Install Dependencies
 
 Ubuntu / Debian:
 
@@ -47,68 +39,58 @@ source "$HOME/.cargo/env"
 
 ## 2. Confirm Local Auth
 
-These commands should work before launching Linux Conductor:
-
 ```bash
 gh auth status
 codex --version
 claude --version
 ```
 
-If `codex` or `claude` opens normally from your shell, Linux Conductor will use
-the same local authentication because it launches those CLIs on your machine.
+GitHub operations use local `gh` auth. Codex and Claude sessions use your local
+CLI authentication.
 
-## 3. Build Locally
-
-From the repository root:
+## 3. Build
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p linux-conductor-core -p linux-conductor
+cargo test -p linux-conductor-core -p linux-conductor -p linux-conductor-gtk
 cargo build --workspace --release --locked
 ```
 
-The binaries are:
+Binaries:
 
 ```text
 target/release/linux-conductor
 target/release/linux-conductor-gtk
 ```
 
-Optional local install:
+Optional install:
 
 ```bash
 sudo install -Dm755 target/release/linux-conductor /usr/local/bin/linux-conductor
 sudo install -Dm755 target/release/linux-conductor-gtk /usr/local/bin/linux-conductor-gtk
 ```
 
-## 4. Register A Repository
-
-Use any Git repository you can safely create test branches in:
+## 4. Launch The App
 
 ```bash
-linux-conductor doctor
-linux-conductor repo add /path/to/repo --name demo
-linux-conductor repo list
+linux-conductor-gtk
 ```
 
-On macOS, import existing repositories and workspaces from the Conductor app:
+Or preselect a workspace:
 
 ```bash
-linux-conductor import conductor
-linux-conductor repo list
-linux-conductor workspace list
+linux-conductor-gtk --workspace berlin
 ```
 
-The importer reads
-`~/Library/Application Support/com.conductor.app/conductor.db`, preserves
-archived workspace state, and renames duplicate workspace names with repository
-prefixes so CLI commands remain unambiguous.
+Validate the app path with
+[manual-testing-checklist.md](manual-testing-checklist.md).
 
-If the target repo needs workspace setup or run scripts, add:
+## 5. Minimal Repository Settings
+
+For a repository that needs setup/run commands, add this at the repository root:
 
 ```toml
-# /path/to/repo/.conductor/settings.toml
+# .conductor/settings.toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 file_include_globs = """
@@ -123,13 +105,81 @@ run = "true"
 run_mode = "concurrent"
 ```
 
-Replace `true` with the repo's real setup and dev-server commands when testing a
-real app. Put shared team settings in `.conductor/settings.toml`; put
-machine-local secrets or overrides in `.conductor/settings.local.toml` and keep
-that file untracked. If the project already uses `.worktreeinclude`, it should
-take precedence over `file_include_globs`.
+Replace `true` with real project commands. Commit shared settings. Put
+machine-local overrides and secrets in `.conductor/settings.local.toml`.
+If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
 
-## 5. Create Workspaces
+Repository prompts are part of the customization surface and should be editable
+from the Projects settings UI:
+
+```toml
+[prompts]
+general = "Prefer small, reviewable changes."
+code_review = "Focus on correctness and missing tests."
+create_pr = "Write concise PR descriptions with test evidence."
+fix_errors = "Fix failing checks with the smallest safe change."
+resolve_merge_conflicts = "Preserve both sides when possible and explain tradeoffs."
+rename_branch = "Use short kebab-case branch names."
+```
+
+Other customization areas should be representable in settings even when the GUI
+only exposes the most common controls:
+
+```toml
+[git]
+branch_prefix_type = "custom"
+branch_prefix = "lc"
+archive_on_merge = true
+
+[customization.naming]
+branch_template = "{prefix}/{type}-{slug}"
+workspace_name_style = "city"
+commit_style = "conventional"
+pr_title_template = "{type}: {summary}"
+pr_body_sections = ["Summary", "Tests", "Risk", "Rollback"]
+default_merge_method = "squash"
+
+[customization.automation]
+auto_setup = true
+auto_start_agent = "codex"
+required_local_files = [".env"]
+test_command = "pnpm test"
+lint_command = "pnpm lint"
+build_command = "pnpm build"
+
+[customization.agent_profiles.default]
+agent = "codex"
+approval_mode = "on-request"
+reasoning_mode = "medium"
+
+[customization.merge_rules]
+block_on_open_todos = true
+block_on_open_comments = true
+block_on_failed_checks = true
+definition_of_done = "Tests run, reviewer comments resolved, PR explains risk."
+
+[customization.view]
+theme = "system"
+density = "compact"
+default_workspace_tab = "changes"
+diff_view = "unified"
+```
+
+The exact advanced schema may evolve. The product direction is stable: prompts
+and common workflow controls belong in the UI; deep theme/view/layout,
+keybinding, notification, hook, and command-preset options can be file-editable.
+
+## 6. CLI Smoke Path
+
+Register a repository:
+
+```bash
+linux-conductor doctor
+linux-conductor repo add /path/to/repo --name demo
+linux-conductor repo list
+```
+
+Create two workspaces:
 
 ```bash
 linux-conductor workspace create demo --name berlin --branch lc/berlin-demo
@@ -137,270 +187,86 @@ linux-conductor workspace create demo --name tokyo --branch lc/tokyo-demo
 linux-conductor workspace list
 ```
 
-Each workspace should have:
-
-```text
-.context/brief.md
-.context/agent-notes.md
-.context/todos.md
-```
-
-## 6. Codex Session
-
-Open Codex interactively in the `berlin` workspace:
+Open sessions:
 
 ```bash
 linux-conductor session open berlin --kind codex
-```
-
-This launches your default terminal emulator, changes directory into the
-workspace, applies `CONDUCTOR_*` environment variables, and runs `codex`.
-
-If no terminal emulator is detected, print the command and run it manually:
-
-```bash
-linux-conductor session open berlin --kind codex --print-command
-```
-
-Useful checks inside the Codex terminal:
-
-```bash
-pwd
-echo "$CONDUCTOR_WORKSPACE_NAME"
-echo "$CONDUCTOR_PORT"
-git branch --show-current
-```
-
-## 7. Claude Code Session
-
-Open Claude Code interactively in the `tokyo` workspace:
-
-```bash
 linux-conductor session open tokyo --kind claude
-```
-
-This uses your existing local Claude Code login. If your terminal is not
-auto-detected:
-
-```bash
-linux-conductor session open tokyo --kind claude --terminal gnome-terminal
-linux-conductor session open tokyo --kind claude --print-command
-```
-
-Supported terminal names include `gnome-terminal`, `kgx`, `konsole`,
-`alacritty`, `kitty`, `xterm`, `tilix`, `terminator`, and `xfce4-terminal`.
-
-## 8. Supervised Background Sessions
-
-Use this path when you want process records and captured logs instead of an
-interactive terminal:
-
-```bash
 linux-conductor session start berlin --kind shell
 linux-conductor session list berlin
-linux-conductor logs berlin --session
 linux-conductor session stop berlin
 ```
 
-## 9. Run Scripts, Diffs, Todos, And Checks
+Run scripts and inspect work:
 
 ```bash
 linux-conductor run berlin
 linux-conductor logs berlin --run
 linux-conductor stop berlin
 
-linux-conductor todo add berlin "manual smoke todo"
-linux-conductor todo list berlin
-linux-conductor checks berlin
-
 linux-conductor diff berlin
-linux-conductor status
+linux-conductor checks berlin
+linux-conductor conflicts berlin
 ```
 
-## 10. Pull Request Flow
+Todos and checkpoints:
 
-Make and commit a small test change in a workspace first:
+```bash
+linux-conductor todo add berlin "manual smoke todo"
+linux-conductor todo list berlin
+linux-conductor todo done <id>
+
+linux-conductor checkpoint create berlin "manual smoke checkpoint"
+linux-conductor checkpoint list berlin
+```
+
+GitHub PR flow:
 
 ```bash
 cd ~/conductor/workspaces/demo/berlin
 echo "linux-conductor smoke $(date)" >> linux-conductor-smoke.txt
 git add linux-conductor-smoke.txt
 git commit -m "test: linux conductor smoke"
-```
 
-Then create and inspect the PR:
-
-```bash
 linux-conductor pr create berlin --title "test: linux conductor smoke" \
   --body "Manual Linux Conductor smoke test"
 linux-conductor pr view berlin
 linux-conductor pr checks berlin
 ```
 
-Merge only if this is a disposable test repository:
+Merge only in a disposable repository:
 
 ```bash
 linux-conductor pr merge berlin --method squash
-linux-conductor archive berlin --remove-worktree
+linux-conductor workspace archive berlin --remove-worktree
 ```
 
-For a non-disposable repo, close the PR manually on GitHub and discard the test
+For a non-disposable repository, close the PR manually and discard the
 workspace:
 
 ```bash
-linux-conductor discard berlin
+linux-conductor workspace discard berlin
 ```
 
-## 11. GTK Prototype
+## 7. Import macOS Conductor Data
 
-Launch the app:
+On macOS, existing Conductor repositories/workspaces can be imported:
 
 ```bash
-linux-conductor-gtk
+linux-conductor import conductor
+linux-conductor repo list
+linux-conductor workspace list
 ```
 
-Or preselect a workspace:
+The importer reads
+`~/Library/Application Support/com.conductor.app/conductor.db`, preserves
+archived workspace state, and renames duplicate workspace names with repository
+prefixes so CLI commands remain unambiguous.
 
-```bash
-linux-conductor-gtk --workspace berlin
-```
+## 8. Build Release Artifacts
 
-Manual GUI smoke:
-
-- Confirm the sidebar shows Dashboard, History, repository sections, workspace
-  rows, and search.
-- Confirm the Dashboard shows project tabs and columns for Backlog, In progress,
-  In review, and Done.
-- Confirm the Projects page lists repositories and can create a workspace.
-- Confirm the Workspace page opens from the sidebar and shows rough Chats,
-  Terminal, Changes, Checks, Todos, and Processes tabs.
-- Confirm the Checks tab exposes the Create PR form with title, body, and draft
-  controls, Refresh PR State and View Checks actions, plus a Merge PR control
-  with squash/merge/rebase methods.
-- Confirm the Review tab can add a local file/line/body comment, lists local
-  review comments, and the Resolve button marks an open comment resolved.
-- Confirm the Terminal tab runs a short command, shows stdout/stderr, and
-  reports the exit code.
-- Confirm Start Shell opens a PTY-backed workspace shell, accepts a typed
-  command, streams output, and Stop Shell terminates it.
-- Confirm starting multiple PTY shells lets you select the active shell, send
-  input to the selected shell, and stop only the selected shell.
-- Confirm stopping one selected shell leaves its tab visible as stopped and
-  auto-selects another running shell when one exists.
-- Confirm the Processes tab shows that terminal shell as running after Start
-  Shell and stopped with exit code `143` after Stop Shell without waiting for
-  the global polling refresh.
-- Confirm starting more than one embedded shell records distinct terminal log
-  paths in Processes instead of reusing one shared terminal log.
-- Confirm PTY shell command echoes and output are appended to that terminal
-  process log, not only shown in the on-screen transcript.
-- Confirm terminal history search finds matching persisted transcript lines and
-  appends process/line matches with one-line before/after context into the
-  terminal transcript.
-- Confirm Terminal Show History lists recorded terminal sessions with status,
-  pid, exit code, log file, start time, line/byte counts, last-output preview,
-  and command.
-- Confirm Terminal Show History displays running/stopped/exited counts and
-  orders terminal sessions newest first.
-- Confirm the Load Transcript selector uses the same newest-first ordering as
-  the rendered history list.
-- Confirm selecting a recorded terminal session and clicking Load Transcript
-  replaces the terminal view with that session's persisted transcript.
-- Restart the GTK app after terminal output exists and confirm the terminal view
-  restores the latest terminal transcript.
-- Confirm a command that emits ANSI color/control sequences renders readable
-  text in the GTK transcript instead of raw escape codes.
-- Confirm a command that redraws progress with carriage returns shows the latest
-  progress line instead of raw `\r` artifacts.
-- Confirm a command that redraws a spinner with backspaces shows the latest
-  spinner character instead of raw backspace artifacts.
-- Confirm a command that redraws one line using cursor-up plus clear-line
-  sequences shows the latest line instead of stale duplicate lines.
-- Confirm a command that saves and restores the cursor position overwrites at
-  the restored location instead of appending at the end.
-- Confirm commands that use erase-line modes clear the intended part of the
-  visible transcript line instead of appending stale text.
-- Confirm a command that clears the screen and moves the cursor home shows only
-  the fresh screen contents instead of stale previous output.
-- Confirm resizing the GTK terminal area updates the active PTY shell size;
-  `stty size` from the shell reflects the resized grid.
-- Confirm long terminal output caps the on-screen transcript with a scrollback
-  trimmed marker while the persisted raw terminal log remains complete.
-- Confirm a terminal shell that exits outside the app is eventually marked
-  exited in Processes after the app-wide reconciliation poller runs.
-- Confirm stale terminal process rows from an earlier app crash are marked
-  exited during app startup reconciliation.
-- Confirm Setup, Run, and Stop controls call the current runtime APIs, show
-  latest setup/run log previews, and show an app toast when the button action
-  fails.
-- With `spotlight_testing = true` and a clean repository root, confirm
-  Spotlight On applies tracked workspace changes to the root and Spotlight Off
-  restores them.
-- Confirm Spotlight On creates a checkpoint entry for the tracked workspace
-  state.
-- Confirm starting Spotlight for a second workspace restores the first
-  workspace's root patch and applies the second workspace's tracked changes.
-- Confirm Spotlight Sync refreshes the root patch after tracked workspace edits
-  and creates another checkpoint.
-- Confirm the selected workspace page auto-syncs active Spotlight tracked
-  changes after a short polling delay.
-- Confirm active Spotlight sessions keep auto-syncing after navigating away from
-  the workspace page.
-- Confirm Runtime Spotlight status shows `root clean` when the active root
-  matches the active Spotlight patch.
-- Confirm Runtime Spotlight status shows root-only affected paths after adding
-  extra root edits before clicking Spotlight Off/Sync.
-- Confirm root-only edits make Spotlight Off/Sync fail without marking the
-  active session stopped and the Runtime status prioritizes root-only affected
-  paths with a destructive Repair Spotlight warning.
-- Confirm Repair Spotlight explicitly discards root-only edits, reapplies the
-  active Spotlight patch, and then Spotlight Off restores the clean root.
-- Confirm Shell, Codex, Claude Code, and Cursor actions use the current
-  external-process launch path.
-- Confirm History lists old Conductor chats when the macOS Conductor database is
-  available.
-- Use `Ctrl+R` to force-refresh workspace state.
-
-Known GUI MVP gaps:
-
-- The agent panel now has PTY-backed session launch, transcript, send, stop,
-  checkpoint, harness metadata, provider/auth/MCP status, and best-effort
-  resume of prior running sessions. It is still not a richer bubble-based
-  Conductor chat UI with attachments.
-- No polished terminal emulator yet; the current terminal has PTY-backed shell
-  I/O and process records but renders transcript text with basic ANSI-control
-  stripping, carriage-return/backspace/cursor-up/cursor-left/right line redraws,
-  saved-cursor restore, erase-line redraws, clear-screen/home redraws, and
-  resize propagation.
-  Stale process rows reconcile at startup and while the app is open, and shell
-  records get distinct searchable raw transcript logs with capped on-screen
-  scrollback, latest-transcript restore, clickable tabs for recent shells with
-  transcript restore on click, but this is not a full terminal tab lifecycle
-  model, or a polished terminal
-  history/scrollback browser.
-- Full Spotlight parity is not implemented; the current Spotlight slice is
-  manual checkpoint/apply/restore/switch/sync with dirty-root refusal before
-  patch reversal, review-style affected-path dirty-root guidance, explicit
-  destructive root repair, app-wide polling sync, and app-open recursive file
-  watching for active Spotlight workspace trees.
-- No command palette, shortcut coverage, deep links, or polished Big Terminal
-  Mode yet.
-- Project settings can be edited from Projects for shared/local repository
-  settings, including Files to copy, `.worktreeinclude` precedence, Spotlight
-  testing, provider executable/provider fields, durable prompts, environment
-  variables, and script settings. Full user/managed settings, richer
-  validation, monorepo directory selection, and linked-directory workflows are
-  still pending.
-- No rich diff/review/comment GUI yet.
-- No full GUI-first GitHub review/check workflow yet; the Checks tab has
-  first-slice PR create/view/raw-checks/raw-comments/stage-failing-checks/
-  stage-comments/merge/archive controls, but structured GitHub review-thread
-  sync and richer deployment/check aggregation are still pending.
-
-## 12. Build Release Artifacts
-
-Packaging is prototype smoke only until the GUI-first MVP acceptance checklist
-passes. Do not treat successful package creation as product release readiness.
+Packaging proves artifact creation; it does not prove product readiness. Run the
+manual checklist before publishing.
 
 Install `nfpm`:
 
@@ -437,20 +303,6 @@ appimagetool --appimage-extract-and-run \
 Smoke the AppImage:
 
 ```bash
-./dist/linux-conductor-0.1.0-x86_64.AppImage doctor
 ./dist/linux-conductor-0.1.0-x86_64.AppImage
+./dist/linux-conductor-0.1.0-x86_64.AppImage doctor
 ```
-
-## 13. CI Artifact Build
-
-Only tag a release after the GUI-first acceptance checklist passes. Until then,
-use this as a CI artifact-build reference:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The `Publish` workflow builds tarball, `.deb`, `.rpm`, and AppImage artifacts
-on Ubuntu 24.04 and attaches them to the GitHub release. This proves packaging,
-not product readiness.

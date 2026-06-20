@@ -1,14 +1,15 @@
 # Packaging
 
-Packaging is not the MVP gate. These commands validate release artifacts for
-the current prototype, but public release readiness depends on the GUI-first
-Conductor acceptance path in `docs/manual-testing-checklist.md`.
+Packaging is not the product-readiness gate. These commands validate release
+artifacts, but public release readiness depends on the app workflow in
+`docs/manual-testing-checklist.md`.
 
-Do not call packaging release-ready until the app supports the normal workflow
-from the GUI: repository onboarding/settings, workspace creation, embedded
-agent sessions, terminal/runtime, diff/review/checks/todos, PR merge/archive,
-history, command palette, shortcuts, deep links, provider/MCP status, and
-safety/privacy surfaces.
+Do not call packaging release-ready until the Linux app workflow has been
+manually validated: repository onboarding/settings, workspace creation,
+embedded agent sessions, terminal/runtime, diff/review/checks/todos, PR
+merge/archive, history, provider/MCP status, customization settings, and known
+gaps documented. Windows and macOS packages are not release targets until the
+process, PTY, path, and shell abstractions are intentionally ported.
 
 ## Build packages locally
 
