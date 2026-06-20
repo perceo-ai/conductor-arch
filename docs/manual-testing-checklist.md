@@ -27,14 +27,35 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
   environment variables, provider executable fields, prompts, and Git behavior.
 - [ ] Confirm all repository action prompts are editable from the GUI: general,
-  code review, create PR, fix errors, resolve conflicts, and rename branch.
+  code review, create PR, fix errors, resolve conflicts, rename branch, commit
+  generation, test fixing, and refactor style.
+- [ ] Confirm prompt profiles or prompt packs can be represented in settings
+  even if the first UI only edits the active values.
+- [ ] Confirm final assembled agent prompts can be previewed or exported before
+  launch, or mark prompt preview as a known gap.
+- [ ] Configure branch naming, workspace naming, commit style, PR title/body
+  template, default merge strategy, and archive-after-merge defaults.
 - [ ] Confirm repository setup can be fully automated with setup/run/archive
   scripts and no manual terminal-only step for a normal workspace.
+- [ ] Confirm repository automation can represent required local file checks,
+  test/lint/build presets, and pre/post hooks, or mark unsupported hooks as a
+  known gap.
+- [ ] Configure default agent, agent profile, approval mode, reasoning/effort,
+  Codex personality/goals, and MCP visibility.
+- [ ] Configure merge blockers and a repository-specific definition of done.
+- [ ] Configure workspace defaults: base branch, workspace parent, branch
+  prefix, port block size, auto-open, checkpoint timing, and default visible
+  tab/panel.
 - [ ] Confirm `.worktreeinclude` wins over Files to copy settings and is shown
   as a read-only preview when present.
 - [ ] Confirm shared settings do not encourage committing secrets.
 - [ ] Confirm advanced view/theme/customization settings are documented as
   config-file editable when they do not have GUI controls.
+- [ ] Confirm file-editable settings cover light/dark/system theme, accent
+  color, density, sidebar layout, diff preference, terminal font/scrollback,
+  transcript display, dashboard columns, notification rules, keybindings,
+  command palette presets, and settings import/export, or mark missing areas as
+  known gaps.
 
 ## Workspace Creation
 
@@ -133,6 +154,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Terminal rendering is not a full terminal emulator.
 - [ ] Command palette, broad shortcuts, and deep links are not complete.
 - [ ] Theme/view customization is not complete.
+- [ ] Full naming-template, hook, notification, shortcut, and prompt-pack
+  customization is not complete.
 - [ ] Monorepo directory selection and linked-directory workflows are not
   complete.
 - [ ] GitHub review-thread sync and deployment/check aggregation are still raw.

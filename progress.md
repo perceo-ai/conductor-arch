@@ -115,6 +115,13 @@ should be run before release artifacts.
   visibility.
 - Theme/view customization needs a documented config-file model. Not every
   advanced visual or layout option needs a bespoke GUI control.
+- Broader customization should cover prompt packs, naming templates, commit/PR
+  style, setup automation, hooks, agent profiles, merge blockers, workspace
+  defaults, notification rules, keybindings, command presets, and settings
+  import/export.
+- Platform direction is Linux-first. Keep the core portable where it does not
+  compromise Linux quality; consider WSL before native Windows, and treat macOS
+  as lower priority while the original Conductor app covers that platform.
 - Visual parity with Conductor is not complete.
 - Release packaging still needs full manual validation on target distros.
 

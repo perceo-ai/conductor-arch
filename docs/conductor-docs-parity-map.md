@@ -50,6 +50,18 @@ surface. Prompts should be GUI-editable because they are part of daily agent
 work. Advanced theme, view, layout, and power-user preferences may be
 file-editable instead of having dedicated controls for every option.
 
+Additional Linux-first customization targets: branch/workspace naming templates,
+commit style, PR title/body templates, setup automation, pre/post hooks, default
+agent profiles, approval/reasoning defaults, merge blockers, definition of done,
+checkpoint timing, notification rules, keybindings, command palette presets,
+terminal presets, dashboard columns, and import/export for team settings.
+
+Platform expectation: optimize the product for Linux first. Keep core process,
+path, PTY, and packaging boundaries portable where practical, but do not let
+native Windows/macOS parity slow Linux desktop quality. WSL can be the first
+Windows-adjacent target; native Windows needs deliberate shell/process
+abstraction before it is realistic.
+
 ## Agents And Tools
 
 - Agent modes: <https://www.conductor.build/docs/concepts/agent-modes>

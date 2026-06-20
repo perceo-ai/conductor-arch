@@ -4,10 +4,12 @@ Packaging is not the product-readiness gate. These commands validate release
 artifacts, but public release readiness depends on the app workflow in
 `docs/manual-testing-checklist.md`.
 
-Do not call packaging release-ready until the app workflow has been manually
-validated: repository onboarding/settings, workspace creation, embedded agent
-sessions, terminal/runtime, diff/review/checks/todos, PR merge/archive, history,
-provider/MCP status, and known gaps documented.
+Do not call packaging release-ready until the Linux app workflow has been
+manually validated: repository onboarding/settings, workspace creation,
+embedded agent sessions, terminal/runtime, diff/review/checks/todos, PR
+merge/archive, history, provider/MCP status, customization settings, and known
+gaps documented. Windows and macOS packages are not release targets until the
+process, PTY, path, and shell abstractions are intentionally ported.
 
 ## Build packages locally
 

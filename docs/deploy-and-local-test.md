@@ -122,8 +122,52 @@ resolve_merge_conflicts = "Preserve both sides when possible and explain tradeof
 rename_branch = "Use short kebab-case branch names."
 ```
 
-Advanced view/theme preferences do not all need first-class UI controls. Keep
-them file-editable and documented as the schema evolves.
+Other customization areas should be representable in settings even when the GUI
+only exposes the most common controls:
+
+```toml
+[git]
+branch_prefix_type = "custom"
+branch_prefix = "lc"
+archive_on_merge = true
+
+[customization.naming]
+branch_template = "{prefix}/{type}-{slug}"
+workspace_name_style = "city"
+commit_style = "conventional"
+pr_title_template = "{type}: {summary}"
+pr_body_sections = ["Summary", "Tests", "Risk", "Rollback"]
+default_merge_method = "squash"
+
+[customization.automation]
+auto_setup = true
+auto_start_agent = "codex"
+required_local_files = [".env"]
+test_command = "pnpm test"
+lint_command = "pnpm lint"
+build_command = "pnpm build"
+
+[customization.agent_profiles.default]
+agent = "codex"
+approval_mode = "on-request"
+reasoning_mode = "medium"
+
+[customization.merge_rules]
+block_on_open_todos = true
+block_on_open_comments = true
+block_on_failed_checks = true
+definition_of_done = "Tests run, reviewer comments resolved, PR explains risk."
+
+[customization.view]
+theme = "system"
+density = "compact"
+default_workspace_tab = "changes"
+diff_view = "unified"
+```
+
+The exact advanced schema may evolve. The product direction is stable: prompts
+and common workflow controls belong in the UI; deep theme/view/layout,
+keybinding, notification, hook, and command-preset options can be file-editable.
 
 ## 6. CLI Smoke Path
 

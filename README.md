@@ -209,7 +209,11 @@ thumb is:
 - Team defaults belong in shared repository settings.
 - Machine-specific preferences and secrets belong in local or user settings.
 
-Prompts that should remain first-class and editable:
+Customization areas that should be first-class:
+
+### Prompts
+
+Prompts are part of daily agent work, so they should be editable in the app:
 
 - General agent instructions.
 - Code review instructions.
@@ -217,13 +221,130 @@ Prompts that should remain first-class and editable:
 - Failing check repair instructions.
 - Merge conflict resolution instructions.
 - Branch naming/rename instructions.
+- Commit message generation instructions.
+- Test-fixing instructions.
+- Refactor style instructions.
 - Staged prompts generated from local review comments, PR comments, checks,
-  todos, and conflicts.
+  todos, conflicts, and selected diffs.
+- Prompt profiles or prompt packs, such as `strict-review`, `fast-prototype`,
+  `security-heavy`, or `docs-heavy`.
+- Final prompt preview before launching an agent.
+
+### Naming And Git Style
+
+Teams should be able to encode their Git conventions once:
+
+- Branch name templates, such as `lc/{workspace}`, `{type}/{slug}`,
+  `{issue_key}-{slug}`, or `{github_issue}-{slug}`.
+- Workspace name style: generated city names, prompt slug, issue key, branch
+  slug, or custom templates.
+- Commit message style: conventional commits, terse lowercase, team template, or
+  "include tests run" format.
+- PR title source: branch, first commit, issue title, prompt summary, or custom
+  template.
+- PR body sections: Summary, Tests, Screenshots, Risk, Rollback, Follow-ups.
+- Default merge strategy: squash, merge, or rebase.
+- Archive-after-merge default.
+
+### Repository Automation
+
+Repositories should be able to bootstrap themselves:
+
+- Setup/run/archive scripts.
+- Auto-run setup after workspace creation.
+- Auto-start a preferred agent after setup.
+- Required local file checks for `.env`, certs, tokens, or config files.
+- Pre/post hooks for clone, workspace creation, setup, PR creation, merge, and
+  archive.
+- Per-workspace environment generation.
+- Script presets for tests, lint, typecheck, build, seed, reset, and local
+  services.
+
+### Agent Defaults
+
+Agent behavior should be configurable per user, repository, workspace, and
+session profile:
+
+- Default agent per repository.
+- Agent profiles: planning, fast prototype, review-only, tests-first,
+  refactor-only, docs-only.
+- Default approval mode.
+- Default reasoning or effort level.
+- Default Codex personality/goals where supported.
+- Default MCP visibility and status checks.
+- Allowed or disallowed tools by repository or workspace.
+
+### Review And Merge Rules
+
+Merge readiness should match the team's definition of done:
+
+- Configurable merge blockers for open todos, unresolved comments, failed
+  checks, sibling workspace conflicts, uncommitted changes, missing tests, or
+  missing PR description sections.
+- Required checklist before PR creation.
+- Required checklist before merge.
+- Custom "definition of done" text shown in the workspace.
+- Rules for when agent-generated work must be reviewed manually.
+
+### Workspace Defaults
+
+Workspace creation should be fast and predictable:
+
+- Default base branch.
+- Workspace parent directory.
+- Branch prefix and slug style.
+- Default port block size.
+- Files to copy policy.
+- Auto-open workspace after creation.
+- Auto-create checkpoints on agent start, before PR, before merge, and before
+  archive.
+- Default tabs/panels to show when a workspace opens.
+
+### View, Theme, And Layout
+
+Not every visual option needs a button. Good file-editable settings include:
+
+- Light, dark, or system theme.
+- Accent color.
+- Density: compact, normal, spacious.
+- Sidebar grouping and sorting.
+- Default workspace tab.
+- Show/hide panels.
+- Unified or side-by-side diff preference.
+- Terminal font, size, and scrollback.
+- Agent transcript font, wrapping, and timestamps.
+- Dashboard columns and status labels.
+
+### Notifications, Shortcuts, And Commands
+
+Power users should be able to tune attention and speed:
+
+- Toasts vs quiet mode.
+- Alerts when agents stop, checks fail/pass, PR comments arrive, or conflicts
+  appear.
+- User-editable keybindings.
+- Custom command palette entries.
+- Repository-specific terminal presets.
+- Import/export for settings bundles and prompt packs.
 
 The current implemented settings format is TOML. Future theme/view
 customization can use the same settings model or a dedicated file format, but
 the public docs should not require every advanced knob to have a custom GUI
 control.
+
+## Platform Stance
+
+Linux is the primary target. The code should keep a portable core where
+practical, but product decisions should optimize for Linux desktop quality
+first.
+
+- Linux: primary supported platform.
+- WSL: likely the best first Windows-adjacent target after Linux.
+- macOS: technically possible, but lower priority because the original
+  Conductor app already serves macOS and GTK packaging is less native there.
+- Native Windows: possible later, but process groups, PTYs, paths, shells,
+  signals, and packaging need deliberate platform abstraction before it is a
+  realistic support target.
 
 ## CLI Reference
 
