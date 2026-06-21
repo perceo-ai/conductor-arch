@@ -61,11 +61,11 @@ The app has a usable but rough Conductor loop:
 
 Known rough edges:
 
-- Agent chat is PTY/transcript based, not a polished structured chat UI.
+- Agent sessions run PTY-backed harnesses with structured app-native transcript
+  events rather than provider-native chat protocols.
 - Terminal rendering is not a full terminal emulator.
-- Command palette, broad shortcuts, deep links, monorepo directory selection,
-  linked directories, richer GitHub review-thread sync, and unified local
-  history are incomplete.
+- Broad shortcuts, deep links, monorepo directory selection, linked directories,
+  richer GitHub review-thread sync, and unified local history are incomplete.
 - GitHub-backed flows require local `gh` auth.
 - Linear-backed flows require `LINEAR_API_KEY`.
 

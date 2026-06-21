@@ -16,9 +16,9 @@ Linux Conductor now has a usable app-first loop for one repository:
    `gh` auth.
 9. Restore archived workspaces and inspect older imported Conductor chats.
 
-The GTK app is usable but still rough. Agent sessions are PTY/transcript based,
-terminal rendering is not a full emulator, and several app controls remain
-unfinished.
+The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
+and render structured app-native transcript events, terminal rendering is not a
+full emulator, and several app controls remain unfinished.
 
 Latest verification on 2026-06-20: `cargo fmt --all -- --check`,
 `cargo test -p linux-conductor-core --lib` (96 tests), and
@@ -51,6 +51,18 @@ the available display, but source-creation click-through is not yet automated,
 though the GTK source form now has focused request-mapping and lifecycle
 feedback coverage. Linear live proof is still blocked until `LINEAR_API_KEY` is
 set. Broader CLI/GTK suites should be run before release artifacts.
+
+Phase 8 was completed on 2026-06-21 for the current PTY-backed harness model:
+selected Shell/Codex/Claude/Cursor sessions render a structured session header
+with kind, status, runtime state, attachment state, event counts, PID,
+start/end/exit metadata, harness options, command, and sanitized transcript
+events. Composer input, staged review prompts, harness/system notices, and
+agent output are labeled as separate app-native transcript events instead of
+raw log text, including live appends while a selected session is running.
+Multi-line composer input and fenced multi-line review prompts are preserved as
+single labeled transcript events. Focused verification:
+`cargo test -p linux-conductor-gtk session_surface::tests -- --nocapture`;
+workspace verification: `cargo test --workspace`.
 
 ## Implemented
 
@@ -123,7 +135,9 @@ set. Broader CLI/GTK suites should be run before release artifacts.
 - Sidebar workspace search/grouping.
 - Command palette is available from the header or `Ctrl+K`, with commands for
   Dashboard, Projects, History, Workspace, Changes, Chat/Terminal, Big
-  Terminal, Todos, Processes, Checkpoints, refresh, and sidebar toggle.
+  Terminal, Todos, Processes, Checkpoints, refresh, and sidebar toggle. The
+  palette filters by command label, shortcut, and workflow aliases such as
+  `ci`, `diff`, `chat`, and `terminal`.
 - `Ctrl+R` refreshes the app and `Ctrl+B` toggles the sidebar.
 - Projects page can add local repos, clone Git URLs, list projects, edit
   shared/local settings, and create workspaces from branch/base, GitHub issue,
@@ -137,8 +151,10 @@ set. Broader CLI/GTK suites should be run before release artifacts.
   lifecycle controls.
 - Agent panel starts PTY-backed Shell, Codex, Claude, and Cursor sessions,
   persists transcripts, sends input, stops selected sessions, creates
-  checkpoints, shows harness metadata, surfaces provider/auth/MCP status, and
-  sends staged review prompts.
+  checkpoints, shows harness metadata, surfaces provider/auth/MCP status, sends
+  staged review prompts, persists new composer input as user transcript events,
+  and renders the selected session through a structured app-native header plus
+  labeled transcript body.
 - Terminal panels support one-shot commands, PTY shells, multiple shell tabs,
   transcript persistence/search/history/reload, basic ANSI/control redraw
   handling, alternate-screen restore for TUI transcripts, CSI cursor-position
@@ -162,12 +178,10 @@ set. Broader CLI/GTK suites should be run before release artifacts.
 
 ## Known Gaps
 
-- Agent chat is transcript-oriented, not a polished structured message UI with
-  attachments.
 - Terminal rendering handles common ANSI/control redraws but is not a full
   terminal emulator.
-- Command palette search/filtering, broad customizable keyboard shortcuts, deep
-  links, and polished Big Terminal Mode are not complete.
+- Broad customizable keyboard shortcuts, deep links, and polished Big Terminal
+  Mode are not complete.
 - Monorepo directory selection and linked-directory workflows are not complete.
 - GitHub review-thread sync now has structured read plus CLI resolve/reopen
   mutation paths that were live-proven against temporary PR #12 with a real

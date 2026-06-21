@@ -36,11 +36,11 @@ The current app supports the core Conductor-style loop, with some rough edges:
 - Customize repository behavior with editable prompts, scripts, environment,
   provider paths, Git behavior, and file-copy rules.
 
-The GUI is usable, but not fully polished. Agent sessions and terminals are
-PTY/transcript based rather than rich message surfaces. Command palette,
-shortcut coverage, deep links, monorepo directory selection, linked-directory
-workflows, theme/view configuration, and full Conductor visual parity are still
-in progress.
+The GUI is usable, but not fully polished. Agent sessions run local PTY-backed
+harnesses and render structured app-native transcript events. Terminal
+rendering, shortcut coverage, deep links, monorepo directory selection,
+linked-directory workflows, theme/view configuration, and full Conductor visual
+parity are still in progress.
 
 ## The Workflow
 
@@ -418,14 +418,14 @@ linux-conductor checkpoint restore <workspace> <id>
 
 ## Known Limits
 
-- Agent chat is transcript-oriented, not a rich structured chat UI yet.
+- Agent session surfaces are structured over local PTY harness logs rather than
+  provider-native chat protocols.
 - Terminal rendering handles common ANSI/control redraws, but it is not a full
   terminal emulator.
 - GitHub PR workflows use the local `gh` CLI and require `gh auth login`.
 - Linear workspace creation requires `LINEAR_API_KEY`.
-- Command palette, broad shortcuts, deep links, monorepo directory selection,
-  linked directories, theme/view configuration, and unified local history are
-  not finished.
+- Broad shortcuts, deep links, monorepo directory selection, linked directories,
+  theme/view configuration, and unified local history are not finished.
 - `checkpoint restore` is destructive: it resets the workspace and removes
   untracked files.
 - Flatpak is experimental because arbitrary repository access needs broad

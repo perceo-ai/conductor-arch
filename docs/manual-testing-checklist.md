@@ -94,6 +94,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   environment variables.
 - [ ] Start multiple sessions in one workspace.
 - [ ] Start sessions in two workspaces for the same repository.
+- [ ] Select a saved or running agent session and confirm the session surface
+  shows kind, status, runtime state, attachment state, harness metadata,
+  command, event counts, and labeled transcript events for user input, review
+  prompts, system notices, and agent output.
 - [ ] Send input to a selected live session.
 - [ ] Stage a review/check/comment prompt and send it to the selected session.
 - [ ] Stop the selected session and confirm the process row updates.
@@ -188,21 +192,20 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] History reads old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 - [ ] `Ctrl+K` opens the command palette.
+- [ ] Type in the command palette and confirm commands filter by label,
+  shortcut, and aliases such as `ci`, `diff`, `chat`, and `terminal`.
 - [ ] `Ctrl+R` refreshes the visible workspace state.
 - [ ] `Ctrl+B` toggles the sidebar.
 - [ ] Use the command palette to navigate Dashboard, Projects, History,
-  Workspace, Changes, Chat/Terminal, Big Terminal, Todos, Processes, and
-  Checkpoints.
+  Workspace, Changes, Checks, Review, Chat/Terminal, Big Terminal, Todos,
+  Processes, and Checkpoints.
 - [ ] Confirm command palette workspace-tab commands are hidden until a
   workspace is selected.
 
 ## Known Gaps To Keep Visible
 
-- [ ] Agent chat is still PTY/transcript-oriented, not a polished structured
-  message UI with attachments.
 - [ ] Terminal rendering is not a full terminal emulator.
-- [ ] Command palette search/filtering, customizable shortcuts, and deep links
-  are not complete.
+- [ ] Customizable shortcuts and deep links are not complete.
 - [ ] Theme/view customization is not complete.
 - [ ] Full naming-template, hook, notification, shortcut, and prompt-pack
   customization is not complete.

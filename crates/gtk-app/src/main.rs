@@ -14,9 +14,9 @@ mod workspace_command_center;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
-use command_palette::{palette_commands, PaletteCommand, PaletteTarget};
+use command_palette::{filter_palette_commands, palette_commands, PaletteCommand, PaletteTarget};
 use gtk::{
-    Box as GBox, Button, CssProvider, Label, Orientation, Stack,
+    Box as GBox, Button, CssProvider, Entry, Label, Orientation, ScrolledWindow, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::paths::AppPaths;
@@ -319,7 +319,63 @@ fn show_command_palette(
     title.set_xalign(0.0);
     body.append(&title);
 
-    for command in commands {
+    let search = Entry::new();
+    search.set_placeholder_text(Some("Search commands"));
+    search.set_tooltip_text(Some(
+        "Filter commands by name, shortcut, or workflow keyword.",
+    ));
+    body.append(&search);
+
+    let list = GBox::new(Orientation::Vertical, 6);
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
+    body.append(&scroll);
+
+    render_command_palette_results(&list, &commands, "", &dialog, &apply);
+    search.grab_focus();
+    search.connect_changed({
+        let list = list.clone();
+        let commands = commands.clone();
+        let dialog = dialog.clone();
+        let apply = apply.clone();
+        move |entry| {
+            render_command_palette_results(
+                &list,
+                &commands,
+                entry.text().as_ref(),
+                &dialog,
+                &apply,
+            );
+        }
+    });
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
+fn render_command_palette_results(
+    list: &GBox,
+    commands: &[PaletteCommand],
+    query: &str,
+    dialog: &gtk::Window,
+    apply: &Rc<dyn Fn(PaletteTarget)>,
+) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+
+    let matches = filter_palette_commands(commands, query);
+    if matches.is_empty() {
+        let empty = Label::new(Some("No matching commands."));
+        empty.add_css_class("card-meta");
+        empty.set_xalign(0.0);
+        list.append(&empty);
+        return;
+    }
+
+    for command in matches {
         let label = match command.shortcut {
             Some(shortcut) => format!("{}  {}", command.label, shortcut),
             None => command.label.to_owned(),
@@ -327,18 +383,15 @@ fn show_command_palette(
         let button = Button::with_label(&label);
         button.set_halign(gtk::Align::Fill);
         button.set_hexpand(true);
-        let target = command.target;
+        let target = command.target.clone();
         let apply_command = apply.clone();
         let dialog_to_close = dialog.clone();
         button.connect_clicked(move |_| {
             apply_command(target.clone());
             dialog_to_close.close();
         });
-        body.append(&button);
+        list.append(&button);
     }
-
-    dialog.set_child(Some(&body));
-    dialog.present();
 }
 
 fn apply_palette_target(
