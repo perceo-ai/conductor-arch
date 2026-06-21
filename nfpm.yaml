@@ -45,6 +45,7 @@ overrides:
     depends:
       - git
       - gh
+      - sqlite3
       - openssh-client
       - libgtk-4-1
       - libadwaita-1-0
@@ -52,6 +53,7 @@ overrides:
     depends:
       - git
       - gh
+      - sqlite
       - openssh-clients
       - gtk4
       - libadwaita
