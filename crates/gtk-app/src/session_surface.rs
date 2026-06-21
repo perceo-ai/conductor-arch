@@ -244,30 +244,29 @@ pub fn agent_session_panel(
                     };
                     let attached = attached_sessions.contains(&process_id);
                     let last_seen = last_output.borrow().get(&process_id).copied();
+                    let runtime_state = session_runtime_state(
+                        record,
+                        if record.status == ProcessStatus::Running {
+                            last_seen
+                        } else {
+                            None
+                        },
+                        attached,
+                    );
                     let contents = fs::read_to_string(&record.log_path)
-                        .map(|text| {
-                            terminal_display_text(&trim_session_scrollback(&text)).to_string()
-                        })
-                        .unwrap_or_else(|_| "Could not read selected session log.".to_string());
-                    if contents.trim().is_empty() {
-                        transcript_buffer.set_text("No output yet.");
-                    } else {
-                        transcript_buffer.set_text(&contents);
-                    }
+                        .unwrap_or_else(|_| "[could not read selected session log]\n".to_string());
+                    transcript_buffer.set_text(&format_selected_session_surface(
+                        record,
+                        &contents,
+                        runtime_state,
+                        attached,
+                    ));
                     status.set_text(&format!(
                         "Selected #{}: {} (status={}, state={}, pid={}, started={}{})",
                         process_id,
                         session_kind_label(&record.command),
                         record.status.as_str(),
-                        session_runtime_state(
-                            record,
-                            if record.status == ProcessStatus::Running {
-                                last_seen
-                            } else {
-                                None
-                            },
-                            attached,
-                        ),
+                        runtime_state,
                         record.pid,
                         record.started_at,
                         session_harness_metadata_label(&record.session_harness_metadata),
@@ -364,7 +363,7 @@ pub fn agent_session_panel(
             let log_text = if staged_review {
                 staged_review_prompt_text(&command)
             } else {
-                command.clone() + "\n"
+                session_input_log_text(&workspace_for_send, process_id, &command)
             };
             if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
                 let _ = writer.append_session_process_output(process_id, &log_text);
@@ -372,14 +371,12 @@ pub fn agent_session_panel(
             last_output_send
                 .borrow_mut()
                 .insert(process_id, Instant::now());
+            append_text(
+                &transcript_buffer_send,
+                &live_session_append_text(&log_text),
+            );
             if staged_review {
-                append_text(&transcript_buffer_send, &log_text);
                 app_state_for_send.set_staged_review_prompt(None);
-            } else {
-                append_text(
-                    &transcript_buffer_send,
-                    &format!("[{workspace_for_send}#{process_id}]> {command}\n"),
-                );
             }
             refresh_view_send();
             refresh_send();
@@ -659,7 +656,10 @@ pub fn agent_session_panel(
                     });
                     let is_selected = *selected_for_poll.borrow() == Some(*process_id);
                     if is_selected {
-                        append_text(&transcript_buffer_for_poll, &terminal_display_text(&output));
+                        append_text(
+                            &transcript_buffer_for_poll,
+                            &live_session_append_text(&output),
+                        );
                     }
                     last_output_for_poll
                         .borrow_mut()
@@ -698,7 +698,7 @@ pub fn agent_session_panel(
             if was_active {
                 append_text(
                     &transcript_buffer_for_poll,
-                    &format!("[session finished] #{process_id}\n"),
+                    &live_session_append_text(&format!("[session finished] #{process_id}\n")),
                 );
             }
             should_sync = true;
@@ -783,6 +783,265 @@ fn initial_session_text(database_path: &Path, workspace_name: &str) -> String {
         ));
     }
     out
+}
+
+fn format_selected_session_surface(
+    record: &ProcessRecord,
+    transcript: &str,
+    runtime_state: &str,
+    attached: bool,
+) -> String {
+    let harness = record
+        .session_harness_metadata
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default");
+    let attachment = session_attachment_label(record, attached);
+    let exit = record
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    let ended = record.ended_at.as_deref().unwrap_or("-");
+    let events = parse_session_transcript_events(transcript);
+    let event_summary = session_transcript_event_summary(&events);
+    let transcript = render_session_transcript_events(transcript);
+
+    format!(
+        "Session #{} - {}\nStatus: {}\nState: {}\nAttachment: {}\nEvents: {}\nPID: {}\nStarted: {}\nEnded: {}\nExit: {}\nHarness: {}\nCommand: {}\n\nTranscript\n{}\n",
+        record.id,
+        session_kind_label(&record.command),
+        record.status.as_str(),
+        runtime_state,
+        attachment,
+        event_summary,
+        record.pid,
+        record.started_at,
+        ended,
+        exit,
+        harness,
+        record.command,
+        transcript,
+    )
+}
+
+fn session_attachment_label(record: &ProcessRecord, attached: bool) -> &'static str {
+    if record.status != ProcessStatus::Running {
+        return "saved";
+    }
+    if attached {
+        "attached"
+    } else {
+        "detached"
+    }
+}
+
+fn session_transcript_event_summary(events: &[SessionTranscriptEvent]) -> String {
+    let mut user = 0usize;
+    let mut review = 0usize;
+    let mut system = 0usize;
+    let mut agent = 0usize;
+    for event in events {
+        match event.role {
+            SessionTranscriptRole::User => user += 1,
+            SessionTranscriptRole::ReviewPrompt => review += 1,
+            SessionTranscriptRole::System => system += 1,
+            SessionTranscriptRole::Agent => agent += 1,
+        }
+    }
+    format!(
+        "{} total, {user} user, {review} review, {system} system, {agent} agent",
+        events.len()
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionTranscriptEvent {
+    role: SessionTranscriptRole,
+    body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionTranscriptRole {
+    System,
+    User,
+    ReviewPrompt,
+    Agent,
+}
+
+impl SessionTranscriptRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::User => "You",
+            Self::ReviewPrompt => "Review Prompt",
+            Self::Agent => "Agent",
+        }
+    }
+}
+
+fn session_input_log_text(workspace_name: &str, process_id: i64, input: &str) -> String {
+    format!(
+        "\n[user input {workspace_name}#{process_id}]\n{}\n",
+        input.trim()
+    )
+}
+
+fn render_session_transcript_events(transcript: &str) -> String {
+    let events = parse_session_transcript_events(transcript);
+    if events.is_empty() {
+        return "[no transcript output yet]\n".to_owned();
+    }
+
+    let mut rendered = String::new();
+    for event in events {
+        rendered.push_str(event.role.label());
+        rendered.push('\n');
+        rendered.push_str(&event.body);
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn live_session_append_text(text: &str) -> String {
+    let rendered = render_session_transcript_events(text);
+    if rendered == "[no transcript output yet]\n" {
+        String::new()
+    } else {
+        rendered
+    }
+}
+
+fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEvent> {
+    let cleaned = terminal_display_text(&trim_session_scrollback(transcript)).to_string();
+    let lines = cleaned.lines().collect::<Vec<_>>();
+    let mut events = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if is_user_input_marker(line) {
+            let (body, next) = collect_user_input_event(&lines, index + 1);
+            push_session_event(&mut events, SessionTranscriptRole::User, body);
+            index = next;
+            continue;
+        }
+
+        if line == "[staged review prompt]" {
+            let (body, next) = collect_review_prompt_event(&lines, index + 1);
+            push_session_event(&mut events, SessionTranscriptRole::ReviewPrompt, body);
+            index = next;
+            continue;
+        }
+
+        if is_system_event_marker(line) {
+            push_session_event(&mut events, SessionTranscriptRole::System, line.to_owned());
+            index += 1;
+            continue;
+        }
+
+        let (body, next) = collect_until_marker(&lines, index);
+        push_session_event(&mut events, SessionTranscriptRole::Agent, body);
+        index = next;
+    }
+
+    if events.len() > SESSION_TAIL_HISTORY {
+        events.drain(0..events.len() - SESSION_TAIL_HISTORY);
+    }
+    events
+}
+
+fn push_session_event(
+    events: &mut Vec<SessionTranscriptEvent>,
+    role: SessionTranscriptRole,
+    body: String,
+) {
+    let body = body.trim().to_owned();
+    if !body.is_empty() {
+        events.push(SessionTranscriptEvent { role, body });
+    }
+}
+
+fn collect_until_marker(lines: &[&str], start: usize) -> (String, usize) {
+    let mut body = Vec::new();
+    let mut index = start;
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if is_session_event_marker(line) {
+            break;
+        }
+        body.push(line);
+        index += 1;
+    }
+    (body.join("\n"), index)
+}
+
+fn collect_user_input_event(lines: &[&str], start: usize) -> (String, usize) {
+    let mut index = start;
+    while index < lines.len() && lines[index].trim().is_empty() {
+        index += 1;
+    }
+    if index >= lines.len() || is_session_event_marker(lines[index].trim_end()) {
+        return (String::new(), index);
+    }
+    collect_until_marker(lines, index)
+}
+
+fn collect_review_prompt_event(lines: &[&str], start: usize) -> (String, usize) {
+    if let Some(end) = review_prompt_end_index(lines, start) {
+        let body = lines[start..end]
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (body, end + 1);
+    }
+
+    let mut body = Vec::new();
+    let mut index = start;
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if is_session_event_marker(line) || (!body.is_empty() && line.trim().is_empty()) {
+            break;
+        }
+        body.push(line);
+        index += 1;
+    }
+    (body.join("\n"), index)
+}
+
+fn review_prompt_end_index(lines: &[&str], start: usize) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, line)| (line.trim_end() == "[/staged review prompt]").then_some(index))
+}
+
+fn is_session_event_marker(line: &str) -> bool {
+    is_user_input_marker(line)
+        || line == "[staged review prompt]"
+        || line == "[/staged review prompt]"
+        || is_system_event_marker(line)
+}
+
+fn is_user_input_marker(line: &str) -> bool {
+    line.starts_with("[user input ") && line.ends_with(']')
+}
+
+fn is_system_event_marker(line: &str) -> bool {
+    line.starts_with("[session ")
+        || line.starts_with("[checkpoint")
+        || line.starts_with("[could not ")
+        || line.starts_with("[error")
 }
 
 fn seed_running_sessions(
@@ -1145,6 +1404,29 @@ fn terminal_device_path_for_pid(process_id: u32) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use linux_conductor_core::workspace::ProcessKind;
+    use std::path::PathBuf;
+
+    fn session_record(
+        id: i64,
+        command: &str,
+        status: ProcessStatus,
+        metadata: Option<&str>,
+    ) -> ProcessRecord {
+        ProcessRecord {
+            id,
+            workspace_id: 42,
+            kind: ProcessKind::Session,
+            command: command.to_owned(),
+            pid: 1234,
+            log_path: PathBuf::from("/tmp/session.log"),
+            status,
+            started_at: "2026-06-20T12:00:00Z".to_owned(),
+            exit_code: None,
+            ended_at: None,
+            session_harness_metadata: metadata.map(str::to_owned),
+        }
+    }
 
     #[test]
     fn staged_review_prompt_text_wraps_review_context() {
@@ -1167,5 +1449,149 @@ mod tests {
             staged_review_status_text(Some("   ")),
             "No staged review prompt."
         );
+    }
+
+    #[test]
+    fn selected_session_surface_shows_harness_and_transcript() {
+        let record = session_record(
+            7,
+            "/opt/bin/codex",
+            ProcessStatus::Running,
+            Some("plan=true;reasoning=high"),
+        );
+
+        let surface = format_selected_session_surface(
+            &record,
+            "hello\x1b[31m agent\x1b[0m\n",
+            "working",
+            true,
+        );
+
+        assert!(surface.contains("Session #7 - Codex"));
+        assert!(surface.contains("State: working"));
+        assert!(surface.contains("Attachment: attached"));
+        assert!(surface.contains("Harness: plan=true;reasoning=high"));
+        assert!(surface.contains("Command: /opt/bin/codex"));
+        assert!(surface.contains("hello agent"));
+    }
+
+    #[test]
+    fn selected_session_surface_marks_empty_saved_transcript() {
+        let record = session_record(3, "claude", ProcessStatus::Exited, None);
+
+        let surface = format_selected_session_surface(&record, "   ", "done", false);
+
+        assert!(surface.contains("Session #3 - Claude"));
+        assert!(surface.contains("Status: exited"));
+        assert!(surface.contains("State: done"));
+        assert!(surface.contains("Attachment: saved"));
+        assert!(surface.contains("[no transcript output yet]"));
+    }
+
+    #[test]
+    fn session_input_log_text_persists_user_event_marker() {
+        let text = session_input_log_text("memphis", 9, "cargo test");
+
+        assert_eq!(text, "\n[user input memphis#9]\ncargo test\n");
+    }
+
+    #[test]
+    fn live_session_append_renders_user_and_review_events_without_markers() {
+        let user = live_session_append_text("[user input memphis#9]\ncargo test\n");
+        let review =
+            live_session_append_text("[staged review prompt]\nFix CI\n[/staged review prompt]\n");
+
+        assert_eq!(user, "You\ncargo test\n\n");
+        assert_eq!(review, "Review Prompt\nFix CI\n\n");
+    }
+
+    #[test]
+    fn live_session_append_renders_plain_output_as_agent_event() {
+        let text = live_session_append_text("hello\x1b[31m agent\x1b[0m\n");
+
+        assert_eq!(text, "Agent\nhello agent\n\n");
+    }
+
+    #[test]
+    fn selected_session_surface_renders_labeled_transcript_events() {
+        let record = session_record(
+            11,
+            "cursor /tmp/workspace",
+            ProcessStatus::Running,
+            Some("fast=true"),
+        );
+        let transcript = "\
+[session started] #11 kind=Cursor pid=1234
+\n[user input memphis#11]
+open the project
+\n[staged review prompt]
+Fix the failing checks
+\nBuild succeeded
+";
+
+        let surface = format_selected_session_surface(&record, transcript, "waiting", true);
+
+        assert!(surface.contains("System\n[session started] #11 kind=Cursor pid=1234"));
+        assert!(surface.contains("You\nopen the project"));
+        assert!(surface.contains("Review Prompt\nFix the failing checks"));
+        assert!(surface.contains("Agent\nBuild succeeded"));
+        assert!(surface.contains("Events: 4 total, 1 user, 1 review, 1 system, 1 agent"));
+        assert!(!surface.contains("[user input memphis#11]"));
+    }
+
+    #[test]
+    fn transcript_events_keep_multiline_user_input_together() {
+        let transcript = "\
+[user input memphis#4]
+first line
+second line
+
+third line
+[session stopped] exit=0
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].role, SessionTranscriptRole::User);
+        assert_eq!(events[0].body, "first line\nsecond line\n\nthird line");
+        assert_eq!(events[1].role, SessionTranscriptRole::System);
+    }
+
+    #[test]
+    fn transcript_events_keep_fenced_review_prompt_together() {
+        let transcript = "\
+[staged review prompt]
+Address review comments.
+
+- src/lib.rs: fix parser
+- src/main.rs: wire UI
+[/staged review prompt]
+agent response
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].role, SessionTranscriptRole::ReviewPrompt);
+        assert_eq!(
+            events[0].body,
+            "Address review comments.\n\n- src/lib.rs: fix parser\n- src/main.rs: wire UI"
+        );
+        assert_eq!(events[1].role, SessionTranscriptRole::Agent);
+        assert_eq!(events[1].body, "agent response");
+    }
+
+    #[test]
+    fn transcript_events_are_limited_to_recent_history() {
+        let transcript = (0..130)
+            .map(|index| format!("[user input memphis#1]\ncommand {index}\n"))
+            .collect::<String>();
+
+        let events = parse_session_transcript_events(&transcript);
+
+        assert_eq!(events.len(), SESSION_TAIL_HISTORY);
+        assert_eq!(events.first().unwrap().body, "command 10");
+        assert_eq!(events.last().unwrap().body, "command 129");
     }
 }
