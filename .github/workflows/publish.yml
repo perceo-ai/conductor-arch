@@ -23,15 +23,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -67,8 +67,10 @@ jobs:
 
       # Tarball
       - name: Package tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tar -czf dist/linux-conductor-${{ github.ref_name }}-linux-x86_64.tar.gz \
+          tar -czf "dist/linux-conductor-${VERSION}-linux-x86_64.tar.gz" \
             -C target/release linux-conductor linux-conductor-gtk
 
       # .deb and .rpm via nfpm
@@ -123,7 +125,7 @@ jobs:
           sha256sum ./* > SHA256SUMS
 
       - name: Scan release artifacts with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: dist
@@ -134,14 +136,14 @@ jobs:
           timeout: 10m
 
       - name: Upload release scan to code scanning
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         if: always()
         with:
           sarif_file: trivy-release-artifacts.sarif
           category: trivy-release-artifacts
 
       - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: |
             dist/*.tar.gz
@@ -152,14 +154,14 @@ jobs:
 
       # Upload
       - name: Upload all artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-conductor-${{ github.ref_name }}-packages
           path: dist/*
 
       - name: Attach artifacts to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/*.tar.gz
