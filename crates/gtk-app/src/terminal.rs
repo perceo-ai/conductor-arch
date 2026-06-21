@@ -176,7 +176,7 @@ pub fn embedded_terminal_panel(
             set_terminal_tab_active(&tab_buttons_for_poll.borrow(), None);
         }
         *reconcile_counter_for_poll_for_tick.borrow_mut() += 1;
-        if *reconcile_counter_for_poll_for_tick.borrow() % 10 == 0 {
+        if (*reconcile_counter_for_poll_for_tick.borrow()).is_multiple_of(10) {
             if let Ok(store) = WorkspaceStore::open(database_path_for_poll.clone()) {
                 if let Ok(reconciled) = store.reconcile_terminal_processes() {
                     if !reconciled.is_empty() {
@@ -652,7 +652,7 @@ pub fn embedded_terminal_panel(
     });
     if let Ok(store) = WorkspaceStore::open(database_path.clone()) {
         let _ = store.reconcile_terminal_processes();
-        if let Ok(processes) = store.list_terminals(&workspace_name) {
+        if let Ok(processes) = store.list_terminals(workspace_name) {
             let mut sessions = ptys_for_seed.borrow_mut();
             let mut states = terminal_tab_states_for_seed.borrow_mut();
             let mut active_terminal = None;
@@ -1106,15 +1106,13 @@ pub fn embedded_terminal_panel(
                 }
             };
 
-            if line_text.is_empty() {
-                if existing_line.is_none() {
-                    jump_history_status.set_text("line: required");
-                    append_text(
-                        &jump_history_buffer,
-                        "\n[terminal history]\nLine number must be provided for the first jump in this session.\n",
-                    );
-                    return;
-                }
+            if line_text.is_empty() && existing_line.is_none() {
+                jump_history_status.set_text("line: required");
+                append_text(
+                    &jump_history_buffer,
+                    "\n[terminal history]\nLine number must be provided for the first jump in this session.\n",
+                );
+                return;
             }
             jump_history_status.set_text(&format!("line: {line_number}"));
 
@@ -1665,7 +1663,7 @@ fn terminal_line_jump_target(current_line: usize, delta: isize) -> usize {
         return current_line;
     }
 
-    let magnitude = delta.abs() as usize;
+    let magnitude = delta.unsigned_abs();
     if delta > 0 {
         current_line.saturating_add(magnitude)
     } else {
@@ -3358,10 +3356,7 @@ fn clear_terminal_display_line(rendered: &mut Vec<char>, cursor: usize, mode: us
     if start >= end {
         return cursor.min(rendered.len());
     }
-    if mode == 0 && line_start == 0 {
-        let spaces = vec![' '; end.saturating_sub(start)];
-        rendered.splice(start..end, spaces);
-    } else if mode == 2 {
+    if (mode == 0 && line_start == 0) || mode == 2 {
         let spaces = vec![' '; end.saturating_sub(start)];
         rendered.splice(start..end, spaces);
     } else {
@@ -3379,7 +3374,7 @@ fn insert_terminal_display_chars(rendered: &mut Vec<char>, cursor: usize, count:
     }
     rendered.splice(
         cursor.min(rendered.len())..cursor.min(rendered.len()),
-        std::iter::repeat(' ').take(count),
+        std::iter::repeat_n(' ', count),
     );
     cursor.min(rendered.len())
 }
@@ -3636,9 +3631,7 @@ fn csi_private_mode_enabled(sequence: &str, modes: &[&str]) -> bool {
     let Some(private_modes) = sequence.strip_prefix('?') else {
         return false;
     };
-    private_modes
-        .split(';')
-        .any(|mode| modes.iter().any(|candidate| *candidate == mode))
+    private_modes.split(';').any(|mode| modes.contains(&mode))
 }
 
 fn move_terminal_display_cursor_to_position(rendered: &[char], numbers: Vec<usize>) -> usize {
@@ -4423,7 +4416,7 @@ mod tests {
             1
         );
         assert_eq!(
-            terminal_line_jump_target(40, -(TERMINAL_LINE_JUMP_PAGE_SIZE as isize * 2) as isize),
+            terminal_line_jump_target(40, -(TERMINAL_LINE_JUMP_PAGE_SIZE as isize * 2)),
             1
         );
         assert_eq!(
@@ -4638,7 +4631,7 @@ mod tests {
         let label = terminal_history_browser_row_label(&summary);
         let preview = truncate_text_for_display(&summary.preview, 120);
         assert!(label.contains(&preview));
-        assert_eq!(preview.ends_with('…'), true);
+        assert!(preview.ends_with('…'));
         assert!(preview.chars().count() <= 141);
     }
 

@@ -1150,7 +1150,7 @@ impl WorkspaceStore {
             process.pid > 0,
             "terminal process {process_id} has invalid pid"
         );
-        stop_process(process.pid as u32)?;
+        stop_process(process.pid)?;
         self.mark_terminal_process_stopped(process.id, Some(SIGTERM_EXIT_CODE))
     }
 

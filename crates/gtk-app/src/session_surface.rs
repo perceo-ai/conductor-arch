@@ -705,7 +705,7 @@ pub fn agent_session_panel(
         }
 
         *reconcile_tick_for_poll.borrow_mut() += 1;
-        if *reconcile_tick_for_poll.borrow() % SESSION_RECONCILE_EVERY_TICKS == 0 {
+        if (*reconcile_tick_for_poll.borrow()).is_multiple_of(SESSION_RECONCILE_EVERY_TICKS) {
             if let Ok(reconciled) = WorkspaceStore::open(db_for_poll.clone())
                 .and_then(|store| store.reconcile_session_processes())
             {
@@ -752,7 +752,7 @@ fn preserve_combo_selection(
 
     let selected_index = preserve
         .and_then(|id| records.iter().position(|record| record.id == id))
-        .or_else(|| Some(0));
+        .or(Some(0));
 
     if let Some(index) = selected_index.filter(|index| *index < records.len()) {
         combo.set_active(Some(index as u32));
@@ -791,7 +791,7 @@ fn seed_running_sessions(
     active_sessions: &Rc<RefCell<HashMap<i64, SessionConnection>>>,
     transcript_buffer: &TextBuffer,
 ) {
-    let Ok(store) = WorkspaceStore::open(database_path.to_path_buf()) else {
+    let Ok(store) = WorkspaceStore::open(database_path) else {
         return;
     };
     let _ = store.reconcile_session_processes();
