@@ -71,13 +71,7 @@ pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
 
 fn is_file_non_empty(path: &Path) -> bool {
     std::fs::metadata(path)
-        .and_then(|metadata| {
-            if metadata.len() == 0 {
-                Ok(false)
-            } else {
-                Ok(true)
-            }
-        })
+        .map(|metadata| metadata.len() != 0)
         .unwrap_or(false)
 }
 

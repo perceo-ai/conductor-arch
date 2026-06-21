@@ -731,8 +731,7 @@ fn workspace_checkpoint_panel(
 
     let mut checkpoints_loaded = Vec::new();
     let mut list_error = None;
-    match WorkspaceStore::open(db_path.to_path_buf()).and_then(|store| store.checkpoint_list(name))
-    {
+    match WorkspaceStore::open(db_path).and_then(|store| store.checkpoint_list(name)) {
         Ok(checkpoints) => {
             checkpoints_loaded = checkpoints;
         }
@@ -1257,13 +1256,13 @@ fn workspace_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -
 }
 
 fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) -> String {
-    WorkspaceStore::open(db_path.to_path_buf())
+    WorkspaceStore::open(db_path)
         .map(|store| workspace_diff_text(&store, name, path))
         .unwrap_or_else(|err| format!("Could not open workspace database: {err:#}\n"))
 }
 
 fn workspace_file_comments_text(db_path: &Path, name: &str, path: &str) -> String {
-    WorkspaceStore::open(db_path.to_path_buf())
+    WorkspaceStore::open(db_path)
         .and_then(|store| store.list_review_comments(name))
         .map(|comments| file_inline_comments_text(&comments, path))
         .unwrap_or_else(|err| format!("Could not read comments for {path}: {err:#}\n"))
