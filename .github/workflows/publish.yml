@@ -53,9 +53,11 @@ jobs:
 
       - name: Derive version
         id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
+            VERSION="$VERSION_INPUT"
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
