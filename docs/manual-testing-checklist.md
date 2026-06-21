@@ -4,17 +4,23 @@ Use this checklist before calling the app flow healthy or cutting a public
 artifact. It focuses on the real Conductor loop: one repository, many
 workspaces, multiple agent sessions, review, GitHub PR, merge, archive, repeat.
 
+Evidence note: items checked on 2026-06-21 were verified on a Linux host plus
+clean Ubuntu 24.04 / Fedora 42 containers. GTK/AppImage launch probes used
+`xvfb-run` because this environment does not have a real interactive desktop
+session (`DISPLAY` was unset). The remaining GUI workflow items still need a
+real desktop walkthrough.
+
 Run on a machine with `git`, `gh`, Rust, GTK4, libadwaita, and any agent CLIs
 you want to test. Run `gh auth login` before GitHub checks. Set
 `LINEAR_API_KEY` before Linear checks.
 
 ## Build And Launch
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo test -p linux-conductor-core -p linux-conductor -p linux-conductor-gtk`
-- [ ] `cargo build --workspace --release --locked`
-- [ ] `./target/release/linux-conductor doctor` prints distro guidance.
-- [ ] `./target/release/linux-conductor-gtk` opens the GTK app.
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo test -p linux-conductor-core -p linux-conductor -p linux-conductor-gtk`
+- [x] `cargo build --workspace --release --locked`
+- [x] `./target/release/linux-conductor doctor` prints distro guidance.
+- [x] `./target/release/linux-conductor-gtk` opens the GTK app.
 
 ## Repository Setup
 
@@ -267,14 +273,16 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 
 ## Packaging Smoke
 
-- [ ] `VERSION=0.1.0 nfpm package --packager deb --target dist/`
-- [ ] `VERSION=0.1.0 nfpm package --packager rpm --target dist/`
-- [ ] AppImage launches GUI with no args:
+- [x] `VERSION=0.1.0 nfpm package --packager deb --target dist/`
+- [x] `VERSION=0.1.0 nfpm package --packager rpm --target dist/`
+- [x] AppImage launches GUI with no args:
   `./dist/linux-conductor-0.1.0-x86_64.AppImage`
-- [ ] AppImage forwards CLI args:
+- [x] AppImage forwards CLI args:
   `./dist/linux-conductor-0.1.0-x86_64.AppImage doctor`
-- [ ] Flatpak build status is documented if it fails because of sandbox or
+- [x] Flatpak build status is documented if it fails because of sandbox or
   dependency limitations.
+  2026-06-21 note: `flatpak` is installed in this environment, but
+  `flatpak-builder` is not, so no local Flatpak build was attempted here.
 - [ ] Tag-driven publish pipeline creates or updates GitHub release artifacts,
   AppImage, APT `.deb` repository metadata, DNF/zypper `.rpm` repository
   metadata, AUR package state, and Flatpak release state.

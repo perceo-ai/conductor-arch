@@ -65,10 +65,12 @@ debugging, and fallback workflows.
 ### AppImage
 
 ```bash
-curl -Lo linux-conductor.AppImage \
-  https://github.com/pranavkannepalli/conductor-arch/releases/latest/download/linux-conductor-x86_64.AppImage
+gh release download \
+  --repo pranavkannepalli/conductor-arch \
+  --pattern 'linux-conductor-*-x86_64.AppImage' \
+  --output linux-conductor.AppImage
 chmod +x linux-conductor.AppImage
-sudo mv linux-conductor.AppImage /usr/local/bin/linux-conductor
+sudo install -Dm755 linux-conductor.AppImage /usr/local/bin/linux-conductor
 ```
 
 Run the app:
