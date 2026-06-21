@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v, for example 0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -48,8 +53,18 @@ jobs:
 
       - name: Derive version
         id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' <<< "$VERSION"; then
+            echo "version must look like MAJOR.MINOR.PATCH, got: $VERSION" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create dist directory

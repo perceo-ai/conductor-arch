@@ -361,6 +361,13 @@ labeled section header instead of a single combined label. Full suite:
 Release readiness must include distribution and website launch work, not just
 local artifact creation:
 
+- Local release readiness is now captured in
+  [`docs/release-readiness.md`](docs/release-readiness.md) and automated by
+  `scripts/release-readiness.sh`, which runs formatting, clippy, tests, release
+  build, doctor, `cargo deny check` when available, and optional local package
+  artifact/checksum generation.
+- Manual publish dispatch now requires an explicit semantic version so dry runs
+  do not accidentally package branch names such as `main` as release versions.
 - CI pipelines publish to every supported Linux package channel: GitHub release
   artifacts, AppImage, `.deb`/APT, `.rpm`/DNF or zypper, AUR, and Flatpak.
 - Package-manager publishing is repeatable from a tag, records checksums and
