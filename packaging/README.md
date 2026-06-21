@@ -27,6 +27,15 @@ Build the release binary first:
 cargo build --workspace --release --locked
 ```
 
+Or run the local release-readiness gate from the repository root. Package mode
+only creates artifacts on Linux; on other platforms, use the tag-driven CI
+workflow for Linux artifacts.
+
+```bash
+scripts/release-readiness.sh --version 0.1.0
+scripts/release-readiness.sh --version 0.1.0 --package
+```
+
 ### .deb (Ubuntu / Debian)
 
 ```bash
@@ -71,8 +80,8 @@ through to the CLI, for example:
 ### AUR (Arch Linux)
 
 ```bash
+scripts/update-aur-checksum.sh 0.1.0 <64-character-sha256>
 cd packaging/aur
-# Update pkgver and sha256sums, then:
 makepkg -si
 ```
 
@@ -108,6 +117,11 @@ git push origin v0.1.0
 
 The workflow builds tarball + .deb + .rpm + AppImage on `ubuntu-24.04` GitHub
 hosted runners and attaches all artifacts to the GitHub release.
+
+For a manual dry run from the Actions UI, run the `Publish` workflow with an
+explicit version such as `0.1.0`. Manual dispatch does not create a GitHub
+release unless it runs on a tag, but it still builds and uploads package
+artifacts for inspection.
 
 Release readiness requires more than attached artifacts. Before a public
 release, add or verify publishing pipelines for every supported Linux package
