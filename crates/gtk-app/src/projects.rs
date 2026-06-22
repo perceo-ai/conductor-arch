@@ -50,6 +50,15 @@ pub(crate) fn build_projects_page(
     repo_title.set_xalign(0.0);
     body.append(&repo_title);
 
+    let repo_actions = GBox::new(Orientation::Horizontal, 8);
+    repo_actions.add_css_class("project-actions-row");
+    let open_add_local_btn = Button::with_label("Add Local Repository");
+    open_add_local_btn.add_css_class("suggested-action");
+    let open_clone_btn = Button::with_label("Clone Repository");
+    repo_actions.append(&open_add_local_btn);
+    repo_actions.append(&open_clone_btn);
+    body.append(&repo_actions);
+
     let repo_box = GBox::new(Orientation::Horizontal, 8);
     let repo_path_entry = Entry::new();
     repo_path_entry.set_placeholder_text(Some("local path or git URL"));
@@ -68,7 +77,9 @@ pub(crate) fn build_projects_page(
     repo_box.append(&repo_name_entry);
     repo_box.append(&add_repo_btn);
     repo_box.append(&clone_repo_btn);
+    repo_box.set_visible(false);
     body.append(&repo_box);
+    repo_result.set_visible(false);
     body.append(&repo_result);
 
     let workspace_title = Label::new(Some("New Workspace"));
@@ -76,6 +87,15 @@ pub(crate) fn build_projects_page(
     workspace_title.set_xalign(0.0);
     workspace_title.set_margin_top(10);
     body.append(&workspace_title);
+
+    let workspace_actions = GBox::new(Orientation::Horizontal, 8);
+    workspace_actions.add_css_class("project-actions-row");
+    let open_workspace_modal_btn = Button::with_label("Create Workspace");
+    open_workspace_modal_btn.add_css_class("suggested-action");
+    let open_source_check_btn = Button::with_label("Check Sources");
+    workspace_actions.append(&open_workspace_modal_btn);
+    workspace_actions.append(&open_source_check_btn);
+    body.append(&workspace_actions);
 
     let create_box = GBox::new(Orientation::Horizontal, 8);
     let repo_entry = Entry::new();
@@ -109,21 +129,32 @@ pub(crate) fn build_projects_page(
     create_box.append(&source_entry);
     create_box.append(&check_sources_btn);
     create_box.append(&create_btn);
+    create_box.set_visible(false);
     body.append(&create_box);
+    result.set_visible(false);
     body.append(&result);
 
     let repo_list = GBox::new(Orientation::Vertical, 8);
     body.append(&repo_list);
 
-    let settings_title = Label::new(Some("Project Settings"));
+    let settings_cta = GBox::new(Orientation::Horizontal, 10);
+    settings_cta.add_css_class("settings-cta");
+    let settings_title = Label::new(Some("Project settings moved"));
     settings_title.add_css_class("section-title");
     settings_title.set_xalign(0.0);
     settings_title.set_margin_top(10);
-    body.append(&settings_title);
+    settings_cta.append(&settings_title);
+    let settings_hint = Label::new(Some(
+        "Use the dedicated Settings page instead of editing everything inline here.",
+    ));
+    settings_hint.add_css_class("card-meta");
+    settings_hint.set_hexpand(true);
+    settings_hint.set_xalign(0.0);
+    settings_cta.append(&settings_hint);
+    body.append(&settings_cta);
 
     let settings_grid = GBox::new(Orientation::Vertical, 10);
     settings_grid.add_css_class("settings-panel");
-    body.append(&settings_grid);
 
     let settings_top = GBox::new(Orientation::Horizontal, 8);
     let settings_repo_entry = Entry::new();
@@ -432,6 +463,157 @@ pub(crate) fn build_projects_page(
         }
     });
 
+    let db_path_modal_add = paths.database_path.clone();
+    let refresh_after_modal_add = refresh.clone();
+    let repo_entry_after_modal_add = repo_entry.clone();
+    let settings_repo_after_modal_add = settings_repo_entry.clone();
+    open_add_local_btn.connect_clicked(move |_| {
+        let dialog = gtk::Window::builder()
+            .title("Add Local Repository")
+            .modal(true)
+            .default_width(520)
+            .default_height(180)
+            .build();
+        let body = dialog_body("Add a checked-out repository.");
+        let path_entry = Entry::new();
+        path_entry.set_placeholder_text(Some("local path"));
+        let name_entry = Entry::new();
+        name_entry.set_placeholder_text(Some("project name, optional"));
+        let feedback = Label::new(None);
+        feedback.add_css_class("card-meta");
+        feedback.set_xalign(0.0);
+        let actions = dialog_actions(&dialog, "Add");
+        let confirm = actions.1.clone();
+        let dialog_for_add = dialog.clone();
+        let path_entry_for_add = path_entry.clone();
+        let name_entry_for_add = name_entry.clone();
+        let feedback_for_add = feedback.clone();
+        let db_path_for_add = db_path_modal_add.clone();
+        let repo_entry_for_add = repo_entry_after_modal_add.clone();
+        let settings_repo_for_add = settings_repo_after_modal_add.clone();
+        let refresh_for_add = refresh_after_modal_add.clone();
+        confirm.connect_clicked(move |_| {
+            let path = path_entry_for_add.text().trim().to_owned();
+            let name = name_entry_for_add.text().trim().to_owned();
+            if path.is_empty() {
+                feedback_for_add.set_text("Local repository path is required.");
+                return;
+            }
+            match RepositoryStore::open(db_path_for_add.clone()).and_then(|store| {
+                store.add(AddRepository {
+                    name: (!name.is_empty()).then_some(name),
+                    root_path: PathBuf::from(path),
+                    default_branch: None,
+                    remote_name: "origin".to_owned(),
+                    workspace_parent_path: None,
+                })
+            }) {
+                Ok(repo) => {
+                    repo_entry_for_add.set_text(&repo.name);
+                    settings_repo_for_add.set_text(&repo.name);
+                    refresh_for_add();
+                    dialog_for_add.close();
+                }
+                Err(err) => feedback_for_add.set_text(&format!("Add failed: {err:#}")),
+            }
+        });
+        body.append(&path_entry);
+        body.append(&name_entry);
+        body.append(&feedback);
+        body.append(&actions.0);
+        dialog.set_child(Some(&body));
+        dialog.present();
+    });
+
+    let db_path_modal_clone = paths.database_path.clone();
+    let refresh_after_modal_clone = refresh.clone();
+    let repo_entry_after_modal_clone = repo_entry.clone();
+    let settings_repo_after_modal_clone = settings_repo_entry.clone();
+    open_clone_btn.connect_clicked(move |_| {
+        let dialog = gtk::Window::builder()
+            .title("Clone Repository")
+            .modal(true)
+            .default_width(520)
+            .default_height(180)
+            .build();
+        let body = dialog_body("Clone a repository into the default projects directory.");
+        let url_entry = Entry::new();
+        url_entry.set_placeholder_text(Some("git URL"));
+        let name_entry = Entry::new();
+        name_entry.set_placeholder_text(Some("project name, optional"));
+        let feedback = Label::new(None);
+        feedback.add_css_class("card-meta");
+        feedback.set_xalign(0.0);
+        let actions = dialog_actions(&dialog, "Clone");
+        let confirm = actions.1.clone();
+        let dialog_for_clone = dialog.clone();
+        let url_entry_for_clone = url_entry.clone();
+        let name_entry_for_clone = name_entry.clone();
+        let feedback_for_clone = feedback.clone();
+        let db_path_for_clone = db_path_modal_clone.clone();
+        let repo_entry_for_clone = repo_entry_after_modal_clone.clone();
+        let settings_repo_for_clone = settings_repo_after_modal_clone.clone();
+        let refresh_for_clone = refresh_after_modal_clone.clone();
+        confirm.connect_clicked(move |_| {
+            let url = url_entry_for_clone.text().trim().to_owned();
+            let explicit_name = name_entry_for_clone.text().trim().to_owned();
+            if url.is_empty() {
+                feedback_for_clone.set_text("Git URL is required.");
+                return;
+            }
+            let name = if explicit_name.is_empty() {
+                repo_name_from_url(&url)
+            } else {
+                explicit_name
+            };
+            let clone_path = default_clone_parent().join(&name);
+            let clone_result = if clone_path.exists() {
+                Ok(())
+            } else {
+                if let Some(parent) = clone_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::process::Command::new("git")
+                    .args(["clone", &url])
+                    .arg(&clone_path)
+                    .status()
+                    .map(|status| {
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!("git clone exited with {status}"))
+                        }
+                    })
+                    .unwrap_or_else(|err| Err(err.into()))
+            };
+            match clone_result.and_then(|_| {
+                RepositoryStore::open(db_path_for_clone.clone()).and_then(|store| {
+                    store.add(AddRepository {
+                        name: Some(name),
+                        root_path: clone_path,
+                        default_branch: None,
+                        remote_name: "origin".to_owned(),
+                        workspace_parent_path: None,
+                    })
+                })
+            }) {
+                Ok(repo) => {
+                    repo_entry_for_clone.set_text(&repo.name);
+                    settings_repo_for_clone.set_text(&repo.name);
+                    refresh_for_clone();
+                    dialog_for_clone.close();
+                }
+                Err(err) => feedback_for_clone.set_text(&format!("Clone failed: {err:#}")),
+            }
+        });
+        body.append(&url_entry);
+        body.append(&name_entry);
+        body.append(&feedback);
+        body.append(&actions.0);
+        dialog.set_child(Some(&body));
+        dialog.present();
+    });
+
     let db_path_check_sources = paths.database_path.clone();
     let result_for_check_sources = result.clone();
     check_sources_btn.connect_clicked(move |_| {
@@ -445,9 +627,35 @@ pub(crate) fn build_projects_page(
         }
     });
 
+    let db_path_modal_check_sources = paths.database_path.clone();
+    open_source_check_btn.connect_clicked(move |_| {
+        let message = match WorkspaceStore::open(db_path_modal_check_sources.clone()) {
+            Ok(store) => source_preflight_text(&store.source_preflight()),
+            Err(err) => format!("Source preflight failed: {err:#}"),
+        };
+        let dialog = gtk::Window::builder()
+            .title("Source Readiness")
+            .modal(true)
+            .default_width(460)
+            .default_height(140)
+            .build();
+        let body = dialog_body("Provider and source readiness.");
+        let label = Label::new(Some(&message));
+        label.add_css_class("card-meta");
+        label.set_wrap(true);
+        label.set_xalign(0.0);
+        let actions = dialog_actions(&dialog, "Close");
+        body.append(&label);
+        body.append(&actions.0);
+        dialog.set_child(Some(&body));
+        dialog.present();
+    });
+
     let db_path_create = paths.database_path.clone();
     let refresh_after_create = refresh.clone();
     let refresh_after_settings_save = refresh.clone();
+    let refresh_dashboard_inline = refresh_dashboard.clone();
+    let refresh_workspace_inline = refresh_workspace.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
         let typed_name = name_entry.text().trim().to_owned();
@@ -478,9 +686,106 @@ pub(crate) fn build_projects_page(
         result.set_text(&workspace_source_create_feedback(&source, create_result));
         if created {
             refresh_after_create();
-            refresh_dashboard();
-            refresh_workspace();
+            refresh_dashboard_inline();
+            refresh_workspace_inline();
         }
+    });
+
+    let db_path_modal_workspace = paths.database_path.clone();
+    let refresh_after_modal_workspace = refresh.clone();
+    let refresh_dashboard_modal_workspace = refresh_dashboard.clone();
+    let refresh_workspace_modal_workspace = refresh_workspace.clone();
+    open_workspace_modal_btn.connect_clicked(move |_| {
+        let dialog = gtk::Window::builder()
+            .title("Create Workspace")
+            .modal(true)
+            .default_width(680)
+            .default_height(240)
+            .build();
+        let body = dialog_body("Create a branch, issue, PR, prompt, or Linear workspace.");
+        let grid = GBox::new(Orientation::Horizontal, 8);
+        let repo_entry = Entry::new();
+        repo_entry.set_placeholder_text(Some("repository name"));
+        repo_entry.set_width_chars(18);
+        let name_entry = Entry::new();
+        name_entry.set_placeholder_text(Some("workspace name"));
+        let branch_entry = Entry::new();
+        branch_entry.set_placeholder_text(Some("branch name"));
+        let base_entry = Entry::new();
+        base_entry.set_placeholder_text(Some("base ref, optional"));
+        let source_select = ComboBoxText::new();
+        source_select.append(Some("branch"), "Branch");
+        source_select.append(Some("github_issue"), "GitHub Issue");
+        source_select.append(Some("github_pr"), "GitHub PR");
+        source_select.append(Some("linear_issue"), "Linear Issue");
+        source_select.append(Some("prompt"), "Prompt");
+        source_select.set_active_id(Some("branch"));
+        let source_entry = Entry::new();
+        source_entry.set_placeholder_text(Some("issue/PR id or prompt"));
+        grid.append(&repo_entry);
+        grid.append(&name_entry);
+        grid.append(&branch_entry);
+        grid.append(&base_entry);
+        grid.append(&source_select);
+        grid.append(&source_entry);
+        let feedback = Label::new(None);
+        feedback.add_css_class("card-meta");
+        feedback.set_xalign(0.0);
+        feedback.set_wrap(true);
+        let actions = dialog_actions(&dialog, "Create");
+        let confirm = actions.1.clone();
+        let dialog_for_create = dialog.clone();
+        let repo_entry_for_create = repo_entry.clone();
+        let name_entry_for_create = name_entry.clone();
+        let branch_entry_for_create = branch_entry.clone();
+        let base_entry_for_create = base_entry.clone();
+        let source_select_for_create = source_select.clone();
+        let source_entry_for_create = source_entry.clone();
+        let feedback_for_create = feedback.clone();
+        let db_path_for_create = db_path_modal_workspace.clone();
+        let refresh_for_create = refresh_after_modal_workspace.clone();
+        let refresh_dashboard_for_create = refresh_dashboard_modal_workspace.clone();
+        let refresh_workspace_for_create = refresh_workspace_modal_workspace.clone();
+        confirm.connect_clicked(move |_| {
+            let repo = repo_entry_for_create.text().trim().to_owned();
+            let typed_name = name_entry_for_create.text().trim().to_owned();
+            let typed_branch = branch_entry_for_create.text().trim().to_owned();
+            let base = optional_entry_text(&base_entry_for_create);
+            let source = source_select_for_create
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "branch".to_owned());
+            let source_value = source_entry_for_create.text().trim().to_owned();
+            if repo.is_empty() {
+                feedback_for_create.set_text("Repository is required.");
+                return;
+            }
+            let request = workspace_source_request_from_form(
+                &source,
+                &source_value,
+                base,
+                (!typed_name.is_empty()).then_some(typed_name),
+                (!typed_branch.is_empty()).then_some(typed_branch),
+            );
+            let create_result = request.and_then(|request| {
+                WorkspaceStore::open(db_path_for_create.clone())
+                    .and_then(|store| request.create_workspace(&store, &repo))
+            });
+            match create_result {
+                Ok(_) => {
+                    refresh_for_create();
+                    refresh_dashboard_for_create();
+                    refresh_workspace_for_create();
+                    dialog_for_create.close();
+                }
+                Err(err) => feedback_for_create.set_text(&format!("Create failed: {err:#}")),
+            }
+        });
+        body.append(&grid);
+        body.append(&feedback);
+        body.append(&actions.0);
+        dialog.set_child(Some(&body));
+        dialog.present();
     });
 
     let db_path_load_settings = paths.database_path.clone();
@@ -720,6 +1025,36 @@ fn settings_text_view(height: i32) -> (ScrolledWindow, gtk::TextBuffer, TextView
     scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     scroll.set_child(Some(&view));
     (scroll, buffer, view)
+}
+
+fn dialog_body(subtitle: &str) -> GBox {
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+    let hint = Label::new(Some(subtitle));
+    hint.add_css_class("card-meta");
+    hint.set_wrap(true);
+    hint.set_xalign(0.0);
+    body.append(&hint);
+    body
+}
+
+fn dialog_actions(dialog: &gtk::Window, primary_label: &str) -> (GBox, Button) {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.set_halign(gtk::Align::End);
+    let cancel = Button::with_label("Cancel");
+    let primary = Button::with_label(primary_label);
+    primary.add_css_class("suggested-action");
+    let dialog_for_cancel = dialog.clone();
+    cancel.connect_clicked(move |_| {
+        dialog_for_cancel.close();
+    });
+    row.append(&cancel);
+    row.append(&primary);
+    (row, primary)
 }
 
 fn optional_entry_text(entry: &Entry) -> Option<String> {

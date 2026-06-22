@@ -7,6 +7,7 @@ mod history;
 mod projects;
 mod refresh;
 mod session_surface;
+mod settings;
 mod sidebar;
 mod state;
 mod terminal;
@@ -14,7 +15,7 @@ mod theme;
 mod workspace_command_center;
 
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, HeaderBar};
+use adw::{Application, ApplicationWindow, ColorScheme, HeaderBar, StyleManager};
 use command_palette::{
     filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
     ShortcutAction,
@@ -263,6 +264,7 @@ fn parse_app_page(value: &str) -> Result<AppPage, String> {
     match normalize_launch_token(value).as_str() {
         "dashboard" | "home" => Ok(AppPage::Dashboard),
         "projects" | "repositories" | "repos" => Ok(AppPage::Projects),
+        "settings" | "config" => Ok(AppPage::Settings),
         "history" | "archive" => Ok(AppPage::History),
         "workspace" | "workspaces" => Ok(AppPage::Workspace),
         other => Err(format!("unknown page: {other}")),
@@ -329,6 +331,12 @@ fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings
 }
 
 fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferences) {
+    let style_manager = StyleManager::default();
+    match preferences.theme {
+        Some(ViewTheme::Light) => style_manager.set_color_scheme(ColorScheme::ForceLight),
+        Some(ViewTheme::Dark) => style_manager.set_color_scheme(ColorScheme::ForceDark),
+        Some(ViewTheme::System) | None => style_manager.set_color_scheme(ColorScheme::Default),
+    }
     for class_name in VIEW_PREFERENCE_CLASSES {
         window.remove_css_class(class_name);
     }
@@ -395,30 +403,50 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
+    let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
 
     let (workspace_detail, refresh_workspace_detail) =
         workspace_command_center::build_workspace_command_center(
             &app_state,
             refresh_hub.clone(),
             toast_overlay.clone(),
+            Rc::new({
+                let state = app_state.clone();
+                let refresh_hub = refresh_hub.clone();
+                let stack_handle = main_stack_handle.clone();
+                move || {
+                    state.set_active_page(AppPage::Projects);
+                    if let Some(stack) = stack_handle.borrow().as_ref() {
+                        stack.set_visible_child_name("projects");
+                    }
+                    refresh_hub.refresh(RefreshScope::Sidebar);
+                    refresh_hub.refresh(RefreshScope::Projects);
+                }
+            }),
         );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
         refresh_workspace_detail.clone(),
     );
+    let (settings_page, refresh_settings) = settings::build_settings_page(&app_state.paths);
     let (history_page, refresh_history) =
         history::build_history_page(app_state.workspace_database_path());
 
     let main_stack = Stack::new();
     main_stack.set_hexpand(true);
     main_stack.set_vexpand(true);
+    *main_stack_handle.borrow_mut() = Some(main_stack.clone());
     main_stack.add_named(&dashboard, Some("dashboard"));
     main_stack.add_named(&projects_page, Some("projects"));
+    main_stack.add_named(&settings_page, Some("settings"));
     main_stack.add_named(&history_page, Some("history"));
     main_stack.add_named(&workspace_detail, Some("workspace"));
     main_stack.set_visible_child_name(match app_state.snapshot().active_page {
         AppPage::Workspace => "workspace",
+        AppPage::Projects => "projects",
+        AppPage::Settings => "settings",
+        AppPage::History => "history",
         _ => "dashboard",
     });
 
@@ -447,7 +475,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
     refresh_hub.set_workspace(refresh_workspace_detail.clone());
-    refresh_hub.set_projects(refresh_projects.clone());
+    refresh_hub.set_projects({
+        let refresh_projects = refresh_projects.clone();
+        let refresh_settings = refresh_settings.clone();
+        move || {
+            refresh_projects();
+            refresh_settings();
+        }
+    });
     refresh_hub.set_history(refresh_history.clone());
     refresh_hub.set_sidebar(refresh_sidebar.clone());
 
@@ -477,6 +512,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     let palette_btn = Button::from_icon_name("edit-find-symbolic");
     palette_btn.add_css_class("chrome-button");
     palette_btn.set_tooltip_text(Some("Command palette"));
+    let settings_btn = Button::from_icon_name("emblem-system-symbolic");
+    settings_btn.add_css_class("chrome-button");
+    settings_btn.set_tooltip_text(Some("Settings"));
 
     let open_palette: Rc<dyn Fn()> = {
         let window_for_palette = window.clone();
@@ -527,7 +565,17 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     palette_btn.connect_clicked(move |_| {
         open_palette_button();
     });
+    let stack_settings = main_stack.clone();
+    let state_settings = app_state.clone();
+    let hub_settings = refresh_hub.clone();
+    settings_btn.connect_clicked(move |_| {
+        state_settings.set_active_page(AppPage::Settings);
+        stack_settings.set_visible_child_name("settings");
+        hub_settings.refresh(RefreshScope::Sidebar);
+        hub_settings.refresh(RefreshScope::Projects);
+    });
     header.pack_start(&toggle_btn);
+    header.pack_end(&settings_btn);
     header.pack_end(&palette_btn);
     header.pack_end(&refresh_btn);
 
@@ -844,6 +892,7 @@ fn apply_palette_target(
         PaletteTarget::Page(page) => {
             state.set_active_page(page.clone());
             main_stack.set_visible_child_name(page_stack_name(&page));
+            refresh_hub.refresh(RefreshScope::Sidebar);
             if page == AppPage::Workspace {
                 refresh_workspace();
             }
@@ -852,6 +901,7 @@ fn apply_palette_target(
             state.set_active_page(AppPage::Workspace);
             state.set_active_workspace_tab(tab);
             main_stack.set_visible_child_name("workspace");
+            refresh_hub.refresh(RefreshScope::Sidebar);
             refresh_workspace();
         }
         PaletteTarget::Refresh => refresh_hub.refresh(RefreshScope::All),
@@ -870,8 +920,9 @@ fn page_stack_name(page: &AppPage) -> &'static str {
     match page {
         AppPage::Dashboard => "dashboard",
         AppPage::Projects => "projects",
+        AppPage::Settings => "settings",
         AppPage::History => "history",
-        AppPage::Workspace | AppPage::Settings | AppPage::Review => "workspace",
+        AppPage::Workspace | AppPage::Review => "workspace",
     }
 }
 

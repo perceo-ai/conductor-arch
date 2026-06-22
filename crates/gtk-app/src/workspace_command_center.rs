@@ -20,6 +20,7 @@ pub(crate) fn build_workspace_command_center(
     app_state: &AppState,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
+    navigate_to_projects: std::rc::Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
@@ -28,14 +29,26 @@ pub(crate) fn build_workspace_command_center(
     let header = GBox::new(Orientation::Vertical, 8);
     header.add_css_class("dashboard-header");
     header.add_css_class("page-header");
+    let title_row = GBox::new(Orientation::Horizontal, 8);
+    title_row.add_css_class("workspace-title-row");
     let title = Label::new(Some("Workspace"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title_row.append(&title);
+    let new_workspace_btn = Button::from_icon_name("list-add-symbolic");
+    new_workspace_btn.add_css_class("mini-action-button");
+    new_workspace_btn.set_tooltip_text(Some("Create workspace"));
+    let navigate_to_projects_for_button = navigate_to_projects.clone();
+    new_workspace_btn.connect_clicked(move |_| {
+        navigate_to_projects_for_button();
+    });
+    title_row.append(&new_workspace_btn);
     let subtitle = Label::new(Some("Select a workspace from the sidebar."));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
     subtitle.set_wrap(true);
-    header.append(&title);
+    header.append(&title_row);
     header.append(&subtitle);
     root.append(&header);
 
@@ -117,6 +130,36 @@ pub(crate) fn build_workspace_command_center(
     };
     refresh();
     (root, refresh)
+}
+
+fn make_action_row() -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("action-row");
+    row
+}
+
+fn make_action_stack() -> GBox {
+    let stack = GBox::new(Orientation::Vertical, 8);
+    stack.add_css_class("action-stack");
+    stack
+}
+
+fn secondary_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("secondary-action");
+    button
+}
+
+fn flat_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("flat-action");
+    button
+}
+
+fn destructive_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("destructive-action");
+    button
 }
 
 fn workspace_status_strip(
@@ -271,6 +314,7 @@ fn show_prompt_preview(prompt: &str, launch_cmd: &str) {
         .default_height(320)
         .build();
     let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
     body.set_margin_top(14);
     body.set_margin_bottom(14);
     body.set_margin_start(14);
@@ -331,15 +375,17 @@ fn runtime_panel(
     panel.set_hexpand(true);
     panel.append(&section_title("Runtime"));
 
-    let actions = GBox::new(Orientation::Horizontal, 8);
-    let setup_btn = Button::with_label("Setup");
+    let actions = make_action_stack();
+    let setup_btn = secondary_button("Setup");
     let run_btn = Button::with_label("Run");
-    let stop_btn = Button::with_label("Stop");
+    run_btn.add_css_class("suggested-action");
+    let stop_btn = destructive_button("Stop");
     let spotlight_on_btn = Button::with_label("Spotlight On");
-    let spotlight_sync_btn = Button::with_label("Spotlight Sync");
-    let spotlight_repair_btn = Button::with_label("Repair Spotlight");
-    let spotlight_off_btn = Button::with_label("Spotlight Off");
-    let folder_btn = Button::with_label("Open Folder");
+    spotlight_on_btn.add_css_class("suggested-action");
+    let spotlight_sync_btn = secondary_button("Sync Spotlight");
+    let spotlight_repair_btn = destructive_button("Repair Spotlight");
+    let spotlight_off_btn = flat_button("Spotlight Off");
+    let folder_btn = flat_button("Open Folder");
     let status = Label::new(None);
     status.add_css_class("card-meta");
     status.set_xalign(0.0);
@@ -548,14 +594,20 @@ fn runtime_panel(
         let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
     });
 
-    actions.append(&setup_btn);
-    actions.append(&run_btn);
-    actions.append(&stop_btn);
-    actions.append(&spotlight_on_btn);
-    actions.append(&spotlight_sync_btn);
-    actions.append(&spotlight_repair_btn);
-    actions.append(&spotlight_off_btn);
-    actions.append(&folder_btn);
+    let launch_row = make_action_row();
+    launch_row.append(&setup_btn);
+    launch_row.append(&run_btn);
+    launch_row.append(&stop_btn);
+    let spotlight_row = make_action_row();
+    spotlight_row.append(&spotlight_on_btn);
+    spotlight_row.append(&spotlight_sync_btn);
+    spotlight_row.append(&spotlight_repair_btn);
+    spotlight_row.append(&spotlight_off_btn);
+    let utility_row = make_action_row();
+    utility_row.append(&folder_btn);
+    actions.append(&launch_row);
+    actions.append(&spotlight_row);
+    actions.append(&utility_row);
     panel.append(&actions);
     panel.append(&detail_row("Setup", &latest_setup_line(store, &ws.name)));
     panel.append(&detail_row("Latest", &latest_runtime_line(store, &ws.name)));
@@ -583,15 +635,15 @@ fn lifecycle_panel(
     panel.add_css_class("command-panel");
     panel.append(&section_title("Workspace Actions"));
 
-    let row = GBox::new(Orientation::Horizontal, 8);
+    let row = make_action_stack();
     let rename_entry = Entry::new();
     rename_entry.set_placeholder_text(Some("new workspace name"));
     rename_entry.set_text(&ws.name);
-    let rename_btn = Button::with_label("Rename");
+    let rename_btn = secondary_button("Rename");
     let confirm = CheckButton::with_label("Confirm archive/discard");
-    let archive_btn = Button::with_label("Archive");
-    let restore_btn = Button::with_label("Restore");
-    let discard_btn = Button::with_label("Discard");
+    let archive_btn = secondary_button("Archive");
+    let restore_btn = flat_button("Restore");
+    let discard_btn = destructive_button("Discard");
     let progress = Label::new(None);
     progress.add_css_class("card-meta");
     progress.set_xalign(0.0);
@@ -666,12 +718,16 @@ fn lifecycle_panel(
         });
     }
 
-    row.append(&rename_entry);
-    row.append(&rename_btn);
-    row.append(&confirm);
-    row.append(&archive_btn);
-    row.append(&restore_btn);
-    row.append(&discard_btn);
+    let rename_row = make_action_row();
+    rename_row.append(&rename_entry);
+    rename_row.append(&rename_btn);
+    let lifecycle_row = make_action_row();
+    lifecycle_row.append(&confirm);
+    lifecycle_row.append(&archive_btn);
+    lifecycle_row.append(&restore_btn);
+    lifecycle_row.append(&discard_btn);
+    row.append(&rename_row);
+    row.append(&lifecycle_row);
     panel.append(&row);
     panel.append(&progress);
     panel
@@ -811,11 +867,12 @@ fn workspace_checkpoint_panel(
     panel.add_css_class("command-panel");
     panel.append(&section_title("Checkpoints"));
 
-    let create_row = GBox::new(Orientation::Horizontal, 8);
+    let create_row = make_action_row();
     let message = Entry::new();
     message.set_placeholder_text(Some("Checkpoint message"));
     message.set_hexpand(true);
     let create_btn = Button::with_label("Create");
+    create_btn.add_css_class("suggested-action");
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
@@ -893,7 +950,7 @@ fn workspace_checkpoint_panel(
     panel.append(&header);
 
     for checkpoint in checkpoints_loaded {
-        let row = GBox::new(Orientation::Horizontal, 8);
+        let row = make_action_row();
         let label = Label::new(Some(&format!(
             "#{} {} - {}",
             checkpoint.id, checkpoint.created_at, checkpoint.message
@@ -901,7 +958,7 @@ fn workspace_checkpoint_panel(
         label.set_xalign(0.0);
         label.set_wrap(true);
         label.set_hexpand(true);
-        let restore_btn = Button::with_label("Restore");
+        let restore_btn = secondary_button("Restore");
         let checkpoint_id = checkpoint.id;
         let workspace_for_restore = name.to_owned();
         let db_for_restore = db_path.to_path_buf();
@@ -1091,7 +1148,8 @@ fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub)
     target_entry.set_placeholder_text(Some("Target workspace name"));
     target_entry.set_hexpand(true);
     let link_btn = Button::with_label("Link");
-    let unlink_btn = Button::with_label("Unlink");
+    link_btn.add_css_class("suggested-action");
+    let unlink_btn = destructive_button("Unlink");
     row.append(&target_entry);
     row.append(&link_btn);
     row.append(&unlink_btn);
@@ -1246,21 +1304,23 @@ fn workspace_changes_panel(
     feedback.set_xalign(0.0);
     feedback.set_wrap(true);
 
-    let action_row = GBox::new(Orientation::Horizontal, 8);
-    let show_all_btn = Button::with_label("Show All");
-    let revert_btn = Button::with_label("Revert Selected");
+    let action_row = make_action_row();
+    let show_all_btn = secondary_button("Show All");
+    let revert_btn = destructive_button("Revert Selected");
     action_row.append(&show_all_btn);
     action_row.append(&revert_btn);
     panel.append(&selection_status);
     panel.append(&action_row);
 
-    let comment_row = GBox::new(Orientation::Horizontal, 8);
+    let comment_row = make_action_row();
+    comment_row.add_css_class("action-input-row");
     let comment_line = Entry::new();
     comment_line.set_placeholder_text(Some("line"));
     let comment_body = Entry::new();
     comment_body.set_placeholder_text(Some("Add comment on selected file"));
     comment_body.set_hexpand(true);
     let comment_btn = Button::with_label("Comment");
+    comment_btn.add_css_class("suggested-action");
     comment_row.append(&comment_line);
     comment_row.append(&comment_body);
     comment_row.append(&comment_btn);
@@ -1293,8 +1353,8 @@ fn workspace_changes_panel(
                     list_box.append(&directory);
                 }
                 DiffTreeRow::File(file) => {
-                    let row_box = GBox::new(Orientation::Horizontal, 8);
-                    let open_btn = Button::with_label(&diff_tree_file_label(&file));
+                    let row_box = make_action_row();
+                    let open_btn = flat_button(&diff_tree_file_label(&file));
                     open_btn.set_hexpand(true);
                     let selected_file_for_open = selected_file.clone();
                     let db_for_open = db_path.to_path_buf();
@@ -1689,7 +1749,7 @@ fn workspace_checks_panel(
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.append(&text_panel(&workspace_checks_text(store, name)));
 
-    let pr_form = GBox::new(Orientation::Horizontal, 8);
+    let pr_form = make_action_stack();
     let title_entry = Entry::new();
     title_entry.set_placeholder_text(Some("PR title (blank = gh --fill)"));
     title_entry.set_hexpand(true);
@@ -1698,28 +1758,33 @@ fn workspace_checks_panel(
     body_entry.set_hexpand(true);
     let draft = CheckButton::with_label("Draft");
     let create_btn = Button::with_label("Create PR");
-    let inspect_row = GBox::new(Orientation::Horizontal, 8);
-    let refresh_pr_btn = Button::with_label("Refresh PR State");
-    let view_summary_btn = Button::with_label("View PR Summary");
+    create_btn.add_css_class("suggested-action");
+    let inspect_row = make_action_stack();
+    let refresh_pr_btn = secondary_button("Refresh PR");
+    let view_summary_btn = flat_button("View PR Summary");
     let stage_summary_btn = Button::with_label("Stage PR Summary");
-    let view_checks_btn = Button::with_label("View Checks");
+    stage_summary_btn.add_css_class("suggested-action");
+    let view_checks_btn = flat_button("View Checks");
     let stage_checks_btn = Button::with_label("Stage Failing Checks");
-    let view_reviews_btn = Button::with_label("View PR Comments");
+    stage_checks_btn.add_css_class("suggested-action");
+    let view_reviews_btn = flat_button("View PR Comments");
     let stage_reviews_btn = Button::with_label("Stage PR Comments");
-    let thread_row = GBox::new(Orientation::Horizontal, 8);
+    stage_reviews_btn.add_css_class("suggested-action");
+    let thread_row = make_action_row();
     let thread_id_entry = Entry::new();
     thread_id_entry.set_placeholder_text(Some("Review thread ID from PR summary"));
     thread_id_entry.set_hexpand(true);
-    let resolve_thread_btn = Button::with_label("Resolve Thread");
-    let reopen_thread_btn = Button::with_label("Reopen Thread");
-    let merge_row = GBox::new(Orientation::Horizontal, 8);
+    let resolve_thread_btn = secondary_button("Resolve Thread");
+    let reopen_thread_btn = flat_button("Reopen Thread");
+    let merge_row = make_action_row();
     let merge_method = ComboBoxText::new();
     merge_method.append(Some("squash"), "Squash");
     merge_method.append(Some("merge"), "Merge");
     merge_method.append(Some("rebase"), "Rebase");
     merge_method.set_active_id(Some("squash"));
     let merge_btn = Button::with_label("Merge PR");
-    let archive_after_merge_btn = Button::with_label("Archive Workspace");
+    merge_btn.add_css_class("suggested-action");
+    let archive_after_merge_btn = destructive_button("Archive Workspace");
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
@@ -1995,18 +2060,26 @@ fn workspace_checks_panel(
         refresh_after_archive.refresh(RefreshScope::All);
     });
 
-    pr_form.append(&title_entry);
-    pr_form.append(&body_entry);
-    pr_form.append(&draft);
-    pr_form.append(&create_btn);
+    let create_inputs_row = make_action_row();
+    create_inputs_row.append(&title_entry);
+    create_inputs_row.append(&body_entry);
+    let create_controls_row = make_action_row();
+    create_controls_row.append(&draft);
+    create_controls_row.append(&create_btn);
+    pr_form.append(&create_inputs_row);
+    pr_form.append(&create_controls_row);
     panel.append(&pr_form);
-    inspect_row.append(&refresh_pr_btn);
-    inspect_row.append(&view_summary_btn);
-    inspect_row.append(&stage_summary_btn);
-    inspect_row.append(&view_checks_btn);
-    inspect_row.append(&stage_checks_btn);
-    inspect_row.append(&view_reviews_btn);
-    inspect_row.append(&stage_reviews_btn);
+    let inspect_top_row = make_action_row();
+    inspect_top_row.append(&refresh_pr_btn);
+    inspect_top_row.append(&view_summary_btn);
+    inspect_top_row.append(&stage_summary_btn);
+    let inspect_bottom_row = make_action_row();
+    inspect_bottom_row.append(&view_checks_btn);
+    inspect_bottom_row.append(&stage_checks_btn);
+    inspect_bottom_row.append(&view_reviews_btn);
+    inspect_bottom_row.append(&stage_reviews_btn);
+    inspect_row.append(&inspect_top_row);
+    inspect_row.append(&inspect_bottom_row);
     panel.append(&inspect_row);
     thread_row.append(&thread_id_entry);
     thread_row.append(&resolve_thread_btn);
@@ -2092,7 +2165,7 @@ fn workspace_conflict_resolution_panel(
         title.set_xalign(0.0);
         title.add_css_class("detail-label");
 
-        let open_workspace_btn = Button::with_label("Open workspace");
+        let open_workspace_btn = flat_button("Open workspace");
         let app_state_for_open = app_state.clone();
         let refresh_for_open = refresh_hub.clone();
         let conflict_workspace_for_open = conflict_workspace.clone();
@@ -2101,10 +2174,10 @@ fn workspace_conflict_resolution_panel(
             refresh_for_open.refresh(RefreshScope::All);
         });
 
-        let action_row = GBox::new(Orientation::Horizontal, 8);
+        let action_row = make_action_row();
         action_row.append(&title);
         action_row.append(&open_workspace_btn);
-        let diff_all_btn = Button::with_label("View all diffs");
+        let diff_all_btn = flat_button("View all diffs");
         let files_for_diff_all = files.clone();
         let source_workspace_for_diff_all = conflict_workspace.clone();
         let feedback_for_diff_all = conflict_feedback.clone();
@@ -2138,7 +2211,7 @@ fn workspace_conflict_resolution_panel(
                 diff_buffer_for_diff_all.set_text(&sections.join("\n"));
             }
         });
-        let copy_all_btn = Button::with_label("Copy all from sibling");
+        let copy_all_btn = secondary_button("Copy all from sibling");
         let files_for_copy_all = files.clone();
         let source_workspace = conflict_workspace.clone();
         let destination_workspace = name.to_owned();
@@ -2196,13 +2269,13 @@ fn workspace_conflict_resolution_panel(
         workspace_group.append(&action_row);
 
         for file in files {
-            let file_row = GBox::new(Orientation::Horizontal, 8);
+            let file_row = make_action_row();
             let file_label = Label::new(Some(&file));
             file_label.set_xalign(0.0);
             file_label.set_wrap(true);
             file_label.set_hexpand(true);
 
-            let diff_btn = Button::with_label("View diff");
+            let diff_btn = flat_button("View diff");
             let db_for_diff = db_path.to_path_buf();
             let source_workspace_for_diff = conflict_workspace.clone();
             let file_for_diff = Path::new(&file).to_path_buf();
@@ -2228,7 +2301,7 @@ fn workspace_conflict_resolution_panel(
                 diff_buffer.set_text(&formatted);
             });
 
-            let copy_btn = Button::with_label("Copy from sibling");
+            let copy_btn = secondary_button("Copy from sibling");
             let file_for_copy = file.clone();
             let db_for_copy = db_path.to_path_buf();
             let destination_workspace = name.to_owned();
@@ -2431,7 +2504,7 @@ fn workspace_review_panel(
     toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
-    let form = GBox::new(Orientation::Horizontal, 8);
+    let form = make_action_row();
     let file_entry = Entry::new();
     file_entry.set_placeholder_text(Some("file path"));
     file_entry.set_hexpand(true);
@@ -2441,6 +2514,7 @@ fn workspace_review_panel(
     body_entry.set_placeholder_text(Some("comment"));
     body_entry.set_hexpand(true);
     let add_btn = Button::with_label("Add Comment");
+    add_btn.add_css_class("suggested-action");
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
@@ -2502,6 +2576,7 @@ fn workspace_review_panel(
     panel.append(&form);
 
     let stage_btn = Button::with_label("Stage Open Comments");
+    stage_btn.add_css_class("suggested-action");
     let stage_feedback = feedback.clone();
     let stage_toast = toast_overlay.clone();
     let db_for_stage = db_path.to_path_buf();
@@ -2538,14 +2613,14 @@ fn workspace_review_panel(
         Ok(comments) if comments.is_empty() => panel.append(&detail_row("Review", "No comments")),
         Ok(comments) => {
             for comment in comments {
-                let row = GBox::new(Orientation::Horizontal, 8);
+                let row = make_action_row();
                 let summary = Label::new(Some(&review_comment_row_summary(&comment)));
                 summary.set_xalign(0.0);
                 summary.set_wrap(true);
                 summary.set_hexpand(true);
                 row.append(&summary);
                 if review_comment_can_resolve(&comment) {
-                    let button = Button::with_label("Resolve");
+                    let button = secondary_button("Resolve");
                     let db_for_resolve = db_path.to_path_buf();
                     let refresh_after_resolve = refresh_hub.clone();
                     let comment_id = comment.id;
@@ -2629,11 +2704,12 @@ fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
             &format!("Could not read todos: {err:#}"),
         )),
     }
-    let entry_row = GBox::new(Orientation::Horizontal, 8);
+    let entry_row = make_action_row();
     let entry = Entry::new();
     entry.set_placeholder_text(Some("Add todo..."));
     entry.set_hexpand(true);
     let add_btn = Button::with_label("Add Todo");
+    add_btn.add_css_class("suggested-action");
     let db_path = linux_conductor_core::paths::AppPaths::from_env().database_path;
     let workspace = name.to_owned();
     let entry_clone = entry.clone();

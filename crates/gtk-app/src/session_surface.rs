@@ -24,6 +24,30 @@ const SESSION_TAIL_HISTORY: usize = 120;
 const SESSION_POLL_INTERVAL_MS: u64 = 100;
 const SESSION_RECONCILE_EVERY_TICKS: u32 = 10;
 
+fn session_action_row() -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("action-row");
+    row
+}
+
+fn session_secondary_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("secondary-action");
+    button
+}
+
+fn session_flat_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("flat-action");
+    button
+}
+
+fn session_destructive_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("destructive-action");
+    button
+}
+
 pub fn agent_session_panel(
     database_path: PathBuf,
     workspace_name: &str,
@@ -106,7 +130,7 @@ pub fn agent_session_panel(
     control_wrapper.append(&codex_row);
     root.append(&control_wrapper);
 
-    let launch_row = GBox::new(Orientation::Horizontal, 8);
+    let launch_row = session_action_row();
     let mut agent_buttons: Vec<(Button, SessionKind)> = Vec::new();
     for (label, kind) in [
         ("Shell", SessionKind::Shell),
@@ -115,6 +139,11 @@ pub fn agent_session_panel(
         ("Cursor", SessionKind::Cursor),
     ] {
         let button = Button::with_label(label);
+        match kind {
+            SessionKind::Codex | SessionKind::Claude => button.add_css_class("suggested-action"),
+            SessionKind::Cursor => button.add_css_class("secondary-action"),
+            SessionKind::Shell => button.add_css_class("flat-action"),
+        }
         let tooltip = match kind {
             SessionKind::Shell => "Open a PTY shell inside this workspace.",
             SessionKind::Codex => "Open a PTY Codex session inside this workspace.",
@@ -144,34 +173,35 @@ pub fn agent_session_panel(
     transcript_scroll.set_child(Some(&transcript));
     root.append(&transcript_scroll);
 
-    let history_row = GBox::new(Orientation::Horizontal, 8);
+    let history_row = session_action_row();
     let sessions_combo = ComboBoxText::new();
     sessions_combo.set_hexpand(true);
-    let refresh_btn = Button::with_label("Refresh");
-    let stop_btn = Button::with_label("Stop session");
+    let refresh_btn = session_flat_button("Refresh");
+    let stop_btn = session_destructive_button("Stop session");
     stop_btn.set_tooltip_text(Some("Stop the selected running session."));
     history_row.append(&sessions_combo);
     history_row.append(&refresh_btn);
     history_row.append(&stop_btn);
     root.append(&history_row);
 
-    let input_row = GBox::new(Orientation::Horizontal, 8);
+    let input_row = session_action_row();
     let input = Entry::new();
     input.set_placeholder_text(Some("Type session input..."));
     input.set_hexpand(true);
     let send_btn = Button::with_label("Send");
+    send_btn.add_css_class("suggested-action");
     send_btn.set_tooltip_text(Some("Send a line to the selected session."));
     input_row.append(&input);
     input_row.append(&send_btn);
     root.append(&input_row);
 
-    let staged_review_row = GBox::new(Orientation::Horizontal, 8);
+    let staged_review_row = session_action_row();
     let staged_review_status = Label::new(Some("No staged review prompt."));
     staged_review_status.add_css_class("card-meta");
     staged_review_status.set_xalign(0.0);
     staged_review_status.set_wrap(true);
     staged_review_status.set_hexpand(true);
-    let send_review_btn = Button::with_label("Send review prompt");
+    let send_review_btn = session_secondary_button("Send review prompt");
     send_review_btn.set_tooltip_text(Some(
         "Send the staged review prompt to the selected session.",
     ));
@@ -179,11 +209,11 @@ pub fn agent_session_panel(
     staged_review_row.append(&send_review_btn);
     root.append(&staged_review_row);
 
-    let checkpoint_row = GBox::new(Orientation::Horizontal, 8);
+    let checkpoint_row = session_action_row();
     let checkpoint_message = Entry::new();
     checkpoint_message.set_placeholder_text(Some("Checkpoint message (optional)"));
     checkpoint_message.set_hexpand(true);
-    let checkpoint_btn = Button::with_label("Create checkpoint");
+    let checkpoint_btn = session_secondary_button("Create checkpoint");
     checkpoint_btn.set_tooltip_text(Some(
         "Create workspace checkpoint tied to selected session.",
     ));
