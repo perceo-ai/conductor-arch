@@ -98,6 +98,30 @@ impl TerminalTabState {
     }
 }
 
+fn terminal_action_row() -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("action-row");
+    row
+}
+
+fn terminal_secondary_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("secondary-action");
+    button
+}
+
+fn terminal_flat_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("flat-action");
+    button
+}
+
+fn terminal_destructive_button(label: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("destructive-action");
+    button
+}
+
 pub fn embedded_terminal_panel(
     database_path: PathBuf,
     workspace_name: &str,
@@ -303,11 +327,12 @@ pub fn embedded_terminal_panel(
     transcript_scroll.set_child(Some(&transcript));
     root.append(&transcript_scroll);
 
-    let pty_controls = GBox::new(Orientation::Horizontal, 8);
+    let pty_controls = terminal_action_row();
     let start_pty_btn = Button::with_label("Start Shell");
-    let stop_pty_btn = Button::with_label("Stop Shell");
-    let close_pty_btn = Button::with_label("Close Shell");
-    let prune_pty_btn = Button::with_label("Prune Inactive Tabs");
+    start_pty_btn.add_css_class("suggested-action");
+    let stop_pty_btn = terminal_destructive_button("Stop Shell");
+    let close_pty_btn = terminal_secondary_button("Close Shell");
+    let prune_pty_btn = terminal_flat_button("Prune Inactive Tabs");
     let terminal_tabs = GBox::new(Orientation::Horizontal, 6);
     terminal_tabs.add_css_class("terminal-tab-strip");
     let db_for_pty = database_path.clone();
@@ -797,9 +822,9 @@ pub fn embedded_terminal_panel(
     pty_controls.append(&active_pty_combo);
     root.append(&pty_controls);
 
-    let presets = GBox::new(Orientation::Horizontal, 8);
+    let presets = terminal_action_row();
     for preset in command_presets {
-        let button = Button::with_label(&preset.label);
+        let button = terminal_flat_button(&preset.label);
         button.set_tooltip_text(Some(&preset.command));
         let db = database_path.clone();
         let workspace = workspace_name.to_owned();
@@ -823,12 +848,13 @@ pub fn embedded_terminal_panel(
     }
     root.append(&presets);
 
-    let command_row = GBox::new(Orientation::Horizontal, 8);
+    let command_row = terminal_action_row();
     let entry = Entry::new();
     entry.set_placeholder_text(Some("workspace command"));
     entry.set_hexpand(true);
     let run_btn = Button::with_label("Run");
-    let interrupt_btn = Button::with_label("Interrupt (Ctrl+C)");
+    run_btn.add_css_class("suggested-action");
+    let interrupt_btn = terminal_destructive_button("Interrupt (Ctrl+C)");
     let buffer = transcript.buffer();
     let workspace = workspace_name.to_owned();
     let db = database_path.clone();
@@ -999,7 +1025,7 @@ pub fn embedded_terminal_panel(
     command_row.append(&interrupt_btn);
     root.append(&command_row);
 
-    let search_row = GBox::new(Orientation::Horizontal, 8);
+    let search_row = terminal_action_row();
     let search_entry = Entry::new();
     search_entry.set_placeholder_text(Some("search terminal history"));
     search_entry.set_hexpand(true);
@@ -1009,9 +1035,9 @@ pub fn embedded_terminal_panel(
     let history_line_entry = Entry::new();
     history_line_entry.set_placeholder_text(Some("line"));
     history_line_entry.set_width_chars(8);
-    let search_btn = Button::with_label("Search Logs");
-    let clear_search_btn = Button::with_label("Clear Search");
-    let history_btn = Button::with_label("Show History");
+    let search_btn = terminal_secondary_button("Search Logs");
+    let clear_search_btn = terminal_flat_button("Clear Search");
+    let history_btn = terminal_flat_button("Show History");
     let history_filter = ComboBoxText::new();
     history_filter.append(Some("all"), "All");
     history_filter.append(Some("running"), "Running");
@@ -1020,13 +1046,13 @@ pub fn embedded_terminal_panel(
     history_filter.set_active_id(Some("all"));
     let history_combo = ComboBoxText::new();
     history_combo.set_hexpand(true);
-    let load_history_btn = Button::with_label("Load Transcript");
-    let jump_history_btn = Button::with_label("Show around line");
-    let jump_history_latest_btn = Button::with_label("Show latest line");
+    let load_history_btn = terminal_secondary_button("Load Transcript");
+    let jump_history_btn = terminal_flat_button("Show around line");
+    let jump_history_latest_btn = terminal_flat_button("Show latest line");
     let jump_history_prev_btn =
-        Button::with_label(&format!("Previous {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
+        terminal_flat_button(&format!("Previous {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
     let jump_history_next_btn =
-        Button::with_label(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
+        terminal_flat_button(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
     let history_records: Rc<RefCell<Vec<TerminalSessionSummary>>> =
         Rc::new(RefCell::new(Vec::new()));
     let history_records_all: Rc<RefCell<Vec<TerminalSessionSummary>>> =

@@ -249,6 +249,7 @@ pub(crate) fn palette_commands(
     let mut commands = vec![
         cmd("Dashboard", PaletteTarget::Page(AppPage::Dashboard)),
         cmd("Projects", PaletteTarget::Page(AppPage::Projects)),
+        cmd("Settings", PaletteTarget::Page(AppPage::Settings)),
         cmd("History", PaletteTarget::Page(AppPage::History)),
         cmd("Refresh", PaletteTarget::Refresh),
         cmd("Toggle Sidebar", PaletteTarget::ToggleSidebar),

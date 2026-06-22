@@ -25,35 +25,66 @@ pub(crate) fn build_app_sidebar(
     nav_group.add_css_class("sidebar-nav-group");
 
     let dashboard_btn = Button::with_label("Dashboard");
-    dashboard_btn.add_css_class("nav-button-active");
+    dashboard_btn.add_css_class("nav-button");
+    let history_btn = Button::with_label("History");
+    history_btn.add_css_class("nav-button");
+    let projects_btn = Button::with_label("Projects");
+    projects_btn.add_css_class("nav-button");
+
+    let sync_nav_state: Rc<dyn Fn()> = {
+        let state = app_state.clone();
+        let dashboard_btn = dashboard_btn.clone();
+        let history_btn = history_btn.clone();
+        let projects_btn = projects_btn.clone();
+        Rc::new(move || {
+            let active_page = state.snapshot().active_page;
+            for (button, page) in [
+                (&dashboard_btn, AppPage::Dashboard),
+                (&history_btn, AppPage::History),
+                (&projects_btn, AppPage::Projects),
+            ] {
+                button.remove_css_class("nav-button");
+                button.remove_css_class("nav-button-active");
+                button.add_css_class(if active_page == page {
+                    "nav-button-active"
+                } else {
+                    "nav-button"
+                });
+            }
+        })
+    };
+
     let stack_dashboard = stack.clone();
     let state_dashboard = app_state.clone();
+    let sync_nav_dashboard = sync_nav_state.clone();
     dashboard_btn.connect_clicked(move |_| {
         state_dashboard.set_active_page(AppPage::Dashboard);
         stack_dashboard.set_visible_child_name("dashboard");
+        sync_nav_dashboard();
     });
     nav_group.append(&dashboard_btn);
 
-    let history_btn = Button::with_label("History");
-    history_btn.add_css_class("nav-button");
     let stack_history = stack.clone();
     let state_history = app_state.clone();
+    let sync_nav_history = sync_nav_state.clone();
     history_btn.connect_clicked(move |_| {
         state_history.set_active_page(AppPage::History);
         stack_history.set_visible_child_name("history");
+        sync_nav_history();
     });
     nav_group.append(&history_btn);
 
-    let projects_btn = Button::with_label("Projects");
-    projects_btn.add_css_class("nav-button");
     let stack_projects = stack.clone();
     let state_projects = app_state.clone();
+    let sync_nav_projects = sync_nav_state.clone();
     projects_btn.connect_clicked(move |_| {
         state_projects.set_active_page(AppPage::Projects);
         stack_projects.set_visible_child_name("projects");
+        sync_nav_projects();
     });
     nav_group.append(&projects_btn);
     sidebar_box.append(&nav_group);
+    sync_nav_state();
 
     let divider = Separator::new(Orientation::Horizontal);
     sidebar_box.append(&divider);
@@ -65,6 +96,18 @@ pub(crate) fn build_app_sidebar(
     header.set_xalign(0.0);
     header.set_hexpand(true);
     projects_header.append(&header);
+    let add_workspace_btn = Button::from_icon_name("list-add-symbolic");
+    add_workspace_btn.add_css_class("mini-action-button");
+    add_workspace_btn.set_tooltip_text(Some("Create workspace"));
+    let stack_add_workspace = stack.clone();
+    let state_add_workspace = app_state.clone();
+    let sync_nav_add_workspace = sync_nav_state.clone();
+    add_workspace_btn.connect_clicked(move |_| {
+        state_add_workspace.set_active_page(AppPage::Projects);
+        stack_add_workspace.set_visible_child_name("projects");
+        sync_nav_add_workspace();
+    });
+    projects_header.append(&add_workspace_btn);
     sidebar_box.append(&projects_header);
 
     let search_entry = Entry::new();
@@ -181,6 +224,7 @@ pub(crate) fn build_app_sidebar(
     let refresh_select = refresh_hub.clone();
     let db_path_select = db_path.clone();
     let refresh_view_preferences_select = refresh_view_preferences.clone();
+    let sync_nav_select = sync_nav_state.clone();
     list.connect_row_selected(move |_, row| {
         let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
             return;
@@ -195,6 +239,7 @@ pub(crate) fn build_app_sidebar(
         refresh_workspace();
         refresh_select.refresh(RefreshScope::Dashboard);
         stack_select.set_visible_child_name("workspace");
+        sync_nav_select();
     });
 
     scroll.set_child(Some(&list));
