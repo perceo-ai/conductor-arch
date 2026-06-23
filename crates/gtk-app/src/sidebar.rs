@@ -1,15 +1,17 @@
+use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
+    Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
     ScrolledWindow, Stack,
 };
 use linux_conductor_core::repository::RepositoryStore;
-use linux_conductor_core::workspace::WorkspaceStore;
+use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceStore};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::projects::{show_create_workspace_dialog, show_repository_quick_add_dialog};
+use crate::buttons::{icon_button, text_button};
+use crate::projects::show_repository_quick_add_dialog;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
@@ -18,52 +20,127 @@ pub(crate) fn build_app_sidebar(
     app_state: &AppState,
     refresh_hub: RefreshHub,
     stack: Stack,
+    window: ApplicationWindow,
+    split: adw::OverlaySplitView,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
-    sidebar_box.set_width_request(240);
+
+    let chrome_row = GBox::new(Orientation::Horizontal, 4);
+    chrome_row.add_css_class("sidebar-chrome");
+
+    let chrome_left = GBox::new(Orientation::Horizontal, 4);
+    chrome_left.set_hexpand(true);
+    let chrome_right = GBox::new(Orientation::Horizontal, 4);
+
+    let close_btn = sidebar_window_button("window-close-symbolic", "Close window");
+    {
+        let window = window.clone();
+        close_btn.connect_clicked(move |_| window.close());
+    }
+    chrome_left.append(&close_btn);
+
+    let minimize_btn = sidebar_window_button("window-minimize-symbolic", "Minimize window");
+    {
+        let window = window.clone();
+        minimize_btn.connect_clicked(move |_| {
+            window.minimize();
+        });
+    }
+    chrome_left.append(&minimize_btn);
+
+    let expand_btn =
+        sidebar_window_button("window-maximize-symbolic", "Maximize or restore window");
+    {
+        let window = window.clone();
+        expand_btn.connect_clicked(move |_| {
+            if window.is_maximized() {
+                window.unmaximize();
+            } else {
+                window.maximize();
+            }
+        });
+    }
+    chrome_left.append(&expand_btn);
+
+    let sidebar_toggle_btn = sidebar_icon_button("sidebar-show-symbolic", "Hide sidebar");
+    {
+        let split = split.clone();
+        sidebar_toggle_btn.connect_clicked(move |_| {
+            split.set_collapsed(true);
+        });
+    }
+    chrome_right.append(&sidebar_toggle_btn);
+
+    let back_btn = sidebar_arrow_button("go-previous-symbolic", "Back");
+    let forward_btn = sidebar_arrow_button("go-next-symbolic", "Forward");
+    chrome_right.append(&back_btn);
+    chrome_right.append(&forward_btn);
+    chrome_row.append(&chrome_left);
+    chrome_row.append(&chrome_right);
+    sidebar_box.append(&chrome_row);
+
+    let sync_nav_buttons = {
+        let app_state = app_state.clone();
+        let back_btn = back_btn.clone();
+        let forward_btn = forward_btn.clone();
+        Rc::new(move || {
+            back_btn.set_sensitive(app_state.can_navigate_back());
+            forward_btn.set_sensitive(app_state.can_navigate_forward());
+        })
+    };
+    sync_nav_buttons();
+
+    let nav_group = GBox::new(Orientation::Vertical, 0);
+    nav_group.add_css_class("sidebar-nav-group");
 
     // Dashboard nav item
-    let dashboard_nav_btn = Button::with_label("Dashboard");
-    dashboard_nav_btn.add_css_class("nav-button");
+    let dashboard_nav_btn = sidebar_nav_button("go-home-symbolic", "Dashboard");
     {
         let stack_d = stack.clone();
         let state_d = app_state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
         dashboard_nav_btn.connect_clicked(move |_| {
-            state_d.set_active_page(AppPage::Dashboard);
+            state_d.navigate_to_page(AppPage::Dashboard);
             stack_d.set_visible_child_name("dashboard");
+            refresh_hub.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
         });
     }
-    sidebar_box.append(&dashboard_nav_btn);
+    nav_group.append(&dashboard_nav_btn);
 
     // History nav item
-    let history_nav_btn = Button::with_label("History");
-    history_nav_btn.add_css_class("nav-button");
+    let history_nav_btn = sidebar_nav_button("view-list-symbolic", "History");
     {
         let stack_h = stack.clone();
         let state_h = app_state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
         history_nav_btn.connect_clicked(move |_| {
-            state_h.set_active_page(AppPage::History);
+            state_h.navigate_to_page(AppPage::History);
             stack_h.set_visible_child_name("history");
+            refresh_hub.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
         });
     }
-    sidebar_box.append(&history_nav_btn);
+    nav_group.append(&history_nav_btn);
+    sidebar_box.append(&nav_group);
 
     sidebar_box.append(&gtk::Separator::new(Orientation::Horizontal));
 
-    // Workspaces header with add button
+    // Workspaces header with filter + add buttons
     let projects_header = GBox::new(Orientation::Horizontal, 8);
     projects_header.add_css_class("projects-header");
-    let header_lbl = Label::new(Some("Workspaces"));
+    let header_lbl = Label::new(Some("Projects"));
     header_lbl.add_css_class("sidebar-header");
     header_lbl.set_xalign(0.0);
     header_lbl.set_hexpand(true);
     projects_header.append(&header_lbl);
-    let add_workspace_btn = Button::with_label("+");
-    add_workspace_btn.add_css_class("mini-action-button");
-    add_workspace_btn.set_tooltip_text(Some("Add repository or workspace"));
+    let add_workspace_btn =
+        sidebar_icon_button("folder-new-symbolic", "Add repository or workspace");
     {
         let db_path_hdr = app_state.workspace_database_path();
         let hub_hdr = refresh_hub.clone();
@@ -99,6 +176,15 @@ pub(crate) fn build_app_sidebar(
     search_entry.set_margin_bottom(0);
     sidebar_box.append(&search_entry);
 
+    let filter_btn = sidebar_icon_button("view-filter-symbolic", "Filter workspaces");
+    {
+        let search_entry = search_entry.clone();
+        filter_btn.connect_clicked(move |_| {
+            search_entry.grab_focus();
+        });
+    }
+    projects_header.insert_child_after(&filter_btn, Some(&header_lbl));
+
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroll.set_vexpand(true);
@@ -118,8 +204,10 @@ pub(crate) fn build_app_sidebar(
         let refresh_hub = refresh_hub.clone();
         let refresh_workspace = refresh_workspace.clone();
         let refresh_view_preferences = refresh_view_preferences.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
         let db_path_populate = db_path_populate.clone();
         move || {
+            sync_nav_buttons();
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
@@ -170,27 +258,20 @@ pub(crate) fn build_app_sidebar(
                         let refresh_view_preferences = refresh_view_preferences.clone();
                         let repo_name = repo_name.clone();
                         move || {
-                            show_create_workspace_dialog(
-                                db_path.clone(),
-                                Rc::new({
-                                    let refresh_hub = refresh_hub.clone();
-                                    let refresh_workspace = refresh_workspace.clone();
-                                    let refresh_view_preferences = refresh_view_preferences.clone();
-                                    move || {
-                                        refresh_hub.refresh(RefreshScope::Projects);
-                                        refresh_hub.refresh(RefreshScope::Sidebar);
-                                        refresh_hub.refresh(RefreshScope::Dashboard);
-                                        refresh_workspace();
-                                        refresh_view_preferences();
-                                    }
-                                }),
-                                Rc::new({
-                                    let refresh_hub = refresh_hub.clone();
-                                    move || refresh_hub.refresh(RefreshScope::Dashboard)
-                                }),
-                                Rc::new(refresh_workspace.clone()),
-                                Some(repo_name.clone()),
-                            );
+                            // Create immediately with auto city-name branch — no modal.
+                            let _ = WorkspaceStore::open(db_path.clone()).and_then(|store| {
+                                store.create(CreateWorkspace {
+                                    repository_name: repo_name.clone(),
+                                    name: String::new(),
+                                    branch: String::new(),
+                                    base_ref: None,
+                                })
+                            });
+                            refresh_hub.refresh(RefreshScope::Projects);
+                            refresh_hub.refresh(RefreshScope::Sidebar);
+                            refresh_hub.refresh(RefreshScope::Dashboard);
+                            refresh_workspace();
+                            refresh_view_preferences();
                         }
                     });
                     list.append(&header_row);
@@ -213,7 +294,10 @@ pub(crate) fn build_app_sidebar(
                             line.active_sessions,
                             line.open_todos,
                             line.pull_request.as_ref().map(|p| p.number),
-                            line.branch_push_state.as_ref().map(|s| s.ahead).unwrap_or(0),
+                            line.branch_push_state
+                                .as_ref()
+                                .map(|s| s.ahead)
+                                .unwrap_or(0),
                             &ws.updated_at,
                         );
                         list.append(&row);
@@ -267,7 +351,7 @@ pub(crate) fn build_app_sidebar(
             .ok()
             .and_then(|defaults| defaults.default_visible_tab)
             .and_then(|tab| WorkspaceTab::from_config(&tab));
-        state_select.set_selected_workspace_with_default_tab(Some(name), default_tab);
+        state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
         refresh_view_preferences_select();
         refresh_workspace_select();
         refresh_select.refresh(RefreshScope::Dashboard);
@@ -278,15 +362,13 @@ pub(crate) fn build_app_sidebar(
     sidebar_box.append(&scroll);
 
     // Bottom bar: Add repository + Settings
-    let settings_btn = Button::with_label("Settings");
-    settings_btn.add_css_class("sidebar-bottom-icon-btn");
-
     let bottom_bar = GBox::new(Orientation::Horizontal, 4);
     bottom_bar.add_css_class("sidebar-bottom-bar");
+    let spacer = GBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bottom_bar.append(&spacer);
 
-    let add_repo_btn = Button::with_label("Add repository");
-    add_repo_btn.add_css_class("nav-button");
-    add_repo_btn.set_hexpand(true);
+    let add_repo_btn = sidebar_icon_button("folder-new-symbolic", "Add repository");
     {
         let db_path_bar = app_state.workspace_database_path();
         let hub_bar = refresh_hub.clone();
@@ -312,17 +394,120 @@ pub(crate) fn build_app_sidebar(
     }
     bottom_bar.append(&add_repo_btn);
 
+    let settings_btn = sidebar_icon_button("emblem-system-symbolic", "Settings");
     {
         let stack_s = stack.clone();
+        let state_s = app_state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
         settings_btn.connect_clicked(move |_| {
+            state_s.navigate_to_page(AppPage::Settings);
             stack_s.set_visible_child_name("settings");
+            refresh_hub.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
         });
     }
     bottom_bar.append(&settings_btn);
 
     sidebar_box.append(&bottom_bar);
 
+    {
+        let state_back = app_state.clone();
+        let stack_back = stack.clone();
+        let refresh_back = refresh_hub.clone();
+        let refresh_workspace_back = refresh_workspace.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        back_btn.connect_clicked(move |_| {
+            if !state_back.navigate_back() {
+                return;
+            }
+            match state_back.snapshot().active_page {
+                AppPage::Dashboard => stack_back.set_visible_child_name("dashboard"),
+                AppPage::Projects => stack_back.set_visible_child_name("projects"),
+                AppPage::Workspace => {
+                    stack_back.set_visible_child_name("workspace");
+                    refresh_workspace_back();
+                }
+                AppPage::History => stack_back.set_visible_child_name("history"),
+                AppPage::Settings => stack_back.set_visible_child_name("settings"),
+                AppPage::Review => stack_back.set_visible_child_name("workspace"),
+            }
+            refresh_back.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+
+    {
+        let state_forward = app_state.clone();
+        let stack_forward = stack.clone();
+        let refresh_forward = refresh_hub.clone();
+        let refresh_workspace_forward = refresh_workspace.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        forward_btn.connect_clicked(move |_| {
+            if !state_forward.navigate_forward() {
+                return;
+            }
+            match state_forward.snapshot().active_page {
+                AppPage::Dashboard => stack_forward.set_visible_child_name("dashboard"),
+                AppPage::Projects => stack_forward.set_visible_child_name("projects"),
+                AppPage::Workspace => {
+                    stack_forward.set_visible_child_name("workspace");
+                    refresh_workspace_forward();
+                }
+                AppPage::History => stack_forward.set_visible_child_name("history"),
+                AppPage::Settings => stack_forward.set_visible_child_name("settings"),
+                AppPage::Review => stack_forward.set_visible_child_name("workspace"),
+            }
+            refresh_forward.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+
     (sidebar_box, populate)
+}
+
+fn sidebar_icon_button(icon: &str, tooltip: &str) -> Button {
+    sidebar_button(icon, tooltip, "sidebar-icon-button")
+}
+
+fn sidebar_arrow_button(icon: &str, tooltip: &str) -> Button {
+    sidebar_button(icon, tooltip, "sidebar-arrow-button")
+}
+
+fn sidebar_window_button(icon: &str, tooltip: &str) -> Button {
+    sidebar_button(icon, tooltip, "sidebar-window-button")
+}
+
+fn sidebar_button(icon: &str, tooltip: &str, class_name: &str) -> Button {
+    let button = icon_button(icon, tooltip);
+    button.add_css_class(class_name);
+    button.set_tooltip_text(Some(tooltip));
+    button
+}
+
+fn sidebar_nav_button(icon: &str, tooltip: &str) -> Button {
+    let button = text_button(tooltip);
+    button.add_css_class("sidebar-nav-button");
+    button.set_tooltip_text(Some(tooltip));
+
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.set_margin_start(2);
+    row.set_margin_end(2);
+    row.set_margin_top(2);
+    row.set_margin_bottom(2);
+
+    let image = Image::from_icon_name(icon);
+    image.add_css_class("sidebar-nav-icon");
+    row.append(&image);
+
+    let label = Label::new(Some(tooltip));
+    label.add_css_class("sidebar-nav-label");
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&label);
+
+    button.set_child(Some(&row));
+    button
 }
 
 fn build_workspace_row(
@@ -344,14 +529,12 @@ fn build_workspace_row(
         row_box.add_css_class("workspace-row-active");
     }
 
-    // Drag handle (3-dot grip indicator)
-    let grip = Label::new(Some("⋮"));
-    grip.add_css_class("workspace-row-grip");
+    let branch_icon = Image::from_icon_name("list-drag-handle-symbolic");
+    branch_icon.add_css_class("workspace-row-branch-icon");
     if is_active {
-        grip.add_css_class("workspace-row-grip-active");
+        branch_icon.add_css_class("workspace-row-branch-icon-active");
     }
-    grip.set_valign(Align::Start);
-    row_box.append(&grip);
+    row_box.append(&branch_icon);
 
     // Text column
     let text_box = GBox::new(Orientation::Vertical, 2);
@@ -426,6 +609,10 @@ fn section_header_row(
     let shell = GBox::new(Orientation::Horizontal, 6);
     shell.add_css_class("repo-section-row");
 
+    let repo_icon = Image::from_icon_name("folder-symbolic");
+    repo_icon.add_css_class("repo-section-icon");
+    shell.append(&repo_icon);
+
     let repo_lbl = Label::new(Some(name));
     repo_lbl.add_css_class("repo-section-header");
     repo_lbl.set_xalign(0.0);
@@ -433,15 +620,11 @@ fn section_header_row(
     repo_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
     shell.append(&repo_lbl);
 
-    let add_btn = Button::from_icon_name("list-add-symbolic");
+    let add_btn = sidebar_icon_button("list-add-symbolic", "Create workspace");
     add_btn.add_css_class("repo-header-add");
     add_btn.set_tooltip_text(Some("Create workspace"));
     add_btn.connect_clicked(move |_| on_add_workspace());
     shell.append(&add_btn);
-
-    let chevron = Label::new(Some("▾"));
-    chevron.add_css_class("repo-section-chevron");
-    shell.append(&chevron);
 
     let row = ListBoxRow::builder().child(&shell).build();
     row.set_selectable(false);
@@ -480,7 +663,11 @@ fn relative_time(ts: &str) -> String {
     let day = date_parts[2];
     let hour = time_parts[0];
     let min = time_parts[1];
-    let sec = if time_parts.len() > 2 { time_parts[2] } else { 0 };
+    let sec = if time_parts.len() > 2 {
+        time_parts[2]
+    } else {
+        0
+    };
 
     let y = year - 1;
     let leap_days = y / 4 - y / 100 + y / 400;
