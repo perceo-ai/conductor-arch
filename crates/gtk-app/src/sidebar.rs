@@ -25,6 +25,34 @@ pub(crate) fn build_app_sidebar(
     sidebar_box.add_css_class("sidebar");
     sidebar_box.set_width_request(240);
 
+    // Dashboard nav item
+    let dashboard_nav_btn = Button::with_label("Dashboard");
+    dashboard_nav_btn.add_css_class("nav-button");
+    {
+        let stack_d = stack.clone();
+        let state_d = app_state.clone();
+        dashboard_nav_btn.connect_clicked(move |_| {
+            state_d.set_active_page(AppPage::Dashboard);
+            stack_d.set_visible_child_name("dashboard");
+        });
+    }
+    sidebar_box.append(&dashboard_nav_btn);
+
+    // History nav item
+    let history_nav_btn = Button::with_label("History");
+    history_nav_btn.add_css_class("nav-button");
+    {
+        let stack_h = stack.clone();
+        let state_h = app_state.clone();
+        history_nav_btn.connect_clicked(move |_| {
+            state_h.set_active_page(AppPage::History);
+            stack_h.set_visible_child_name("history");
+        });
+    }
+    sidebar_box.append(&history_nav_btn);
+
+    sidebar_box.append(&gtk::Separator::new(Orientation::Horizontal));
+
     // Workspaces header with add button
     let projects_header = GBox::new(Orientation::Horizontal, 8);
     projects_header.add_css_class("projects-header");
@@ -33,7 +61,7 @@ pub(crate) fn build_app_sidebar(
     header_lbl.set_xalign(0.0);
     header_lbl.set_hexpand(true);
     projects_header.append(&header_lbl);
-    let add_workspace_btn = Button::from_icon_name("list-add-symbolic");
+    let add_workspace_btn = Button::with_label("+");
     add_workspace_btn.add_css_class("mini-action-button");
     add_workspace_btn.set_tooltip_text(Some("Add repository or workspace"));
     {
@@ -229,38 +257,7 @@ pub(crate) fn build_app_sidebar(
     let db_path_select = db_path.clone();
     let refresh_view_preferences_select = refresh_view_preferences.clone();
 
-    // Bottom bar nav state sync (defined before list.connect_row_selected so sync_nav_select is available)
-    let dashboard_btn = Button::from_icon_name("go-home-symbolic");
-    dashboard_btn.add_css_class("sidebar-bottom-icon-btn");
-    dashboard_btn.set_tooltip_text(Some("Dashboard"));
-    let history_btn = Button::from_icon_name("document-open-recent-symbolic");
-    history_btn.add_css_class("sidebar-bottom-icon-btn");
-    history_btn.set_tooltip_text(Some("History"));
-    let settings_btn = Button::from_icon_name("emblem-system-symbolic");
-    settings_btn.add_css_class("sidebar-bottom-icon-btn");
-    settings_btn.set_tooltip_text(Some("Settings"));
-
-    let sync_nav_state: Rc<dyn Fn()> = {
-        let state = app_state.clone();
-        let dashboard_btn = dashboard_btn.clone();
-        let history_btn = history_btn.clone();
-        Rc::new(move || {
-            let active_page = state.snapshot().active_page;
-            for (button, page) in [
-                (&dashboard_btn, AppPage::Dashboard),
-                (&history_btn, AppPage::History),
-            ] {
-                if active_page == page {
-                    button.add_css_class("active");
-                } else {
-                    button.remove_css_class("active");
-                }
-            }
-        })
-    };
-
     let refresh_workspace_select = refresh_workspace.clone();
-    let sync_nav_select = sync_nav_state.clone();
     list.connect_row_selected(move |_, row| {
         let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
             return;
@@ -275,13 +272,15 @@ pub(crate) fn build_app_sidebar(
         refresh_workspace_select();
         refresh_select.refresh(RefreshScope::Dashboard);
         stack_select.set_visible_child_name("workspace");
-        sync_nav_select();
     });
 
     scroll.set_child(Some(&list));
     sidebar_box.append(&scroll);
 
-    // Bottom bar: Add repository + nav icon buttons
+    // Bottom bar: Add repository + Settings
+    let settings_btn = Button::with_label("Settings");
+    settings_btn.add_css_class("sidebar-bottom-icon-btn");
+
     let bottom_bar = GBox::new(Orientation::Horizontal, 4);
     bottom_bar.add_css_class("sidebar-bottom-bar");
 
@@ -314,39 +313,13 @@ pub(crate) fn build_app_sidebar(
     bottom_bar.append(&add_repo_btn);
 
     {
-        let stack_d = stack.clone();
-        let state_d = app_state.clone();
-        let sync_d = sync_nav_state.clone();
-        dashboard_btn.connect_clicked(move |_| {
-            state_d.set_active_page(AppPage::Dashboard);
-            stack_d.set_visible_child_name("dashboard");
-            sync_d();
-        });
-    }
-    {
-        let stack_h = stack.clone();
-        let state_h = app_state.clone();
-        let sync_h = sync_nav_state.clone();
-        history_btn.connect_clicked(move |_| {
-            state_h.set_active_page(AppPage::History);
-            stack_h.set_visible_child_name("history");
-            sync_h();
-        });
-    }
-    {
         let stack_s = stack.clone();
-        let sync_s = sync_nav_state.clone();
         settings_btn.connect_clicked(move |_| {
             stack_s.set_visible_child_name("settings");
-            sync_s();
         });
     }
-
-    bottom_bar.append(&dashboard_btn);
-    bottom_bar.append(&history_btn);
     bottom_bar.append(&settings_btn);
 
-    sync_nav_state();
     sidebar_box.append(&bottom_bar);
 
     (sidebar_box, populate)
@@ -371,18 +344,14 @@ fn build_workspace_row(
         row_box.add_css_class("workspace-row-active");
     }
 
-    // Status dot (colored circle)
-    let dot = GBox::new(Orientation::Horizontal, 0);
-    dot.add_css_class("status-dot");
-    if run_active {
-        dot.add_css_class("status-dot-running");
-    } else if is_active {
-        dot.add_css_class("status-dot-active");
-    } else {
-        dot.add_css_class("status-dot-idle");
+    // Drag handle (3-dot grip indicator)
+    let grip = Label::new(Some("⋮"));
+    grip.add_css_class("workspace-row-grip");
+    if is_active {
+        grip.add_css_class("workspace-row-grip-active");
     }
-    dot.set_valign(Align::Start);
-    row_box.append(&dot);
+    grip.set_valign(Align::Start);
+    row_box.append(&grip);
 
     // Text column
     let text_box = GBox::new(Orientation::Vertical, 2);

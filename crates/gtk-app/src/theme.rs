@@ -1016,6 +1016,182 @@ window.lc-theme-dark,
     padding: 7px 10px 7px 12px;
 }
 
+/* ── Sidebar drag grip ── */
+.workspace-row-grip {
+    font-size: 13px;
+    color: #4a4d4a;
+    letter-spacing: -1px;
+    min-width: 10px;
+}
+.workspace-row-grip-active {
+    color: #6a6f6a;
+}
+
+/* ── Workspace empty state ── */
+.workspace-empty-label {
+    font-size: 14px;
+    color: #8a8f88;
+}
+
+/* ── Workspace title bar ── */
+.ws-title-bar {
+    background-color: #1c201d;
+    border-bottom: 1px solid #000;
+    padding: 0 14px;
+    min-height: 46px;
+}
+.ws-breadcrumb {
+    font-size: 14px;
+    font-weight: 500;
+    color: #dfe3df;
+}
+.ws-pr-badge {
+    border-radius: 7px;
+    overflow: hidden;
+}
+.ws-pr-num {
+    font-size: 13px;
+    font-weight: 600;
+    color: #9ff0bf;
+    background-color: #274b30;
+    padding: 5px 11px;
+}
+.ws-pr-sep {
+    min-width: 1px;
+    background-color: #1e3b25;
+}
+.ws-pr-state {
+    font-size: 13px;
+    font-weight: 600;
+    color: #7fdf9f;
+    background-color: #1e3b25;
+    padding: 5px 13px;
+}
+
+/* ── Center panel / tab bar ── */
+.ws-center {
+    background-color: #181a18;
+}
+.ws-tab-bar {
+    min-height: 46px;
+    padding: 0 18px;
+    gap: 4px;
+    background-color: #181a18;
+}
+.ws-tab-sep {
+    min-height: 1px;
+    background-color: #26282a;
+}
+.ws-tab-btn {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0 4px;
+    margin: 0;
+    font-size: 14px;
+    font-weight: 400;
+    color: #8a8f88;
+    min-height: 46px;
+}
+.ws-tab-btn:hover {
+    background: transparent;
+    color: #c4c8c4;
+}
+.ws-tab-active {
+    color: #e8eae8;
+    border-bottom-color: #e8eae8;
+    font-weight: 600;
+}
+.ws-mode-switcher button {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 5px;
+}
+
+/* ── Right panel ── */
+.ws-right-panel {
+    background-color: #15181b;
+    border-left: 1px solid #000;
+}
+.ws-right-tabs {
+    min-height: 46px;
+    padding: 0 10px;
+    gap: 2px;
+    background-color: #15181b;
+    border-bottom: 1px solid #23272a;
+}
+.ws-right-tab-btn {
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 4px 11px;
+    font-size: 13px;
+    color: #8b908c;
+}
+.ws-right-tab-btn:hover {
+    background-color: #1e2124;
+    color: #c8ccc8;
+}
+.ws-right-tab-active {
+    background-color: #23272a;
+    color: #e8eae8;
+}
+
+/* ── File list ── */
+.ws-file-list {
+    background: transparent;
+}
+.ws-file-row {
+    padding: 7px 11px;
+}
+.ws-file-badge {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    font-weight: 600;
+    color: #5d6560;
+    min-width: 18px;
+}
+.ws-file-name {
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-size: 13px;
+    color: #b1b6b2;
+}
+.ws-file-dir {
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-size: 11px;
+    color: #5d6560;
+}
+row:selected .ws-file-name {
+    color: #e8eae8;
+}
+row:hover .ws-file-name {
+    color: #c8ccc8;
+}
+
+/* ── Run console section ── */
+.ws-run-section {
+    background-color: #15181b;
+}
+.ws-run-switcher {
+    min-height: 42px;
+    padding: 0 8px;
+    border-top: 1px solid #23272a;
+}
+.ws-run-switcher button {
+    font-size: 13px;
+    padding: 4px 11px;
+    border-radius: 7px;
+    color: #9a9e9a;
+    background: transparent;
+    border: none;
+}
+.ws-run-switcher button:checked,
+.ws-run-switcher button.active {
+    background-color: #23272a;
+    color: #dfe3df;
+}
+
 /* ── Minimal sidebar search ── */
 .sidebar-search-minimal {
     background: transparent;

@@ -1,14 +1,19 @@
 use adw::{Toast, ToastOverlay};
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, Paned,
-    PolicyType, ScrolledWindow, Stack, StackSwitcher, TextView, WrapMode,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Expander, Label, ListBox,
+    ListBoxRow, Orientation, Paned, PolicyType, ScrolledWindow, Separator, Stack, StackSwitcher,
+    TextView, WrapMode,
 };
 use linux_conductor_core::workspace::{
     DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment, Workspace, WorkspaceStore,
 };
+use std::cell::RefCell;
+use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
+use crate::projects::show_create_workspace_dialog;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
 use crate::{
@@ -20,46 +25,16 @@ pub(crate) fn build_workspace_command_center(
     app_state: &AppState,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
-    navigate_to_projects: std::rc::Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
-    root.add_css_class("dashboard");
-    root.add_css_class("page-shell");
+    root.set_vexpand(true);
+    root.set_hexpand(true);
 
-    let header = GBox::new(Orientation::Vertical, 8);
-    header.add_css_class("dashboard-header");
-    header.add_css_class("page-header");
-    let title_row = GBox::new(Orientation::Horizontal, 8);
-    title_row.add_css_class("workspace-title-row");
-    let title = Label::new(Some("Workspace"));
-    title.add_css_class("dashboard-title");
-    title.set_xalign(0.0);
-    title.set_hexpand(true);
-    title_row.append(&title);
-    let new_workspace_btn = Button::from_icon_name("list-add-symbolic");
-    new_workspace_btn.add_css_class("mini-action-button");
-    new_workspace_btn.set_tooltip_text(Some("Create workspace"));
-    let navigate_to_projects_for_button = navigate_to_projects.clone();
-    new_workspace_btn.connect_clicked(move |_| {
-        navigate_to_projects_for_button();
-    });
-    title_row.append(&new_workspace_btn);
-    let subtitle = Label::new(Some("Select a workspace from the sidebar."));
-    subtitle.add_css_class("card-meta");
-    subtitle.set_xalign(0.0);
-    subtitle.set_wrap(true);
-    header.append(&title_row);
-    header.append(&subtitle);
-    root.append(&header);
-
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_vexpand(true);
-    let body = GBox::new(Orientation::Vertical, 14);
-    body.add_css_class("detail-body");
-    body.add_css_class("page-body");
-    scroll.set_child(Some(&body));
-    root.append(&scroll);
+    // body is what gets swapped on refresh
+    let body = GBox::new(Orientation::Vertical, 0);
+    body.set_vexpand(true);
+    body.set_hexpand(true);
+    root.append(&body);
 
     let db_path = app_state.workspace_database_path();
     let state = app_state.clone();
@@ -69,61 +44,31 @@ pub(crate) fn build_workspace_command_center(
         }
 
         let Some(name) = state.selected_workspace() else {
-            title.set_text("Workspace");
-            subtitle.set_text("Select a workspace from the sidebar.");
+            let empty = Label::new(Some("Select a workspace from the sidebar."));
+            empty.add_css_class("workspace-empty-label");
+            empty.set_valign(Align::Center);
+            empty.set_halign(Align::Center);
+            empty.set_vexpand(true);
+            body.append(&empty);
             return;
         };
         let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
-            title.set_text("Workspace");
-            subtitle.set_text("Could not open workspace database.");
             return;
         };
         let Ok(Some(line)) = store
             .list_status()
-            .map(|lines| lines.into_iter().find(|line| line.workspace.name == name))
+            .map(|lines| lines.into_iter().find(|l| l.workspace.name == name))
         else {
-            title.set_text("Workspace");
-            subtitle.set_text("Workspace not found.");
             return;
         };
 
-        let ws = line.workspace;
-        let checks = store.checks_summary(&ws.name).ok();
-        title.set_text(&title_case_workspace(&ws.name));
-        subtitle.set_text(&format!(
-            "{} / {} / base {} / {}",
-            line.repository_name,
-            ws.branch,
-            ws.base_ref,
-            ws.path.display()
-        ));
-
-        body.append(&workspace_status_strip(&ws, checks.as_ref()));
-
-        let top_grid = GBox::new(Orientation::Horizontal, 14);
-        top_grid.append(&agents_panel(&db_path, &ws, &state, refresh_hub.clone()));
-        top_grid.append(&runtime_panel(
-            &db_path,
-            &ws,
-            &store,
-            refresh_hub.clone(),
-            toast_overlay.clone(),
-        ));
-        body.append(&top_grid);
-
-        body.append(&lifecycle_panel(
-            &db_path,
-            &ws,
-            &state,
-            refresh_hub.clone(),
-            toast_overlay.clone(),
-        ));
-
-        body.append(&work_tabs(
+        let pr = line.pull_request;
+        body.append(&simple_workspace_shell(
             &db_path,
             &store,
-            &ws,
+            &line.workspace,
             &state,
+            pr,
             refresh_hub.clone(),
             toast_overlay.clone(),
         ));
@@ -132,10 +77,724 @@ pub(crate) fn build_workspace_command_center(
     (root, refresh)
 }
 
+fn simple_workspace_shell(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    ws: &Workspace,
+    state: &AppState,
+    pr: Option<PullRequest>,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let shell = GBox::new(Orientation::Vertical, 0);
+    shell.set_vexpand(true);
+    shell.set_hexpand(true);
+
+    // Title bar: breadcrumb + PR badge
+    shell.append(&ws_title_bar(ws, pr.as_ref()));
+
+    // Horizontal split: center (flex) + right (fixed 300px)
+    let split = Paned::new(Orientation::Horizontal);
+    split.set_wide_handle(false);
+    split.set_resize_start_child(true);
+    split.set_resize_end_child(false);
+    split.set_shrink_start_child(false);
+    split.set_shrink_end_child(false);
+    split.set_vexpand(true);
+
+    // Center: custom tab bar + chat/terminal/file content
+    let (center, open_file) = ws_center_panel(db_path, store, ws, state, refresh_hub.clone());
+    split.set_start_child(Some(&center));
+
+    // Right: file list + run console
+    let right = ws_right_panel(
+        db_path,
+        store,
+        ws,
+        state,
+        refresh_hub,
+        toast_overlay,
+        open_file,
+    );
+    split.set_end_child(Some(&right));
+
+    shell.append(&split);
+    shell
+}
+
 fn make_action_row() -> GBox {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.add_css_class("action-row");
     row
+}
+
+// ── Title bar ───────────────────────────────────────────────────
+
+fn ws_title_bar(ws: &Workspace, pr: Option<&PullRequest>) -> GBox {
+    let bar = GBox::new(Orientation::Horizontal, 10);
+    bar.add_css_class("ws-title-bar");
+
+    let breadcrumb = Label::new(Some(&format!(
+        "{} / {}",
+        title_case_workspace(&ws.name),
+        ws.branch
+    )));
+    breadcrumb.add_css_class("ws-breadcrumb");
+    breadcrumb.set_xalign(0.0);
+    breadcrumb.set_hexpand(true);
+    breadcrumb.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    bar.append(&breadcrumb);
+
+    if let Some(pr) = pr {
+        let pr_badge = GBox::new(Orientation::Horizontal, 0);
+        pr_badge.add_css_class("ws-pr-badge");
+
+        let num_lbl = Label::new(Some(&format!("PR #{}", pr.number)));
+        num_lbl.add_css_class("ws-pr-num");
+        pr_badge.append(&num_lbl);
+
+        let sep = Separator::new(Orientation::Vertical);
+        sep.add_css_class("ws-pr-sep");
+        pr_badge.append(&sep);
+
+        let state_lbl = Label::new(Some(&pr.state));
+        state_lbl.add_css_class("ws-pr-state");
+        pr_badge.append(&state_lbl);
+
+        bar.append(&pr_badge);
+    }
+
+    bar
+}
+
+// ── Center panel (chat + terminal + file tabs) ───────────────────
+
+fn ws_center_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    ws: &Workspace,
+    state: &AppState,
+    refresh_hub: RefreshHub,
+) -> (GBox, Rc<dyn Fn(&str)>) {
+    let panel = GBox::new(Orientation::Vertical, 0);
+    panel.add_css_class("ws-center");
+    panel.set_hexpand(true);
+    panel.set_vexpand(true);
+
+    // Tab bar
+    let tab_bar = GBox::new(Orientation::Horizontal, 0);
+    tab_bar.add_css_class("ws-tab-bar");
+    panel.append(&tab_bar);
+
+    // Separator below tab bar
+    let tab_sep = Separator::new(Orientation::Horizontal);
+    tab_sep.add_css_class("ws-tab-sep");
+    panel.append(&tab_sep);
+
+    // Content stack
+    let content = Stack::new();
+    content.set_vexpand(true);
+    content.set_hexpand(true);
+
+    // Chat tab
+    let refresh_sessions = refresh_hub.clone();
+    let chat_widget = session_surface::agent_session_panel(
+        db_path.to_path_buf(),
+        &ws.name,
+        state.clone(),
+        move || refresh_sessions.refresh(RefreshScope::Workspace),
+    );
+    content.add_named(&chat_widget, Some("chat"));
+
+    let chat_btn = ws_tab_button("Chat");
+    chat_btn.add_css_class("ws-tab-active");
+    {
+        let c = content.clone();
+        let tb = tab_bar.clone();
+        chat_btn.connect_clicked(move |_| {
+            c.set_visible_child_name("chat");
+            ws_sync_tab_active(&tb, "ws-tab-btn");
+        });
+    }
+    tab_bar.append(&chat_btn);
+
+    // Terminal tab
+    let term_prefs = store
+        .workspace_view_defaults(&ws.name)
+        .map(|d| terminal::TerminalPreferences::from_config(d.terminal_font.as_deref(), d.terminal_scrollback))
+        .unwrap_or_default();
+    let term_presets = store
+        .workspace_view_defaults(&ws.name)
+        .map(|d| terminal::terminal_command_presets(&d.command_palette_presets))
+        .unwrap_or_else(|_| terminal::terminal_command_presets(&[]));
+
+    let term_widget = terminal::embedded_terminal_panel(
+        db_path.to_path_buf(),
+        &ws.name,
+        &ws.path,
+        true,
+        refresh_hub.clone(),
+        term_prefs,
+        term_presets,
+    );
+    content.add_named(&term_widget, Some("terminal"));
+
+    let term_btn = ws_tab_button("Terminal");
+    {
+        let c = content.clone();
+        let tb = tab_bar.clone();
+        term_btn.connect_clicked(move |_| {
+            c.set_visible_child_name("terminal");
+            ws_sync_tab_active(&tb, "ws-tab-btn");
+        });
+    }
+    tab_bar.append(&term_btn);
+
+    // Sync active tab state
+    let state_tabs = state.clone();
+    content.connect_visible_child_name_notify(move |stack| {
+        match stack.visible_child_name().as_deref() {
+            Some("terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Terminal),
+            _ => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
+        }
+    });
+
+    content.set_visible_child_name(match state.snapshot().active_workspace_tab {
+        WorkspaceTab::Terminal => "terminal",
+        _ => "chat",
+    });
+
+    panel.append(&content);
+
+    // Open-file closure: reads file from disk, opens as a new tab
+    let ws_path = ws.path.clone();
+    let content_ref = content.clone();
+    let tab_bar_ref = tab_bar.clone();
+
+    let open_file: Rc<dyn Fn(&str)> = Rc::new(move |rel_path: &str| {
+        let tab_key = format!("file:{rel_path}");
+
+        if content_ref.child_by_name(&tab_key).is_none() {
+            // File pane with Edit / Diff mode switcher
+            let file_pane = GBox::new(Orientation::Vertical, 0);
+            file_pane.set_vexpand(true);
+
+            let mode_tabs = Stack::new();
+            mode_tabs.set_vexpand(true);
+            let mode_sw = StackSwitcher::new();
+            mode_sw.set_stack(Some(&mode_tabs));
+            mode_sw.add_css_class("ws-mode-switcher");
+            file_pane.append(&mode_sw);
+
+            let full_path = ws_path.join(rel_path);
+            let file_content = fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| format!("# Error reading file\n{e}"));
+
+            let edit_view = TextView::new();
+            edit_view.set_monospace(true);
+            edit_view.set_vexpand(true);
+            edit_view.buffer().set_text(&file_content);
+            let edit_scroll = ScrolledWindow::new();
+            edit_scroll.set_vexpand(true);
+            edit_scroll.set_child(Some(&edit_view));
+            mode_tabs.add_titled(&edit_scroll, Some("edit"), "Edit");
+
+            let diff_view = TextView::new();
+            diff_view.set_editable(false);
+            diff_view.set_monospace(true);
+            diff_view.set_vexpand(true);
+            let diff_scroll = ScrolledWindow::new();
+            diff_scroll.set_vexpand(true);
+            diff_scroll.set_child(Some(&diff_view));
+            mode_tabs.add_titled(&diff_scroll, Some("diff"), "Diff");
+
+            let preview_view = TextView::new();
+            preview_view.set_editable(false);
+            preview_view.set_wrap_mode(WrapMode::WordChar);
+            preview_view.set_vexpand(true);
+            preview_view.buffer().set_text(&file_content);
+            let preview_scroll = ScrolledWindow::new();
+            preview_scroll.set_vexpand(true);
+            preview_scroll.set_child(Some(&preview_view));
+            mode_tabs.add_titled(&preview_scroll, Some("preview"), "Preview");
+
+            mode_tabs.set_visible_child_name("edit");
+            file_pane.append(&mode_tabs);
+            content_ref.add_named(&file_pane, Some(&tab_key));
+
+            // Tab button for this file
+            let short_name = std::path::Path::new(rel_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(rel_path);
+            let file_btn = ws_tab_button(short_name);
+            let cr = content_ref.clone();
+            let tk = tab_key.clone();
+            let tb = tab_bar_ref.clone();
+            file_btn.connect_clicked(move |_| {
+                cr.set_visible_child_name(&tk);
+                ws_sync_tab_active(&tb, "ws-tab-btn");
+            });
+            tab_bar_ref.append(&file_btn);
+        }
+        content_ref.set_visible_child_name(&tab_key);
+    });
+
+    (panel, open_file)
+}
+
+fn ws_tab_button(label: &str) -> Button {
+    let btn = Button::with_label(label);
+    btn.add_css_class("ws-tab-btn");
+    btn
+}
+
+fn ws_sync_tab_active(tab_bar: &GBox, _class: &str) {
+    // Visual active state is handled by CSS on the stack's visible child name notify
+    // This is a placeholder for future per-button active highlighting
+    let _ = tab_bar;
+}
+
+// ── Right panel (file list + run console) ───────────────────────
+
+fn ws_right_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    ws: &Workspace,
+    state: &AppState,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    open_file: Rc<dyn Fn(&str)>,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 0);
+    panel.add_css_class("ws-right-panel");
+    panel.set_vexpand(true);
+    panel.set_width_request(300);
+
+    // Top tab strip: All files | Changes | Checks
+    let tab_strip = GBox::new(Orientation::Horizontal, 4);
+    tab_strip.add_css_class("ws-right-tabs");
+
+    let content = Stack::new();
+    content.set_vexpand(true);
+
+    // All files
+    let all_btn = Button::with_label("All files");
+    all_btn.add_css_class("ws-right-tab-btn");
+    all_btn.add_css_class("ws-right-tab-active");
+    let files_widget = ws_simple_file_list(db_path, ws, open_file.clone());
+    content.add_named(&files_widget, Some("files"));
+    {
+        let c = content.clone();
+        all_btn.connect_clicked(move |_| c.set_visible_child_name("files"));
+    }
+    tab_strip.append(&all_btn);
+
+    // Changes
+    let changes_btn = Button::with_label("Changes");
+    changes_btn.add_css_class("ws-right-tab-btn");
+    let changes_widget =
+        workspace_changes_panel(db_path, store, &ws.name, refresh_hub.clone(), toast_overlay.clone());
+    content.add_named(&changes_widget, Some("changes"));
+    {
+        let c = content.clone();
+        changes_btn.connect_clicked(move |_| c.set_visible_child_name("changes"));
+    }
+    tab_strip.append(&changes_btn);
+
+    // Checks
+    let checks_btn = Button::with_label("Checks");
+    checks_btn.add_css_class("ws-right-tab-btn");
+    let checks_widget = workspace_checks_panel(
+        db_path,
+        store,
+        &ws.name,
+        state.clone(),
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+    );
+    content.add_named(&checks_widget, Some("checks"));
+    {
+        let c = content.clone();
+        checks_btn.connect_clicked(move |_| c.set_visible_child_name("checks"));
+    }
+    tab_strip.append(&checks_btn);
+
+    content.set_visible_child_name("files");
+
+    panel.append(&tab_strip);
+    panel.append(&Separator::new(Orientation::Horizontal));
+    panel.append(&content);
+
+    // Run console at bottom
+    panel.append(&Separator::new(Orientation::Horizontal));
+    panel.append(&ws_run_console(db_path, store, ws, state, refresh_hub, toast_overlay));
+
+    panel
+}
+
+fn ws_simple_file_list(
+    db_path: &Path,
+    ws: &Workspace,
+    open_file: Rc<dyn Fn(&str)>,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 0);
+    panel.set_vexpand(true);
+
+    let list = ListBox::new();
+    list.add_css_class("ws-file-list");
+    list.set_selection_mode(gtk::SelectionMode::Single);
+
+    let file_paths: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+    if let Ok(store) = WorkspaceStore::open(db_path) {
+        if let Ok(files) = store.changed_files(&ws.name) {
+            for path in &files {
+                let row_box = GBox::new(Orientation::Horizontal, 6);
+                row_box.add_css_class("ws-file-row");
+
+                let ext_lbl = Label::new(Some(file_type_badge(path)));
+                ext_lbl.add_css_class("ws-file-badge");
+                row_box.append(&ext_lbl);
+
+                let short = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path.as_str());
+                let name_lbl = Label::new(Some(short));
+                name_lbl.add_css_class("ws-file-name");
+                name_lbl.set_xalign(0.0);
+                name_lbl.set_hexpand(true);
+                row_box.append(&name_lbl);
+
+                if short != path.as_str() {
+                    let dir_part = &path[..path.len().saturating_sub(short.len())];
+                    let dir_lbl = Label::new(Some(dir_part));
+                    dir_lbl.add_css_class("ws-file-dir");
+                    dir_lbl.set_xalign(1.0);
+                    dir_lbl.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+                    row_box.append(&dir_lbl);
+                }
+
+                list.append(&ListBoxRow::builder().child(&row_box).build());
+                file_paths.borrow_mut().push(path.clone());
+            }
+        }
+    }
+
+    let paths_select = file_paths.clone();
+    list.connect_row_selected(move |_, row| {
+        if let Some(r) = row {
+            let idx = r.index() as usize;
+            if let Some(path) = paths_select.borrow().get(idx) {
+                open_file(path.as_str());
+            }
+        }
+    });
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_child(Some(&list));
+    panel.append(&scroll);
+
+    panel
+}
+
+fn file_type_badge(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    match ext {
+        "rs" => "rs",
+        "ts" | "tsx" => "ts",
+        "js" | "jsx" => "js",
+        "py" => "py",
+        "md" => "md",
+        "toml" => "ml",
+        "yaml" | "yml" => "yl",
+        "json" => "{}",
+        "css" | "scss" => "cs",
+        "html" => "ht",
+        "sh" | "bash" => "sh",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" => "c+",
+        _ => "  ",
+    }
+}
+
+fn ws_run_console(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    ws: &Workspace,
+    state: &AppState,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let section = GBox::new(Orientation::Vertical, 0);
+    section.add_css_class("ws-run-section");
+
+    // Tab strip: Run | Terminal | Actions
+    let run_content = Stack::new();
+    let run_switcher = StackSwitcher::new();
+    run_switcher.set_stack(Some(&run_content));
+    run_switcher.add_css_class("ws-run-switcher");
+    section.append(&run_switcher);
+
+    run_content.add_titled(
+        &runtime_panel(db_path, ws, store, refresh_hub.clone(), toast_overlay.clone()),
+        Some("run"),
+        "Run",
+    );
+
+    let term_prefs = store
+        .workspace_view_defaults(&ws.name)
+        .map(|d| terminal::TerminalPreferences::from_config(d.terminal_font.as_deref(), d.terminal_scrollback))
+        .unwrap_or_default();
+    let term_presets = store
+        .workspace_view_defaults(&ws.name)
+        .map(|d| terminal::terminal_command_presets(&d.command_palette_presets))
+        .unwrap_or_else(|_| terminal::terminal_command_presets(&[]));
+
+    run_content.add_titled(
+        &terminal::embedded_terminal_panel(
+            db_path.to_path_buf(),
+            &ws.name,
+            &ws.path,
+            false,
+            refresh_hub.clone(),
+            term_prefs,
+            term_presets,
+        ),
+        Some("terminal"),
+        "Terminal",
+    );
+
+    run_content.add_titled(
+        &lifecycle_panel(db_path, ws, state, refresh_hub, toast_overlay),
+        Some("actions"),
+        "Actions",
+    );
+
+    run_content.set_visible_child_name("run");
+    section.append(&run_content);
+
+    section
+}
+
+fn workspace_files_panel(
+    db_path: &Path,
+    ws: &Workspace,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.set_vexpand(true);
+
+    let selected_file = Rc::new(RefCell::new(None::<String>));
+    let current_file = Label::new(Some("Select a file."));
+    current_file.add_css_class("card-meta");
+    current_file.set_xalign(0.0);
+    current_file.set_wrap(true);
+    panel.append(&current_file);
+
+    let mode_stack = Stack::new();
+    let mode_switcher = StackSwitcher::new();
+    mode_switcher.set_stack(Some(&mode_stack));
+    mode_switcher.add_css_class("panel-switcher");
+    panel.append(&mode_switcher);
+
+    let edit_view = TextView::new();
+    edit_view.set_monospace(true);
+    edit_view.set_vexpand(true);
+    let edit_scroll = ScrolledWindow::new();
+    edit_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    edit_scroll.set_vexpand(true);
+    edit_scroll.set_child(Some(&edit_view));
+    mode_stack.add_titled(&edit_scroll, Some("edit"), "Edit");
+
+    let diff_view = TextView::new();
+    diff_view.set_editable(false);
+    diff_view.set_monospace(true);
+    diff_view.set_vexpand(true);
+    let diff_scroll = ScrolledWindow::new();
+    diff_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    diff_scroll.set_vexpand(true);
+    diff_scroll.set_child(Some(&diff_view));
+    mode_stack.add_titled(&diff_scroll, Some("diff"), "Diff");
+
+    let preview_view = TextView::new();
+    preview_view.set_editable(false);
+    preview_view.set_wrap_mode(WrapMode::WordChar);
+    preview_view.set_vexpand(true);
+    let preview_scroll = ScrolledWindow::new();
+    preview_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    preview_scroll.set_vexpand(true);
+    preview_scroll.set_child(Some(&preview_view));
+    mode_stack.add_titled(&preview_scroll, Some("preview"), "Preview");
+
+    let feedback = Label::new(Some("No file action run yet."));
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    let action_row = make_action_row();
+    let reload_btn = secondary_button("Reload");
+    let save_btn = Button::with_label("Save");
+    save_btn.add_css_class("suggested-action");
+    action_row.append(&reload_btn);
+    action_row.append(&save_btn);
+    panel.append(&action_row);
+
+    let file_list = GBox::new(Orientation::Vertical, 4);
+    let files = list_workspace_files(&ws.path);
+    if files.is_empty() {
+        file_list.append(&detail_row("Files", "No visible files."));
+    } else {
+        for relative in files {
+            let open_btn = flat_button(&relative);
+            open_btn.set_hexpand(true);
+            open_btn.set_halign(Align::Fill);
+            let current_file_open = current_file.clone();
+            let selected_file_open = selected_file.clone();
+            let edit_buffer = edit_view.buffer();
+            let diff_buffer = diff_view.buffer();
+            let preview_buffer = preview_view.buffer();
+            let workspace_path = ws.path.clone();
+            let db_path_open = db_path.to_path_buf();
+            let workspace_name = ws.name.clone();
+            let relative_path = relative.clone();
+            let mode_stack_open = mode_stack.clone();
+            open_btn.connect_clicked(move |_| {
+                *selected_file_open.borrow_mut() = Some(relative_path.clone());
+                current_file_open.set_text(&relative_path);
+                let file_path = workspace_path.join(&relative_path);
+                let contents = fs::read_to_string(&file_path)
+                    .unwrap_or_else(|_| "[binary or unreadable file]".to_owned());
+                edit_buffer.set_text(&contents);
+                preview_buffer.set_text(&contents);
+                diff_buffer.set_text(&workspace_diff_text_for_path(
+                    &db_path_open,
+                    &workspace_name,
+                    Some(&relative_path),
+                ));
+                if relative_path.ends_with(".md") {
+                    mode_stack_open.set_visible_child_name("preview");
+                } else {
+                    mode_stack_open.set_visible_child_name("edit");
+                }
+            });
+            file_list.append(&open_btn);
+        }
+    }
+
+    let file_scroll = ScrolledWindow::new();
+    file_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    file_scroll.set_min_content_height(160);
+    file_scroll.set_child(Some(&file_list));
+    panel.append(&file_scroll);
+    panel.append(&mode_stack);
+    panel.append(&feedback);
+
+    let selected_file_reload = selected_file.clone();
+    let current_file_reload = current_file.clone();
+    let edit_buffer_reload = edit_view.buffer();
+    let diff_buffer_reload = diff_view.buffer();
+    let preview_buffer_reload = preview_view.buffer();
+    let workspace_path_reload = ws.path.clone();
+    let db_path_reload = db_path.to_path_buf();
+    let workspace_name_reload = ws.name.clone();
+    reload_btn.connect_clicked(move |_| {
+        let Some(relative_path) = selected_file_reload.borrow().clone() else {
+            current_file_reload.set_text("Select a file.");
+            return;
+        };
+        let file_path = workspace_path_reload.join(&relative_path);
+        let contents = fs::read_to_string(&file_path)
+            .unwrap_or_else(|_| "[binary or unreadable file]".to_owned());
+        edit_buffer_reload.set_text(&contents);
+        preview_buffer_reload.set_text(&contents);
+        diff_buffer_reload.set_text(&workspace_diff_text_for_path(
+            &db_path_reload,
+            &workspace_name_reload,
+            Some(&relative_path),
+        ));
+    });
+
+    let selected_file_save = selected_file;
+    let edit_buffer_save = edit_view.buffer();
+    let workspace_path_save = ws.path.clone();
+    let feedback_save = feedback.clone();
+    let toast_save = toast_overlay;
+    save_btn.connect_clicked(move |_| {
+        let Some(relative_path) = selected_file_save.borrow().clone() else {
+            apply_action_feedback(
+                &feedback_save,
+                &toast_save,
+                "Select a file before saving.",
+                true,
+            );
+            return;
+        };
+        let file_path = workspace_path_save.join(&relative_path);
+        match fs::write(&file_path, text_buffer_contents(&edit_buffer_save)) {
+            Ok(()) => {
+                apply_action_feedback(
+                    &feedback_save,
+                    &toast_save,
+                    &format!("Saved {}.", relative_path),
+                    true,
+                );
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_save,
+                &toast_save,
+                &format!("Could not save {}: {err}", relative_path),
+                true,
+            ),
+        }
+    });
+
+    panel
+}
+
+fn list_workspace_files(root: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    list_workspace_files_recursive(root, root, &mut files);
+    files.sort();
+    files.truncate(400);
+    files
+}
+
+fn list_workspace_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+            continue;
+        }
+        if path.is_dir() {
+            // ponytail: skip deep vendor/build trees; add a real tree model only if users hit this ceiling.
+            list_workspace_files_recursive(root, &path, files);
+            continue;
+        }
+        if let Ok(relative) = path.strip_prefix(root) {
+            files.push(relative.to_string_lossy().to_string());
+        }
+    }
+}
+
+fn text_buffer_contents(buffer: &gtk::TextBuffer) -> String {
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), true)
+        .to_string()
 }
 
 fn make_action_stack() -> GBox {
@@ -160,6 +819,13 @@ fn destructive_button(label: &str) -> Button {
     let button = Button::with_label(label);
     button.add_css_class("destructive-action");
     button
+}
+
+fn toolbar_label(text: &str) -> Label {
+    let label = Label::new(Some(text));
+    label.add_css_class("toolbar-label");
+    label.set_xalign(0.0);
+    label
 }
 
 fn workspace_status_strip(
@@ -775,16 +1441,9 @@ fn work_tabs(
         "Changes",
     );
     tabs.add_titled(
-        &chat_terminal_split(
-            db_path,
-            ws,
-            state.clone(),
-            refresh_hub.clone(),
-            terminal_preferences.clone(),
-            terminal_command_presets.clone(),
-        ),
+        &parallel_agents_panel(db_path, ws, state.clone(), refresh_hub.clone()),
         Some("chat-terminal"),
-        "Chat / Terminal",
+        "Chat",
     );
     tabs.add_titled(
         &terminal::embedded_terminal_panel(
@@ -1123,6 +1782,83 @@ fn chat_terminal_split(
 
     split.set_start_child(Some(&chat_box));
     split.set_end_child(Some(&terminal_box));
+    split
+}
+
+fn parallel_agents_panel(
+    db_path: &Path,
+    ws: &Workspace,
+    app_state: AppState,
+    refresh_hub: RefreshHub,
+) -> Paned {
+    let split = Paned::new(Orientation::Horizontal);
+    split.set_wide_handle(true);
+    split.set_position(580);
+
+    let chat_box = GBox::new(Orientation::Vertical, 8);
+    chat_box.add_css_class("command-panel");
+    chat_box.add_css_class("session-tool-surface");
+    chat_box.append(&section_title("Chat"));
+    let refresh_chat = refresh_hub.clone();
+    chat_box.append(&session_surface::agent_session_panel(
+        db_path.to_path_buf(),
+        &ws.name,
+        app_state,
+        move || refresh_chat.refresh(RefreshScope::Workspace),
+    ));
+    for chat in history::sessions_for_workspace_path(db_path, &ws.path)
+        .into_iter()
+        .take(8)
+    {
+        chat_box.append(&history::session_summary_row(&chat));
+    }
+    chat_box.append(&linked_directories_panel(db_path, &ws.name, refresh_hub));
+
+    let right = GBox::new(Orientation::Vertical, 0);
+    right.add_css_class("command-panel");
+    right.add_css_class("session-tool-surface");
+
+    let file_tabs = Stack::new();
+    file_tabs.set_vexpand(true);
+    let file_switcher = StackSwitcher::new();
+    file_switcher.set_stack(Some(&file_tabs));
+    file_switcher.add_css_class("panel-switcher");
+
+    let changes_text = WorkspaceStore::open(db_path)
+        .and_then(|store| store.diff_file_summaries(&ws.name))
+        .map(|summaries| format_diff_file_summary(&summaries))
+        .unwrap_or_else(|_| "No changes yet.\n".to_owned());
+    file_tabs.add_titled(&text_panel(&changes_text), Some("changes"), "Changes");
+
+    let checks_text = WorkspaceStore::open(db_path)
+        .map(|store| workspace_checks_text(&store, &ws.name))
+        .unwrap_or_else(|_| "No checks yet.\n".to_owned());
+    file_tabs.add_titled(&text_panel(&checks_text), Some("checks"), "Checks");
+
+    right.append(&file_switcher);
+    right.append(&file_tabs);
+
+    let run_label = section_title("Run");
+    run_label.set_margin_top(8);
+    run_label.set_margin_start(8);
+    right.append(&run_label);
+
+    let run_text = WorkspaceStore::open(db_path)
+        .map(|store| latest_run_log_line(&store, &ws.name))
+        .unwrap_or_else(|_| "No run log yet.\n".to_owned());
+    let run_view = TextView::new();
+    run_view.set_editable(false);
+    run_view.set_monospace(true);
+    run_view.add_css_class("history-view");
+    run_view.buffer().set_text(&run_text);
+    let run_scroll = ScrolledWindow::new();
+    run_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    run_scroll.set_min_content_height(120);
+    run_scroll.set_child(Some(&run_view));
+    right.append(&run_scroll);
+
+    split.set_start_child(Some(&chat_box));
+    split.set_end_child(Some(&right));
     split
 }
 
@@ -1761,14 +2497,14 @@ fn workspace_checks_panel(
     create_btn.add_css_class("suggested-action");
     let inspect_row = make_action_stack();
     let refresh_pr_btn = secondary_button("Refresh PR");
-    let view_summary_btn = flat_button("View PR Summary");
-    let stage_summary_btn = Button::with_label("Stage PR Summary");
+    let view_summary_btn = flat_button("Preview Summary");
+    let stage_summary_btn = Button::with_label("Queue Summary");
     stage_summary_btn.add_css_class("suggested-action");
-    let view_checks_btn = flat_button("View Checks");
-    let stage_checks_btn = Button::with_label("Stage Failing Checks");
+    let view_checks_btn = flat_button("Preview Checks");
+    let stage_checks_btn = Button::with_label("Queue Failing Checks");
     stage_checks_btn.add_css_class("suggested-action");
-    let view_reviews_btn = flat_button("View PR Comments");
-    let stage_reviews_btn = Button::with_label("Stage PR Comments");
+    let view_reviews_btn = flat_button("Preview Comments");
+    let stage_reviews_btn = Button::with_label("Queue Comments");
     stage_reviews_btn.add_css_class("suggested-action");
     let thread_row = make_action_row();
     let thread_id_entry = Entry::new();
@@ -2069,17 +2805,34 @@ fn workspace_checks_panel(
     pr_form.append(&create_inputs_row);
     pr_form.append(&create_controls_row);
     panel.append(&pr_form);
-    let inspect_top_row = make_action_row();
-    inspect_top_row.append(&refresh_pr_btn);
-    inspect_top_row.append(&view_summary_btn);
-    inspect_top_row.append(&stage_summary_btn);
-    let inspect_bottom_row = make_action_row();
-    inspect_bottom_row.append(&view_checks_btn);
-    inspect_bottom_row.append(&stage_checks_btn);
-    inspect_bottom_row.append(&view_reviews_btn);
-    inspect_bottom_row.append(&stage_reviews_btn);
-    inspect_row.append(&inspect_top_row);
-    inspect_row.append(&inspect_bottom_row);
+    let inspect_refresh_row = make_action_row();
+    inspect_refresh_row.append(&refresh_pr_btn);
+    inspect_row.append(&inspect_refresh_row);
+
+    let summary_group = make_action_stack();
+    summary_group.append(&toolbar_label("PR summary"));
+    let summary_row = make_action_row();
+    summary_row.append(&view_summary_btn);
+    summary_row.append(&stage_summary_btn);
+    summary_group.append(&summary_row);
+
+    let checks_group = make_action_stack();
+    checks_group.append(&toolbar_label("Checks"));
+    let checks_row = make_action_row();
+    checks_row.append(&view_checks_btn);
+    checks_row.append(&stage_checks_btn);
+    checks_group.append(&checks_row);
+
+    let comments_group = make_action_stack();
+    comments_group.append(&toolbar_label("Review comments"));
+    let comments_row = make_action_row();
+    comments_row.append(&view_reviews_btn);
+    comments_row.append(&stage_reviews_btn);
+    comments_group.append(&comments_row);
+
+    inspect_row.append(&summary_group);
+    inspect_row.append(&checks_group);
+    inspect_row.append(&comments_group);
     panel.append(&inspect_row);
     thread_row.append(&thread_id_entry);
     thread_row.append(&resolve_thread_btn);
@@ -2575,7 +3328,7 @@ fn workspace_review_panel(
     form.append(&add_btn);
     panel.append(&form);
 
-    let stage_btn = Button::with_label("Stage Open Comments");
+    let stage_btn = Button::with_label("Queue Open Comments");
     stage_btn.add_css_class("suggested-action");
     let stage_feedback = feedback.clone();
     let stage_toast = toast_overlay.clone();
