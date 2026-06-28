@@ -7,7 +7,7 @@ Before touching code or docs in this repository, read:
 1. `README.md`
 2. `progress.md`
 3. `docs/manual-testing-checklist.md`
-4. `docs/conductor-docs-parity-map.md`
+4. `docs/archductor-docs-parity-map.md`
 5. `docs/deploy-and-local-test.md`
 
 Use official Conductor behavior as the parity baseline:
@@ -24,7 +24,7 @@ Use official Conductor behavior as the parity baseline:
 
 ## Product Baseline
 
-Linux Conductor is a local desktop control plane for parallel coding agents.
+Linux Archductor is a local desktop control plane for parallel coding agents.
 The core loop should work in the app: add or clone a repository, create
 workspaces, run multiple chats/sessions, review work, create/merge PRs, archive,
 and repeat for the same repository.
@@ -47,7 +47,7 @@ GTK controls, and verified end-to-end app behavior.
 
 ## Current State
 
-The app has a usable but rough Conductor loop:
+The app has a usable but rough Archductor loop:
 
 - Projects can add/clone repositories, edit shared/local settings, and create
   branch/prompt/GitHub/Linear workspaces.

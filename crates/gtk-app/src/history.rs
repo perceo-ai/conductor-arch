@@ -2,8 +2,8 @@ use gtk::prelude::*;
 use gtk::{
     Box as GBox, Label, ListBox, Orientation, PolicyType, ScrolledWindow, Separator, TextView,
 };
-use linux_conductor_core::import::default_conductor_app_database;
-use linux_conductor_core::workspace::WorkspaceStore;
+use linux_archductor_core::import::default_conductor_app_database;
+use linux_archductor_core::workspace::WorkspaceStore;
 use rusqlite::Connection;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
     let subtitle = Label::new(Some(
-        "Local Linux agent sessions plus imported Conductor chats when available.",
+        "Local Linux agent sessions plus imported Archductor chats when available.",
     ));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
@@ -165,22 +165,41 @@ fn query_local_sessions(
     path: Option<&Path>,
 ) -> anyhow::Result<Vec<ChatSummary>> {
     let store = WorkspaceStore::open(database_path)?;
-    let sessions = store.list_local_chat_history(path)?;
-    Ok(sessions
+    let mut sessions = store
+        .list_local_chat_threads(path)?
         .into_iter()
-        .map(|session| ChatSummary {
-            id: format!("local:{}", session.process_id),
+        .map(|thread| ChatSummary {
+            id: format!("local-thread:{}", thread.thread_id),
             source: "Linux".to_owned(),
-            title: format!("{} session #{}", session.agent_type, session.process_id),
-            agent_type: session.agent_type,
-            status: session.status,
-            repository_name: session.repository_name,
-            workspace_name: session.workspace_name,
-            workspace_path: session.workspace_path.to_string_lossy().to_string(),
-            updated_at: session.updated_at,
-            message_count: i64::try_from(session.message_count).unwrap_or(i64::MAX),
+            title: thread.title,
+            agent_type: thread.provider,
+            status: thread.status,
+            repository_name: thread.repository_name,
+            workspace_name: thread.workspace_name,
+            workspace_path: thread.workspace_path.to_string_lossy().to_string(),
+            updated_at: thread.updated_at,
+            message_count: i64::try_from(thread.message_count).unwrap_or(i64::MAX),
         })
-        .collect())
+        .collect::<Vec<_>>();
+    sessions.extend(
+        store
+            .list_local_chat_history(path)?
+            .into_iter()
+            .filter(|session| session.chat_thread_id.is_none())
+            .map(|session| ChatSummary {
+                id: format!("local:{}", session.process_id),
+                source: "Linux Legacy".to_owned(),
+                title: format!("{} session #{}", session.agent_type, session.process_id),
+                agent_type: session.agent_type,
+                status: session.status,
+                repository_name: session.repository_name,
+                workspace_name: session.workspace_name,
+                workspace_path: session.workspace_path.to_string_lossy().to_string(),
+                updated_at: session.updated_at,
+                message_count: i64::try_from(session.message_count).unwrap_or(i64::MAX),
+            }),
+    );
+    Ok(sessions)
 }
 
 fn query_conductor_sessions(path: Option<&std::path::Path>) -> rusqlite::Result<Vec<ChatSummary>> {
@@ -234,6 +253,12 @@ fn row_to_chat_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSummary>
 
 fn history_session_messages(database_path: &Path, session_id: &str) -> String {
     if let Some(id) = session_id
+        .strip_prefix("local-thread:")
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        return local_thread_messages(database_path, id);
+    }
+    if let Some(id) = session_id
         .strip_prefix("local:")
         .and_then(|value| value.parse::<i64>().ok())
     {
@@ -243,9 +268,32 @@ fn history_session_messages(database_path: &Path, session_id: &str) -> String {
     conductor_session_messages(imported_id)
 }
 
+fn local_thread_messages(database_path: &Path, thread_id: i64) -> String {
+    let Ok(store) = WorkspaceStore::open(database_path) else {
+        return "Could not open Linux Archductor history database.".to_owned();
+    };
+    let Ok(messages) = store.local_chat_thread_messages(thread_id) else {
+        return "Could not read local chat thread.".to_owned();
+    };
+    if messages.is_empty() {
+        return "No messages in this chat.".to_owned();
+    }
+    messages
+        .into_iter()
+        .map(|message| {
+            format!(
+                "{}\n{}\n",
+                local_role_label(&message.role),
+                truncate_message(&message.content, 2200)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn local_session_messages(database_path: &Path, process_id: i64) -> String {
     let Ok(store) = WorkspaceStore::open(database_path) else {
-        return "Could not open Linux Conductor history database.".to_owned();
+        return "Could not open Linux Archductor history database.".to_owned();
     };
     let Ok(messages) = store.local_chat_history_messages(process_id) else {
         return "Could not read local chat transcript.".to_owned();
@@ -279,7 +327,7 @@ fn conductor_session_messages(session_id: &str) -> String {
     let db_path = default_conductor_app_database();
     let Ok(conn) = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
     else {
-        return "Could not open Conductor chat database.".to_owned();
+        return "Could not open Archductor chat database.".to_owned();
     };
     let Ok(mut stmt) = conn.prepare(
         "SELECT COALESCE(role, ''), COALESCE(content, full_message, ''), COALESCE(created_at, '')

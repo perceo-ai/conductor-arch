@@ -1,13 +1,13 @@
 # Settings Redesign Design
 
-**Goal:** Redesign the GTK Settings surface so it feels like a dense, panel-like Conductor inspector instead of a generic form page, while keeping the current settings data model and load/save behavior intact.
+**Goal:** Redesign the GTK Settings surface so it feels like a dense, panel-like Archductor inspector instead of a generic form page, while keeping the current settings data model and load/save behavior intact.
 
 ## Scope
 
 This pass addresses:
 
 - `list_o_problems.md` item `#4`: smoother settings surface with better formatted text fields
-- The settings-specific part of item `#6`: align the Settings UI with the Conductor-style dark shell language
+- The settings-specific part of item `#6`: align the Settings UI with the Archductor-style dark shell language
 
 This pass does **not**:
 
@@ -86,7 +86,7 @@ They should:
 
 ## Visual Language
 
-Follow the Conductor-style guidance from `list_o_problems.md`:
+Follow the Archductor-style guidance from `list_o_problems.md`:
 
 - darker shell surfaces with separation by lightness, not heavy borders/shadows
 - one green semantic accent
@@ -110,7 +110,7 @@ Follow the Conductor-style guidance from `list_o_problems.md`:
 ## Testing
 
 - Add small unit coverage for any new section metadata/helper logic introduced in `settings.rs`
-- Run `cargo test -p linux-conductor-gtk -- --nocapture`
+- Run `cargo test -p linux-archductor-gtk -- --nocapture`
 
 ## Risks
 
@@ -122,4 +122,4 @@ Follow the Conductor-style guidance from `list_o_problems.md`:
 - Settings no longer feels like a generic page with loose rows
 - Section navigation reads like an inspector rail
 - Text fields and text editors are easier to scan and edit
-- The settings surface is visibly closer to the Conductor design language
+- The settings surface is visibly closer to the Archductor design language

@@ -31,7 +31,7 @@ fn codex_launch_includes_workspace_and_harness_metadata() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p linux-conductor-core harness -- --nocapture`
+Run: `cargo test -p linux-archductor-core harness -- --nocapture`
 Expected: fail because `crates/core/src/harness.rs` does not exist yet.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -49,7 +49,7 @@ pub fn build_session_launch(...) -> Result<SessionLaunch> {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p linux-conductor-core harness -- --nocapture`
+Run: `cargo test -p linux-archductor-core harness -- --nocapture`
 Expected: pass.
 
 - [ ] **Step 5: Commit**
@@ -78,7 +78,7 @@ fn session_launch_uses_harness_builder_for_codex_and_claude() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p linux-conductor-core session_launch -- --nocapture`
+Run: `cargo test -p linux-archductor-core session_launch -- --nocapture`
 Expected: fail until `WorkspaceStore` delegates to the harness module.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -89,7 +89,7 @@ let launch = harness::build_session_launch(&workspace, kind, harness, &settings,
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p linux-conductor-core session_launch -- --nocapture`
+Run: `cargo test -p linux-archductor-core session_launch -- --nocapture`
 Expected: pass.
 
 - [ ] **Step 5: Commit**
@@ -117,7 +117,7 @@ fn selected_session_surface_shows_harness_event_labels() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p linux-conductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
 Expected: fail on the new labels.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -134,7 +134,7 @@ fn is_system_event_marker(line: &str) -> bool {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p linux-conductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
 Expected: pass.
 
 - [ ] **Step 5: Commit**
@@ -162,7 +162,7 @@ fn fake_codex_and_claude_wrappers_receive_expected_startup_payload() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p linux-conductor --test cli_sessions -- --nocapture`
+Run: `cargo test -p linux-archductor --test cli_sessions -- --nocapture`
 Expected: fail until the wrapper test captures the new payload.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -174,7 +174,7 @@ fs::write(&fake_claude, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CAPTURE\"\n")?;
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p linux-conductor --test cli_sessions -- --nocapture`
+Run: `cargo test -p linux-archductor --test cli_sessions -- --nocapture`
 Expected: pass.
 
 - [ ] **Step 5: Commit**

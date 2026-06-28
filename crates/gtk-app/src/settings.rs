@@ -4,9 +4,9 @@ use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
     ScrolledWindow, Stack, TextView,
 };
-use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::repository::RepositoryStore;
-use linux_conductor_core::settings::{
+use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::repository::RepositoryStore;
+use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
     load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
     PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
@@ -167,7 +167,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
 
     let general_intro = settings_group(
         "Repository runtime",
-        "Commands and runtime flags Linux Conductor uses when preparing and running this repository.",
+        "Commands and runtime flags Linux Archductor uses when preparing and running this repository.",
     );
     general_panel.append(&general_intro.0);
     general_intro.1.append(&settings_field_pair(
@@ -303,7 +303,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         ),
         settings_field(
             "Branch prefix",
-            "Short prefix used when Linux Conductor generates branch names.",
+            "Short prefix used when Linux Archductor generates branch names.",
             &branch_prefix_entry,
         ),
     ));

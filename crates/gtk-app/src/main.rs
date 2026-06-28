@@ -5,6 +5,7 @@ mod buttons;
 mod command_palette;
 mod dashboard;
 mod history;
+mod logger;
 mod projects;
 mod refresh;
 mod session_surface;
@@ -26,8 +27,8 @@ use gtk::{
     Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overlay, ScrolledWindow, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
+use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
@@ -36,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 
-const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
+const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchTarget {
@@ -209,7 +210,7 @@ where
                     .ok_or_else(|| "--page requires a value".to_owned())?;
                 target.page = parse_app_page(value)?;
             }
-            value if value.starts_with("linux-conductor://") => {
+            value if value.starts_with("linux-archductor://") => {
                 target = parse_deep_link(value)?;
             }
             _ => {}
@@ -221,8 +222,8 @@ where
 
 fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
     let rest = value
-        .strip_prefix("linux-conductor://")
-        .ok_or_else(|| "deep link must start with linux-conductor://".to_owned())?;
+        .strip_prefix("linux-archductor://")
+        .ok_or_else(|| "deep link must start with linux-archductor://".to_owned())?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let mut target = LaunchTarget::default();
     let parts = path
@@ -349,6 +350,9 @@ fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferen
 
 fn build_ui(app: &Application, launch_target: LaunchTarget) {
     let paths = AppPaths::from_env();
+    if let Err(err) = logger::init_dev_logger(&paths) {
+        eprintln!("failed to initialize dev logger: {err:#}");
+    }
     let initial_tab = if launch_target.explicit_workspace_tab {
         launch_target.workspace_tab.clone()
     } else {
@@ -374,7 +378,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
 
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Linux Conductor")
+        .title("Linux Archductor")
         .default_width(1280)
         .default_height(800)
         .build();
@@ -397,8 +401,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     apply_view_preferences(&window, &initial_view_preferences);
 
     let split = adw::OverlaySplitView::new();
-    split.set_min_sidebar_width(180.0);
-    split.set_max_sidebar_width(480.0);
+    split.set_min_sidebar_width(120.0);
+    split.set_max_sidebar_width(360.0);
     split.set_pin_sidebar(false);
     split.set_collapsed(false);
     let collapse_sidebar: Rc<dyn Fn()> = {
@@ -686,16 +690,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         gtk::glib::Propagation::Proceed
     });
     window.add_controller(evk);
-
-    // Auto-refresh panels every 5 seconds
-    let hub_auto = refresh_hub.clone();
-    glib::timeout_add_seconds_local(5, move || {
-        hub_auto.refresh(RefreshScope::Sidebar);
-        hub_auto.refresh(RefreshScope::Dashboard);
-        hub_auto.refresh(RefreshScope::Projects);
-        hub_auto.refresh(RefreshScope::Workspace);
-        glib::ControlFlow::Continue
-    });
 
     // Notification tracker: fires toasts when sessions stop or checks fail.
     // State is (workspace_name, prev_active_sessions, prev_session_was_running).
@@ -1030,9 +1024,9 @@ pub(crate) fn detail_row(label: &str, value: &str) -> GBox {
 pub(crate) fn cli_binary() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("linux-conductor")))
+        .and_then(|path| path.parent().map(|parent| parent.join("linux-archductor")))
         .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("linux-conductor"))
+        .unwrap_or_else(|| PathBuf::from("linux-archductor"))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -1043,7 +1037,7 @@ pub(crate) fn default_clone_parent() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("conductor")
+        .join("archductor")
         .join("repos")
 }
 
@@ -1121,8 +1115,8 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_conductor_core::repository::{AddRepository, RepositoryStore};
-    use linux_conductor_core::workspace::{CreateWorkspace, ProcessStatus};
+    use linux_archductor_core::repository::{AddRepository, RepositoryStore};
+    use linux_archductor_core::workspace::{CreateWorkspace, ProcessStatus};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1172,7 +1166,7 @@ mod tests {
     #[test]
     fn launch_target_parses_workspace_and_tab_args() {
         let target = parse_launch_target([
-            "linux-conductor-gtk",
+            "linux-archductor-gtk",
             "--workspace",
             "berlin",
             "--tab",
@@ -1188,8 +1182,8 @@ mod tests {
     #[test]
     fn launch_target_parses_workspace_deep_link() {
         let target = parse_launch_target([
-            "linux-conductor-gtk",
-            "linux-conductor://workspace/berlin?tab=review",
+            "linux-archductor-gtk",
+            "linux-archductor://workspace/berlin?tab=review",
         ])
         .unwrap();
 
@@ -1201,7 +1195,7 @@ mod tests {
     #[test]
     fn launch_target_parses_page_deep_links_and_tab_aliases() {
         let history =
-            parse_launch_target(["linux-conductor-gtk", "linux-conductor://history"]).unwrap();
+            parse_launch_target(["linux-archductor-gtk", "linux-archductor://history"]).unwrap();
         let terminal = parse_workspace_tab("big-terminal").unwrap();
 
         assert_eq!(history.page, AppPage::History);
@@ -1261,9 +1255,9 @@ mod tests {
             &path,
             [
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

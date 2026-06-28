@@ -1,10 +1,10 @@
 # Agent Harnesses Design
 
-> Goal: build first-class Claude Code and Codex harnesses that Conductor can launch, control, checkpoint, and render with structured transcripts.
+> Goal: build first-class Claude Code and Codex harnesses that Archductor can launch, control, checkpoint, and render with structured transcripts.
 
 ## Summary
 
-Conductor already owns workspaces, PTY sessions, checkpoints, and transcript storage. The missing piece is a shared harness layer that turns those primitives into real agent-specific sessions instead of generic terminals with a few option flags.
+Archductor already owns workspaces, PTY sessions, checkpoints, and transcript storage. The missing piece is a shared harness layer that turns those primitives into real agent-specific sessions instead of generic terminals with a few option flags.
 
 This design keeps the current PTY model and adds a small, explicit harness abstraction for `Codex` and `Claude`. The harness layer is responsible for launch composition, startup bootstrapping, option translation, and transcript markers. GTK stays the control surface, but the harness logic moves into `core` so CLI and GUI both use the same behavior.
 
@@ -53,7 +53,7 @@ The session transcript renderer keeps the current labeled-event model and extend
 - skill references
 - slash-command style control events
 
-The goal is not a perfect emulation of each vendor UI. The goal is a readable, stable Conductor transcript that makes the important parts obvious: what the user sent, what the agent said, what tools or skills were invoked, and when the workspace was checkpointed.
+The goal is not a perfect emulation of each vendor UI. The goal is a readable, stable Archductor transcript that makes the important parts obvious: what the user sent, what the agent said, what tools or skills were invoked, and when the workspace was checkpointed.
 
 ## Non-Goals
 

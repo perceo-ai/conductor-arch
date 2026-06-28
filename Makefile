@@ -16,15 +16,15 @@ help:
 
 dev:
 	@trap 'kill 0' INT TERM EXIT; \
-	cargo watch -x "run --bin linux-conductor-gtk" & \
-	cargo watch -x "run --bin linux-conductor --" & \
+	cargo watch -x "run --bin linux-archductor-gtk" & \
+	cargo watch -x "run --bin linux-archductor --" & \
 	wait
 
 gtk:
-	cargo run --bin linux-conductor-gtk
+	cargo run --bin linux-archductor-gtk
 
 cli:
-	cargo run --bin linux-conductor --
+	cargo run --bin linux-archductor --
 
 run: gtk
 

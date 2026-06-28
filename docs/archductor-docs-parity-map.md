@@ -1,7 +1,7 @@
-# Conductor Docs Parity Map
+# Archductor Docs Parity Map
 
-Use this map when updating the Linux Conductor MVP docs or implementing the GUI.
-The product target is Conductor parity first. Better-than-Conductor features
+Use this map when updating the Linux Archductor MVP docs or implementing the GUI.
+The product target is Archductor parity first. Better-than-Archductor features
 should be explicit product decisions after parity is understood.
 
 ## Core Product Loop
@@ -76,7 +76,7 @@ abstraction before it is realistic.
 - Cursor: <https://www.conductor.build/docs/reference/harnesses/cursor>
 
 Key expectation: Claude Code, Codex, and Cursor are harnesses inside the
-workspace workflow. Conductor owns the workspace, branch, terminal, diff,
+workspace workflow. Archductor owns the workspace, branch, terminal, diff,
 checks, PR state, and archive/history flow around those agents.
 
 ## Review And Merge

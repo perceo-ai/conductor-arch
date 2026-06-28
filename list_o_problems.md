@@ -1,4 +1,4 @@
-1. takes way too much to create a workspace, requires manual branch name entry whereas conductor just uses random city names + v1 if they're already used and then a later prompt renames it (either on PR or renamed in system prompt - prompt prefix configurable)
+1. takes way too much to create a workspace, requires manual branch name entry whereas Archductor should just use random city names + v1 if they're already used and then a later prompt renames it (either on PR or renamed in system prompt - prompt prefix configurable)
 2. thread 'main' (189728) panicked at crates/gtk-app/src/terminal.rs:2876:38:
    RefCell already mutably borrowed
    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
@@ -58,7 +58,7 @@ at /home/kitts/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gtk4-0.11.3/
 at /home/kitts/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gio-0.22.6/src/application.rs:25:13
 48: 0x565446f1c349 - gio::application::ApplicationExtManual::run::h58a27c45fa716857
 at /home/kitts/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gio-0.22.6/src/application.rs:17:14
-49: 0x565446ef9a95 - linux_conductor_gtk::main::h60e4f8cb59ee0bf0
+49: 0x565446ef9a95 - linux_archductor_gtk::main::h60e4f8cb59ee0bf0
 at /home/kitts/Documents/dev/personal/conductor-arch/crates/gtk-app/src/main.rs:173:9
 50: 0x565446fb1f4b - core::ops::function::FnOnce::call_once::hd078fa94493cf1ca
 at /usr/src/debug/rust/rustc-1.96.0-src/library/core/src/ops/function.rs:250:5
@@ -77,14 +77,14 @@ at /usr/src/debug/rust/rustc-1.96.0-src/library/std/src/rt.rs:205:5
 thread caused non-unwinding panic. aborting.
 make: \*\*\* [Makefile:18: gtk] Aborted (core dumped)
 
-3. takes wayyy too much to create add a repo. these things are almost one click in conductor - click the plus button, opens a modal (no projects tab), modal has 3 options (folder - opens folder selector, clone - opens selector for gh repos, new - select from 3 template options and folder selector for where to put the new project)
+3. takes wayyy too much to create add a repo. these things should be almost one click in Archductor - click the plus button, opens a modal (no projects tab), modal has 3 options (folder - opens folder selector, clone - opens selector for gh repos, new - select from 3 template options and folder selector for where to put the new project)
 
 4) smoother settings surface with better formatted text fields and shit.
 
 5) filters + refine all buttons (they look ai generated right now)
 
 6) Doesn't align with design schema:
-   Design language — "Conductor-style" dark IDE shell
+   Design language — "Archductor-style" dark IDE shell
 
 Vibe: Calm, dense, developer-native. Dark, low-contrast surfaces with one green accent. Nothing decorative — every pixel is information or affordance. Think "native desktop app," not "web page." No gradients, no rounded cards-with-left-border-accent, no shadows on a dark UI.
 

@@ -311,7 +311,7 @@ fn custom_palette_command_from_config(entry: &str) -> Option<PaletteCommand> {
         "ci" => ("CI", "pnpm test && pnpm lint && pnpm build"),
         "status" | "gitstatus" => ("Git Status", "git status --short --branch"),
         "diff" | "gitdiff" => ("Git Diff", "git diff --stat && git diff -- ."),
-        "env" => ("Env", "env | sort | grep '^CONDUCTOR_'"),
+        "env" => ("Env", "env | sort | grep '^ARCHDUCTOR_'"),
         "files" => (
             "Files",
             "find . -maxdepth 2 -type f | sort | sed 's#^./##' | head -80",

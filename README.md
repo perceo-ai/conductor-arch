@@ -1,6 +1,6 @@
-# Linux Conductor
+# Linux Archductor
 
-Linux Conductor is a desktop control plane for running coding agents across
+Linux Archductor is a desktop control plane for running coding agents across
 isolated Git worktree workspaces.
 
 Use it when one repository has several streams of work in flight: create a
@@ -13,13 +13,13 @@ desktops with GTK4/libadwaita.
 
 ## What Works Today
 
-The current app supports the core Conductor-style loop, with some rough edges:
+The current app supports the core Archductor loop, with some rough edges:
 
 - Add an existing repository or clone a Git URL from the Projects page.
 - Create workspaces from a branch, prompt, GitHub issue, GitHub PR, or Linear
   issue.
 - Give each workspace its own Git worktree, branch, `.context` directory, and
-  stable `CONDUCTOR_PORT` range.
+  stable `ARCHDUCTOR_PORT` range.
 - Run multiple workspaces for the same repository in parallel.
 - Start multiple Shell, Codex, Claude Code, or Cursor sessions inside one
   workspace.
@@ -41,11 +41,11 @@ The current app supports the core Conductor-style loop, with some rough edges:
 The GUI is usable, but not fully polished. Agent sessions run local PTY-backed
 harnesses and render structured app-native transcript events. Terminal
 rendering, exhaustive per-command shortcuts, full visual theme/layout
-application, and full Conductor visual parity are still in progress.
+application, and full Archductor visual parity are still in progress.
 
 ## The Workflow
 
-1. Open `linux-conductor-gtk`.
+1. Open `linux-archductor-gtk`.
 2. Add or clone a repository on the Projects page.
 3. Configure repository scripts and settings if the project needs them.
 4. Create a workspace for the next task.
@@ -65,16 +65,16 @@ debugging, and fallback workflows.
 ### AppImage
 
 ```bash
-curl -Lo linux-conductor.AppImage \
-  https://github.com/pranavkannepalli/conductor-arch/releases/latest/download/linux-conductor-x86_64.AppImage
-chmod +x linux-conductor.AppImage
-sudo mv linux-conductor.AppImage /usr/local/bin/linux-conductor
+curl -Lo linux-archductor.AppImage \
+  https://github.com/pranavkannepalli/conductor-arch/releases/latest/download/linux-archductor-x86_64.AppImage
+chmod +x linux-archductor.AppImage
+sudo mv linux-archductor.AppImage /usr/local/bin/linux-archductor
 ```
 
 Run the app:
 
 ```bash
-linux-conductor
+linux-archductor
 ```
 
 The AppImage opens the GTK app with no arguments and forwards CLI arguments to
@@ -105,7 +105,7 @@ Build and run:
 git clone https://github.com/pranavkannepalli/conductor-arch
 cd conductor-arch
 cargo build --workspace --release --locked
-./target/release/linux-conductor-gtk
+./target/release/linux-archductor-gtk
 ```
 
 Or use the short `make` targets:
@@ -124,8 +124,8 @@ make publish-tag VERSION=0.1.0
 Optional install:
 
 ```bash
-sudo install -Dm755 target/release/linux-conductor /usr/local/bin/linux-conductor
-sudo install -Dm755 target/release/linux-conductor-gtk /usr/local/bin/linux-conductor-gtk
+sudo install -Dm755 target/release/linux-archductor /usr/local/bin/linux-archductor
+sudo install -Dm755 target/release/linux-archductor-gtk /usr/local/bin/linux-archductor-gtk
 ```
 
 ## Requirements
@@ -144,7 +144,7 @@ existing local CLI authentication.
 
 ## Repository Settings
 
-Shared project settings live at `.conductor/settings.toml` in the repository
+Shared project settings live at `.archductor/settings.toml` in the repository
 root. Commit this file when teammates should get the same setup.
 
 ```toml
@@ -159,7 +159,7 @@ spotlight_testing = false
 
 [scripts]
 setup = "pnpm install"
-run = "pnpm dev --port $CONDUCTOR_PORT"
+run = "pnpm dev --port $ARCHDUCTOR_PORT"
 archive = "./script/workspace-archive.sh"
 run_mode = "concurrent"
 
@@ -214,7 +214,7 @@ diff_preference = "unified"
 transcript_display = "structured"
 ```
 
-Local machine overrides live at `.conductor/settings.local.toml`. Do not commit
+Local machine overrides live at `.archductor/settings.local.toml`. Do not commit
 secrets.
 
 Use `.worktreeinclude` when new workspaces should copy gitignored local files:
@@ -230,21 +230,21 @@ belong in `scripts.setup`.
 
 ### Script Environment
 
-Setup, run, archive, terminal, and agent processes receive Conductor context.
+Setup, run, archive, terminal, and agent processes receive Archductor context.
 When `customization.workspace_defaults.working_directory` is set, processes run
 from that relative subdirectory inside the worktree.
 
 | Variable | Value |
 | --- | --- |
-| `CONDUCTOR_WORKSPACE_NAME` | Workspace name |
-| `CONDUCTOR_WORKSPACE_PATH` | Absolute path to the worktree |
-| `CONDUCTOR_WORKING_DIRECTORY` | Absolute path to the selected working directory |
-| `CONDUCTOR_ROOT_PATH` | Absolute path to the main repository |
-| `CONDUCTOR_DEFAULT_BRANCH` | Repository default branch |
-| `CONDUCTOR_PORT` | Base port for this workspace |
-| `CONDUCTOR_IS_LOCAL` | `1` |
-| `CONDUCTOR_LINKED_DIRECTORIES` | Newline-separated `workspace=/path` entries for linked workspaces |
-| `CONDUCTOR_LINKED_DIRECTORY_<NAME>` | Absolute path for one linked workspace |
+| `ARCHDUCTOR_WORKSPACE_NAME` | Workspace name |
+| `ARCHDUCTOR_WORKSPACE_PATH` | Absolute path to the worktree |
+| `ARCHDUCTOR_WORKING_DIRECTORY` | Absolute path to the selected working directory |
+| `ARCHDUCTOR_ROOT_PATH` | Absolute path to the main repository |
+| `ARCHDUCTOR_DEFAULT_BRANCH` | Repository default branch |
+| `ARCHDUCTOR_PORT` | Base port for this workspace |
+| `ARCHDUCTOR_IS_LOCAL` | `1` |
+| `ARCHDUCTOR_LINKED_DIRECTORIES` | Newline-separated `workspace=/path` entries for linked workspaces |
+| `ARCHDUCTOR_LINKED_DIRECTORY_<NAME>` | Absolute path for one linked workspace |
 
 ### Linked Directories
 
@@ -254,9 +254,9 @@ Links are stored in the app database and materialized as symlinks under
 `.context/linked-directories/<target-workspace>`.
 
 ```bash
-linux-conductor workspace link-dir frontend backend
-linux-conductor workspace linked-dirs frontend
-linux-conductor workspace unlink-dir frontend backend
+linux-archductor workspace link-dir frontend backend
+linux-archductor workspace linked-dirs frontend
+linux-archductor workspace unlink-dir frontend backend
 ```
 
 `scripts.run_mode = "concurrent"` lets multiple workspaces run at once.
@@ -429,7 +429,7 @@ first.
 - Linux: primary supported platform.
 - WSL: likely the best first Windows-adjacent target after Linux.
 - macOS: technically possible, but lower priority because the original
-  Conductor app already serves macOS and GTK packaging is less native there.
+  the upstream Conductor app already serves macOS and GTK packaging is less native there.
 - Native Windows: possible later, but process groups, PTYs, paths, shells,
   signals, and packaging need deliberate platform abstraction before it is a
   realistic support target.
@@ -439,75 +439,75 @@ first.
 The CLI mirrors the app backend and is useful for smoke tests:
 
 ```bash
-linux-conductor doctor
+linux-archductor doctor
 
-linux-conductor repo add <path> [--name <name>]
-linux-conductor repo list
-linux-conductor repo doctor [<name>]
-linux-conductor repo settings <name> export [--local] [--output <path>]
-linux-conductor repo settings <name> import <path> [--local]
+linux-archductor repo add <path> [--name <name>]
+linux-archductor repo list
+linux-archductor repo doctor [<name>]
+linux-archductor repo settings <name> export [--local] [--output <path>]
+linux-archductor repo settings <name> import <path> [--local]
 
-linux-conductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
-linux-conductor workspace create <repo> --from-issue <number>
-linux-conductor workspace create <repo> --from-pr <number>
-linux-conductor workspace create <repo> --from-linear <issue-id>
-linux-conductor workspace create <repo> --prompt <prompt>
-linux-conductor workspace list
-linux-conductor workspace archive <name> [--remove-worktree]
-linux-conductor workspace restore <name>
-linux-conductor workspace discard <name>
-linux-conductor workspace rename <name> <new-name>
+linux-archductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
+linux-archductor workspace create <repo> --from-issue <number>
+linux-archductor workspace create <repo> --from-pr <number>
+linux-archductor workspace create <repo> --from-linear <issue-id>
+linux-archductor workspace create <repo> --prompt <prompt>
+linux-archductor workspace list
+linux-archductor workspace archive <name> [--remove-worktree]
+linux-archductor workspace restore <name>
+linux-archductor workspace discard <name>
+linux-archductor workspace rename <name> <new-name>
 
-linux-conductor session start <workspace> --kind shell|codex|claude|cursor
-linux-conductor session open <workspace> --kind shell|codex|claude|cursor
-linux-conductor session stop <workspace>
-linux-conductor session list <workspace>
+linux-archductor session start <workspace> --kind shell|codex|claude|cursor
+linux-archductor session open <workspace> --kind shell|codex|claude|cursor
+linux-archductor session stop <workspace>
+linux-archductor session list <workspace>
 
-linux-conductor run <workspace>
-linux-conductor stop <workspace>
-linux-conductor logs <workspace> --run|--session
+linux-archductor run <workspace>
+linux-archductor stop <workspace>
+linux-archductor logs <workspace> --run|--session
 
-linux-conductor diff <workspace> [--name-only] [--file <path>]
-linux-conductor checks <workspace>
-linux-conductor conflicts <workspace>
+linux-archductor diff <workspace> [--name-only] [--file <path>]
+linux-archductor checks <workspace>
+linux-archductor conflicts <workspace>
 
-linux-conductor todo add <workspace> <text...>
-linux-conductor todo list <workspace>
-linux-conductor todo done <id>
+linux-archductor todo add <workspace> <text...>
+linux-archductor todo list <workspace>
+linux-archductor todo done <id>
 
-linux-conductor review add <workspace> <file> [--line <n>] <body...>
-linux-conductor review list <workspace>
-linux-conductor review resolve <id>
+linux-archductor review add <workspace> <file> [--line <n>] <body...>
+linux-archductor review list <workspace>
+linux-archductor review resolve <id>
 
-linux-conductor pr create <workspace> [--title <title>] [--body <body>] [--draft]
-linux-conductor pr view <workspace>
-linux-conductor pr checks <workspace>
-linux-conductor pr merge <workspace> [--method squash|merge|rebase]
+linux-archductor pr create <workspace> [--title <title>] [--body <body>] [--draft]
+linux-archductor pr view <workspace>
+linux-archductor pr checks <workspace>
+linux-archductor pr merge <workspace> [--method squash|merge|rebase]
 
-linux-conductor workspace link-dir <workspace> <target-workspace>
-linux-conductor workspace linked-dirs <workspace>
-linux-conductor workspace unlink-dir <workspace> <target-workspace>
+linux-archductor workspace link-dir <workspace> <target-workspace>
+linux-archductor workspace linked-dirs <workspace>
+linux-archductor workspace unlink-dir <workspace> <target-workspace>
 
-linux-conductor checkpoint create <workspace> [--session <id>] <message...>
-linux-conductor checkpoint list <workspace>
-linux-conductor checkpoint restore <workspace> <id>
+linux-archductor checkpoint create <workspace> [--session <id>] <message...>
+linux-archductor checkpoint list <workspace>
+linux-archductor checkpoint restore <workspace> <id>
 ```
 
 ## Data Locations
 
 ```text
-~/.config/linux-conductor/config.toml
-~/.local/share/linux-conductor/linux-conductor.db
-~/.local/state/linux-conductor/logs/<workspace>/
-~/.cache/linux-conductor/
-~/conductor/workspaces/<repo>/<workspace>/
+~/.config/linux-archductor/config.toml
+~/.local/share/linux-archductor/linux-archductor.db
+~/.local/state/linux-archductor/logs/<workspace>/
+~/.cache/linux-archductor/
+~/archductor/workspaces/<repo>/<workspace>/
 ```
 
 ## Documentation
 
 - [Manual testing checklist](docs/manual-testing-checklist.md)
 - [Local deploy and validation guide](docs/deploy-and-local-test.md)
-- [Conductor docs parity map](docs/conductor-docs-parity-map.md)
+- [Archductor docs parity map](docs/archductor-docs-parity-map.md)
 - [Packaging notes](packaging/README.md)
 
 ## Known Limits

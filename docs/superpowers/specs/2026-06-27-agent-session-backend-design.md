@@ -6,6 +6,23 @@ Replace PTY-driven chat sessions in the GTK app with supported agent transports 
 
 This redesign applies only to agent chat sessions. Shell terminals stay PTY-based.
 
+## Billing And Authentication Constraint
+
+This redesign must prefer subscription or account-backed authentication and must not silently bill API credits.
+
+Hard requirements:
+
+- Codex sessions must use ChatGPT/Codex account auth or Codex access tokens tied to ChatGPT-managed entitlements.
+- Codex sessions must fail closed if only API-key auth is available, unless the user explicitly opts into API billing later.
+- The app must not inherit `OPENAI_API_KEY` or `CODEX_API_KEY` into a Codex-backed session path when subscription/account auth is required.
+- The app must surface the active auth mode clearly in the UI before the user sends a prompt.
+
+Claude has a stricter constraint:
+
+- Anthropic's Agent SDK documentation requires API-key or supported cloud-provider authentication for third-party products and does not permit offering `claude.ai` login or routing usage through consumer plan credentials on behalf of users.
+- Because of that, a Claude Agent SDK embedding does not currently satisfy the "use subscriptions and not API credits" requirement for this GTK app.
+- Under this requirement, Claude migration is blocked unless we identify a supported Claude account-backed local integration path that Anthropic explicitly allows for this product shape.
+
 ## Why
 
 The current GTK chat path treats Codex and Claude like terminal apps:
@@ -27,9 +44,11 @@ GTK should communicate with the Codex app server using structured requests and e
 
 ### Claude
 
-Use the Claude Agent SDK streaming session path as the primary backend for Claude sessions.
+Current official embedded path is the Claude Agent SDK streaming session path.
 
-GTK should communicate with Claude through the supported SDK session interface instead of PTY keystroke injection.
+However, under the billing constraint above, that path is not currently acceptable for this app because Anthropic documents API-key or supported cloud-provider auth for third-party products using the SDK.
+
+GTK should only migrate Claude once a supported non-API-credit account-backed transport is confirmed.
 
 ## Non-Goals
 
@@ -37,6 +56,7 @@ GTK should communicate with Claude through the supported SDK session interface i
 - Do not migrate run/setup/background process infrastructure in this change.
 - Do not redesign the full visual language of the GTK UI.
 - Do not normalize Codex and Claude into a fake lowest-common-denominator model API.
+- Do not silently fall back from subscription/account-backed auth to API-billed auth.
 
 ## Current State
 
@@ -149,6 +169,7 @@ Codex backend responsibilities:
 - map app-server streamed events into `AgentEvent`
 - send user messages through the supported protocol
 - capture backend errors and surface them as session events
+- refuse startup when active auth resolves to API-key billing while subscription/account-backed mode is required
 
 Codex bootstrap settings such as plan mode, fast mode, goals, and similar options should be expressed through supported request/config/session parameters where possible, not through fake terminal boot text.
 
@@ -156,15 +177,15 @@ If some existing harness settings do not map cleanly yet, preserve them as app m
 
 #### Claude backend
 
-Claude backend responsibilities:
+Claude backend work is conditional.
 
-- launch or attach to a Claude Agent SDK session
-- use streaming mode for interactive GTK chat
-- map SDK stream events into `AgentEvent`
-- persist SDK-native session identity for resume
-- submit user messages through the supported SDK interface
+Before implementing a Claude replacement backend, confirm a supported authentication path that:
 
-Claude-specific controls should remain available only where they map cleanly to the SDK.
+- is allowed for this product shape
+- uses Claude subscription or account-backed billing rather than API credits
+- supports interactive structured session transport
+
+If that path does not exist, Claude remains on the legacy path temporarily or is disabled until a supported path exists. Do not ship a Claude SDK integration that quietly violates the billing requirement.
 
 ### 6. GTK session surface redesign
 
@@ -208,17 +229,18 @@ Introduce the abstraction and Codex backend behind the existing UI.
 Target outcome:
 
 - Codex sessions work with structured transport
+- Codex sessions verify subscription/account-backed auth before send
 - shell sessions remain unchanged
 - old saved Codex PTY transcripts remain readable
 
 ### Phase 2
 
-Migrate Claude sessions to the new backend abstraction.
+Decide Claude path based on provider-supported authentication.
 
 Target outcome:
 
-- both agent types use supported transports
-- PTY chat transport is no longer used for agent sessions
+- if a supported non-API-credit Claude transport exists, migrate Claude to the new backend abstraction
+- otherwise, explicitly mark Claude migration blocked under provider policy and do not switch it to an API-billed SDK path
 
 ### Phase 3
 
@@ -236,7 +258,8 @@ Target outcome:
 Add tests for:
 
 - event normalization for Codex backend messages
-- event normalization for Claude backend messages
+- Codex auth-mode detection and fail-closed startup behavior
+- event normalization for Claude backend messages if Claude migration proceeds
 - session persistence and resume ID storage
 - transcript rendering from structured events
 
@@ -245,8 +268,9 @@ Add tests for:
 Add tests for:
 
 - launching a Codex backend session and receiving structured events
+- launching a Codex backend session with API-key-only auth and confirming fail-closed behavior
 - sending a user message and observing assistant output events
-- launching/resuming a Claude backend session and receiving structured events
+- launching/resuming a Claude backend session and receiving structured events if Claude migration proceeds
 - migration path for old saved PTY transcripts
 
 Where live external agent processes are too heavy for CI, add backend fakes that emit realistic event streams and keep one smaller smoke path for real-process coverage if practical.
@@ -273,6 +297,15 @@ Mitigation:
 - normalize into a narrow app event model
 - keep backend-specific metadata separate from shared rendering state
 
+### Claude provider policy mismatch
+
+The user's requirement is "subscriptions, not API credits". Anthropic's current SDK documentation for third-party developers points to API-key or supported cloud-provider auth for embedded Agent SDK usage.
+
+Mitigation:
+
+- treat Claude migration as blocked until a supported account-backed path is verified
+- do not implement a hidden API-billed fallback
+
 ### Existing persistence assumptions
 
 Current history and transcript views assume flat text logs.
@@ -295,24 +328,26 @@ Mitigation:
 ## Open Decisions Resolved
 
 - Replace current Codex session path completely: yes
-- Apply the same transport redesign goal to Claude: yes
+- Apply the same transport redesign goal to Claude: yes, but only if provider-supported non-API-credit auth exists
 - Keep shell sessions on PTY: yes
 - Prefer native supported agent transports over simulated terminal interaction: yes
+- Fail closed instead of using API-billed auth when subscription/account-backed auth is required: yes
 
 ## Recommended Delivery Order
 
 1. Add shared agent backend abstraction and event model.
-2. Add Codex app-server backend.
+2. Add Codex app-server backend with subscription/account-auth checks.
 3. Wire GTK session surface to structured events for Codex.
 4. Add persistent backend-native resume/session metadata.
-5. Add Claude Agent SDK backend.
-6. Remove PTY-based agent submission and transcript dependence.
+5. Verify whether Claude has a supported non-API-credit embedded path.
+6. Migrate Claude only if step 5 succeeds.
+7. Remove PTY-based agent submission and transcript dependence where replacement backends exist.
 
 ## Success Criteria
 
 - GTK no longer submits Codex prompts by PTY keystroke injection.
-- GTK no longer submits Claude prompts by PTY keystroke injection.
+- GTK refuses to start or send a Codex session through API-billed auth when subscription/account-backed mode is required.
 - Codex replies stream into the GTK UI through supported app-server events.
-- Claude replies stream into the GTK UI through supported SDK events.
+- Claude replies stream into the GTK UI through a supported non-API-credit transport if and only if such a transport is verified.
 - Agent session resume uses stored backend-native session identity.
 - Shell terminal behavior remains intact.

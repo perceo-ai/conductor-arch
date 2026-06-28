@@ -8,7 +8,7 @@ Before touching code or docs in this repository, read these files in order:
 2. `progress.md`
 3. `docs/mvp-scope.md`
 4. `docs/manual-testing-checklist.md`
-5. `docs/conductor-docs-parity-map.md`
+5. `docs/archductor-docs-parity-map.md`
 6. `README.md`
 
 Also keep the official Conductor docs in mind as the parity baseline:
@@ -25,8 +25,9 @@ Also keep the official Conductor docs in mind as the parity baseline:
 
 Treat `docs/conductor-gui-mvp-handoff.md` as the source of truth for the
 corrected MVP. The old direction over-indexed on CLI/backend work. The product
-goal is a GUI-first Conductor-style desktop app that matches Conductor first.
-Better-than-Conductor features come only after an explicit product decision.
+goal is a GUI-first Archductor desktop app that matches the upstream Conductor
+workflow first. Better-than-Archductor features come only after an explicit
+product decision.
 
 ## Operating Mode
 
@@ -59,7 +60,7 @@ Use Superpowers:
 - Use systematic debugging for bugs.
 - Use TDD where practical for behavior changes.
 - Use verification-before-completion before claiming something is done.
-- Use subagents or separate Conductor workspaces for independent work when that
+- Use subagents or separate Archductor workspaces for independent work when that
   helps finish faster.
 
 There are enough credits. Optimize for throughput while keeping the codebase
@@ -116,7 +117,7 @@ Follow the handoff phases:
 
 ## Product North Star
 
-Conductor is a local desktop control plane for parallel coding agents:
+Archductor is a local desktop control plane for parallel coding agents:
 
 - Projects wrap repositories.
 - Workspaces are Git worktrees and branches.

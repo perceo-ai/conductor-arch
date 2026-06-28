@@ -4,8 +4,8 @@ use gtk::{
     Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation, PolicyType,
     ScrolledWindow, TextBuffer, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_conductor_core::pty::PtySession;
-use linux_conductor_core::workspace::{
+use linux_archductor_core::pty::PtySession;
+use linux_archductor_core::workspace::{
     ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
     WorkspaceStore,
 };
@@ -3032,7 +3032,7 @@ fn format_initial_terminal_text(
     preferences: &TerminalPreferences,
 ) -> String {
     let mut text = format!(
-        "Workspace terminal\nworkspace: {}\npath: {}\n{}\n\nCommands run here execute inside the workspace with CONDUCTOR_* environment variables.",
+        "Workspace terminal\nworkspace: {}\npath: {}\n{}\n\nCommands run here execute inside the workspace with ARCHDUCTOR_* environment variables.",
         workspace_name,
         workspace_path.display(),
         preferences.summary()
@@ -3881,7 +3881,7 @@ pub(crate) fn terminal_command_presets(configured: &[String]) -> Vec<TerminalCom
 
 fn default_terminal_command_presets() -> Vec<TerminalCommandPreset> {
     [
-        ("Env", "env | sort | grep '^CONDUCTOR_'"),
+        ("Env", "env | sort | grep '^ARCHDUCTOR_'"),
         ("Git Status", "git status --short --branch"),
         ("Git Diff", "git diff --stat && git diff -- ."),
         (
@@ -3927,7 +3927,7 @@ fn terminal_command_preset_from_config(entry: &str) -> Option<TerminalCommandPre
         "env" => {
             return Some(terminal_command_preset(
                 "Env",
-                "env | sort | grep '^CONDUCTOR_'",
+                "env | sort | grep '^ARCHDUCTOR_'",
             ))
         }
         "files" => {
@@ -4198,7 +4198,7 @@ fn display_command(program: &Path, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_conductor_core::workspace::{ProcessKind, ProcessStatus};
+    use linux_archductor_core::workspace::{ProcessKind, ProcessStatus};
 
     fn terminal_summary(
         id: i64,
@@ -4213,6 +4213,7 @@ mod tests {
             process: ProcessRecord {
                 id,
                 workspace_id: 1,
+                chat_thread_id: None,
                 kind: ProcessKind::Terminal,
                 command: command.to_owned(),
                 pid: 4_000 + id as u32,
@@ -4223,6 +4224,7 @@ mod tests {
                 ended_at: (status != ProcessStatus::Running)
                     .then(|| "2026-06-18T04:00:00Z".to_owned()),
                 session_harness_metadata: None,
+                session_resume_id: None,
             },
             line_count,
             byte_count,
@@ -4718,6 +4720,7 @@ mod tests {
         let record = ProcessRecord {
             id: 19,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4040,
@@ -4727,6 +4730,7 @@ mod tests {
             exit_code: None,
             ended_at: None,
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let formatted = format_terminal_tail_transcript(&record, "tail line\n");
@@ -4741,6 +4745,7 @@ mod tests {
         let record = ProcessRecord {
             id: 33,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4040,
@@ -4750,6 +4755,7 @@ mod tests {
             exit_code: None,
             ended_at: None,
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let formatted = format_terminal_head_transcript(&record, "first line\n");
@@ -4764,6 +4770,7 @@ mod tests {
         let record = ProcessRecord {
             id: 88,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4040,
@@ -4773,6 +4780,7 @@ mod tests {
             exit_code: None,
             ended_at: None,
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let formatted = format_terminal_line_transcript(&record, 17, 5, "ctx\n");
@@ -5049,6 +5057,7 @@ mod tests {
         let record = ProcessRecord {
             id: 7,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4242,
@@ -5058,6 +5067,7 @@ mod tests {
             exit_code: Some(0),
             ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let rendered = format_selected_terminal_transcript(&record, "hello\n");

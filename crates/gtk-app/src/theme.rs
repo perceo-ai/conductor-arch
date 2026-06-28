@@ -467,6 +467,15 @@ checkbutton {
     font-size: 16px;
     font-weight: 700;
 }
+.card-meta.ws-pr-status-ready {
+    color: #84e0a0;
+}
+.card-meta.ws-pr-status-failed {
+    color: #ff8a8a;
+}
+.card-meta.ws-pr-status-merged {
+    color: #c6a3ff;
+}
 
 .command-center-strip,
 .workspace-summary-strip {
@@ -1098,6 +1107,18 @@ window.lc-theme-dark,
 .workspace-badge-muted {
     color: #b4b4b4;
     background-color: transparent;
+}
+.workspace-badge.ws-pr-status-ready {
+    background-color: #163522;
+    color: #84e0a0;
+}
+.workspace-badge.ws-pr-status-failed {
+    background-color: #3a1a1a;
+    color: #ff8a8a;
+}
+.workspace-badge.ws-pr-status-merged {
+    background-color: #311d46;
+    color: #c6a3ff;
 }
 
 /* ── Sidebar bottom bar ── */

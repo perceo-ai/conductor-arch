@@ -4,17 +4,20 @@ use gtk::{
     Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
     ScrolledWindow, Stack,
 };
-use linux_conductor_core::repository::RepositoryStore;
-use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceStore};
+use linux_archductor_core::repository::RepositoryStore;
+use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceStore};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::buttons::{icon_button, text_button};
 use crate::projects::show_repository_quick_add_dialog;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
+use crate::workspace_command_center::workspace_pull_request_status_summary;
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
@@ -25,6 +28,7 @@ pub(crate) fn build_app_sidebar(
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
+    let app_state = app_state.clone();
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
 
@@ -200,10 +204,12 @@ pub(crate) fn build_app_sidebar(
         let list = list.clone();
         let names = Rc::clone(&names);
         let state = app_state.clone();
+        let app_state = app_state.clone();
         let search_entry = search_entry.clone();
         let refresh_hub = refresh_hub.clone();
         let refresh_workspace = refresh_workspace.clone();
         let refresh_view_preferences = refresh_view_preferences.clone();
+        let stack = stack.clone();
         let sync_nav_buttons = sync_nav_buttons.clone();
         let db_path_populate = db_path_populate.clone();
         move || {
@@ -256,22 +262,67 @@ pub(crate) fn build_app_sidebar(
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
+                        let app_state = app_state.clone();
+                        let stack = stack.clone();
                         let repo_name = repo_name.clone();
-                        move || {
-                            // Create immediately with auto city-name branch — no modal.
-                            let _ = WorkspaceStore::open(db_path.clone()).and_then(|store| {
-                                store.create(CreateWorkspace {
-                                    repository_name: repo_name.clone(),
-                                    name: String::new(),
-                                    branch: String::new(),
-                                    base_ref: None,
-                                })
+                        move |add_btn: Button| {
+                            add_btn.set_sensitive(false);
+                            add_btn.set_tooltip_text(Some("Creating workspace..."));
+                            let rx = spawn_background_job({
+                                let db_path = db_path.clone();
+                                let repo_name = repo_name.clone();
+                                move || {
+                                    WorkspaceStore::open(db_path).and_then(|store| {
+                                        store.create(CreateWorkspace {
+                                            repository_name: repo_name,
+                                            name: String::new(),
+                                            branch: String::new(),
+                                            base_ref: None,
+                                        })
+                                    })
+                                }
                             });
-                            refresh_hub.refresh(RefreshScope::Projects);
-                            refresh_hub.refresh(RefreshScope::Sidebar);
-                            refresh_hub.refresh(RefreshScope::Dashboard);
-                            refresh_workspace();
-                            refresh_view_preferences();
+                            let refresh_hub = refresh_hub.clone();
+                            let refresh_workspace = refresh_workspace.clone();
+                            let refresh_view_preferences = refresh_view_preferences.clone();
+                            let app_state = app_state.clone();
+                            let stack = stack.clone();
+                            glib::timeout_add_local(Duration::from_millis(100), move || {
+                                match rx.try_recv() {
+                                    Ok(result) => {
+                                        add_btn.set_sensitive(true);
+                                        add_btn.set_tooltip_text(Some("Create workspace"));
+                                        if let Ok(workspace) = result {
+                                            let default_tab = WorkspaceStore::open(
+                                                app_state.workspace_database_path(),
+                                            )
+                                            .and_then(|store| {
+                                                store.workspace_view_defaults(&workspace.name)
+                                            })
+                                            .ok()
+                                            .and_then(|defaults| defaults.default_visible_tab)
+                                            .and_then(|tab| WorkspaceTab::from_config(&tab));
+                                            app_state.navigate_to_workspace_with_default_tab(
+                                                Some(workspace.name),
+                                                default_tab,
+                                            );
+                                            stack.set_visible_child_name("workspace");
+                                            refresh_hub.refresh(RefreshScope::Projects);
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            refresh_hub.refresh(RefreshScope::Dashboard);
+                                            refresh_workspace();
+                                            refresh_view_preferences();
+                                        }
+                                        glib::ControlFlow::Break
+                                    }
+                                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                    Err(mpsc::TryRecvError::Disconnected) => {
+                                        add_btn.set_sensitive(true);
+                                        add_btn.set_tooltip_text(Some("Create workspace"));
+                                        glib::ControlFlow::Break
+                                    }
+                                }
+                            });
                         }
                     });
                     list.append(&header_row);
@@ -294,6 +345,13 @@ pub(crate) fn build_app_sidebar(
                             line.active_sessions,
                             line.open_todos,
                             line.pull_request.as_ref().map(|p| p.number),
+                            line.pull_request.as_ref().map(|pr| {
+                                workspace_pull_request_status_summary(
+                                    &workspace_store,
+                                    &ws.name,
+                                    pr,
+                                )
+                            }),
                             line.branch_push_state
                                 .as_ref()
                                 .map(|s| s.ahead)
@@ -518,6 +576,7 @@ fn build_workspace_row(
     active_sessions: usize,
     open_todos: usize,
     pr_number: Option<i64>,
+    github_badge: Option<crate::workspace_command_center::PullRequestStatusSummary>,
     ahead: usize,
     updated_at: &str,
 ) -> ListBoxRow {
@@ -552,23 +611,25 @@ fn build_workspace_row(
     top_row.append(&name_label);
 
     // Badge priority: PR > preview > active > ahead commits > todos
-    let badge_text = if let Some(pr) = pr_number {
-        Some(format!("PR #{pr}"))
-    } else if run_active {
-        Some("preview".to_string())
-    } else if active_sessions > 0 {
-        Some("active".to_string())
-    } else if ahead > 0 {
-        Some(format!("+{ahead}"))
-    } else if open_todos > 0 {
-        Some(format!("{open_todos} todo"))
-    } else {
-        None
-    };
+    let badge_text = workspace_badge_text(
+        pr_number,
+        github_badge
+            .as_ref()
+            .and_then(|state| state.attention_label()),
+        run_active,
+        active_sessions,
+        ahead,
+        open_todos,
+    );
 
     if let Some(badge) = badge_text {
         let badge_label = Label::new(Some(&badge));
         badge_label.add_css_class("workspace-badge");
+        if let Some(state) = github_badge.as_ref() {
+            if let Some(css_class) = state.attention_css_class() {
+                badge_label.add_css_class(css_class);
+            }
+        }
         if !is_active && ahead == 0 && pr_number.is_none() {
             badge_label.add_css_class("workspace-badge-muted");
         }
@@ -601,10 +662,39 @@ fn build_workspace_row(
     ListBoxRow::builder().child(&row_box).build()
 }
 
+fn workspace_badge_text(
+    pr_number: Option<i64>,
+    pr_attention: Option<&str>,
+    run_active: bool,
+    active_sessions: usize,
+    ahead: usize,
+    open_todos: usize,
+) -> Option<String> {
+    if let Some(attention) = pr_attention.filter(|value| !value.is_empty()) {
+        return Some(attention.to_owned());
+    }
+    if let Some(pr) = pr_number {
+        return Some(format!("PR #{pr}"));
+    }
+    if run_active {
+        return Some("preview".to_owned());
+    }
+    if active_sessions > 0 {
+        return Some("active".to_owned());
+    }
+    if ahead > 0 {
+        return Some(format!("+{ahead}"));
+    }
+    if open_todos > 0 {
+        return Some(format!("{open_todos} todo"));
+    }
+    None
+}
+
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
-    on_add_workspace: impl Fn() + 'static,
+    on_add_workspace: impl Fn(Button) + 'static,
 ) -> ListBoxRow {
     let shell = GBox::new(Orientation::Horizontal, 6);
     shell.add_css_class("repo-section-row");
@@ -623,13 +713,28 @@ fn section_header_row(
     let add_btn = sidebar_icon_button("list-add-symbolic", "Create workspace");
     add_btn.add_css_class("repo-header-add");
     add_btn.set_tooltip_text(Some("Create workspace"));
-    add_btn.connect_clicked(move |_| on_add_workspace());
+    add_btn.connect_clicked({
+        let add_btn = add_btn.clone();
+        move |_| on_add_workspace(add_btn.clone())
+    });
     shell.append(&add_btn);
 
     let row = ListBoxRow::builder().child(&shell).build();
     row.set_selectable(false);
     row.set_activatable(false);
     row
+}
+
+fn spawn_background_job<F, T>(job: F) -> mpsc::Receiver<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    rx
 }
 
 fn empty_repo_row() -> ListBoxRow {
@@ -694,5 +799,36 @@ fn relative_time(ts: &str) -> String {
         3600..=86399 => format!("{}h ago", delta / 3600),
         86400..=604799 => format!("{}d ago", delta / 86400),
         _ => format!("{}w ago", delta / 604800),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{spawn_background_job, workspace_badge_text};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn workspace_badge_prefers_failed_github_state_over_pr_number() {
+        let badge = workspace_badge_text(Some(42), Some("checks failed"), false, 0, 0, 0);
+        assert_eq!(badge.as_deref(), Some("checks failed"));
+    }
+
+    #[test]
+    fn workspace_badge_falls_back_to_pr_number_without_github_state() {
+        let badge = workspace_badge_text(Some(42), None, false, 0, 0, 0);
+        assert_eq!(badge.as_deref(), Some("PR #42"));
+    }
+
+    #[test]
+    fn spawn_background_job_returns_before_work_finishes() {
+        let start = Instant::now();
+        let rx = spawn_background_job(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            42
+        });
+
+        assert!(start.elapsed() < Duration::from_millis(50));
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
     }
 }

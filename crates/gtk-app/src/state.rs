@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use linux_conductor_core::paths::AppPaths;
+use linux_archductor_core::paths::AppPaths;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NavigationEntry {
@@ -63,6 +63,7 @@ pub struct AppStateSnapshot {
     pub selected_project: Option<String>,
     pub active_page: AppPage,
     pub active_workspace_tab: WorkspaceTab,
+    pub selected_chat_thread: Option<i64>,
     pub selected_agent_session: Option<i64>,
     pub staged_review_prompt: Option<String>,
     pub running_processes: Vec<i64>,
@@ -113,6 +114,7 @@ impl AppState {
                 selected_project: None,
                 active_page,
                 active_workspace_tab: initial_tab,
+                selected_chat_thread: None,
                 selected_agent_session: None,
                 staged_review_prompt: None,
                 running_processes: Vec::new(),
@@ -132,6 +134,7 @@ impl AppState {
     pub fn set_selected_workspace(&self, workspace: Option<String>) {
         let mut state = self.inner.borrow_mut();
         if state.selected_workspace != workspace {
+            state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
         }
@@ -155,6 +158,7 @@ impl AppState {
         }
         push_navigation_entry(&mut state);
         if state.selected_workspace != workspace {
+            state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
         }
@@ -169,6 +173,7 @@ impl AppState {
     ) {
         let mut state = self.inner.borrow_mut();
         if state.selected_workspace != workspace {
+            state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
             if let Some(tab) = default_tab {
@@ -190,6 +195,7 @@ impl AppState {
         }
         push_navigation_entry(&mut state);
         if state.selected_workspace != workspace {
+            state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
             if let Some(tab) = default_tab {
@@ -202,6 +208,14 @@ impl AppState {
 
     pub fn selected_agent_session(&self) -> Option<i64> {
         self.inner.borrow().selected_agent_session
+    }
+
+    pub fn selected_chat_thread(&self) -> Option<i64> {
+        self.inner.borrow().selected_chat_thread
+    }
+
+    pub fn set_selected_chat_thread(&self, thread_id: Option<i64>) {
+        self.inner.borrow_mut().selected_chat_thread = thread_id;
     }
 
     pub fn set_selected_agent_session(&self, session_id: Option<i64>) {
@@ -292,6 +306,7 @@ fn push_navigation_entry(state: &mut AppStateSnapshot) {
 fn apply_navigation_entry(state: &mut AppStateSnapshot, entry: NavigationEntry) {
     let workspace_changed = state.selected_workspace != entry.selected_workspace;
     if workspace_changed {
+        state.selected_chat_thread = None;
         state.selected_agent_session = None;
         state.staged_review_prompt = None;
     }
@@ -370,5 +385,20 @@ mod tests {
             Some("berlin")
         );
         assert_eq!(state.snapshot().active_page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn changing_workspace_clears_selected_chat_thread() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.set_selected_chat_thread(Some(42));
+        state.navigate_to_workspace(Some("tokyo".to_owned()));
+
+        assert_eq!(state.selected_chat_thread(), None);
     }
 }

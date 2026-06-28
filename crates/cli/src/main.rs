@@ -1,22 +1,30 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use linux_conductor_core::doctor;
-use linux_conductor_core::import::{default_conductor_app_database, import_conductor_app_database};
-use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::repository::{AddRepository, RepositoryStore};
-use linux_conductor_core::settings::{
+use linux_archductor_core::codex_tui::detect_directory_trust_prompt;
+use linux_archductor_core::doctor;
+use linux_archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
+use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::pty::PtySession;
+use linux_archductor_core::repository::{AddRepository, RepositoryStore};
+use linux_archductor_core::settings::{
     repository_settings_from_toml, save_repository_settings, SettingsLayer,
 };
-use linux_conductor_core::workspace::{
+use linux_archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
-    SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStatusLine, WorkspaceStore,
+    ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
+    WorkspaceStatusLine, WorkspaceStore,
 };
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, Read, Write};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
-#[command(name = "linux-conductor")]
+#[command(name = "linux-archductor")]
 #[command(about = "Linux-native Git worktree workflow for parallel coding agents")]
 struct Cli {
     #[command(subcommand)]
@@ -109,6 +117,11 @@ enum Command {
         #[command(subcommand)]
         command: HistoryCommand,
     },
+    #[command(hide = true)]
+    Internal {
+        #[command(subcommand)]
+        command: InternalCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -127,6 +140,29 @@ enum HistoryCommand {
     },
     Show {
         process_id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InternalCommand {
+    RunCodexSession {
+        workspace: String,
+        #[arg(long)]
+        plan_mode: bool,
+        #[arg(long)]
+        fast_mode: bool,
+        #[arg(long)]
+        approval_mode: Option<String>,
+        #[arg(long)]
+        reasoning_mode: Option<String>,
+        #[arg(long)]
+        effort_mode: Option<String>,
+        #[arg(long)]
+        codex_personality: Option<String>,
+        #[arg(long)]
+        codex_goals: Option<String>,
+        #[arg(long)]
+        codex_skills: Option<String>,
     },
 }
 
@@ -299,6 +335,13 @@ enum SessionCommand {
     Stop {
         workspace: String,
     },
+    Attach {
+        workspace: String,
+        #[arg(long)]
+        process_id: Option<i64>,
+        #[arg(long)]
+        print_pty_path: bool,
+    },
     List {
         workspace: String,
     },
@@ -382,7 +425,6 @@ enum CliSessionKind {
     Shell,
     Codex,
     Claude,
-    Cursor,
 }
 
 fn main() -> Result<()> {
@@ -693,7 +735,7 @@ fn main() -> Result<()> {
         } => {
             if run == session {
                 anyhow::bail!(
-                    "choose exactly one log stream, for example: linux-conductor logs {workspace} --run"
+                    "choose exactly one log stream, for example: linux-archductor logs {workspace} --run"
                 );
             }
             let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
@@ -809,7 +851,10 @@ fn main() -> Result<()> {
             }
         }
         Command::Session { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_with_logs(
+                paths.database_path.clone(),
+                paths.logs_dir.clone(),
+            )?;
             match command {
                 SessionCommand::Start {
                     workspace,
@@ -823,20 +868,21 @@ fn main() -> Result<()> {
                     codex_goals,
                     codex_skills,
                 } => {
-                    let process = store.start_session_with_options(
-                        &workspace,
-                        kind.into(),
-                        SessionHarnessOptions {
-                            plan_mode,
-                            fast_mode,
-                            approval_mode,
-                            reasoning_mode,
-                            effort_mode,
-                            codex_personality,
-                            codex_goals,
-                            codex_skills,
-                        },
-                    )?;
+                    let harness = session_harness_options(
+                        plan_mode,
+                        fast_mode,
+                        approval_mode,
+                        reasoning_mode,
+                        effort_mode,
+                        codex_personality,
+                        codex_goals,
+                        codex_skills,
+                    );
+                    let process = if matches!(kind, CliSessionKind::Codex) {
+                        start_durable_codex_session(&paths, &workspace, harness)?
+                    } else {
+                        store.start_session_with_options(&workspace, kind.into(), harness)?
+                    };
                     println!(
                         "Started session for {} as pid {} (log: {})",
                         workspace,
@@ -882,6 +928,20 @@ fn main() -> Result<()> {
                     let process = store.stop_session(&workspace)?;
                     println!("Stopped session for {} (pid {})", workspace, process.pid);
                 }
+                SessionCommand::Attach {
+                    workspace,
+                    process_id,
+                    print_pty_path,
+                } => {
+                    let process =
+                        resolve_attachable_session(&store, &workspace, process_id)?;
+                    let pty_path = terminal_device_path_for_pid(process.pid)?;
+                    if print_pty_path {
+                        println!("{}", pty_path.display());
+                    } else {
+                        attach_to_session_pty(&pty_path)?;
+                    }
+                }
                 SessionCommand::List { workspace } => {
                     for session in store.list_sessions(&workspace)? {
                         println!(
@@ -918,6 +978,35 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Internal { command } => match command {
+            InternalCommand::RunCodexSession {
+                workspace,
+                plan_mode,
+                fast_mode,
+                approval_mode,
+                reasoning_mode,
+                effort_mode,
+                codex_personality,
+                codex_goals,
+                codex_skills,
+            } => {
+                let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+                run_codex_session_monitor(
+                    &store,
+                    &workspace,
+                    session_harness_options(
+                        plan_mode,
+                        fast_mode,
+                        approval_mode,
+                        reasoning_mode,
+                        effort_mode,
+                        codex_personality,
+                        codex_goals,
+                        codex_skills,
+                    ),
+                )?;
+            }
+        },
         Command::Checks { workspace } => {
             let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
             print_checks_summary(store.checks_summary(&workspace)?);
@@ -1052,7 +1141,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary) {
+fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary) {
     println!(
         "Workspace: {} ({})",
         summary.workspace.name, summary.workspace.status
@@ -1060,7 +1149,7 @@ fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary)
     println!("Branch:    {}", summary.workspace.branch);
     match &summary.branch_push_state {
         Some(state) if !state.has_upstream => {
-            println!("Push:      no upstream set (push with: linux-conductor pr create)");
+            println!("Push:      no upstream set (push with: linux-archductor pr create)");
         }
         Some(state) => println!(
             "Push:      {} ahead, {} behind upstream",
@@ -1104,7 +1193,7 @@ fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary)
     }
 }
 
-fn print_source_preflight(preflight: linux_conductor_core::workspace::WorkspaceSourcePreflight) {
+fn print_source_preflight(preflight: linux_archductor_core::workspace::WorkspaceSourcePreflight) {
     println!("Workspace source preflight");
     println!("GitHub: {}", preflight.github_status());
     println!("Linear: {}", preflight.linear_status());
@@ -1189,12 +1278,12 @@ fn repo_settings_layer_label(layer: SettingsLayer) -> &'static str {
 
 fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
     match layer {
-        SettingsLayer::RepositoryShared => repo_path.join(".conductor/settings.toml"),
-        SettingsLayer::LocalOverride => repo_path.join(".conductor/settings.local.toml"),
+        SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
+        SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
     }
 }
 
-fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
+fn print_mcp_status(status: linux_archductor_core::mcp::McpStatus) {
     println!("MCP status for {}", status.workspace_path.display());
     let groups = [
         ("Claude user (~/.claude.json)", &status.claude_user),
@@ -1216,7 +1305,7 @@ fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
 
 fn print_status(lines: Vec<WorkspaceStatusLine>) {
     if lines.is_empty() {
-        println!("No workspaces found. Run: linux-conductor workspace create <repo> --name <name> --branch <branch>");
+        println!("No workspaces found. Run: linux-archductor workspace create <repo> --name <name> --branch <branch>");
         return;
     }
     for line in lines {
@@ -1253,7 +1342,6 @@ impl From<CliSessionKind> for SessionKind {
             CliSessionKind::Shell => Self::Shell,
             CliSessionKind::Codex => Self::Codex,
             CliSessionKind::Claude => Self::Claude,
-            CliSessionKind::Cursor => Self::Cursor,
         }
     }
 }
@@ -1398,16 +1486,167 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn interactive_session_command(launch: &SessionLaunch) -> String {
-    if matches!(launch.kind, SessionKind::Codex)
-        && launch.env_value("CONDUCTOR_SESSION_BOOTSTRAP").is_some()
-    {
-        let inner = format!(
-            "printf '%s\\n' \"$CONDUCTOR_SESSION_BOOTSTRAP\" | exec {}",
-            shell_words(&launch.program, &launch.args)
-        );
-        return format!("sh -lc {}", quote_shell_word(&inner));
+fn session_harness_options(
+    plan_mode: bool,
+    fast_mode: bool,
+    approval_mode: Option<String>,
+    reasoning_mode: Option<String>,
+    effort_mode: Option<String>,
+    codex_personality: Option<String>,
+    codex_goals: Option<String>,
+    codex_skills: Option<String>,
+) -> SessionHarnessOptions {
+    SessionHarnessOptions {
+        plan_mode,
+        fast_mode,
+        approval_mode,
+        reasoning_mode,
+        effort_mode,
+        codex_personality,
+        codex_goals,
+        codex_skills,
     }
+}
+
+fn start_durable_codex_session(
+    paths: &AppPaths,
+    workspace: &str,
+    harness: SessionHarnessOptions,
+) -> Result<ProcessRecord> {
+    let current_exe = std::env::current_exe().context("resolve current executable")?;
+    let mut command = ProcessCommand::new(current_exe);
+    command
+        .arg("internal")
+        .arg("run-codex-session")
+        .arg(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("XDG_CONFIG_HOME", xdg_home_from_app_dir(&paths.config_dir)?)
+        .env("XDG_DATA_HOME", xdg_home_from_app_dir(&paths.data_dir)?)
+        .env("XDG_STATE_HOME", xdg_home_from_app_dir(&paths.state_dir)?)
+        .env("XDG_CACHE_HOME", xdg_home_from_app_dir(&paths.cache_dir)?);
+    append_harness_args(&mut command, &harness);
+
+    let mut child = command.spawn().context("spawn codex session helper")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("capture codex session helper stdout")?;
+    let mut reader = io::BufReader::new(stdout);
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .context("read codex session helper startup")?;
+    anyhow::ensure!(read > 0, "codex session helper exited before reporting startup");
+
+    let process_id = line
+        .trim()
+        .strip_prefix("started\t")
+        .with_context(|| format!("unexpected codex session helper response: {}", line.trim()))?
+        .parse::<i64>()
+        .context("parse codex session process id")?;
+
+    let store = WorkspaceStore::open_with_logs(
+        paths.database_path.clone(),
+        paths.logs_dir.clone(),
+    )?;
+    store
+        .list_sessions(workspace)?
+        .into_iter()
+        .find(|process| process.id == process_id)
+        .with_context(|| format!("session process {process_id} not found for workspace {workspace}"))
+}
+
+fn xdg_home_from_app_dir(path: &Path) -> Result<PathBuf> {
+    path.parent()
+        .map(Path::to_path_buf)
+        .with_context(|| format!("resolve XDG home for {}", path.display()))
+}
+
+fn append_harness_args(command: &mut ProcessCommand, harness: &SessionHarnessOptions) {
+    if harness.plan_mode {
+        command.arg("--plan-mode");
+    }
+    if harness.fast_mode {
+        command.arg("--fast-mode");
+    }
+    if let Some(value) = harness.approval_mode.as_deref() {
+        command.arg("--approval-mode").arg(value);
+    }
+    if let Some(value) = harness.reasoning_mode.as_deref() {
+        command.arg("--reasoning-mode").arg(value);
+    }
+    if let Some(value) = harness.effort_mode.as_deref() {
+        command.arg("--effort-mode").arg(value);
+    }
+    if let Some(value) = harness.codex_personality.as_deref() {
+        command.arg("--codex-personality").arg(value);
+    }
+    if let Some(value) = harness.codex_goals.as_deref() {
+        command.arg("--codex-goals").arg(value);
+    }
+    if let Some(value) = harness.codex_skills.as_deref() {
+        command.arg("--codex-skills").arg(value);
+    }
+}
+
+fn run_codex_session_monitor(
+    store: &WorkspaceStore,
+    workspace: &str,
+    harness: SessionHarnessOptions,
+) -> Result<()> {
+    let launch = store.session_launch_with_options(workspace, SessionKind::Codex, harness)?;
+    let mut pty = PtySession::spawn(launch.program.clone(), launch.args.clone(), &launch.cwd, launch.env.clone(), 24, 80)
+        .with_context(|| format!("spawn codex pty in {}", launch.cwd.display()))?;
+    let pid = pty
+        .process_id()
+        .context("codex pty did not report a process id")?;
+    let process = store.record_session_process(workspace, &launch, pid)?;
+    println!("started\t{}", process.id);
+    io::stdout().flush().context("flush codex session helper startup")?;
+
+    let mut trust_answered = false;
+    let mut last_screen = String::new();
+    loop {
+        let raw = pty.read_available();
+        if !raw.is_empty() {
+            store.append_session_process_output(process.id, &format_codex_raw_output(&raw))?;
+        }
+
+        let screen = pty.visible_screen_text();
+        if !screen.is_empty() && screen != last_screen {
+            if !trust_answered && detect_directory_trust_prompt(&screen) {
+                pty.send_line("1")?;
+                trust_answered = true;
+            }
+            store.append_session_process_output(process.id, &format_codex_screen_snapshot(&screen))?;
+            last_screen = screen;
+        }
+
+        if pty.has_exited()? {
+            store.reconcile_session_processes()?;
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Ok(())
+}
+
+fn format_codex_raw_output(raw: &str) -> String {
+    format!("[codex raw]\n{raw}\n[/codex raw]\n")
+}
+
+fn format_codex_screen_snapshot(screen: &str) -> String {
+    format!(
+        "[codex screen]\n{}\n[/codex screen]\n",
+        screen.trim_end_matches('\n')
+    )
+}
+
+fn interactive_session_command(launch: &SessionLaunch) -> String {
     format!("exec {}", shell_words(&launch.program, &launch.args))
 }
 
@@ -1439,8 +1678,93 @@ fn session_kind_label(kind: SessionKind) -> &'static str {
         SessionKind::Shell => "shell",
         SessionKind::Codex => "codex",
         SessionKind::Claude => "claude",
-        SessionKind::Cursor => "cursor",
     }
+}
+
+fn resolve_attachable_session(
+    store: &WorkspaceStore,
+    workspace: &str,
+    process_id: Option<i64>,
+) -> Result<ProcessRecord> {
+    let sessions = store.list_sessions(workspace)?;
+    let process = if let Some(process_id) = process_id {
+        sessions
+            .into_iter()
+            .find(|session| session.id == process_id)
+            .with_context(|| {
+                format!("session process {process_id} not found for workspace {workspace}")
+            })?
+    } else {
+        sessions
+            .into_iter()
+            .find(|session| session.status == ProcessStatus::Running)
+            .with_context(|| format!("no running session found for workspace {workspace}"))?
+    };
+    anyhow::ensure!(
+        process.status == ProcessStatus::Running,
+        "session #{} for workspace {} is not running",
+        process.id,
+        workspace
+    );
+    Ok(process)
+}
+
+fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
+    let fd = format!("/proc/{process_id}/fd/0");
+    let target = fs::read_link(&fd).with_context(|| format!("read {}", fd))?;
+    anyhow::ensure!(
+        target.starts_with("/dev/pts/"),
+        "process {process_id} is not attached to a PTY slave"
+    );
+    Ok(target)
+}
+
+fn attach_to_session_pty(path: &Path) -> Result<()> {
+    let mut reader = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .with_context(|| format!("open PTY for reading {}", path.display()))?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open PTY for writing {}", path.display()))?;
+
+    let stdin_thread = thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if writer.write_all(&buffer[..n]).is_err() {
+                        break;
+                    }
+                    if writer.flush().is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut stdout = io::stdout().lock();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                stdout
+                    .write_all(&buffer[..n])
+                    .context("write PTY output to stdout")?;
+                stdout.flush().context("flush stdout")?;
+            }
+            Err(err) => return Err(err).context("read PTY output"),
+        }
+    }
+
+    let _ = stdin_thread.join();
+    Ok(())
 }
 
 fn shell_words(program: &std::path::Path, args: &[String]) -> String {
@@ -1561,24 +1885,25 @@ mod tests {
             cwd: PathBuf::from("/tmp/work space"),
             env: vec![
                 (
-                    "CONDUCTOR_WORKSPACE_NAME".to_owned(),
+                    "ARCHDUCTOR_WORKSPACE_NAME".to_owned(),
                     OsString::from("berlin"),
                 ),
-                ("CONDUCTOR_PORT".to_owned(), OsString::from("3000")),
+                ("ARCHDUCTOR_PORT".to_owned(), OsString::from("3000")),
             ],
             harness_metadata: None,
+            session_resume_id: None,
         };
 
         let command = render_manual_session_command(&launch);
         assert!(command.contains("cd '/tmp/work space'"));
-        assert!(command.contains("CONDUCTOR_WORKSPACE_NAME=berlin"));
-        assert!(command.contains("CONDUCTOR_PORT=3000"));
-        assert!(command.contains("CONDUCTOR_PORT=3000 exec codex"));
+        assert!(command.contains("ARCHDUCTOR_WORKSPACE_NAME=berlin"));
+        assert!(command.contains("ARCHDUCTOR_PORT=3000"));
+        assert!(command.contains("ARCHDUCTOR_PORT=3000 exec codex"));
         assert!(command.ends_with("exec codex"));
     }
 
     #[test]
-    fn manual_codex_session_command_pipes_bootstrap_payload() {
+    fn manual_codex_session_command_keeps_bootstrap_env_out_of_prompt() {
         let launch = SessionLaunch {
             kind: SessionKind::Codex,
             program: PathBuf::from("codex"),
@@ -1586,26 +1911,30 @@ mod tests {
             cwd: PathBuf::from("/tmp/work"),
             env: vec![
                 (
-                    "CONDUCTOR_WORKSPACE_NAME".to_owned(),
+                    "ARCHDUCTOR_WORKSPACE_NAME".to_owned(),
                     OsString::from("berlin"),
                 ),
                 (
-                    "CONDUCTOR_SESSION_BOOTSTRAP".to_owned(),
-                    OsString::from("[conductor bootstrap for codex]\n/plan\n"),
+                    "ARCHDUCTOR_SESSION_BOOTSTRAP".to_owned(),
+                    OsString::from("[archductor bootstrap for codex]\n/plan\n"),
                 ),
             ],
             harness_metadata: Some("harness=codex;plan=true".to_owned()),
+            session_resume_id: None,
         };
 
         let command = render_manual_session_command(&launch);
-        assert!(command.contains("CONDUCTOR_SESSION_BOOTSTRAP"));
-        assert!(command.contains("sh -lc"));
+        assert!(command.contains("ARCHDUCTOR_SESSION_BOOTSTRAP"));
+        assert!(command.contains("exec codex"));
+        assert!(!command.ends_with("'[archductor bootstrap for codex]\n/plan\n'"));
+        assert!(!command.contains("exec codex '[archductor bootstrap for codex]"));
     }
 
     #[test]
     fn history_list_render_shows_local_session_rows() {
         let text = render_history_list(&[LocalChatHistorySummary {
             process_id: 9,
+            chat_thread_id: None,
             repository_name: "demo".to_owned(),
             workspace_name: "berlin".to_owned(),
             workspace_path: PathBuf::from("/tmp/berlin"),

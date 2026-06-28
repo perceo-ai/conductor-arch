@@ -4,14 +4,14 @@ use gtk::{
     Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
     ScrolledWindow, Stack, TextView,
 };
-use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::repository::{AddRepository, RepositoryStore};
-use linux_conductor_core::settings::{
+use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::repository::{AddRepository, RepositoryStore};
+use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
     load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
     PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
-use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
+use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -1003,6 +1003,7 @@ pub(crate) fn show_create_workspace_dialog(
     let dialog_for_create = dialog.clone();
     let repo_select_for_create = repo_select.clone();
     let name_entry_for_create = name_entry.clone();
+    let branch_entry_for_create = branch_entry.clone();
     let base_entry_for_create = base_entry.clone();
     let source_select_for_create = source_select.clone();
     let feedback_for_create = feedback.clone();
@@ -1090,12 +1091,31 @@ pub(crate) fn show_create_workspace_dialog(
                 "prompt" => prompt_entry.text().trim().to_owned(),
                 _ => String::new(),
             };
+            let source_label = match source.as_str() {
+                "github_issue" => github_selection_preview_label(
+                    github_issue_select.active_id().as_deref(),
+                    github_issue_select.active_text().as_deref(),
+                ),
+                "github_pr" => github_selection_preview_label(
+                    github_pr_select.active_id().as_deref(),
+                    github_pr_select.active_text().as_deref(),
+                ),
+                _ => None,
+            };
             let name = name_entry.text().trim().to_owned();
             let branch = branch_entry.text().trim().to_owned();
-            let source_summary = if source_value.is_empty() {
-                copy.preview_empty.to_owned()
+            let source_line = if matches!(source.as_str(), "github_issue" | "github_pr") {
+                github_source_preview_line(
+                    &source,
+                    source_label.as_deref().filter(|text| !text.is_empty()),
+                )
             } else {
-                format!("{} {}", copy.preview_prefix, source_value)
+                let source_summary = if source_value.is_empty() {
+                    copy.preview_empty.to_owned()
+                } else {
+                    format!("{} {}", copy.preview_prefix, source_value)
+                };
+                format!("Source: {source_summary}")
             };
             let workspace_summary = if name.is_empty() {
                 "auto".to_owned()
@@ -1108,7 +1128,7 @@ pub(crate) fn show_create_workspace_dialog(
                 branch
             };
             preview_body.set_text(&format!(
-                "Repository: {repo}\nBase: {base}\nSource: {source_summary}\nWorkspace: {workspace_summary}\nBranch: {branch_summary}"
+                "Repository: {repo}\nBase: {base}\n{source_line}\nWorkspace: {workspace_summary}\nBranch: {branch_summary}"
             ));
         })
     };
@@ -1182,10 +1202,7 @@ pub(crate) fn show_create_workspace_dialog(
             .map(|id| id.to_string())
             .as_deref()
         {
-            Some("branch") => branch_select
-                .active_id()
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
+            Some("branch") => branch_entry_for_create.text().trim().to_owned(),
             Some("github_issue") => github_issue_select
                 .active_id()
                 .map(|id| id.to_string())
@@ -1267,7 +1284,7 @@ fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {
 
 fn workspace_source_create_feedback(
     source: &str,
-    result: anyhow::Result<linux_conductor_core::workspace::Workspace>,
+    result: anyhow::Result<linux_archductor_core::workspace::Workspace>,
 ) -> String {
     match result {
         Ok(workspace) => format!(
@@ -1425,7 +1442,7 @@ impl WorkspaceSourceRequest {
         &self,
         store: &WorkspaceStore,
         repository_name: &str,
-    ) -> anyhow::Result<linux_conductor_core::workspace::Workspace> {
+    ) -> anyhow::Result<linux_archductor_core::workspace::Workspace> {
         match self {
             Self::Branch { name, branch, base } => store.create(CreateWorkspace {
                 repository_name: repository_name.to_owned(),
@@ -1524,7 +1541,10 @@ fn workspace_source_request_from_form(
         _ => Ok(WorkspaceSourceRequest::Branch {
             name: typed_name.unwrap_or_default(),
             branch: typed_branch.unwrap_or_default(),
-            base,
+            base: base.or_else(|| {
+                let source_value = source_value.trim();
+                (!source_value.is_empty()).then(|| source_value.to_owned())
+            }),
         }),
     }
 }
@@ -1555,6 +1575,12 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
 struct GithubRepoChoice {
     label: String,
     url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubNumberedChoice {
+    value: String,
+    label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1780,7 +1806,7 @@ fn add_repository_from_path(
     database_path: &Path,
     path: &str,
     explicit_name: Option<String>,
-) -> Result<linux_conductor_core::repository::Repository> {
+) -> Result<linux_archductor_core::repository::Repository> {
     let trimmed = path.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Local repository path is required.");
     RepositoryStore::open(database_path)?.add(AddRepository {
@@ -1796,7 +1822,7 @@ fn clone_repository_into_default_parent(
     database_path: &Path,
     url: &str,
     explicit_name: Option<String>,
-) -> Result<linux_conductor_core::repository::Repository> {
+) -> Result<linux_archductor_core::repository::Repository> {
     let trimmed = url.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Git URL is required.");
     let name = explicit_name.unwrap_or_else(|| repo_name_from_url(trimmed));
@@ -1827,7 +1853,7 @@ fn create_repository_from_template(
     parent_folder: &str,
     project_name: &str,
     template: &str,
-) -> Result<linux_conductor_core::repository::Repository> {
+) -> Result<linux_archductor_core::repository::Repository> {
     let parent = parent_folder.trim();
     anyhow::ensure!(!parent.is_empty(), "Parent folder is required.");
     let path = scaffold_new_repository(Path::new(parent), project_name, template)?;
@@ -1922,22 +1948,45 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
     combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
 
-fn parse_github_numbered_choices(raw: &str) -> Vec<(String, String)> {
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
+fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
+    linux_archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
         .into_iter()
-        .filter_map(|item| {
-            let number = item.get("number")?.as_u64()?.to_string();
-            let title = item.get("title")?.as_str()?.trim();
+        .filter_map(|choice| {
+            let title = choice.title.trim();
             if title.is_empty() {
-                None
-            } else {
-                Some((number.clone(), format!("#{number} {title}")))
+                return None;
             }
+            Some(GithubNumberedChoice {
+                value: format!("#{}", choice.number),
+                label: format!("#{} · {} · {}", choice.number, choice.state, title),
+            })
         })
         .collect()
+}
+
+fn github_source_preview_line(source: &str, selected: Option<&str>) -> String {
+    match (source, selected) {
+        ("github_issue", Some(label)) => format!("Source: Issue {label}"),
+        ("github_pr", Some(label)) => format!("Source: PR {label}"),
+        ("github_issue", None) => "Source: Issue missing".to_owned(),
+        ("github_pr", None) => "Source: PR missing".to_owned(),
+        _ => "Source: none".to_owned(),
+    }
+}
+
+fn github_selection_preview_label(
+    selected_id: Option<&str>,
+    selected_text: Option<&str>,
+) -> Option<String> {
+    let selected_id = selected_id?.trim();
+    if selected_id.is_empty() {
+        return None;
+    }
+    let selected_text = selected_text?.trim();
+    if selected_text.is_empty() {
+        return None;
+    }
+    Some(selected_text.to_owned())
 }
 
 fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
@@ -1953,7 +2002,9 @@ fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
             "--state",
             "open",
             "--json",
-            "number,title",
+            "number,state,title",
+            "--template",
+            "{{range .}}{{.number}}{{\"\\t\"}}{{.state}}{{\"\\t\"}}{{.title}}{{\"\\n\"}}{{end}}",
         ])
         .output();
     let Ok(output) = output else {
@@ -1962,10 +2013,10 @@ fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
     if !output.status.success() {
         return;
     }
-    let choices = parse_github_numbered_choices(&String::from_utf8_lossy(&output.stdout));
+    let choices = parse_github_numbered_stateful_choices(&String::from_utf8_lossy(&output.stdout));
     let has_items = !choices.is_empty();
-    for (value, label) in choices {
-        combo.append(Some(&value), &label);
+    for choice in choices {
+        combo.append(Some(&choice.value), &choice.label);
     }
     combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
@@ -1983,7 +2034,9 @@ fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
             "--state",
             "open",
             "--json",
-            "number,title",
+            "number,state,title,isDraft",
+            "--template",
+            "{{range .}}{{.number}}{{\"\\t\"}}{{if .isDraft}}DRAFT{{else}}{{.state}}{{end}}{{\"\\t\"}}{{.title}}{{\"\\n\"}}{{end}}",
         ])
         .output();
     let Ok(output) = output else {
@@ -1992,10 +2045,10 @@ fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
     if !output.status.success() {
         return;
     }
-    let choices = parse_github_numbered_choices(&String::from_utf8_lossy(&output.stdout));
+    let choices = parse_github_numbered_stateful_choices(&String::from_utf8_lossy(&output.stdout));
     let has_items = !choices.is_empty();
-    for (value, label) in choices {
-        combo.append(Some(&value), &label);
+    for choice in choices {
+        combo.append(Some(&choice.value), &choice.label);
     }
     combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
@@ -2090,6 +2143,24 @@ mod tests {
             workspace_source_request_from_form("branch", "", Some("main".to_owned()), None, None)
                 .unwrap();
         assert!(matches!(branch, WorkspaceSourceRequest::Branch { .. }));
+        assert_eq!(branch.source_label(), "branch");
+
+        let branch_with_selected_base = workspace_source_request_from_form(
+            "branch",
+            "origin/main",
+            None,
+            Some("berlin".to_owned()),
+            Some("team/berlin".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            branch_with_selected_base,
+            WorkspaceSourceRequest::Branch {
+                name: "berlin".to_owned(),
+                branch: "team/berlin".to_owned(),
+                base: Some("origin/main".to_owned()),
+            }
+        );
 
         let issue =
             workspace_source_request_from_form("github_issue", "#123", None, None, None).unwrap();
@@ -2115,13 +2186,13 @@ mod tests {
 
     #[test]
     fn workspace_source_create_feedback_summarizes_success_and_failure() {
-        let workspace = linux_conductor_core::workspace::Workspace {
+        let workspace = linux_archductor_core::workspace::Workspace {
             id: 1,
             repository_id: 2,
             name: "pr-10".to_owned(),
             path: PathBuf::from("/tmp/pr-10"),
             branch: "lc/pr-10".to_owned(),
-            base_ref: "refs/linux-conductor/pull-requests/10".to_owned(),
+            base_ref: "refs/linux-archductor/pull-requests/10".to_owned(),
             port_base: 3000,
             status: "active".to_owned(),
             archived_at: None,
@@ -2152,6 +2223,40 @@ mod tests {
         assert_eq!(pr.field_label, "GitHub PR");
         assert!(!pr.base_allowed);
         assert_eq!(pr.placeholder, "#456");
+    }
+
+    #[test]
+    fn parse_github_numbered_stateful_choices_reads_number_state_and_title() {
+        let choices = parse_github_numbered_stateful_choices(
+            "12\tOPEN\tFix auth loop\n18\tDRAFT\tShip checks ui\n",
+        );
+
+        assert_eq!(choices[0].value, "#12");
+        assert_eq!(choices[0].label, "#12 · OPEN · Fix auth loop");
+        assert_eq!(choices[1].value, "#18");
+        assert_eq!(choices[1].label, "#18 · DRAFT · Ship checks ui");
+    }
+
+    #[test]
+    fn workspace_source_preview_mentions_github_stateful_selection() {
+        let preview = github_source_preview_line("github_pr", Some("#18 · DRAFT · Ship checks ui"));
+
+        assert_eq!(preview, "Source: PR #18 · DRAFT · Ship checks ui");
+    }
+
+    #[test]
+    fn github_selection_preview_label_ignores_placeholder_selection() {
+        assert_eq!(
+            github_selection_preview_label(Some(""), Some("Select...")),
+            None
+        );
+        assert_eq!(
+            github_source_preview_line(
+                "github_issue",
+                github_selection_preview_label(Some(""), Some("Select...")).as_deref(),
+            ),
+            "Source: Issue missing"
+        );
     }
 
     #[test]

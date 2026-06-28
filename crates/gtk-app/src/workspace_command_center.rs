@@ -5,14 +5,23 @@ use gtk::{
     Orientation, Paned, PolicyType, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag,
     TextView, WrapMode,
 };
-use linux_conductor_core::workspace::{
-    DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment, Workspace, WorkspaceStore,
+use linux_archductor_core::pty::PtySession;
+use linux_archductor_core::workspace::{
+    DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment, SessionKind, Workspace,
+    WorkspaceStore,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
+const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
+const WORKSPACE_SPLIT_MIN_START: i32 = 360;
+const WORKSPACE_SPLIT_MIN_END: i32 = 280;
 
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
@@ -66,6 +75,8 @@ pub(crate) fn build_workspace_command_center(
 
     let db_path = app_state.workspace_database_path();
     let state = app_state.clone();
+    let run_console_states: RunConsoleStateStore = Rc::new(RefCell::new(HashMap::new()));
+    let run_console_terminals: RunConsoleTerminalStore = Rc::new(RefCell::new(HashMap::new()));
     let refresh = move || {
         while let Some(child) = body.first_child() {
             body.remove(&child);
@@ -95,6 +106,8 @@ pub(crate) fn build_workspace_command_center(
             &store,
             &line.workspace,
             &state,
+            run_console_states.clone(),
+            run_console_terminals.clone(),
             refresh_hub.clone(),
             toast_overlay.clone(),
             collapse_sidebar.clone(),
@@ -109,6 +122,8 @@ fn simple_workspace_shell(
     store: &WorkspaceStore,
     ws: &Workspace,
     state: &AppState,
+    run_console_states: RunConsoleStateStore,
+    run_console_terminals: RunConsoleTerminalStore,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
     collapse_sidebar: Rc<dyn Fn()>,
@@ -125,6 +140,13 @@ fn simple_workspace_shell(
     split.set_resize_end_child(true);
     split.set_shrink_start_child(true);
     split.set_shrink_end_child(true);
+    split.set_position(split_position_for_ratio(
+        1280,
+        WORKSPACE_SPLIT_START_WEIGHT,
+        WORKSPACE_SPLIT_END_WEIGHT,
+        WORKSPACE_SPLIT_MIN_START,
+        WORKSPACE_SPLIT_MIN_END,
+    ));
     split.set_vexpand(true);
 
     // Center: custom tab bar + chat/terminal/file content
@@ -144,6 +166,8 @@ fn simple_workspace_shell(
         store,
         ws,
         state,
+        run_console_states,
+        run_console_terminals,
         refresh_hub,
         toast_overlay,
         open_file,
@@ -151,14 +175,246 @@ fn simple_workspace_shell(
     );
     split.set_end_child(Some(&right));
 
+    let split_for_resize = split.clone();
+    let last_width = Rc::new(RefCell::new(0));
+    let last_width_for_resize = last_width.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        if split_for_resize.root().is_none() {
+            return glib::ControlFlow::Break;
+        }
+
+        let width = split_for_resize.allocated_width();
+        if width > 0 && *last_width_for_resize.borrow() != width {
+            split_for_resize.set_position(split_position_for_ratio(
+                width,
+                WORKSPACE_SPLIT_START_WEIGHT,
+                WORKSPACE_SPLIT_END_WEIGHT,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END,
+            ));
+            *last_width_for_resize.borrow_mut() = width;
+        }
+
+        glib::ControlFlow::Continue
+    });
+
     shell.append(&split);
     shell
+}
+
+fn split_position_for_ratio(
+    total_width: i32,
+    start_weight: i32,
+    end_weight: i32,
+    min_start: i32,
+    min_end: i32,
+) -> i32 {
+    if total_width <= 0 {
+        return min_start.max(0);
+    }
+
+    let total_weight = (start_weight + end_weight).max(1);
+    let preferred = total_width.saturating_mul(start_weight) / total_weight;
+    let max_start = (total_width - min_end).max(min_start);
+    preferred.clamp(min_start, max_start)
 }
 
 fn make_action_row() -> GBox {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.add_css_class("action-row");
     row
+}
+
+type RunConsoleStateStore = Rc<RefCell<HashMap<String, WorkspaceRunConsoleState>>>;
+type RunConsoleTerminalStore = Rc<RefCell<HashMap<String, WorkspaceRunConsoleTerminalConnection>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceRunConsoleTerminalState {
+    id: usize,
+    process_id: Option<i64>,
+    pid: Option<u32>,
+    draft: String,
+    transcript: String,
+}
+
+impl WorkspaceRunConsoleTerminalState {
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            process_id: None,
+            pid: None,
+            draft: String::new(),
+            transcript: String::new(),
+        }
+    }
+
+    fn tab_name(&self) -> String {
+        format!("terminal-{}", self.id)
+    }
+
+    fn label(&self) -> String {
+        match self.id {
+            1 => "Terminal".to_owned(),
+            id => format!("Terminal {id}"),
+        }
+    }
+
+    fn display_text(&self) -> &str {
+        if self.transcript.is_empty() {
+            "Enter a command above."
+        } else {
+            &self.transcript
+        }
+    }
+
+    fn append_command(&mut self, command: &str) {
+        self.transcript
+            .push_str(&format!("\n$ {command}\n[running]\n"));
+    }
+
+    fn append_result(&mut self, result: &str) {
+        self.transcript.push_str(result);
+    }
+
+    fn clear_transcript(&mut self) {
+        self.transcript.clear();
+    }
+}
+
+enum WorkspaceRunConsoleTerminalConnection {
+    Live(PtySession),
+    Reattached {
+        write: std::fs::File,
+        output: Arc<Mutex<String>>,
+        read_cursor: usize,
+        pid: u32,
+    },
+}
+
+impl WorkspaceRunConsoleTerminalConnection {
+    fn try_reattach_running(pid: u32) -> anyhow::Result<Self> {
+        let path = workspace_terminal_device_path_for_pid(pid)?;
+        let mut reader = OpenOptions::new().read(true).open(&path)?;
+        let write = OpenOptions::new().write(true).open(&path)?;
+        let output = Arc::new(Mutex::new(String::new()));
+        let reader_output = Arc::clone(&output);
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut output) = reader_output.lock() {
+                            output.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self::Reattached {
+            write,
+            output,
+            read_cursor: 0,
+            pid,
+        })
+    }
+
+    fn write(&mut self, input: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Live(session) => session.write(input),
+            Self::Reattached { write, .. } => {
+                write.write_all(input.as_bytes())?;
+                write.flush()?;
+                Ok(())
+            }
+        }
+    }
+
+    fn has_exited(&mut self) -> anyhow::Result<bool> {
+        match self {
+            Self::Live(session) => session.has_exited(),
+            Self::Reattached { pid, .. } => Ok(!workspace_terminal_process_alive(*pid)),
+        }
+    }
+
+    fn read_available(&mut self) -> String {
+        match self {
+            Self::Live(session) => session.read_available(),
+            Self::Reattached {
+                output,
+                read_cursor,
+                ..
+            } => {
+                let Ok(output) = output.lock() else {
+                    return String::new();
+                };
+                let next = output.get(*read_cursor..).unwrap_or_default().to_owned();
+                *read_cursor = output.len();
+                next
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceRunConsoleState {
+    active_tab: String,
+    next_terminal_id: usize,
+    terminals: Vec<WorkspaceRunConsoleTerminalState>,
+}
+
+impl Default for WorkspaceRunConsoleState {
+    fn default() -> Self {
+        Self {
+            active_tab: "setup".to_owned(),
+            next_terminal_id: 2,
+            terminals: vec![WorkspaceRunConsoleTerminalState::new(1)],
+        }
+    }
+}
+
+impl WorkspaceRunConsoleState {
+    fn active_tab_name(&self) -> String {
+        if self.active_tab == "setup" || self.active_tab == "run" {
+            return self.active_tab.clone();
+        }
+
+        if self
+            .terminals
+            .iter()
+            .any(|terminal| terminal.tab_name() == self.active_tab)
+        {
+            return self.active_tab.clone();
+        }
+
+        "setup".to_owned()
+    }
+
+    fn add_terminal_tab(&mut self) -> String {
+        let id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        let terminal = WorkspaceRunConsoleTerminalState::new(id);
+        let name = terminal.tab_name();
+        self.terminals.push(terminal);
+        self.active_tab = name.clone();
+        name
+    }
+
+    fn terminal_by_name(&self, tab_name: &str) -> Option<&WorkspaceRunConsoleTerminalState> {
+        self.terminals
+            .iter()
+            .find(|terminal| terminal.tab_name() == tab_name)
+    }
+
+    fn terminal_by_name_mut(
+        &mut self,
+        tab_name: &str,
+    ) -> Option<&mut WorkspaceRunConsoleTerminalState> {
+        self.terminals
+            .iter_mut()
+            .find(|terminal| terminal.tab_name() == tab_name)
+    }
 }
 
 // ── Center panel (chat + terminal + file tabs) ───────────────────
@@ -207,7 +463,11 @@ fn ws_center_panel(
         &ws.branch,
         collapse_sidebar.clone(),
         state.clone(),
-        move || refresh_sessions.refresh(RefreshScope::Workspace),
+        move || {
+            refresh_sessions.refresh(RefreshScope::Sidebar);
+            refresh_sessions.refresh(RefreshScope::Dashboard);
+            refresh_sessions.refresh(RefreshScope::History);
+        },
         false,
     );
     content.add_named(&chat_widget, Some("chat"));
@@ -367,6 +627,8 @@ fn ws_right_panel(
     store: &WorkspaceStore,
     ws: &Workspace,
     state: &AppState,
+    run_console_states: RunConsoleStateStore,
+    run_console_terminals: RunConsoleTerminalStore,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
     open_file: Rc<dyn Fn(&str)>,
@@ -443,6 +705,8 @@ fn ws_right_panel(
         store,
         ws,
         state,
+        run_console_states,
+        run_console_terminals,
         refresh_hub,
         toast_overlay,
         collapse_sidebar,
@@ -518,6 +782,7 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroll.set_vexpand(true);
+    scroll.set_propagate_natural_width(false);
     scroll.set_child(Some(&list));
     panel.append(&scroll);
 
@@ -689,10 +954,16 @@ fn ws_run_console(
     _store: &WorkspaceStore,
     ws: &Workspace,
     _state: &AppState,
-    refresh_hub: RefreshHub,
+    run_console_states: RunConsoleStateStore,
+    run_console_terminals: RunConsoleTerminalStore,
+    _refresh_hub: RefreshHub,
     _toast_overlay: ToastOverlay,
     _collapse_sidebar: Rc<dyn Fn()>,
 ) -> GBox {
+    {
+        let mut states = run_console_states.borrow_mut();
+        states.entry(ws.name.clone()).or_default();
+    }
     let section = GBox::new(Orientation::Vertical, 0);
     section.add_css_class("ws-run-section");
     section.set_overflow(gtk::Overflow::Hidden);
@@ -714,14 +985,24 @@ fn ws_run_console(
     content.set_vexpand(true);
 
     let tabs: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
-    let active_name: Rc<RefCell<String>> = Rc::new(RefCell::new("setup".to_owned()));
+    let initial_active = run_console_states
+        .borrow()
+        .get(&ws.name)
+        .map(|state| state.active_tab_name())
+        .unwrap_or_else(|| "setup".to_owned());
+    let active_name: Rc<RefCell<String>> = Rc::new(RefCell::new(initial_active));
     let set_active = {
         let content = content.clone();
         let tabs = tabs.clone();
         let active_name = active_name.clone();
+        let run_console_states = run_console_states.clone();
+        let workspace_name = ws.name.clone();
         Rc::new(move |name: &str| {
             content.set_visible_child_name(name);
             *active_name.borrow_mut() = name.to_owned();
+            if let Some(state) = run_console_states.borrow_mut().get_mut(&workspace_name) {
+                state.active_tab = name.to_owned();
+            }
             for (tab_name, button) in tabs.borrow().iter() {
                 if tab_name == name {
                     button.add_css_class("ws-run-tab-active");
@@ -767,7 +1048,29 @@ fn ws_run_console(
     register_tab("run", &run_btn);
     tabs_row.append(&run_btn);
 
-    let terminal_index = Rc::new(RefCell::new(1usize));
+    let terminal_tabs = run_console_states
+        .borrow()
+        .get(&ws.name)
+        .map(|state| state.terminals.clone())
+        .unwrap_or_default();
+    for terminal_state in terminal_tabs {
+        let name = terminal_state.tab_name();
+        let label = terminal_state.label();
+        let tab = workspace_terminal_tab_view(
+            &ws.name,
+            &name,
+            &label,
+            db_path,
+            run_console_states.clone(),
+            run_console_terminals.clone(),
+        );
+        content.add_named(&tab, Some(&name));
+        let button = text_button(&label);
+        button.add_css_class("ws-run-tab-btn");
+        register_tab(&name, &button);
+        tabs_row.append(&button);
+    }
+
     let add_terminal_tab = {
         let db_path = db_path.to_path_buf();
         let workspace_name = ws.name.clone();
@@ -775,17 +1078,29 @@ fn ws_run_console(
         let tabs_row = tabs_row.clone();
         let set_active = set_active.clone();
         let register_tab = register_tab.clone();
-        let terminal_index = terminal_index.clone();
+        let run_console_states = run_console_states.clone();
         Rc::new(move || {
             if tabs.borrow().len() >= 7 {
                 return;
             }
-            let next = *terminal_index.borrow();
-            *terminal_index.borrow_mut() += 1;
-            let name = format!("terminal-{next}");
-            let label = "Terminal".to_owned();
-            let tab =
-                workspace_terminal_tab_view(&db_path, &workspace_name, &label, refresh_hub.clone());
+            let (name, label) = {
+                let mut states = run_console_states.borrow_mut();
+                let state = states.entry(workspace_name.clone()).or_default();
+                let name = state.add_terminal_tab();
+                let label = state
+                    .terminal_by_name(&name)
+                    .map(|terminal| terminal.label())
+                    .unwrap_or_else(|| "Terminal".to_owned());
+                (name, label)
+            };
+            let tab = workspace_terminal_tab_view(
+                &workspace_name,
+                &name,
+                &label,
+                &db_path,
+                run_console_states.clone(),
+                run_console_terminals.clone(),
+            );
             content.add_named(&tab, Some(&name));
             let button = text_button(&label);
             button.add_css_class("ws-run-tab-btn");
@@ -815,7 +1130,12 @@ fn ws_run_console(
     body.set_visible(true);
     body.append(&content);
     section.append(&body);
-    content.set_visible_child_name("setup");
+    let active_tab = run_console_states
+        .borrow()
+        .get(&ws.name)
+        .map(|state| state.active_tab_name())
+        .unwrap_or_else(|| "setup".to_owned());
+    content.set_visible_child_name(&active_tab);
 
     let expanded = Rc::new(RefCell::new(true));
     {
@@ -832,8 +1152,7 @@ fn ws_run_console(
         });
     }
 
-    add_terminal_tab();
-    set_active("setup");
+    set_active(&active_tab);
     section
 }
 
@@ -893,11 +1212,20 @@ fn workspace_prompt_tab_view(
 }
 
 fn workspace_terminal_tab_view(
-    db_path: &Path,
     workspace_name: &str,
+    tab_name: &str,
     label: &str,
-    _refresh_hub: RefreshHub,
+    db_path: &Path,
+    run_console_states: RunConsoleStateStore,
+    run_console_terminals: RunConsoleTerminalStore,
 ) -> GBox {
+    ensure_workspace_terminal_session(
+        db_path,
+        workspace_name,
+        tab_name,
+        &run_console_states,
+        &run_console_terminals,
+    );
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.add_css_class("ws-run-panel");
 
@@ -924,7 +1252,15 @@ fn workspace_terminal_tab_view(
     output_view.set_monospace(true);
     output_view.set_vexpand(true);
     output_view.add_css_class("ws-run-output");
-    output_view.buffer().set_text("Enter a command above.");
+    let initial_terminal_state = run_console_states
+        .borrow()
+        .get(workspace_name)
+        .and_then(|state| state.terminal_by_name(tab_name).cloned())
+        .unwrap_or_else(|| WorkspaceRunConsoleTerminalState::new(1));
+    command_entry.set_text(&initial_terminal_state.draft);
+    output_view
+        .buffer()
+        .set_text(initial_terminal_state.display_text());
     let output_scroll = ScrolledWindow::new();
     output_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     output_scroll.set_vexpand(true);
@@ -932,91 +1268,228 @@ fn workspace_terminal_tab_view(
     panel.append(&output_scroll);
 
     let buffer = output_view.buffer();
+    let panel_for_poll = panel.clone();
+    let state_for_poll = run_console_states.clone();
+    let terminals_for_poll = run_console_terminals.clone();
+    let workspace_for_poll = workspace_name.to_owned();
+    let tab_for_poll = tab_name.to_owned();
+    let buffer_for_poll = buffer.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        if panel_for_poll.root().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        let key = run_console_terminal_key(&workspace_for_poll, &tab_for_poll);
+        let mut remove_connection = false;
+        let output = {
+            let mut terminals = terminals_for_poll.borrow_mut();
+            let Some(connection) = terminals.get_mut(&key) else {
+                return glib::ControlFlow::Continue;
+            };
+            match connection.has_exited() {
+                Ok(true) => {
+                    remove_connection = true;
+                    connection.read_available()
+                }
+                Ok(false) => connection.read_available(),
+                Err(_) => String::new(),
+            }
+        };
+        if !output.is_empty() {
+            let transcript = {
+                let mut states = state_for_poll.borrow_mut();
+                let Some(state) = states.get_mut(&workspace_for_poll) else {
+                    return glib::ControlFlow::Continue;
+                };
+                let Some(terminal) = state.terminal_by_name_mut(&tab_for_poll) else {
+                    return glib::ControlFlow::Continue;
+                };
+                terminal.append_result(&output);
+                terminal.display_text().to_owned()
+            };
+            buffer_for_poll.set_text(&transcript);
+        }
+        if remove_connection {
+            terminals_for_poll.borrow_mut().remove(&key);
+            let transcript = {
+                let mut states = state_for_poll.borrow_mut();
+                let Some(state) = states.get_mut(&workspace_for_poll) else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(terminal) = state.terminal_by_name_mut(&tab_for_poll) else {
+                    return glib::ControlFlow::Break;
+                };
+                terminal.append_result("\n[terminal exited]\n");
+                terminal.display_text().to_owned()
+            };
+            buffer_for_poll.set_text(&transcript);
+        }
+        glib::ControlFlow::Continue
+    });
+    let state_for_change = run_console_states.clone();
+    let workspace_for_change = workspace_name.to_owned();
+    let tab_for_change = tab_name.to_owned();
+    command_entry.connect_changed(move |entry| {
+        if let Some(state) = state_for_change.borrow_mut().get_mut(&workspace_for_change) {
+            if let Some(terminal) = state.terminal_by_name_mut(&tab_for_change) {
+                terminal.draft = entry.text().to_string();
+            }
+        }
+    });
     let db_for_run = db_path.to_path_buf();
     let workspace_for_run = workspace_name.to_owned();
     let buffer_for_run = buffer.clone();
-    run_btn.connect_clicked(move |_| {
-        let command = command_entry.text().trim().to_owned();
+    let tab_for_run = tab_name.to_owned();
+    let state_for_run = run_console_states.clone();
+    let terminals_for_run = run_console_terminals.clone();
+    let command_entry_for_run = command_entry.clone();
+    let run_command = Rc::new(move || {
+        let command = command_entry_for_run.text().trim().to_owned();
         if command.is_empty() {
             return;
         }
-        command_entry.set_text("");
-        run_workspace_command_async(
-            db_for_run.clone(),
-            workspace_for_run.clone(),
-            command,
-            buffer_for_run.clone(),
-        );
+        let transcript = {
+            let mut states = state_for_run.borrow_mut();
+            let Some(state) = states.get_mut(&workspace_for_run) else {
+                return;
+            };
+            let Some(terminal) = state.terminal_by_name_mut(&tab_for_run) else {
+                return;
+            };
+            terminal.draft.clear();
+            terminal.display_text().to_owned()
+        };
+        command_entry_for_run.set_text("");
+        let key = run_console_terminal_key(&workspace_for_run, &tab_for_run);
+        if !terminals_for_run.borrow().contains_key(&key) {
+            ensure_workspace_terminal_session(
+                &db_for_run,
+                &workspace_for_run,
+                &tab_for_run,
+                &state_for_run,
+                &terminals_for_run,
+            );
+        }
+        let mut terminals = terminals_for_run.borrow_mut();
+        let Some(connection) = terminals.get_mut(&key) else {
+            return;
+        };
+        let _ = connection.write(&(command + "\n"));
+        buffer_for_run.set_text(&transcript);
+    });
+    let run_btn_handler = run_command.clone();
+    run_btn.connect_clicked(move |_| {
+        run_btn_handler();
+    });
+    let run_activate = run_command.clone();
+    command_entry.connect_activate(move |_| {
+        run_activate();
     });
 
     let buffer_for_clear = buffer.clone();
+    let state_for_clear = run_console_states;
+    let workspace_for_clear = workspace_name.to_owned();
+    let tab_for_clear = tab_name.to_owned();
     clear_btn.connect_clicked(move |_| {
+        if let Some(state) = state_for_clear.borrow_mut().get_mut(&workspace_for_clear) {
+            if let Some(terminal) = state.terminal_by_name_mut(&tab_for_clear) {
+                terminal.clear_transcript();
+            }
+        }
         buffer_for_clear.set_text("Enter a command above.");
     });
 
     panel
 }
 
-fn run_workspace_command_async(
-    db_path: PathBuf,
-    workspace_name: String,
-    command: String,
-    buffer: gtk::TextBuffer,
-) {
-    append_terminal_buffer_text(&buffer, &format!("\n$ {command}\n[running]\n"));
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let message = WorkspaceStore::open(db_path)
-            .and_then(|store| store.terminal_command(&workspace_name, &command));
-        let _ = tx.send(message);
-    });
-
-    let buffer_for_ui = buffer.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        match rx.try_recv() {
-            Ok(result) => {
-                append_terminal_buffer_text(
-                    &buffer_for_ui,
-                    &format_terminal_command_result(result),
-                );
-                glib::ControlFlow::Break
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                append_terminal_buffer_text(
-                    &buffer_for_ui,
-                    "[error]\nterminal worker disconnected\n",
-                );
-                glib::ControlFlow::Break
-            }
-        }
-    });
+fn run_console_terminal_key(workspace_name: &str, tab_name: &str) -> String {
+    format!("{workspace_name}::{tab_name}")
 }
 
-fn format_terminal_command_result(
-    result: anyhow::Result<linux_conductor_core::workspace::TerminalCommandResult>,
-) -> String {
-    match result {
-        Ok(result) => {
-            let mut text = String::new();
-            if !result.stdout.is_empty() {
-                text.push_str(&result.stdout);
-            }
-            if !result.stderr.is_empty() {
-                text.push_str("\n[stderr]\n");
-                text.push_str(&result.stderr);
-            }
-            text.push_str(&format!(
-                "\n[exit {}]\n",
-                result
-                    .exit_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "signal".to_owned())
-            ));
-            text
-        }
-        Err(err) => format!("[error]\n{err:#}\n"),
+fn ensure_workspace_terminal_session(
+    db_path: &Path,
+    workspace_name: &str,
+    tab_name: &str,
+    run_console_states: &RunConsoleStateStore,
+    run_console_terminals: &RunConsoleTerminalStore,
+) {
+    let key = run_console_terminal_key(workspace_name, tab_name);
+    if run_console_terminals.borrow().contains_key(&key) {
+        return;
     }
+
+    let existing_pid = run_console_states
+        .borrow()
+        .get(workspace_name)
+        .and_then(|state| state.terminal_by_name(tab_name))
+        .and_then(|terminal| terminal.pid);
+    if let Some(pid) = existing_pid {
+        if let Ok(connection) = WorkspaceRunConsoleTerminalConnection::try_reattach_running(pid) {
+            run_console_terminals.borrow_mut().insert(key, connection);
+            return;
+        }
+    }
+
+    let Ok((process_id, pid, connection)) =
+        spawn_workspace_terminal_session(db_path, workspace_name)
+    else {
+        return;
+    };
+    run_console_terminals.borrow_mut().insert(key, connection);
+    if let Some(state) = run_console_states.borrow_mut().get_mut(workspace_name) {
+        if let Some(terminal) = state.terminal_by_name_mut(tab_name) {
+            terminal.process_id = Some(process_id);
+            terminal.pid = Some(pid);
+            if terminal.transcript.is_empty() {
+                terminal
+                    .transcript
+                    .push_str(&format!("[terminal started #{process_id} pid={pid}]\n"));
+            }
+        }
+    }
+}
+
+fn spawn_workspace_terminal_session(
+    db_path: &Path,
+    workspace_name: &str,
+) -> anyhow::Result<(i64, u32, WorkspaceRunConsoleTerminalConnection)> {
+    let store = WorkspaceStore::open(db_path)?;
+    let launch = store.session_launch(workspace_name, SessionKind::Shell)?;
+    let command = format!("{}", launch.program.display());
+    let session = PtySession::spawn(launch.program, launch.args, &launch.cwd, launch.env, 24, 80)?;
+    let pid = session
+        .process_id()
+        .ok_or_else(|| anyhow::anyhow!("terminal PTY did not report a process id"))?;
+    let process = store.record_terminal_process(workspace_name, &command, pid)?;
+    Ok((
+        process.id,
+        pid,
+        WorkspaceRunConsoleTerminalConnection::Live(session),
+    ))
+}
+
+fn workspace_terminal_process_alive(process_id: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(process_id.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn workspace_terminal_device_path_for_pid(process_id: u32) -> anyhow::Result<PathBuf> {
+    let fd = format!("/proc/{process_id}/fd/0");
+    let target = fs::read_link(&fd)?;
+    let path = target
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("terminal fd path is not valid UTF-8"))?
+        .to_owned();
+    anyhow::ensure!(
+        !path.is_empty() && path.starts_with("/dev/pts/"),
+        "process {process_id} is not attached to a PTY slave"
+    );
+    Ok(PathBuf::from(path))
 }
 
 fn append_terminal_buffer_text(buffer: &gtk::TextBuffer, text: &str) {
@@ -1270,7 +1743,7 @@ fn toolbar_label(text: &str) -> Label {
 
 fn workspace_status_strip(
     ws: &Workspace,
-    checks: Option<&linux_conductor_core::workspace::ChecksSummary>,
+    checks: Option<&linux_archductor_core::workspace::ChecksSummary>,
 ) -> GBox {
     let strip = GBox::new(Orientation::Horizontal, 10);
     strip.add_css_class("command-center-strip");
@@ -1359,7 +1832,6 @@ fn agents_panel(
         ("Shell", "shell"),
         ("Codex", "codex"),
         ("Claude", "claude"),
-        ("Cursor", "cursor"),
     ] {
         let button = text_button(label);
         let workspace = ws.name.clone();
@@ -1397,8 +1869,12 @@ fn agents_panel(
         &ws.branch,
         collapse_sidebar.clone(),
         app_state.clone(),
-        move || refresh_sessions.refresh(RefreshScope::Workspace),
-        true,
+        move || {
+            refresh_sessions.refresh(RefreshScope::Sidebar);
+            refresh_sessions.refresh(RefreshScope::Dashboard);
+            refresh_sessions.refresh(RefreshScope::History);
+        },
+        false,
     ));
     panel.append(&session_box);
     panel
@@ -2210,8 +2686,12 @@ fn chat_terminal_split(
         &ws.branch,
         collapse_sidebar.clone(),
         app_state,
-        move || refresh_sessions.refresh(RefreshScope::Workspace),
-        true,
+        move || {
+            refresh_sessions.refresh(RefreshScope::Sidebar);
+            refresh_sessions.refresh(RefreshScope::Dashboard);
+            refresh_sessions.refresh(RefreshScope::History);
+        },
+        false,
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -2272,8 +2752,12 @@ fn parallel_agents_panel(
         &ws.branch,
         collapse_sidebar.clone(),
         app_state,
-        move || refresh_chat.refresh(RefreshScope::Workspace),
-        true,
+        move || {
+            refresh_chat.refresh(RefreshScope::Sidebar);
+            refresh_chat.refresh(RefreshScope::Dashboard);
+            refresh_chat.refresh(RefreshScope::History);
+        },
+        false,
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -2871,53 +3355,126 @@ fn workspace_todos_text(store: &WorkspaceStore, name: &str) -> String {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PullRequestStateKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PullRequestStateKind {
     Open,
     Ready,
     Failed,
     Merged,
 }
 
-fn pull_request_state_summary(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PullRequestStatusSummary {
+    pub label: String,
+    pub css_class: &'static str,
+    pub kind: PullRequestStateKind,
+}
+
+impl PullRequestStatusSummary {
+    pub(crate) fn attention_label(&self) -> Option<&str> {
+        match self.kind {
+            PullRequestStateKind::Open => None,
+            PullRequestStateKind::Ready
+            | PullRequestStateKind::Failed
+            | PullRequestStateKind::Merged => Some(self.label.as_str()),
+        }
+    }
+
+    pub(crate) fn attention_css_class(&self) -> Option<&'static str> {
+        match self.kind {
+            PullRequestStateKind::Open => None,
+            PullRequestStateKind::Ready
+            | PullRequestStateKind::Failed
+            | PullRequestStateKind::Merged => Some(self.css_class),
+        }
+    }
+}
+
+pub(crate) fn pull_request_status_summary(
     pr: &PullRequest,
-    readiness: Option<&linux_conductor_core::workspace::PullRequestReadiness>,
-    summary: &linux_conductor_core::workspace::ChecksSummary,
-) -> (String, &'static str, PullRequestStateKind) {
+    readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
+    summary: &linux_archductor_core::workspace::ChecksSummary,
+) -> PullRequestStatusSummary {
     if pr.state.eq_ignore_ascii_case("merged") {
-        return (
-            "merged".to_owned(),
-            "ws-pr-status-merged",
-            PullRequestStateKind::Merged,
-        );
+        return PullRequestStatusSummary {
+            label: "merged".to_owned(),
+            css_class: "ws-pr-status-merged",
+            kind: PullRequestStateKind::Merged,
+        };
     }
 
     if let Some(readiness) = readiness {
         if pull_request_is_failed(readiness) {
-            return (
-                "checks failed".to_owned(),
-                "ws-pr-status-failed",
-                PullRequestStateKind::Failed,
-            );
+            return PullRequestStatusSummary {
+                label: "checks failed".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::Failed,
+            };
         }
         if pull_request_is_ready(readiness, summary) {
-            return (
-                "ready to merge".to_owned(),
-                "ws-pr-status-ready",
-                PullRequestStateKind::Ready,
-            );
+            return PullRequestStatusSummary {
+                label: "ready to merge".to_owned(),
+                css_class: "ws-pr-status-ready",
+                kind: PullRequestStateKind::Ready,
+            };
         }
     }
 
-    (
-        pr.state.to_owned(),
-        "ws-pr-status-muted",
-        PullRequestStateKind::Open,
-    )
+    PullRequestStatusSummary {
+        label: pr.state.to_owned(),
+        css_class: "ws-pr-status-muted",
+        kind: PullRequestStateKind::Open,
+    }
+}
+
+pub(crate) fn workspace_pull_request_status_summary(
+    store: &WorkspaceStore,
+    workspace_name: &str,
+    pr: &PullRequest,
+) -> PullRequestStatusSummary {
+    let readiness = store
+        .pull_request_panel_state(workspace_name)
+        .ok()
+        .and_then(|panel| panel.readiness);
+    let summary = store.checks_summary(workspace_name).ok();
+
+    match summary.as_ref() {
+        Some(summary) => pull_request_status_summary(pr, readiness.as_ref(), summary),
+        None => pull_request_status_summary_without_checks_summary(pr, readiness.as_ref()),
+    }
+}
+
+fn pull_request_status_summary_without_checks_summary(
+    pr: &PullRequest,
+    readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
+) -> PullRequestStatusSummary {
+    if pr.state.eq_ignore_ascii_case("merged") {
+        return PullRequestStatusSummary {
+            label: "merged".to_owned(),
+            css_class: "ws-pr-status-merged",
+            kind: PullRequestStateKind::Merged,
+        };
+    }
+
+    if let Some(readiness) = readiness {
+        if pull_request_is_failed(readiness) {
+            return PullRequestStatusSummary {
+                label: "checks failed".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::Failed,
+            };
+        }
+    }
+
+    PullRequestStatusSummary {
+        label: pr.state.to_owned(),
+        css_class: "ws-pr-status-muted",
+        kind: PullRequestStateKind::Open,
+    }
 }
 
 fn pull_request_is_failed(
-    readiness: &linux_conductor_core::workspace::PullRequestReadiness,
+    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
 ) -> bool {
     readiness.review_decision.as_deref() == Some("CHANGES_REQUESTED")
         || readiness.checks.iter().any(|check| check.is_failure())
@@ -2928,8 +3485,8 @@ fn pull_request_is_failed(
 }
 
 fn pull_request_is_ready(
-    readiness: &linux_conductor_core::workspace::PullRequestReadiness,
-    summary: &linux_conductor_core::workspace::ChecksSummary,
+    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
+    summary: &linux_archductor_core::workspace::ChecksSummary,
 ) -> bool {
     readiness.review_decision.as_deref() == Some("APPROVED")
         && readiness
@@ -2943,21 +3500,6 @@ fn pull_request_is_ready(
         && summary.open_todos == 0
         && summary.open_review_comments == 0
         && summary.conflicting_workspaces.is_empty()
-}
-
-fn workspace_create_pr_prompt(db_path: &Path, name: &str) -> String {
-    WorkspaceStore::open(db_path)
-        .and_then(|store| store.workspace_repo_settings(name))
-        .ok()
-        .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr))
-        .filter(|prompt| !prompt.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "Create a pull request for workspace {name}.\n\
-                 If needed, update .conductor/settings.toml with scripts.setup first, then use gh to open the PR.\n\
-                 Keep the change small and explain the result."
-            )
-        })
 }
 
 fn workspace_setup_prompt(db_path: &Path, name: &str) -> String {
@@ -2994,11 +3536,11 @@ fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: 
         });
     match current {
         Some(script) if !script.trim().is_empty() => format!(
-            "Create or update .conductor/settings.toml for workspace {name}.\n\
+            "Create or update .archductor/settings.toml for workspace {name}.\n\
              Set scripts.{script_key} to this multiline shell block of successive commands:\n\n{script}\n"
         ),
         _ => format!(
-            "Create or update .conductor/settings.toml for workspace {name}.\n\
+            "Create or update .archductor/settings.toml for workspace {name}.\n\
              Define scripts.{script_key} as a multiline shell block so the {label} tab can run successive commands in order.\n\
              Keep the commands short, reliable, and checked into the repo."
         ),
@@ -3226,262 +3768,507 @@ fn workspace_checks_panel(
         }
     };
 
-    let pr = summary.pull_request.clone();
-    if pr.is_none() {
-        let row = GBox::new(Orientation::Horizontal, 8);
-        row.add_css_class("ws-pr-nav");
-        row.set_hexpand(true);
-        row.set_halign(Align::Fill);
-        let empty = Label::new(Some("No pull request yet."));
-        empty.add_css_class("card-meta");
-        empty.set_xalign(0.0);
-        empty.set_wrap(true);
-        empty.set_valign(Align::Center);
-        let prompt_btn = text_button("Create PR");
-        prompt_btn.add_css_class("suggested-action");
-        prompt_btn.set_valign(Align::Center);
-        let db_for_prompt = db_path.to_path_buf();
-        let workspace_for_prompt = name.to_owned();
-        let app_state_for_prompt = app_state.clone();
-        prompt_btn.connect_clicked(move |_| {
-            let prompt = workspace_create_pr_prompt(&db_for_prompt, &workspace_for_prompt);
-            app_state_for_prompt.set_staged_review_prompt(Some(prompt));
+    let panel_state_result = store.pull_request_panel_state(name);
+    let panel_state_error = panel_state_result
+        .as_ref()
+        .err()
+        .map(|err| format!("{err:#}"));
+    let panel_state = panel_state_result.ok();
+    let pr = panel_state
+        .as_ref()
+        .and_then(|state| state.pull_request.clone())
+        .or_else(|| summary.pull_request.clone());
+    let has_pull_request = pr.is_some();
+    let checks_text = workspace_checks_text(store, name);
+    let readiness_text = panel_state
+        .as_ref()
+        .map(|state| state.readiness_text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            panel_state_error
+                .as_ref()
+                .filter(|_| has_pull_request)
+                .map(|err| format!("Could not read PR readiness: {err}"))
+        })
+        .unwrap_or_else(|| "No pull request yet.".to_owned());
+    let review_text = panel_state
+        .as_ref()
+        .and_then(|state| state.review_text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            panel_state_error
+                .as_ref()
+                .filter(|_| has_pull_request)
+                .map(|err| format!("Could not read PR comments/reviews: {err}"))
+        })
+        .unwrap_or_else(|| {
+            if has_pull_request {
+                "No PR comments/reviews yet.".to_owned()
+            } else {
+                "No pull request yet.".to_owned()
+            }
         });
-        let spacer = GBox::new(Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        row.append(&empty);
-        row.append(&spacer);
-        row.append(&prompt_btn);
-        empty.set_hexpand(true);
-        panel.append(&row);
-        return panel;
-    }
 
-    let pr = pr.unwrap();
-    let readiness = WorkspaceStore::open(db_path)
-        .and_then(|store| store.pull_request_readiness(name))
-        .ok();
-    let (status_text, status_class, state_kind) =
-        pull_request_state_summary(&pr, readiness.as_ref(), &summary);
+    let header = GBox::new(Orientation::Vertical, 8);
+    header.add_css_class("ws-pr-nav");
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
 
-    let nav = make_action_row();
-    nav.add_css_class("ws-pr-nav");
-    nav.set_hexpand(true);
-    let number = Label::new(Some(&format!("#{}", pr.number)));
-    number.add_css_class("ws-pr-number");
-    number.set_xalign(0.0);
-    let status = Label::new(Some(&status_text));
-    status.add_css_class("ws-pr-status");
-    status.add_css_class(status_class);
-    status.set_xalign(0.0);
-    status.set_hexpand(true);
-    let action_row = GBox::new(Orientation::Horizontal, 6);
-    action_row.set_halign(Align::End);
-    action_row.set_hexpand(false);
+    match pr {
+        Some(pr) => {
+            let status_summary = pull_request_status_summary(
+                &pr,
+                panel_state
+                    .as_ref()
+                    .and_then(|state| state.readiness.as_ref()),
+                &summary,
+            );
+            let action_labels = pull_request_action_labels(Some(status_summary.kind));
 
-    match state_kind {
-        PullRequestStateKind::Open => {
-            let refresh_btn = secondary_button("Refresh");
-            let prompt_btn = secondary_button("PR summary");
-            let db_for_refresh = db_path.to_path_buf();
-            let workspace_for_refresh = name.to_owned();
-            let refresh_after = refresh_hub.clone();
-            let feedback = Label::new(None);
-            feedback.add_css_class("card-meta");
-            feedback.set_xalign(0.0);
-            feedback.set_wrap(true);
-            let feedback_for_refresh = feedback.clone();
-            let toast_for_refresh = toast_overlay.clone();
-            refresh_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open(db_for_refresh.clone())
-                    .and_then(|store| store.refresh_pull_request_state(&workspace_for_refresh));
-                let message = pull_request_refresh_feedback(result);
-                apply_action_feedback(&feedback_for_refresh, &toast_for_refresh, &message, true);
-                refresh_after.refresh(RefreshScope::All);
-            });
+            let status_row = GBox::new(Orientation::Horizontal, 8);
+            status_row.add_css_class("ws-pr-nav");
+            status_row.set_hexpand(true);
+            let number = Label::new(Some(&format!("#{}", pr.number)));
+            number.add_css_class("ws-pr-number");
+            number.set_xalign(0.0);
+            let status = Label::new(Some(&status_summary.label));
+            status.add_css_class("ws-pr-status");
+            status.add_css_class(status_summary.css_class);
+            status.set_xalign(0.0);
+            status.set_hexpand(true);
+            status_row.append(&number);
+            status_row.append(&status);
+            header.append(&status_row);
 
-            let db_for_stage = db_path.to_path_buf();
-            let workspace_for_stage = name.to_owned();
-            let app_state_for_stage = app_state.clone();
-            let feedback_for_stage = feedback.clone();
-            let toast_for_stage = toast_overlay.clone();
-            prompt_btn.connect_clicked(move |_| {
-                match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
-                    store.pull_request_readiness_agent_prompt(&workspace_for_stage)
-                }) {
-                    Ok(prompt) => {
-                        app_state_for_stage.set_staged_review_prompt(Some(prompt));
+            let actions = make_action_stack();
+            match status_summary.kind {
+                PullRequestStateKind::Open => {
+                    let top_row = make_action_row();
+                    let summary_btn = secondary_button(action_labels[0]);
+                    let review_btn = secondary_button(action_labels[1]);
+                    let refresh_btn = secondary_button(action_labels[2]);
+
+                    let db_for_stage = db_path.to_path_buf();
+                    let workspace_for_stage = name.to_owned();
+                    let app_state_for_stage = app_state.clone();
+                    let feedback_for_stage = feedback.clone();
+                    let toast_for_stage = toast_overlay.clone();
+                    summary_btn.connect_clicked(move |_| {
+                        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+                            store.pull_request_readiness_agent_prompt(&workspace_for_stage)
+                        }) {
+                            Ok(prompt) => {
+                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                apply_action_feedback(
+                                    &feedback_for_stage,
+                                    &toast_for_stage,
+                                    "PR summary prompt ready for the selected agent session.",
+                                    true,
+                                );
+                            }
+                            Err(err) => apply_action_feedback(
+                                &feedback_for_stage,
+                                &toast_for_stage,
+                                &format!("Could not create PR summary prompt: {err:#}"),
+                                true,
+                            ),
+                        }
+                    });
+
+                    let db_for_review = db_path.to_path_buf();
+                    let workspace_for_review = name.to_owned();
+                    let app_state_for_review = app_state.clone();
+                    let feedback_for_review = feedback.clone();
+                    let toast_for_review = toast_overlay.clone();
+                    review_btn.connect_clicked(move |_| {
+                        match WorkspaceStore::open(db_for_review.clone()).and_then(|store| {
+                            store.pull_request_review_agent_prompt(&workspace_for_review)
+                        }) {
+                            Ok(prompt) => {
+                                app_state_for_review.set_staged_review_prompt(Some(prompt));
+                                apply_action_feedback(
+                                    &feedback_for_review,
+                                    &toast_for_review,
+                                    "PR review prompt ready for the selected agent session.",
+                                    true,
+                                );
+                            }
+                            Err(err) => apply_action_feedback(
+                                &feedback_for_review,
+                                &toast_for_review,
+                                &format!("Could not create PR review prompt: {err:#}"),
+                                true,
+                            ),
+                        }
+                    });
+
+                    let db_for_refresh = db_path.to_path_buf();
+                    let workspace_for_refresh = name.to_owned();
+                    let refresh_after = refresh_hub.clone();
+                    let feedback_for_refresh = feedback.clone();
+                    let toast_for_refresh = toast_overlay.clone();
+                    refresh_btn.connect_clicked(move |_| {
+                        let result =
+                            WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
+                                store.refresh_pull_request_state(&workspace_for_refresh)
+                            });
+                        let message = pull_request_refresh_feedback(result);
                         apply_action_feedback(
-                            &feedback_for_stage,
-                            &toast_for_stage,
-                            "PR summary prompt ready for the selected agent session.",
+                            &feedback_for_refresh,
+                            &toast_for_refresh,
+                            &message,
                             true,
                         );
+                        refresh_after.refresh(RefreshScope::All);
+                    });
+
+                    top_row.append(&summary_btn);
+                    top_row.append(&review_btn);
+                    top_row.append(&refresh_btn);
+                    actions.append(&top_row);
+                }
+                PullRequestStateKind::Ready => {
+                    let merge_row = make_action_row();
+                    let top_row = make_action_row();
+                    let merge_method = ComboBoxText::new();
+                    merge_method.append(Some("squash"), "Squash");
+                    merge_method.append(Some("merge"), "Merge");
+                    merge_method.append(Some("rebase"), "Rebase");
+                    merge_method.set_active_id(Some("squash"));
+                    let merge_btn = text_button(action_labels[0]);
+                    merge_btn.add_css_class("suggested-action");
+                    let summary_btn = secondary_button(action_labels[1]);
+                    let refresh_btn = secondary_button(action_labels[2]);
+
+                    let db_for_merge = db_path.to_path_buf();
+                    let workspace_for_merge = name.to_owned();
+                    let refresh_after_merge = refresh_hub.clone();
+                    let feedback_for_merge = feedback.clone();
+                    let toast_for_merge = toast_overlay.clone();
+                    let merge_method_for_merge = merge_method.clone();
+                    merge_btn.connect_clicked(move |_| {
+                        let method = merge_method_for_merge
+                            .active_id()
+                            .map(|method| method.to_string())
+                            .unwrap_or_else(|| "squash".to_owned());
+                        let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
+                            store.merge_and_maybe_archive_pull_request(
+                                &workspace_for_merge,
+                                Some(&method),
+                            )
+                        });
+                        apply_action_feedback(
+                            &feedback_for_merge,
+                            &toast_for_merge,
+                            &pull_request_merge_and_archive_feedback(result),
+                            true,
+                        );
+                        refresh_after_merge.refresh(RefreshScope::All);
+                    });
+
+                    let db_for_stage = db_path.to_path_buf();
+                    let workspace_for_stage = name.to_owned();
+                    let app_state_for_stage = app_state.clone();
+                    let feedback_for_stage = feedback.clone();
+                    let toast_for_stage = toast_overlay.clone();
+                    summary_btn.connect_clicked(move |_| {
+                        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+                            store.pull_request_readiness_agent_prompt(&workspace_for_stage)
+                        }) {
+                            Ok(prompt) => {
+                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                apply_action_feedback(
+                                    &feedback_for_stage,
+                                    &toast_for_stage,
+                                    "PR summary prompt ready for the selected agent session.",
+                                    true,
+                                );
+                            }
+                            Err(err) => apply_action_feedback(
+                                &feedback_for_stage,
+                                &toast_for_stage,
+                                &format!("Could not create PR summary prompt: {err:#}"),
+                                true,
+                            ),
+                        }
+                    });
+
+                    let db_for_refresh = db_path.to_path_buf();
+                    let workspace_for_refresh = name.to_owned();
+                    let refresh_after = refresh_hub.clone();
+                    let feedback_for_refresh = feedback.clone();
+                    let toast_for_refresh = toast_overlay.clone();
+                    refresh_btn.connect_clicked(move |_| {
+                        let result =
+                            WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
+                                store.refresh_pull_request_state(&workspace_for_refresh)
+                            });
+                        let message = pull_request_refresh_feedback(result);
+                        apply_action_feedback(
+                            &feedback_for_refresh,
+                            &toast_for_refresh,
+                            &message,
+                            true,
+                        );
+                        refresh_after.refresh(RefreshScope::All);
+                    });
+
+                    merge_row.append(&merge_method);
+                    merge_row.append(&merge_btn);
+                    top_row.append(&summary_btn);
+                    top_row.append(&refresh_btn);
+                    actions.append(&merge_row);
+                    actions.append(&top_row);
+                }
+                PullRequestStateKind::Failed => {
+                    let top_row = make_action_row();
+                    let fix_btn = text_button(action_labels[0]);
+                    fix_btn.add_css_class("suggested-action");
+                    let summary_btn = secondary_button(action_labels[1]);
+                    let refresh_btn = secondary_button(action_labels[2]);
+
+                    let db_for_fix = db_path.to_path_buf();
+                    let workspace_for_fix = name.to_owned();
+                    let app_state_for_fix = app_state.clone();
+                    let feedback_for_fix = feedback.clone();
+                    let toast_for_fix = toast_overlay.clone();
+                    fix_btn.connect_clicked(move |_| {
+                        match WorkspaceStore::open(db_for_fix.clone()).and_then(|store| {
+                            store.pull_request_checks_agent_prompt(&workspace_for_fix)
+                        }) {
+                            Ok(prompt) => {
+                                app_state_for_fix.set_staged_review_prompt(Some(prompt));
+                                apply_action_feedback(
+                                    &feedback_for_fix,
+                                    &toast_for_fix,
+                                    "Failing checks prompt ready for the selected agent session.",
+                                    true,
+                                );
+                            }
+                            Err(err) => apply_action_feedback(
+                                &feedback_for_fix,
+                                &toast_for_fix,
+                                &format!("Could not stage failing checks: {err:#}"),
+                                true,
+                            ),
+                        }
+                    });
+
+                    let db_for_stage = db_path.to_path_buf();
+                    let workspace_for_stage = name.to_owned();
+                    let app_state_for_stage = app_state.clone();
+                    let feedback_for_stage = feedback.clone();
+                    let toast_for_stage = toast_overlay.clone();
+                    summary_btn.connect_clicked(move |_| {
+                        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+                            store.pull_request_readiness_agent_prompt(&workspace_for_stage)
+                        }) {
+                            Ok(prompt) => {
+                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                apply_action_feedback(
+                                    &feedback_for_stage,
+                                    &toast_for_stage,
+                                    "PR summary prompt ready for the selected agent session.",
+                                    true,
+                                );
+                            }
+                            Err(err) => apply_action_feedback(
+                                &feedback_for_stage,
+                                &toast_for_stage,
+                                &format!("Could not create PR summary prompt: {err:#}"),
+                                true,
+                            ),
+                        }
+                    });
+
+                    let db_for_refresh = db_path.to_path_buf();
+                    let workspace_for_refresh = name.to_owned();
+                    let refresh_after = refresh_hub.clone();
+                    let feedback_for_refresh = feedback.clone();
+                    let toast_for_refresh = toast_overlay.clone();
+                    refresh_btn.connect_clicked(move |_| {
+                        let result =
+                            WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
+                                store.refresh_pull_request_state(&workspace_for_refresh)
+                            });
+                        let message = pull_request_refresh_feedback(result);
+                        apply_action_feedback(
+                            &feedback_for_refresh,
+                            &toast_for_refresh,
+                            &message,
+                            true,
+                        );
+                        refresh_after.refresh(RefreshScope::All);
+                    });
+
+                    top_row.append(&fix_btn);
+                    top_row.append(&summary_btn);
+                    top_row.append(&refresh_btn);
+                    actions.append(&top_row);
+                }
+                PullRequestStateKind::Merged => {
+                    let top_row = make_action_row();
+                    let continue_btn = text_button(action_labels[0]);
+                    continue_btn.add_css_class("suggested-action");
+                    let archive_btn = destructive_button(action_labels[1]);
+
+                    let db_for_continue = db_path.to_path_buf();
+                    let workspace_for_continue = name.to_owned();
+                    let app_state_for_continue = app_state.clone();
+                    continue_btn.connect_clicked(move |_| {
+                        let prompt =
+                            workspace_continue_prompt(&db_for_continue, &workspace_for_continue);
+                        app_state_for_continue.set_staged_review_prompt(Some(prompt));
+                    });
+
+                    let db_for_archive = db_path.to_path_buf();
+                    let workspace_for_archive = name.to_owned();
+                    let refresh_after_archive = refresh_hub.clone();
+                    let feedback_for_archive = feedback.clone();
+                    let toast_for_archive = toast_overlay.clone();
+                    archive_btn.connect_clicked(move |_| {
+                        let result = WorkspaceStore::open(db_for_archive.clone())
+                            .and_then(|store| store.archive(&workspace_for_archive, false));
+                        apply_action_feedback(
+                            &feedback_for_archive,
+                            &toast_for_archive,
+                            &pull_request_archive_feedback(result),
+                            true,
+                        );
+                        refresh_after_archive.refresh(RefreshScope::All);
+                    });
+
+                    top_row.append(&continue_btn);
+                    top_row.append(&archive_btn);
+                    actions.append(&top_row);
+                }
+            }
+            header.append(&actions);
+        }
+        None => {
+            let action_labels = pull_request_action_labels(None);
+            let status_row = GBox::new(Orientation::Horizontal, 8);
+            status_row.add_css_class("ws-pr-nav");
+            status_row.set_hexpand(true);
+            let empty = Label::new(Some("No pull request yet."));
+            empty.add_css_class("card-meta");
+            empty.set_xalign(0.0);
+            empty.set_wrap(true);
+            empty.set_hexpand(true);
+            status_row.append(&empty);
+            header.append(&status_row);
+
+            let title_row = make_action_row();
+            let title_entry = Entry::new();
+            title_entry.set_placeholder_text(Some("PR title"));
+            title_entry.set_hexpand(true);
+            title_row.append(&title_entry);
+            header.append(&title_row);
+
+            let body_label = toolbar_label("PR body");
+            header.append(&body_label);
+            let body_view = TextView::new();
+            body_view.set_wrap_mode(WrapMode::WordChar);
+            body_view.set_top_margin(8);
+            body_view.set_bottom_margin(8);
+            body_view.set_left_margin(8);
+            body_view.set_right_margin(8);
+            body_view.buffer().set_text(
+                &store
+                    .read_context_brief(name)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+            );
+            let body_scroll = ScrolledWindow::new();
+            body_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+            body_scroll.set_min_content_height(72);
+            body_scroll.set_max_content_height(120);
+            body_scroll.set_child(Some(&body_view));
+            header.append(&body_scroll);
+
+            let button_row = make_action_row();
+            let draft_check = CheckButton::with_label("Draft");
+            let push_btn = secondary_button(action_labels[0]);
+            let create_btn = text_button(action_labels[1]);
+            create_btn.add_css_class("suggested-action");
+            let body_buffer = body_view.buffer();
+
+            let db_for_push = db_path.to_path_buf();
+            let workspace_for_push = name.to_owned();
+            let feedback_for_push = feedback.clone();
+            let toast_for_push = toast_overlay.clone();
+            push_btn.connect_clicked(move |_| {
+                match WorkspaceStore::open(db_for_push.clone())
+                    .and_then(|store| store.push_branch(&workspace_for_push))
+                {
+                    Ok(output) => {
+                        let message = output
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .map(|line| format!("Pushed branch: {line}"))
+                            .unwrap_or_else(|| "Pushed branch.".to_owned());
+                        apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
                     }
                     Err(err) => apply_action_feedback(
-                        &feedback_for_stage,
-                        &toast_for_stage,
-                        &format!("Could not create PR summary prompt: {err:#}"),
+                        &feedback_for_push,
+                        &toast_for_push,
+                        &format!("Push branch failed: {err:#}"),
                         true,
                     ),
                 }
             });
-            action_row.append(&prompt_btn);
-            action_row.append(&refresh_btn);
-            panel.append(&feedback);
-        }
-        PullRequestStateKind::Ready => {
-            let merge_btn = text_button("Merge");
-            merge_btn.add_css_class("suggested-action");
-            let refresh_btn = secondary_button("Refresh");
-            let merge_method = ComboBoxText::new();
-            merge_method.append(Some("squash"), "Squash");
-            merge_method.append(Some("merge"), "Merge");
-            merge_method.append(Some("rebase"), "Rebase");
-            merge_method.set_active_id(Some("squash"));
-            let db_for_merge = db_path.to_path_buf();
-            let workspace_for_merge = name.to_owned();
-            let refresh_after_merge = refresh_hub.clone();
-            let feedback = Label::new(None);
-            feedback.add_css_class("card-meta");
-            feedback.set_xalign(0.0);
-            feedback.set_wrap(true);
-            let feedback_for_merge = feedback.clone();
-            let toast_for_merge = toast_overlay.clone();
-            let merge_method_for_merge = merge_method.clone();
-            merge_btn.connect_clicked(move |_| {
-                let method = merge_method_for_merge
-                    .active_id()
-                    .map(|method| method.to_string())
-                    .unwrap_or_else(|| "squash".to_owned());
-                let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
-                    store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some(&method))
+
+            let db_for_create = db_path.to_path_buf();
+            let workspace_for_create = name.to_owned();
+            let feedback_for_create = feedback.clone();
+            let toast_for_create = toast_overlay.clone();
+            let refresh_after_create = refresh_hub.clone();
+            let title_entry_for_create = title_entry.clone();
+            let draft_check_for_create = draft_check.clone();
+            create_btn.connect_clicked(move |_| {
+                let title = optional_entry_text(&title_entry_for_create);
+                let body = optional_text_buffer_text(&body_buffer);
+                let result = WorkspaceStore::open(db_for_create.clone()).and_then(|store| {
+                    store.create_pull_request(
+                        &workspace_for_create,
+                        title.as_deref(),
+                        body.as_deref(),
+                        draft_check_for_create.is_active(),
+                    )
                 });
+                let should_refresh = result.is_ok();
                 apply_action_feedback(
-                    &feedback_for_merge,
-                    &toast_for_merge,
-                    &pull_request_merge_and_archive_feedback(result),
+                    &feedback_for_create,
+                    &toast_for_create,
+                    &pull_request_create_feedback(result),
                     true,
                 );
-                refresh_after_merge.refresh(RefreshScope::All);
-            });
-            let db_for_refresh = db_path.to_path_buf();
-            let workspace_for_refresh = name.to_owned();
-            let refresh_after = refresh_hub.clone();
-            let feedback_for_refresh = feedback.clone();
-            let toast_for_refresh = toast_overlay.clone();
-            refresh_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open(db_for_refresh.clone())
-                    .and_then(|store| store.refresh_pull_request_state(&workspace_for_refresh));
-                let message = pull_request_refresh_feedback(result);
-                apply_action_feedback(&feedback_for_refresh, &toast_for_refresh, &message, true);
-                refresh_after.refresh(RefreshScope::All);
-            });
-            action_row.append(&merge_method);
-            action_row.append(&merge_btn);
-            action_row.append(&refresh_btn);
-            panel.append(&feedback);
-        }
-        PullRequestStateKind::Failed => {
-            let fix_btn = text_button("Fix checks");
-            fix_btn.add_css_class("suggested-action");
-            let refresh_btn = secondary_button("Refresh");
-            let db_for_fix = db_path.to_path_buf();
-            let workspace_for_fix = name.to_owned();
-            let app_state_for_fix = app_state.clone();
-            let feedback = Label::new(None);
-            feedback.add_css_class("card-meta");
-            feedback.set_xalign(0.0);
-            feedback.set_wrap(true);
-            let feedback_for_fix = feedback.clone();
-            let toast_for_fix = toast_overlay.clone();
-            fix_btn.connect_clicked(move |_| {
-                match WorkspaceStore::open(db_for_fix.clone())
-                    .and_then(|store| store.pull_request_checks_agent_prompt(&workspace_for_fix))
-                {
-                    Ok(prompt) => app_state_for_fix.set_staged_review_prompt(Some(prompt)),
-                    Err(err) => apply_action_feedback(
-                        &feedback_for_fix,
-                        &toast_for_fix,
-                        &format!("Could not stage failing checks: {err:#}"),
-                        true,
-                    ),
+                if should_refresh {
+                    refresh_after_create.refresh(RefreshScope::All);
                 }
             });
-            let db_for_refresh = db_path.to_path_buf();
-            let workspace_for_refresh = name.to_owned();
-            let refresh_after = refresh_hub.clone();
-            let feedback_for_refresh = feedback.clone();
-            let toast_for_refresh = toast_overlay.clone();
-            refresh_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open(db_for_refresh.clone())
-                    .and_then(|store| store.refresh_pull_request_state(&workspace_for_refresh));
-                let message = pull_request_refresh_feedback(result);
-                apply_action_feedback(&feedback_for_refresh, &toast_for_refresh, &message, true);
-                refresh_after.refresh(RefreshScope::All);
-            });
-            action_row.append(&fix_btn);
-            action_row.append(&refresh_btn);
-            panel.append(&feedback);
-        }
-        PullRequestStateKind::Merged => {
-            let continue_btn = text_button("Continue");
-            continue_btn.add_css_class("suggested-action");
-            let archive_btn = destructive_button("Archive");
-            let db_for_continue = db_path.to_path_buf();
-            let workspace_for_continue = name.to_owned();
-            let app_state_for_continue = app_state.clone();
-            let feedback = Label::new(None);
-            feedback.add_css_class("card-meta");
-            feedback.set_xalign(0.0);
-            feedback.set_wrap(true);
-            let feedback_for_archive = feedback.clone();
-            let toast_for_archive = toast_overlay.clone();
-            continue_btn.connect_clicked(move |_| {
-                let prompt = workspace_continue_prompt(&db_for_continue, &workspace_for_continue);
-                app_state_for_continue.set_staged_review_prompt(Some(prompt));
-            });
-            let db_for_archive = db_path.to_path_buf();
-            let workspace_for_archive = name.to_owned();
-            let refresh_after_archive = refresh_hub.clone();
-            archive_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open(db_for_archive.clone())
-                    .and_then(|store| store.archive(&workspace_for_archive, false));
-                apply_action_feedback(
-                    &feedback_for_archive,
-                    &toast_for_archive,
-                    &pull_request_archive_feedback(result),
-                    true,
-                );
-                refresh_after_archive.refresh(RefreshScope::All);
-            });
-            action_row.append(&continue_btn);
-            action_row.append(&archive_btn);
-            panel.append(&feedback);
+
+            button_row.append(&draft_check);
+            button_row.append(&push_btn);
+            button_row.append(&create_btn);
+            header.append(&button_row);
         }
     }
 
-    nav.append(&number);
-    nav.append(&status);
-    nav.append(&action_row);
-    panel.append(&nav);
-
-    let summary = Label::new(Some(&workspace_checks_text(store, name)));
-    summary.add_css_class("checks-view");
-    summary.set_xalign(0.0);
-    summary.set_wrap(true);
-    summary.set_selectable(true);
-    panel.append(&summary);
-
-    if let Ok(readiness) =
-        WorkspaceStore::open(db_path).and_then(|store| store.pull_request_review_state(name))
-    {
-        let reviews = Label::new(Some(&pull_request_review_feedback(Ok(readiness))));
-        reviews.add_css_class("card-meta");
-        reviews.set_xalign(0.0);
-        reviews.set_wrap(true);
-        panel.append(&reviews);
-    }
+    panel.append(&header);
+    panel.append(&feedback);
+    panel.append(&pull_request_text_section("Checks Summary", &checks_text));
+    panel.append(&pull_request_text_section("PR Readiness", &readiness_text));
+    panel.append(&pull_request_text_section(
+        "PR Comments / Reviews",
+        &review_text,
+    ));
 
     panel
 }
@@ -3489,6 +4276,46 @@ fn workspace_checks_panel(
 fn optional_entry_text(entry: &Entry) -> Option<String> {
     let value = entry.text().trim().to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+fn optional_text_buffer_text(buffer: &gtk::TextBuffer) -> Option<String> {
+    let value = text_buffer_contents(buffer).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn pull_request_action_labels(kind: Option<PullRequestStateKind>) -> Vec<&'static str> {
+    match kind {
+        None => vec!["Push branch", "Create PR"],
+        Some(PullRequestStateKind::Open) => vec!["PR summary", "Reviews", "Refresh"],
+        Some(PullRequestStateKind::Ready) => vec!["Merge", "PR summary", "Refresh"],
+        Some(PullRequestStateKind::Failed) => vec!["Fix checks", "PR summary", "Refresh"],
+        Some(PullRequestStateKind::Merged) => vec!["Continue", "Archive"],
+    }
+}
+
+fn pull_request_text_section(title: &str, text: &str) -> GBox {
+    let section = GBox::new(Orientation::Vertical, 4);
+    section.append(&section_title(title));
+
+    let view = TextView::new();
+    view.set_editable(false);
+    view.set_monospace(true);
+    view.set_wrap_mode(WrapMode::WordChar);
+    view.add_css_class("history-view");
+    view.set_left_margin(6);
+    view.set_right_margin(6);
+    view.set_top_margin(6);
+    view.set_bottom_margin(6);
+    view.buffer().set_text(text);
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_min_content_height(56);
+    scroll.set_max_content_height(88);
+    scroll.set_child(Some(&view));
+    section.append(&scroll);
+
+    section
 }
 
 fn workspace_conflict_resolution_panel(
@@ -3755,7 +4582,7 @@ fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
 }
 
 fn pull_request_merge_and_archive_feedback(
-    result: anyhow::Result<linux_conductor_core::workspace::MergePullRequestResult>,
+    result: anyhow::Result<linux_archductor_core::workspace::MergePullRequestResult>,
 ) -> String {
     match result {
         Ok(result) => {
@@ -3889,6 +4716,99 @@ fn workspace_review_panel(
     toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+    let github_threads_state = match store.pull_request(name) {
+        Ok(Some(_)) => match store.pull_request_readiness(name) {
+            Ok(readiness) => Ok(readiness.review_threads),
+            Err(err) => Err(format!("Could not read GitHub review threads: {err:#}")),
+        },
+        Ok(None) => Ok(Vec::new()),
+        Err(err) => Err(format!("Could not read pull request state: {err:#}")),
+    };
+    let show_github_threads_section = match &github_threads_state {
+        Ok(threads) => !threads.is_empty(),
+        Err(_) => true,
+    };
+    let section_titles = review_tab_section_titles(show_github_threads_section);
+
+    if show_github_threads_section {
+        panel.append(&section_title(section_titles[0]));
+        match github_threads_state {
+            Ok(threads) => {
+                for thread in threads {
+                    let thread_box = GBox::new(Orientation::Vertical, 4);
+                    let row = make_action_row();
+                    let summary = Label::new(Some(&format_review_thread_row(&thread)));
+                    summary.set_xalign(0.0);
+                    summary.set_wrap(true);
+                    summary.set_hexpand(true);
+                    row.append(&summary);
+
+                    if let Some(thread_id) = thread.id.clone() {
+                        let button =
+                            secondary_button(if thread.resolved { "Reopen" } else { "Resolve" });
+                        let db_for_resolution = db_path.to_path_buf();
+                        let workspace_for_resolution = name.to_owned();
+                        let refresh_after_resolution = refresh_hub.clone();
+                        let feedback_for_resolution = feedback.clone();
+                        let toast_for_resolution = toast_overlay.clone();
+                        let action = if thread.resolved { "Reopen" } else { "Resolve" };
+                        let resolved = !thread.resolved;
+                        button.connect_clicked(move |_| {
+                            let result =
+                                WorkspaceStore::open(db_for_resolution.clone()).and_then(|store| {
+                                    store.set_pull_request_review_thread_resolution(
+                                        &workspace_for_resolution,
+                                        &thread_id,
+                                        resolved,
+                                    )
+                                });
+                            let should_refresh = result.is_ok();
+                            let message =
+                                pull_request_review_thread_action_feedback(action, result);
+                            apply_action_feedback(
+                                &feedback_for_resolution,
+                                &toast_for_resolution,
+                                &message,
+                                true,
+                            );
+                            if should_refresh {
+                                refresh_after_resolution.refresh(RefreshScope::All);
+                            }
+                        });
+                        row.append(&button);
+                    }
+
+                    thread_box.append(&row);
+                    if let Some(comment) = thread.comments.last() {
+                        let preview = Label::new(Some(&format!(
+                            "{}: {}",
+                            comment.author,
+                            comment.body.replace('\n', " ")
+                        )));
+                        preview.add_css_class("card-meta");
+                        preview.set_xalign(0.0);
+                        preview.set_wrap(true);
+                        thread_box.append(&preview);
+                    }
+                    panel.append(&thread_box);
+                }
+            }
+            Err(message) => panel.append(&detail_row("GitHub", &message)),
+        }
+        panel.append(&Separator::new(Orientation::Horizontal));
+    }
+
+    panel.append(&section_title(
+        section_titles
+            .last()
+            .copied()
+            .unwrap_or("Local review comments"),
+    ));
+
     let form = make_action_row();
     let file_entry = Entry::new();
     file_entry.set_placeholder_text(Some("file path"));
@@ -3900,10 +4820,6 @@ fn workspace_review_panel(
     body_entry.set_hexpand(true);
     let add_btn = text_button("Add Comment");
     add_btn.add_css_class("suggested-action");
-    let feedback = Label::new(None);
-    feedback.add_css_class("card-meta");
-    feedback.set_xalign(0.0);
-    feedback.set_wrap(true);
     let db_for_add = db_path.to_path_buf();
     let workspace_for_add = name.to_owned();
     let refresh_after_add = refresh_hub.clone();
@@ -3995,7 +4911,9 @@ fn workspace_review_panel(
     panel.append(&feedback);
 
     match store.list_review_comments(name) {
-        Ok(comments) if comments.is_empty() => panel.append(&detail_row("Review", "No comments")),
+        Ok(comments) if comments.is_empty() => {
+            panel.append(&detail_row("Local review", "No local comments"))
+        }
         Ok(comments) => {
             for comment in comments {
                 let row = make_action_row();
@@ -4036,11 +4954,36 @@ fn workspace_review_panel(
             }
         }
         Err(err) => panel.append(&detail_row(
-            "Review",
-            &format!("Could not read review comments: {err:#}"),
+            "Local review",
+            &format!("Could not read local review comments: {err:#}"),
         )),
     }
     panel
+}
+
+fn review_tab_section_titles(has_threads: bool) -> Vec<&'static str> {
+    if has_threads {
+        vec!["GitHub review threads", "Local review comments"]
+    } else {
+        vec!["Local review comments"]
+    }
+}
+
+fn format_review_thread_row(thread: &PullRequestReviewThread) -> String {
+    let state = if thread.resolved { "resolved" } else { "open" };
+    let location = match (thread.path.as_deref(), thread.line) {
+        (Some(path), Some(line)) => format!("{path}:{line}"),
+        (Some(path), None) => path.to_owned(),
+        (None, Some(line)) => format!("line {line}"),
+        (None, None) => "unknown location".to_owned(),
+    };
+    format!(
+        "{} [{}] {} · {}",
+        thread.id.as_deref().unwrap_or("thread"),
+        state,
+        location,
+        pluralize(thread.comments.len(), "comment")
+    )
 }
 
 fn review_comment_row_summary(comment: &ReviewComment) -> String {
@@ -4095,7 +5038,7 @@ fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
     entry.set_hexpand(true);
     let add_btn = text_button("Add Todo");
     add_btn.add_css_class("suggested-action");
-    let db_path = linux_conductor_core::paths::AppPaths::from_env().database_path;
+    let db_path = linux_archductor_core::paths::AppPaths::from_env().database_path;
     let workspace = name.to_owned();
     let entry_clone = entry.clone();
     add_btn.connect_clicked(move |_| {
@@ -4465,12 +5408,12 @@ mod tests {
     #[test]
     fn diff_file_summary_renders_review_scan_rows() {
         let summaries = vec![
-            linux_conductor_core::workspace::DiffFileSummary {
+            linux_archductor_core::workspace::DiffFileSummary {
                 path: "README.md".to_owned(),
                 additions: Some(2),
                 deletions: Some(1),
             },
-            linux_conductor_core::workspace::DiffFileSummary {
+            linux_archductor_core::workspace::DiffFileSummary {
                 path: "assets/logo.png".to_owned(),
                 additions: None,
                 deletions: None,
@@ -4486,7 +5429,7 @@ mod tests {
 
     #[test]
     fn review_comment_summary_marks_open_comments_resolvable() {
-        let comment = linux_conductor_core::workspace::ReviewComment {
+        let comment = linux_archductor_core::workspace::ReviewComment {
             id: 7,
             workspace_id: 1,
             file_path: "src/lib.rs".to_owned(),
@@ -4507,7 +5450,7 @@ mod tests {
     #[test]
     fn file_inline_comments_text_filters_to_selected_file() {
         let comments = vec![
-            linux_conductor_core::workspace::ReviewComment {
+            linux_archductor_core::workspace::ReviewComment {
                 id: 7,
                 workspace_id: 1,
                 file_path: "src/lib.rs".to_owned(),
@@ -4518,7 +5461,7 @@ mod tests {
                 created_at: "2026-06-19T00:00:00Z".to_owned(),
                 updated_at: "2026-06-19T00:00:00Z".to_owned(),
             },
-            linux_conductor_core::workspace::ReviewComment {
+            linux_archductor_core::workspace::ReviewComment {
                 id: 8,
                 workspace_id: 1,
                 file_path: "README.md".to_owned(),
@@ -4541,12 +5484,12 @@ mod tests {
     #[test]
     fn diff_tree_rows_insert_directory_headers_once() {
         let summaries = vec![
-            linux_conductor_core::workspace::DiffFileSummary {
+            linux_archductor_core::workspace::DiffFileSummary {
                 path: "src/lib.rs".to_owned(),
                 additions: Some(1),
                 deletions: Some(0),
             },
-            linux_conductor_core::workspace::DiffFileSummary {
+            linux_archductor_core::workspace::DiffFileSummary {
                 path: "src/ui/panel.rs".to_owned(),
                 additions: Some(3),
                 deletions: Some(1),
@@ -4585,6 +5528,91 @@ mod tests {
     }
 
     #[test]
+    fn run_console_state_seeds_terminal_tab_and_defaults_to_setup() {
+        let state = WorkspaceRunConsoleState::default();
+
+        assert_eq!(state.active_tab_name(), "setup");
+        assert_eq!(state.terminals.len(), 1);
+        assert_eq!(state.terminals[0].tab_name(), "terminal-1");
+    }
+
+    #[test]
+    fn split_position_for_ratio_prefers_five_to_three_layout_and_clamps() {
+        assert_eq!(
+            split_position_for_ratio(1280, 5, 3, 360, 280),
+            800
+        );
+        assert_eq!(
+            split_position_for_ratio(700, 5, 3, 360, 280),
+            420
+        );
+        assert_eq!(
+            split_position_for_ratio(500, 5, 3, 360, 280),
+            360
+        );
+    }
+
+    #[test]
+    fn run_console_state_keeps_active_terminal_when_it_exists() {
+        let mut state = WorkspaceRunConsoleState::default();
+        let active = state.add_terminal_tab();
+        state.active_tab = active.clone();
+
+        assert_eq!(state.active_tab_name(), active);
+    }
+
+    #[test]
+    fn run_console_state_falls_back_to_setup_when_active_terminal_is_missing() {
+        let mut state = WorkspaceRunConsoleState::default();
+        state.active_tab = "terminal-99".to_owned();
+
+        assert_eq!(state.active_tab_name(), "setup");
+    }
+
+    #[test]
+    fn run_console_terminal_state_appends_command_output() {
+        let mut terminal = WorkspaceRunConsoleTerminalState::new(3);
+        terminal.append_command("cargo test");
+        terminal.append_result("[exit 0]\n");
+
+        assert!(terminal.transcript.contains("$ cargo test"));
+        assert!(terminal.transcript.contains("[running]"));
+        assert!(terminal.transcript.contains("[exit 0]"));
+    }
+
+    #[test]
+    fn review_thread_row_format_includes_state_location_and_comment_count() {
+        let thread = linux_archductor_core::workspace::PullRequestReviewThread {
+            id: Some("PRRT_fake".to_owned()),
+            path: Some("src/lib.rs".to_owned()),
+            line: Some(42),
+            resolved: false,
+            comments: vec![linux_archductor_core::workspace::PullRequestThreadComment {
+                author: "alice".to_owned(),
+                body: "Need a test.".to_owned(),
+                url: None,
+                created_at: None,
+            }],
+        };
+
+        let summary = format_review_thread_row(&thread);
+
+        assert_eq!(summary, "PRRT_fake [open] src/lib.rs:42 · 1 comment");
+    }
+
+    #[test]
+    fn review_tab_sections_keep_github_threads_separate_from_local_comments() {
+        assert_eq!(
+            review_tab_section_titles(true),
+            vec!["GitHub review threads", "Local review comments"]
+        );
+        assert_eq!(
+            review_tab_section_titles(false),
+            vec!["Local review comments"]
+        );
+    }
+
+    #[test]
     fn pull_request_create_feedback_summarizes_output() {
         let success = pull_request_create_feedback(Ok(
             "Creating pull request\nhttps://github.com/example/demo/pull/42\n".to_owned(),
@@ -4601,6 +5629,41 @@ mod tests {
             failure,
             "Create PR failed: workspace berlin has no changed files"
         );
+    }
+
+    #[test]
+    fn pull_request_actions_include_create_controls_without_pr() {
+        let actions = pull_request_action_labels(None);
+
+        assert_eq!(actions, vec!["Push branch", "Create PR"]);
+    }
+
+    #[test]
+    fn pull_request_actions_include_summary_review_and_refresh_for_open_prs() {
+        let actions = pull_request_action_labels(Some(PullRequestStateKind::Open));
+
+        assert_eq!(actions, vec!["PR summary", "Reviews", "Refresh"]);
+    }
+
+    #[test]
+    fn pull_request_actions_include_merge_summary_and_refresh_for_ready_prs() {
+        let actions = pull_request_action_labels(Some(PullRequestStateKind::Ready));
+
+        assert_eq!(actions, vec!["Merge", "PR summary", "Refresh"]);
+    }
+
+    #[test]
+    fn pull_request_actions_include_fix_summary_and_refresh_for_failed_prs() {
+        let actions = pull_request_action_labels(Some(PullRequestStateKind::Failed));
+
+        assert_eq!(actions, vec!["Fix checks", "PR summary", "Refresh"]);
+    }
+
+    #[test]
+    fn pull_request_actions_include_continue_and_archive_for_merged_prs() {
+        let actions = pull_request_action_labels(Some(PullRequestStateKind::Merged));
+
+        assert_eq!(actions, vec!["Continue", "Archive"]);
     }
 
     #[test]
@@ -4622,7 +5685,7 @@ mod tests {
     #[test]
     fn pull_request_merge_and_archive_feedback_reports_archive_state() {
         let success = pull_request_merge_and_archive_feedback(Ok(
-            linux_conductor_core::workspace::MergePullRequestResult {
+            linux_archductor_core::workspace::MergePullRequestResult {
                 merge_output: "Merged pull request #42\n".to_owned(),
                 archived_workspace: Some(Workspace {
                     id: 1,
@@ -4645,7 +5708,7 @@ mod tests {
         );
 
         let no_archive = pull_request_merge_and_archive_feedback(Ok(
-            linux_conductor_core::workspace::MergePullRequestResult {
+            linux_archductor_core::workspace::MergePullRequestResult {
                 merge_output: "Merged pull request #42\n".to_owned(),
                 archived_workspace: None,
             },
@@ -4667,7 +5730,7 @@ mod tests {
     #[test]
     fn pull_request_refresh_feedback_summarizes_state() {
         let success =
-            pull_request_refresh_feedback(Ok(Some(linux_conductor_core::workspace::PullRequest {
+            pull_request_refresh_feedback(Ok(Some(linux_archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -4738,10 +5801,139 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_status_summary_prefers_failed_checks() {
+        let status = pull_request_status_summary(
+            &linux_archductor_core::workspace::PullRequest {
+                id: 1,
+                workspace_id: 2,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://github.com/example/demo/pull/42".to_owned(),
+                state: "OPEN".to_owned(),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+                review_decision: Some("CHANGES_REQUESTED".to_owned()),
+                latest_reviews: Vec::new(),
+                comments: Vec::new(),
+                review_threads: Vec::new(),
+                checks: Vec::new(),
+                deployments: Vec::new(),
+            }),
+            &linux_archductor_core::workspace::ChecksSummary {
+                workspace: Workspace {
+                    id: 1,
+                    repository_id: 2,
+                    name: "berlin".to_owned(),
+                    path: std::path::PathBuf::from("/tmp/berlin"),
+                    branch: "lc/berlin".to_owned(),
+                    base_ref: "main".to_owned(),
+                    port_base: 4200,
+                    status: "active".to_owned(),
+                    archived_at: None,
+                    created_at: "then".to_owned(),
+                    updated_at: "now".to_owned(),
+                },
+                changed_files: 0,
+                run_status: None,
+                session_status: None,
+                active_sessions: 0,
+                pull_request: None,
+                open_todos: 0,
+                total_todos: 0,
+                branch_push_state: None,
+                open_review_comments: 0,
+                conflicting_workspaces: Vec::new(),
+            },
+        );
+
+        assert_eq!(status.label, "checks failed");
+        assert_eq!(status.css_class, "ws-pr-status-failed");
+        assert_eq!(status.kind, PullRequestStateKind::Failed);
+    }
+
+    #[test]
+    fn pull_request_status_summary_open_state_is_not_attention() {
+        let status = pull_request_status_summary(
+            &linux_archductor_core::workspace::PullRequest {
+                id: 1,
+                workspace_id: 2,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://github.com/example/demo/pull/42".to_owned(),
+                state: "OPEN".to_owned(),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            None,
+            &linux_archductor_core::workspace::ChecksSummary {
+                workspace: Workspace {
+                    id: 1,
+                    repository_id: 2,
+                    name: "berlin".to_owned(),
+                    path: std::path::PathBuf::from("/tmp/berlin"),
+                    branch: "lc/berlin".to_owned(),
+                    base_ref: "main".to_owned(),
+                    port_base: 4200,
+                    status: "active".to_owned(),
+                    archived_at: None,
+                    created_at: "then".to_owned(),
+                    updated_at: "now".to_owned(),
+                },
+                changed_files: 0,
+                run_status: None,
+                session_status: None,
+                active_sessions: 0,
+                pull_request: None,
+                open_todos: 0,
+                total_todos: 0,
+                branch_push_state: None,
+                open_review_comments: 0,
+                conflicting_workspaces: Vec::new(),
+            },
+        );
+
+        assert_eq!(status.label, "OPEN");
+        assert_eq!(status.kind, PullRequestStateKind::Open);
+        assert_eq!(status.attention_label(), None);
+        assert_eq!(status.attention_css_class(), None);
+    }
+
+    #[test]
+    fn pull_request_status_summary_keeps_failed_attention_without_checks_summary() {
+        let pr = linux_archductor_core::workspace::PullRequest {
+            id: 1,
+            workspace_id: 2,
+            provider: "github".to_owned(),
+            number: 42,
+            url: "https://github.com/example/demo/pull/42".to_owned(),
+            state: "OPEN".to_owned(),
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        let readiness = linux_archductor_core::workspace::PullRequestReadiness {
+            review_decision: Some("CHANGES_REQUESTED".to_owned()),
+            latest_reviews: Vec::new(),
+            comments: Vec::new(),
+            review_threads: Vec::new(),
+            checks: Vec::new(),
+            deployments: Vec::new(),
+        };
+
+        let status = pull_request_status_summary_without_checks_summary(&pr, Some(&readiness));
+
+        assert_eq!(status.label, "checks failed");
+        assert_eq!(status.css_class, "ws-pr-status-failed");
+        assert_eq!(status.kind, PullRequestStateKind::Failed);
+        assert_eq!(status.attention_label(), Some("checks failed"));
+    }
+
+    #[test]
     fn pull_request_review_thread_action_feedback_reports_state_and_id() {
         let success = pull_request_review_thread_action_feedback(
             "Resolve",
-            Ok(linux_conductor_core::workspace::PullRequestReviewThread {
+            Ok(linux_archductor_core::workspace::PullRequestReviewThread {
                 id: Some("PRRT_fake".to_owned()),
                 path: Some("src/lib.rs".to_owned()),
                 line: Some(42),
