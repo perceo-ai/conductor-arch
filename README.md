@@ -3,7 +3,7 @@
 Linux Archductor is a desktop control plane for running coding agents across
 isolated Git worktree workspaces.
 
-Use it when one repository has several streams of work in flight: create a
+Use it when one codebase has several streams of work in flight: create a
 workspace, start Codex or Claude Code, review the diff, open or merge a GitHub
 pull request, archive the workspace, then start the next task without leaving
 the app.
@@ -11,11 +11,33 @@ the app.
 Inspired by [Conductor](https://conductor.build). This project targets Linux
 desktops with GTK4/libadwaita.
 
+## Product Structure
+
+Archductor is cloning the Conductor structure below and the docs in this repo
+should use these terms consistently:
+
+| Term | What it means in Archductor | Relationship |
+| --- | --- | --- |
+| `Project` | The Archductor entry for one codebase. It holds repository settings, scripts, instructions, and the list of workspaces for that codebase. | `1 project contains 1 repository` |
+| `Repository` | The Git codebase behind a project. It can come from an existing local folder, Git URL, or quick-start flow. | `1 repository contains many workspaces` |
+| `Workspace` | An isolated copy of a project and repository for one task, issue, experiment, or pull request. | `1 workspace maps to 1 branch` |
+| `Branch` | The Git branch checked out inside a workspace. This is usually the review and PR unit. | `1 branch has 1 working tree` |
+| `Working tree` | The files on disk for one workspace. Archductor creates these separate checkouts with Git worktrees. | `1 working tree belongs to 1 workspace` |
+| `Running environment` | The app, server, watchers, tests, terminals, and agent processes running inside a workspace. | `1 workspace can run many processes` |
+
+Practical rule:
+
+- Projects own repository-level defaults and configuration.
+- Workspaces are the task unit.
+- Sessions, terminals, setup/run scripts, and agents are part of the running
+  environment inside a workspace.
+
 ## What Works Today
 
 The current app supports the core Archductor loop, with some rough edges:
 
-- Add an existing repository or clone a Git URL from the Projects page.
+- Add a project from an existing repository path or clone a Git URL from the
+  Projects page.
 - Create workspaces from a branch, prompt, GitHub issue, GitHub PR, or Linear
   issue.
 - Give each workspace its own Git worktree, branch, `.context` directory, and
@@ -38,6 +60,10 @@ The current app supports the core Archductor loop, with some rough edges:
   and file-editable workflow defaults for naming, automation, agents, merge
   rules, workspaces, and views.
 
+- New PTY-backed Codex chat threads now use real pseudo-terminals, rendered
+  screen parsing, structured thread/message persistence, and exact resume IDs
+  captured from Codex rollout metadata.
+
 The GUI is usable, but not fully polished. Agent sessions run local PTY-backed
 harnesses and render structured app-native transcript events. Terminal
 rendering, exhaustive per-command shortcuts, full visual theme/layout
@@ -46,7 +72,8 @@ application, and full Archductor visual parity are still in progress.
 ## The Workflow
 
 1. Open `linux-archductor-gtk`.
-2. Add or clone a repository on the Projects page.
+2. Add or clone a repository on the Projects page. This creates the Archductor
+   project entry for that codebase.
 3. Configure repository scripts and settings if the project needs them.
 4. Create a workspace for the next task.
 5. Start Codex, Claude Code, Cursor, or a shell from the workspace page.
@@ -145,7 +172,9 @@ existing local CLI authentication.
 ## Repository Settings
 
 Shared project settings live at `.archductor/settings.toml` in the repository
-root. Commit this file when teammates should get the same setup.
+root. In product terms, these are project-level settings because one Archductor
+project wraps one repository. Commit this file when teammates should get the
+same setup.
 
 ```toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"

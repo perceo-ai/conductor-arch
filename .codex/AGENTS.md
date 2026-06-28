@@ -78,9 +78,70 @@ Current state as of the latest progress log:
 - GitHub-backed flows require local `gh` auth. Linear-backed flows require
   `LINEAR_API_KEY`. MCP status currently means config inspection unless live
   reachability is explicitly tested.
+- Codex chat control now runs through PTYs, not plain pipes.
+- Codex chat recovery now prefers:
+  - exact native resume ID from Codex rollout metadata
+  - structured `chat_threads`
+  - structured `chat_messages`
+  - rendered-screen parsing over raw PTY logs
+- GTK chat is moving from process-first selection to thread-first selection.
 
 Do not describe the project as MVP complete. Do not call packaging
 release-ready until the GUI-first flow works without normal CLI coordination.
+
+## Product Structure
+
+Use these terms exactly:
+
+- `Project`: the Archductor entry for one codebase.
+- `Repository`: the Git codebase behind that project.
+- `Workspace`: one isolated task copy of the repository.
+- `Branch`: the Git branch checked out in the workspace.
+- `Working tree`: the files on disk for that workspace.
+- `Running environment`: terminals, agents, scripts, tests, servers, and other
+  live processes inside that workspace.
+
+Relationship model:
+
+- `1 project contains 1 repository`
+- `1 repository contains many workspaces`
+- `1 workspace maps to 1 branch`
+- `1 branch has 1 working tree`
+- `1 workspace can run many processes`
+
+When writing docs, UI text, or code comments:
+
+- Do not blur project and repository together unless the distinction does not
+  matter.
+- Do not describe sessions or terminals as workspaces.
+- Do not describe multiple chats in one workspace as multiple workspaces.
+
+## Repository Structure
+
+Agents should understand the repo before editing:
+
+- `crates/core`
+  - data model, repository/workspace/process state, PTY integration, Codex TUI
+    parsing, harness launch planning
+- `crates/gtk-app`
+  - main desktop product surface, workspace command center, chat UI, history,
+    terminal UI, app state
+- `crates/cli`
+  - fallback CLI, automation hooks, durable helper paths used by the GTK app
+- `docs`
+  - parity target, specs, plans, manual testing, deployment notes
+- `.codex/AGENTS.md`
+  - Codex-specific working instructions for this repo
+- `claude/CLAUDE.md`
+  - Claude-specific working instructions for this repo
+
+Current architectural direction:
+
+- GUI-first Archductor clone
+- PTY-backed agent harnesses
+- thread-first chat persistence
+- workspace-centered review/merge loop
+- Linux-first product quality over theoretical portability
 
 ## Implementation Priorities
 
