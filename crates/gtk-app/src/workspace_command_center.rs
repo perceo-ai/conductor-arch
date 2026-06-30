@@ -7,16 +7,18 @@ use gtk::{
 };
 use linux_archductor_core::pty::PtySession;
 use linux_archductor_core::workspace::{
-    DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment, SessionKind, Workspace,
-    WorkspaceStore,
+    ChatThreadRecord, DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment,
+    SessionKind, Workspace, WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use tracing::error;
 
 const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
 const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
@@ -438,9 +440,15 @@ fn ws_center_panel(
         collapse_sidebar.clone(),
     ));
 
-    // Tab bar
-    let tab_bar = GBox::new(Orientation::Horizontal, 0);
+    let tab_bar = GBox::new(Orientation::Horizontal, 8);
     tab_bar.add_css_class("ws-tab-bar");
+    let chat_tabs = GBox::new(Orientation::Horizontal, 6);
+    let spacer = GBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    let file_tabs = GBox::new(Orientation::Horizontal, 6);
+    tab_bar.append(&chat_tabs);
+    tab_bar.append(&spacer);
+    tab_bar.append(&file_tabs);
     panel.append(&tab_bar);
 
     // Separator below tab bar
@@ -454,8 +462,56 @@ fn ws_center_panel(
     content.set_overflow(gtk::Overflow::Hidden);
     content.set_hexpand(true);
 
-    // Chat tab
+    let known_threads = Rc::new(RefCell::new(
+        store.list_chat_threads(&ws.name).unwrap_or_default(),
+    ));
+    let selected_thread =
+        Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
+            known_threads.borrow().first().map(|thread| thread.id)
+        })));
+    if state.selected_chat_thread().is_none() {
+        state.set_selected_chat_thread(*selected_thread.borrow());
+    }
+    let external_thread_selection: session_surface::ExternalThreadSelectionController =
+        Rc::new(RefCell::new(None));
+
     let refresh_sessions = refresh_hub.clone();
+    let on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)> = {
+        let chat_tabs = chat_tabs.clone();
+        let known_threads = known_threads.clone();
+        let selected_thread = selected_thread.clone();
+        let state = state.clone();
+        let external_thread_selection = external_thread_selection.clone();
+        let content = content.clone();
+        Rc::new(move |threads, selected| {
+            *known_threads.borrow_mut() = threads.clone();
+            *selected_thread.borrow_mut() = selected;
+            state.set_selected_chat_thread(selected);
+            while let Some(child) = chat_tabs.first_child() {
+                chat_tabs.remove(&child);
+            }
+            for thread in threads.iter().take(10) {
+                let button = ws_tab_button(&workspace_chat_tab_label(thread));
+                if Some(thread.id) == selected {
+                    button.add_css_class("ws-tab-active");
+                }
+                let controller = external_thread_selection.clone();
+                let content = content.clone();
+                let selected_thread = selected_thread.clone();
+                let state = state.clone();
+                let thread_id = thread.id;
+                button.connect_clicked(move |_| {
+                    *selected_thread.borrow_mut() = Some(thread_id);
+                    state.set_selected_chat_thread(Some(thread_id));
+                    content.set_visible_child_name("chat");
+                    if let Some(select_thread) = controller.borrow().as_ref().cloned() {
+                        select_thread(Some(thread_id));
+                    }
+                });
+                chat_tabs.append(&button);
+            }
+        })
+    };
     let chat_widget = session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -469,51 +525,55 @@ fn ws_center_panel(
             refresh_sessions.refresh(RefreshScope::History);
         },
         false,
+        Some(session_surface::ExternalChatTabs {
+            on_threads_changed: on_threads_changed.clone(),
+            selection_controller: external_thread_selection.clone(),
+        }),
     );
     content.add_named(&chat_widget, Some("chat"));
-
-    let chat_btn = ws_tab_button("Chat");
-    chat_btn.add_css_class("ws-tab-active");
-    {
-        let c = content.clone();
-        let tb = tab_bar.clone();
-        chat_btn.connect_clicked(move |_| {
-            c.set_visible_child_name("chat");
-            ws_sync_tab_active(&tb, "ws-tab-btn");
-        });
-    }
-    tab_bar.append(&chat_btn);
-
-    // Pre-opened placeholder file tab
-    let placeholder_code = "use anyhow::Result;\nuse axum::{routing::get, Router};\n\n#[tokio::main]\nasync fn main() -> Result<()> {\n    let app = Router::new()\n        .route(\"/\", get(root))\n        .route(\"/health\", get(health));\n\n    let addr = \"0.0.0.0:3000\".parse()?;\n    axum::Server::bind(&addr)\n        .serve(app.into_make_service())\n        .await?;\n    Ok(())\n}\n\nasync fn root() -> &'static str {\n    \"Hello, World!\"\n}\n\nasync fn health() -> &'static str {\n    \"ok\"\n}";
-    let file_code_view = TextView::new();
-    file_code_view.set_editable(false);
-    file_code_view.set_monospace(true);
-    file_code_view.set_vexpand(true);
-    file_code_view.add_css_class("ws-file-code-view");
-    file_code_view.set_left_margin(16);
-    file_code_view.set_right_margin(16);
-    file_code_view.set_top_margin(14);
-    file_code_view.set_bottom_margin(14);
-    file_code_view.buffer().set_text(placeholder_code);
-    let file_code_scroll = ScrolledWindow::new();
-    file_code_scroll.set_vexpand(true);
-    file_code_scroll.set_child(Some(&file_code_view));
-    content.add_named(&file_code_scroll, Some("file:main.rs"));
-    let file_tab_btn = ws_tab_button("main.rs");
-    {
-        let c = content.clone();
-        let tb = tab_bar.clone();
-        file_tab_btn.connect_clicked(move |_| {
-            c.set_visible_child_name("file:main.rs");
-            ws_sync_tab_active(&tb, "ws-tab-btn");
-        });
-    }
-    tab_bar.append(&file_tab_btn);
-
-    // Visual "+" add-tab button
     let add_tab_btn = text_button("+");
     add_tab_btn.add_css_class("ws-tab-add-btn");
+    {
+        let db_path = db_path.to_path_buf();
+        let workspace_name = ws.name.clone();
+        let known_threads = known_threads.clone();
+        let selected_thread = selected_thread.clone();
+        let state = state.clone();
+        let external_thread_selection = external_thread_selection.clone();
+        let on_threads_changed = on_threads_changed.clone();
+        let content = content.clone();
+        add_tab_btn.connect_clicked(move |_| {
+            let existing = { known_threads.borrow().clone() };
+            if existing.len() >= 10 {
+                return;
+            }
+            let active_thread = *selected_thread.borrow();
+            let provider = existing
+                .iter()
+                .find(|thread| Some(thread.id) == active_thread)
+                .map(|thread| thread.provider.clone())
+                .unwrap_or_else(|| "codex".to_owned());
+            let title = workspace_chat_default_title(&existing);
+            let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+                return;
+            };
+            let Ok(thread) = store.create_chat_thread(&workspace_name, &provider, &title, None)
+            else {
+                return;
+            };
+            let mut threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
+            if !threads.iter().any(|item| item.id == thread.id) {
+                threads.insert(0, thread.clone());
+            }
+            *selected_thread.borrow_mut() = Some(thread.id);
+            state.set_selected_chat_thread(Some(thread.id));
+            content.set_visible_child_name("chat");
+            (on_threads_changed)(threads, Some(thread.id));
+            if let Some(select_thread) = external_thread_selection.borrow().as_ref().cloned() {
+                select_thread(Some(thread.id));
+            }
+        });
+    }
     tab_bar.append(&add_tab_btn);
 
     // Sync active tab state
@@ -534,7 +594,7 @@ fn ws_center_panel(
     // Open-file closure: reads file from disk, opens as a new tab
     let ws_path = ws.path.clone();
     let content_ref = content.clone();
-    let tab_bar_ref = tab_bar.clone();
+    let file_tabs_ref = file_tabs.clone();
 
     let open_file: Rc<dyn Fn(&str)> = Rc::new(move |rel_path: &str| {
         let tab_key = format!("file:{rel_path}");
@@ -595,15 +655,17 @@ fn ws_center_panel(
             let file_btn = ws_tab_button(short_name);
             let cr = content_ref.clone();
             let tk = tab_key.clone();
-            let tb = tab_bar_ref.clone();
             file_btn.connect_clicked(move |_| {
                 cr.set_visible_child_name(&tk);
-                ws_sync_tab_active(&tb, "ws-tab-btn");
             });
-            tab_bar_ref.append(&file_btn);
+            file_tabs_ref.append(&file_btn);
         }
         content_ref.set_visible_child_name(&tab_key);
     });
+
+    let initial_threads = known_threads.borrow().clone();
+    let initial_selected_thread = *selected_thread.borrow();
+    (on_threads_changed)(initial_threads, initial_selected_thread);
 
     (panel, open_file)
 }
@@ -614,10 +676,35 @@ fn ws_tab_button(label: &str) -> Button {
     btn
 }
 
-fn ws_sync_tab_active(tab_bar: &GBox, _class: &str) {
-    // Visual active state is handled by CSS on the stack's visible child name notify
-    // This is a placeholder for future per-button active highlighting
-    let _ = tab_bar;
+fn workspace_chat_default_title(threads: &[ChatThreadRecord]) -> String {
+    let next = threads.len() + 1;
+    if next == 1 {
+        "New Chat".to_owned()
+    } else {
+        format!("New Chat {next}")
+    }
+}
+
+fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
+    let title = thread.title.trim();
+    if title.is_empty() {
+        "New Chat".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
+fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(value) => value,
+        Err(_) => {
+            error!("recovered panic inside workspace command center GTK callback");
+            fallback
+        }
+    }
 }
 
 // ── Right panel (file list + run console) ───────────────────────
@@ -769,14 +856,18 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
 
     let rows_for_select = rows.clone();
     list.connect_row_selected(move |_, row| {
-        if let Some(r) = row {
-            let idx = r.index() as usize;
-            if let Some(entry) = rows_for_select.borrow().get(idx) {
-                if !entry.is_dir {
-                    open_file(entry.path.as_str());
+        guarded_gtk_callback((), || {
+            if let Some(r) = row {
+                let idx = r.index() as usize;
+                let path = rows_for_select
+                    .borrow()
+                    .get(idx)
+                    .and_then(|entry| (!entry.is_dir).then(|| entry.path.clone()));
+                if let Some(path) = path {
+                    open_file(path.as_str());
                 }
             }
-        }
+        })
     });
 
     let scroll = ScrolledWindow::new();
@@ -1828,11 +1919,7 @@ fn agents_panel(
     panel.append(&profile_row);
 
     let actions = GBox::new(Orientation::Horizontal, 8);
-    for (label, kind) in [
-        ("Shell", "shell"),
-        ("Codex", "codex"),
-        ("Claude", "claude"),
-    ] {
+    for (label, kind) in [("Shell", "shell"), ("Codex", "codex"), ("Claude", "claude")] {
         let button = text_button(label);
         let workspace = ws.name.clone();
         let db_for_launch = db_path.to_path_buf();
@@ -1875,6 +1962,7 @@ fn agents_panel(
             refresh_sessions.refresh(RefreshScope::History);
         },
         false,
+        None,
     ));
     panel.append(&session_box);
     panel
@@ -2692,6 +2780,7 @@ fn chat_terminal_split(
             refresh_sessions.refresh(RefreshScope::History);
         },
         false,
+        None,
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -2758,6 +2847,7 @@ fn parallel_agents_panel(
             refresh_chat.refresh(RefreshScope::History);
         },
         false,
+        None,
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -5538,18 +5628,9 @@ mod tests {
 
     #[test]
     fn split_position_for_ratio_prefers_five_to_three_layout_and_clamps() {
-        assert_eq!(
-            split_position_for_ratio(1280, 5, 3, 360, 280),
-            800
-        );
-        assert_eq!(
-            split_position_for_ratio(700, 5, 3, 360, 280),
-            420
-        );
-        assert_eq!(
-            split_position_for_ratio(500, 5, 3, 360, 280),
-            360
-        );
+        assert_eq!(split_position_for_ratio(1280, 5, 3, 360, 280), 800);
+        assert_eq!(split_position_for_ratio(700, 5, 3, 360, 280), 420);
+        assert_eq!(split_position_for_ratio(500, 5, 3, 360, 280), 360);
     }
 
     #[test]
@@ -5567,6 +5648,26 @@ mod tests {
         state.active_tab = "terminal-99".to_owned();
 
         assert_eq!(state.active_tab_name(), "setup");
+    }
+
+    #[test]
+    fn workspace_chat_default_title_counts_from_existing_threads() {
+        assert_eq!(workspace_chat_default_title(&[]), "New Chat");
+        assert_eq!(
+            workspace_chat_default_title(&[ChatThreadRecord {
+                id: 1,
+                workspace_id: 2,
+                provider: "codex".to_owned(),
+                title: "New Chat".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            }]),
+            "New Chat 2"
+        );
     }
 
     #[test]
@@ -5729,8 +5830,8 @@ mod tests {
 
     #[test]
     fn pull_request_refresh_feedback_summarizes_state() {
-        let success =
-            pull_request_refresh_feedback(Ok(Some(linux_archductor_core::workspace::PullRequest {
+        let success = pull_request_refresh_feedback(Ok(Some(
+            linux_archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -5739,7 +5840,8 @@ mod tests {
                 state: "MERGED".to_owned(),
                 created_at: "now".to_owned(),
                 updated_at: "now".to_owned(),
-            })));
+            },
+        )));
         assert_eq!(success, "PR #42 state: MERGED");
 
         let missing = pull_request_refresh_feedback(Ok(None));

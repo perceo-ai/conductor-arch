@@ -229,7 +229,11 @@ fn cli_codex_and_claude_sessions_preserve_harness_launch_details() {
         .stdout(contains("arg:on-request"))
         .stdout(contains("arg:--enable"))
         .stdout(contains("arg:goals"))
-        .stdout(predicates::str::is_match("env_bootstrap:.*\\S").unwrap().not());
+        .stdout(
+            predicates::str::is_match("env_bootstrap:.*\\S")
+                .unwrap()
+                .not(),
+        );
     app(temp.path())
         .env("PATH", &fake_path)
         .args(["session", "stop", "berlin"])
@@ -293,7 +297,11 @@ fn cli_codex_and_claude_sessions_preserve_harness_launch_details() {
         .success()
         .stdout(contains("exec codex"))
         .stdout(contains("--enable goals"))
-        .stdout(predicates::str::is_match("exec codex .*'\\[archductor bootstrap for codex]").unwrap().not())
+        .stdout(
+            predicates::str::is_match("exec codex .*'\\[archductor bootstrap for codex]")
+                .unwrap()
+                .not(),
+        )
         .stdout(predicates::str::contains("ARCHDUCTOR_SESSION_BOOTSTRAP=").not());
 
     app(temp.path())
@@ -311,7 +319,9 @@ fn cli_codex_and_claude_sessions_preserve_harness_launch_details() {
         .assert()
         .success()
         .stdout(contains("exec claude --permission-mode plan --session-id"))
-        .stdout(contains("--append-system-prompt '[archductor bootstrap for claude]"))
+        .stdout(contains(
+            "--append-system-prompt '[archductor bootstrap for claude]",
+        ))
         .stdout(contains("skills: rust, tests'"));
 }
 
@@ -363,9 +373,7 @@ fn wait_for_session_log(root: &Path) {
 }
 
 fn wait_for_session_log_contains(root: &Path, workspace: &str, needle: &str) {
-    let log_dir = root
-        .join("xdg/state/linux-archductor/logs")
-        .join(workspace);
+    let log_dir = root.join("xdg/state/linux-archductor/logs").join(workspace);
     for _ in 0..100 {
         if fs::read_dir(&log_dir)
             .ok()

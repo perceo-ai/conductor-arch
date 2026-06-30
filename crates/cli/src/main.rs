@@ -1,10 +1,15 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use linux_archductor_core::codex_tui::detect_directory_trust_prompt;
+use linux_archductor_core::archcar::client::ArchcarClient;
+use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest, ArchcarResponse};
+use linux_archductor_core::archcar::server::{
+    reconcile_managed_sessions_on_startup, ArchcarServer,
+};
 use linux_archductor_core::doctor;
-use linux_archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
+use linux_archductor_core::import::{
+    default_conductor_app_database, import_conductor_app_database,
+};
 use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::pty::PtySession;
 use linux_archductor_core::repository::{AddRepository, RepositoryStore};
 use linux_archductor_core::settings::{
     repository_settings_from_toml, save_repository_settings, SettingsLayer,
@@ -14,12 +19,11 @@ use linux_archductor_core::workspace::{
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
     WorkspaceStatusLine, WorkspaceStore,
 };
-use std::fs::OpenOptions;
-use std::io::{self, BufRead, Read, Write};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
@@ -117,10 +121,9 @@ enum Command {
         #[command(subcommand)]
         command: HistoryCommand,
     },
-    #[command(hide = true)]
-    Internal {
+    Archcar {
         #[command(subcommand)]
-        command: InternalCommand,
+        command: ArchcarCommand,
     },
 }
 
@@ -144,25 +147,24 @@ enum HistoryCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum InternalCommand {
-    RunCodexSession {
+enum ArchcarCommand {
+    Ensure {
         workspace: String,
-        #[arg(long)]
-        plan_mode: bool,
-        #[arg(long)]
-        fast_mode: bool,
-        #[arg(long)]
-        approval_mode: Option<String>,
-        #[arg(long)]
-        reasoning_mode: Option<String>,
-        #[arg(long)]
-        effort_mode: Option<String>,
-        #[arg(long)]
-        codex_personality: Option<String>,
-        #[arg(long)]
-        codex_goals: Option<String>,
-        #[arg(long)]
-        codex_skills: Option<String>,
+        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
+        kind: CliSessionKind,
+    },
+    Status {
+        session_id: i64,
+    },
+    Screen {
+        session_id: i64,
+    },
+    Send {
+        session_id: i64,
+        input: Vec<String>,
+    },
+    Kill {
+        session_id: i64,
     },
 }
 
@@ -428,6 +430,11 @@ enum CliSessionKind {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().any(|arg| arg == "--archcar-serve") {
+        let paths = AppPaths::from_env();
+        reconcile_managed_sessions_on_startup(&paths)?;
+        return ArchcarServer::bind(paths)?.serve();
+    }
     let cli = Cli::parse();
     let paths = AppPaths::from_env();
 
@@ -471,6 +478,42 @@ fn main() -> Result<()> {
                 HistoryCommand::Show { process_id } => {
                     let messages = store.local_chat_history_messages(process_id)?;
                     print!("{}", render_history_messages(&messages));
+                }
+            }
+        }
+        Command::Archcar { command } => {
+            let client = ArchcarClient::from_paths(&paths);
+            match command {
+                ArchcarCommand::Ensure { workspace, kind } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::EnsureWorkspaceDefaultSession {
+                            workspace,
+                            kind: kind.into(),
+                            harness: None,
+                        },
+                    )?);
+                }
+                ArchcarCommand::Status { session_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSessionStatus { session_id })?,
+                    );
+                }
+                ArchcarCommand::Screen { session_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSessionScreen { session_id })?,
+                    );
+                }
+                ArchcarCommand::Send { session_id, input } => {
+                    print_archcar_response(client.send(ArchcarRequest::SendInput {
+                        session_id,
+                        input: input.join(" "),
+                        kind: ArchcarInputKind::User,
+                    })?);
+                }
+                ArchcarCommand::Kill { session_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::KillSession { session_id })?,
+                    );
                 }
             }
         }
@@ -879,7 +922,18 @@ fn main() -> Result<()> {
                         codex_skills,
                     );
                     let process = if matches!(kind, CliSessionKind::Codex) {
-                        start_durable_codex_session(&paths, &workspace, harness)?
+                        let client = ArchcarClient::from_paths(&paths);
+                        print_archcar_response(client.send(ArchcarRequest::SpawnSession {
+                            workspace: workspace.clone(),
+                            kind: SessionKind::Codex,
+                            harness: Some(harness.clone()),
+                        })?);
+                        wait_for_session_process(
+                            &store,
+                            &workspace,
+                            SessionKind::Codex,
+                            Duration::from_secs(5),
+                        )?
                     } else {
                         store.start_session_with_options(&workspace, kind.into(), harness)?
                     };
@@ -925,6 +979,17 @@ fn main() -> Result<()> {
                     }
                 }
                 SessionCommand::Stop { workspace } => {
+                    let sessions = store.list_sessions(&workspace)?;
+                    let codex = sessions.iter().find(|record| {
+                        record.status == ProcessStatus::Running
+                            && command_session_kind_label(&record.command) == "codex"
+                    });
+                    if let Some(record) = codex {
+                        let client = ArchcarClient::from_paths(&paths);
+                        let _ = client.send(ArchcarRequest::KillSession {
+                            session_id: record.id,
+                        });
+                    }
                     let process = store.stop_session(&workspace)?;
                     println!("Stopped session for {} (pid {})", workspace, process.pid);
                 }
@@ -933,8 +998,7 @@ fn main() -> Result<()> {
                     process_id,
                     print_pty_path,
                 } => {
-                    let process =
-                        resolve_attachable_session(&store, &workspace, process_id)?;
+                    let process = resolve_attachable_session(&store, &workspace, process_id)?;
                     let pty_path = terminal_device_path_for_pid(process.pid)?;
                     if print_pty_path {
                         println!("{}", pty_path.display());
@@ -978,35 +1042,6 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Internal { command } => match command {
-            InternalCommand::RunCodexSession {
-                workspace,
-                plan_mode,
-                fast_mode,
-                approval_mode,
-                reasoning_mode,
-                effort_mode,
-                codex_personality,
-                codex_goals,
-                codex_skills,
-            } => {
-                let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
-                run_codex_session_monitor(
-                    &store,
-                    &workspace,
-                    session_harness_options(
-                        plan_mode,
-                        fast_mode,
-                        approval_mode,
-                        reasoning_mode,
-                        effort_mode,
-                        codex_personality,
-                        codex_goals,
-                        codex_skills,
-                    ),
-                )?;
-            }
-        },
         Command::Checks { workspace } => {
             let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
             print_checks_summary(store.checks_summary(&workspace)?);
@@ -1139,6 +1174,43 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_archcar_response(response: ArchcarResponse) {
+    match response {
+        ArchcarResponse::Ack => println!("ok"),
+        ArchcarResponse::SessionSpawnQueued { workspace, kind } => {
+            println!("queued {:?} session for {}", kind, workspace);
+        }
+        ArchcarResponse::SessionSpawned {
+            session_id,
+            thread_id,
+            workspace,
+            kind,
+            pid,
+        } => {
+            println!(
+                "spawned {:?} session {} thread {} for {} pid {}",
+                kind, session_id, thread_id, workspace, pid
+            );
+        }
+        ArchcarResponse::SessionStatus {
+            session_id,
+            status,
+            ready,
+        } => {
+            println!("session {} status={} ready={}", session_id, status, ready);
+        }
+        ArchcarResponse::SessionScreen { screen, .. } => print!("{screen}"),
+        ArchcarResponse::SessionMessages { messages, .. } => {
+            for message in messages {
+                println!("[{}] {}", message.role, message.content);
+            }
+        }
+        ArchcarResponse::Error { message } => {
+            eprintln!("{message}");
+        }
+    }
 }
 
 fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary) {
@@ -1508,144 +1580,6 @@ fn session_harness_options(
     }
 }
 
-fn start_durable_codex_session(
-    paths: &AppPaths,
-    workspace: &str,
-    harness: SessionHarnessOptions,
-) -> Result<ProcessRecord> {
-    let current_exe = std::env::current_exe().context("resolve current executable")?;
-    let mut command = ProcessCommand::new(current_exe);
-    command
-        .arg("internal")
-        .arg("run-codex-session")
-        .arg(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env("XDG_CONFIG_HOME", xdg_home_from_app_dir(&paths.config_dir)?)
-        .env("XDG_DATA_HOME", xdg_home_from_app_dir(&paths.data_dir)?)
-        .env("XDG_STATE_HOME", xdg_home_from_app_dir(&paths.state_dir)?)
-        .env("XDG_CACHE_HOME", xdg_home_from_app_dir(&paths.cache_dir)?);
-    append_harness_args(&mut command, &harness);
-
-    let mut child = command.spawn().context("spawn codex session helper")?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("capture codex session helper stdout")?;
-    let mut reader = io::BufReader::new(stdout);
-    let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
-        .context("read codex session helper startup")?;
-    anyhow::ensure!(read > 0, "codex session helper exited before reporting startup");
-
-    let process_id = line
-        .trim()
-        .strip_prefix("started\t")
-        .with_context(|| format!("unexpected codex session helper response: {}", line.trim()))?
-        .parse::<i64>()
-        .context("parse codex session process id")?;
-
-    let store = WorkspaceStore::open_with_logs(
-        paths.database_path.clone(),
-        paths.logs_dir.clone(),
-    )?;
-    store
-        .list_sessions(workspace)?
-        .into_iter()
-        .find(|process| process.id == process_id)
-        .with_context(|| format!("session process {process_id} not found for workspace {workspace}"))
-}
-
-fn xdg_home_from_app_dir(path: &Path) -> Result<PathBuf> {
-    path.parent()
-        .map(Path::to_path_buf)
-        .with_context(|| format!("resolve XDG home for {}", path.display()))
-}
-
-fn append_harness_args(command: &mut ProcessCommand, harness: &SessionHarnessOptions) {
-    if harness.plan_mode {
-        command.arg("--plan-mode");
-    }
-    if harness.fast_mode {
-        command.arg("--fast-mode");
-    }
-    if let Some(value) = harness.approval_mode.as_deref() {
-        command.arg("--approval-mode").arg(value);
-    }
-    if let Some(value) = harness.reasoning_mode.as_deref() {
-        command.arg("--reasoning-mode").arg(value);
-    }
-    if let Some(value) = harness.effort_mode.as_deref() {
-        command.arg("--effort-mode").arg(value);
-    }
-    if let Some(value) = harness.codex_personality.as_deref() {
-        command.arg("--codex-personality").arg(value);
-    }
-    if let Some(value) = harness.codex_goals.as_deref() {
-        command.arg("--codex-goals").arg(value);
-    }
-    if let Some(value) = harness.codex_skills.as_deref() {
-        command.arg("--codex-skills").arg(value);
-    }
-}
-
-fn run_codex_session_monitor(
-    store: &WorkspaceStore,
-    workspace: &str,
-    harness: SessionHarnessOptions,
-) -> Result<()> {
-    let launch = store.session_launch_with_options(workspace, SessionKind::Codex, harness)?;
-    let mut pty = PtySession::spawn(launch.program.clone(), launch.args.clone(), &launch.cwd, launch.env.clone(), 24, 80)
-        .with_context(|| format!("spawn codex pty in {}", launch.cwd.display()))?;
-    let pid = pty
-        .process_id()
-        .context("codex pty did not report a process id")?;
-    let process = store.record_session_process(workspace, &launch, pid)?;
-    println!("started\t{}", process.id);
-    io::stdout().flush().context("flush codex session helper startup")?;
-
-    let mut trust_answered = false;
-    let mut last_screen = String::new();
-    loop {
-        let raw = pty.read_available();
-        if !raw.is_empty() {
-            store.append_session_process_output(process.id, &format_codex_raw_output(&raw))?;
-        }
-
-        let screen = pty.visible_screen_text();
-        if !screen.is_empty() && screen != last_screen {
-            if !trust_answered && detect_directory_trust_prompt(&screen) {
-                pty.send_line("1")?;
-                trust_answered = true;
-            }
-            store.append_session_process_output(process.id, &format_codex_screen_snapshot(&screen))?;
-            last_screen = screen;
-        }
-
-        if pty.has_exited()? {
-            store.reconcile_session_processes()?;
-            break;
-        }
-
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    Ok(())
-}
-
-fn format_codex_raw_output(raw: &str) -> String {
-    format!("[codex raw]\n{raw}\n[/codex raw]\n")
-}
-
-fn format_codex_screen_snapshot(screen: &str) -> String {
-    format!(
-        "[codex screen]\n{}\n[/codex screen]\n",
-        screen.trim_end_matches('\n')
-    )
-}
-
 fn interactive_session_command(launch: &SessionLaunch) -> String {
     format!("exec {}", shell_words(&launch.program, &launch.args))
 }
@@ -1678,6 +1612,44 @@ fn session_kind_label(kind: SessionKind) -> &'static str {
         SessionKind::Shell => "shell",
         SessionKind::Codex => "codex",
         SessionKind::Claude => "claude",
+    }
+}
+
+fn command_session_kind_label(command: &str) -> &'static str {
+    let executable = command.split_whitespace().next().unwrap_or("").trim();
+    match PathBuf::from(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+    {
+        "codex" => "codex",
+        "claude" => "claude",
+        _ => "shell",
+    }
+}
+
+fn wait_for_session_process(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(record) = store.list_sessions(workspace)?.into_iter().find(|record| {
+            record.status == ProcessStatus::Running
+                && command_session_kind_label(&record.command) == session_kind_label(kind)
+        }) {
+            return Ok(record);
+        }
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "timed out waiting for {:?} session record for workspace {}",
+                kind,
+                workspace
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -1986,5 +1958,13 @@ mod tests {
             text,
             "backend\t/tmp/backend\t/tmp/frontend/.context/linked-directories/backend\n"
         );
+    }
+
+    #[test]
+    fn cli_rejects_removed_internal_run_codex_session_command() {
+        let parse =
+            Cli::try_parse_from(["linux-archductor", "internal", "run-codex-session", "demo"]);
+
+        assert!(parse.is_err());
     }
 }

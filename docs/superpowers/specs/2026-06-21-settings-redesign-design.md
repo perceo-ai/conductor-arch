@@ -6,8 +6,8 @@
 
 This pass addresses:
 
-- `list_o_problems.md` item `#4`: smoother settings surface with better formatted text fields
-- The settings-specific part of item `#6`: align the Settings UI with the Archductor-style dark shell language
+- smoother settings surface with better formatted text fields
+- align the Settings UI with the Archductor-style dark shell language
 
 This pass does **not**:
 
@@ -21,7 +21,8 @@ This pass does **not**:
 - The Settings page still reads like a normal web form page instead of an app-native inspector surface.
 - Inputs are grouped in wide horizontal rows that make labels, fields, and helper context hard to scan.
 - Large text editors feel dropped in rather than intentionally framed.
-- The current theme uses rounder, higher-contrast card styling than the design language described in `list_o_problems.md`.
+- The current theme uses rounder, higher-contrast card styling than the target
+  Archductor design language.
 
 ## UX Direction
 
@@ -86,7 +87,7 @@ They should:
 
 ## Visual Language
 
-Follow the Archductor-style guidance from `list_o_problems.md`:
+Follow the Archductor-style dark shell guidance:
 
 - darker shell surfaces with separation by lightness, not heavy borders/shadows
 - one green semantic accent

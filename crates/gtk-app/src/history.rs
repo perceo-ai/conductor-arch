@@ -6,8 +6,12 @@ use linux_archductor_core::import::default_conductor_app_database;
 use linux_archductor_core::workspace::WorkspaceStore;
 use rusqlite::Connection;
 use std::cell::RefCell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
+use tracing::error;
 
 pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -51,40 +55,119 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
 
     let session_ids: Rc<RefCell<std::collections::HashMap<i32, String>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
+    let refresh_generation = Rc::new(RefCell::new(0u64));
     let refresh = {
         let list = list.clone();
         let session_ids = Rc::clone(&session_ids);
         let database_path = database_path.clone();
+        let refresh_generation = Rc::clone(&refresh_generation);
         move || {
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
             session_ids.borrow_mut().clear();
-            for (idx, session) in history_recent_sessions(&database_path)
-                .into_iter()
-                .enumerate()
-            {
-                list.append(&session_summary_row(&session));
-                session_ids
-                    .borrow_mut()
-                    .insert(i32::try_from(idx).unwrap_or(i32::MAX), session.id);
-            }
+
+            let loading = Label::new(Some("Loading history..."));
+            loading.add_css_class("empty-label");
+            loading.set_xalign(0.0);
+            loading.set_margin_start(24);
+            loading.set_margin_top(24);
+            list.append(&loading);
+
+            *refresh_generation.borrow_mut() += 1;
+            let generation = *refresh_generation.borrow();
+            let (tx, rx) = mpsc::channel();
+            let db_path = database_path.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(history_recent_sessions(&db_path));
+            });
+
+            let list = list.clone();
+            let session_ids = Rc::clone(&session_ids);
+            let refresh_generation = Rc::clone(&refresh_generation);
+            glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+                Ok(sessions) => {
+                    if *refresh_generation.borrow() != generation {
+                        return glib::ControlFlow::Break;
+                    }
+                    while let Some(child) = list.first_child() {
+                        list.remove(&child);
+                    }
+                    session_ids.borrow_mut().clear();
+                    for (idx, session) in sessions.into_iter().enumerate() {
+                        list.append(&session_summary_row(&session));
+                        session_ids
+                            .borrow_mut()
+                            .insert(i32::try_from(idx).unwrap_or(i32::MAX), session.id);
+                    }
+                    if list.first_child().is_none() {
+                        let empty = Label::new(Some("No chat history yet."));
+                        empty.add_css_class("empty-label");
+                        empty.set_xalign(0.0);
+                        empty.set_margin_start(24);
+                        empty.set_margin_top(24);
+                        list.append(&empty);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if *refresh_generation.borrow() == generation {
+                        while let Some(child) = list.first_child() {
+                            list.remove(&child);
+                        }
+                        let empty = Label::new(Some("Could not load chat history."));
+                        empty.add_css_class("empty-label");
+                        empty.set_xalign(0.0);
+                        empty.set_margin_start(24);
+                        empty.set_margin_top(24);
+                        list.append(&empty);
+                    }
+                    glib::ControlFlow::Break
+                }
+            });
         }
     };
 
     let session_ids_select = Rc::clone(&session_ids);
     let database_path_select = database_path.clone();
+    let message_generation = Rc::new(RefCell::new(0u64));
     list.connect_row_selected(move |_, row| {
-        let Some(session_id) =
-            row.and_then(|r| session_ids_select.borrow().get(&r.index()).cloned())
-        else {
-            return;
-        };
-        let buffer = message_view.buffer();
-        buffer.set_text(&history_session_messages(
-            &database_path_select,
-            &session_id,
-        ));
+        guarded_gtk_callback((), || {
+            let Some(session_id) =
+                row.and_then(|r| session_ids_select.borrow().get(&r.index()).cloned())
+            else {
+                return;
+            };
+            let buffer = message_view.buffer();
+            buffer.set_text("Loading chat messages...");
+            *message_generation.borrow_mut() += 1;
+            let generation = *message_generation.borrow();
+            let (tx, rx) = mpsc::channel();
+            let db_path = database_path_select.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(history_session_messages(&db_path, &session_id));
+            });
+            let message_view = message_view.clone();
+            let message_generation = Rc::clone(&message_generation);
+            glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+                Ok(text) => {
+                    if *message_generation.borrow() == generation {
+                        message_view.buffer().set_text(&text);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if *message_generation.borrow() == generation {
+                        message_view
+                            .buffer()
+                            .set_text("Could not load chat messages.");
+                    }
+                    glib::ControlFlow::Break
+                }
+            });
+        })
     });
 
     refresh();
@@ -371,4 +454,17 @@ fn truncate_message(content: &str, max_chars: usize) -> String {
         truncated.push_str("\n...");
     }
     truncated
+}
+
+fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(value) => value,
+        Err(_) => {
+            error!("recovered panic inside history GTK callback");
+            fallback
+        }
+    }
 }

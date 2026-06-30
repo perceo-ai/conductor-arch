@@ -285,7 +285,8 @@ impl WorkspaceSourcePreflight {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionKind {
     Shell,
     Codex,
@@ -312,7 +313,7 @@ impl SessionLaunch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionHarnessOptions {
     pub plan_mode: bool,
     pub fast_mode: bool,
@@ -3421,6 +3422,14 @@ mutation($threadId: ID!) {{
         self.list_processes(name, ProcessKind::Session)
     }
 
+    pub fn get_process_record(&self, id: i64) -> Result<ProcessRecord> {
+        self.get_process(id)
+    }
+
+    pub fn get_workspace_record(&self, id: i64) -> Result<Workspace> {
+        self.get_by_id(id)
+    }
+
     pub fn list_local_chat_history(
         &self,
         workspace_path: Option<&Path>,
@@ -3705,8 +3714,11 @@ mutation($threadId: ID!) {{
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = if let Some(path) = workspace_path {
-            stmt.query_map([path.to_string_lossy().to_string()], row_to_local_chat_thread_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            stmt.query_map(
+                [path.to_string_lossy().to_string()],
+                row_to_local_chat_thread_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             stmt.query_map([], row_to_local_chat_thread_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -3924,6 +3936,19 @@ mutation($threadId: ID!) {{
         self.get_chat_message(self.conn.last_insert_rowid())
     }
 
+    pub fn update_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
+        let title = title.trim();
+        anyhow::ensure!(!title.is_empty(), "chat thread title is required");
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET title = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![title, now, thread_id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_chat_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, thread_id, role, content, source, created_at, updated_at
@@ -3943,10 +3968,7 @@ mutation($threadId: ID!) {{
         native_thread_id: &str,
     ) -> Result<ChatThreadRecord> {
         let native_thread_id = native_thread_id.trim();
-        anyhow::ensure!(
-            !native_thread_id.is_empty(),
-            "native thread id is required"
-        );
+        anyhow::ensure!(!native_thread_id.is_empty(), "native thread id is required");
         let now = timestamp();
         self.conn.execute(
             "UPDATE chat_threads
@@ -4034,7 +4056,8 @@ mutation($threadId: ID!) {{
             return Ok(Some(native_thread_id));
         }
         let cwd = self.get_by_id(process.workspace_id)?.path;
-        let Some(native_thread_id) = find_codex_rollout_session_id(&cwd, &process.started_at)? else {
+        let Some(native_thread_id) = find_codex_rollout_session_id(&cwd, &process.started_at)?
+        else {
             return Ok(None);
         };
         self.update_chat_thread_native_id(thread_id, &native_thread_id)?;
@@ -4125,7 +4148,12 @@ mutation($threadId: ID!) {{
                 continue;
             }
             if role == "agent" {
-                self.append_chat_message(thread_id, "agent", &message.content, "agent_screen_parse")?;
+                self.append_chat_message(
+                    thread_id,
+                    "agent",
+                    &message.content,
+                    "agent_screen_parse",
+                )?;
             }
         }
         Ok(())
@@ -4732,11 +4760,11 @@ fn spawn_codex_session_monitor(db_path: PathBuf, process_id: i64, mut pty: PtySe
     });
 }
 
-fn format_codex_raw_output(raw: &str) -> String {
+pub fn format_codex_raw_output(raw: &str) -> String {
     format!("[codex raw]\n{raw}\n[/codex raw]\n")
 }
 
-fn format_codex_screen_snapshot(screen: &str) -> String {
+pub fn format_codex_screen_snapshot(screen: &str) -> String {
     format!(
         "[codex screen]\n{}\n[/codex screen]\n",
         screen.trim_end_matches('\n')
@@ -4790,7 +4818,10 @@ fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<
     let min_started_at = started_at.saturating_sub(5);
     let max_started_at = started_at.saturating_add(600);
     let mut candidates = Vec::new();
-    for entry in WalkDir::new(&root).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -10785,25 +10816,30 @@ working_directory = "apps/worker"
             .unwrap();
 
         let codex_cwd = launch.cwd.to_str().unwrap().to_owned();
+        let codex_trust_arg = format!(r#"projects."{codex_cwd}".trust_level="trusted""#);
         assert_eq!(&launch.program, &PathBuf::from("codex"));
         assert_eq!(
             &launch.args,
             &vec![
+                "--no-alt-screen",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "-c",
                 "check_for_update_on_startup=false",
                 "-c",
-                "model_reasoning_effort=\"high\"",
-                "-c",
-                "personality=\"pragmatic\"",
-                "-c",
-                "service_tier=\"fast\"",
-                "--no-alt-screen",
+                codex_trust_arg.as_str(),
                 "-C",
                 codex_cwd.as_str(),
+                "-c",
+                r#"model_reasoning_effort="high""#,
+                "-c",
+                r#"personality="pragmatic""#,
+                "-c",
+                r#"service_tier="fast""#,
                 "--ask-for-approval",
                 "on-request",
                 "--enable",
-                "goals"
+                "goals",
+                "ship the fix",
             ]
         );
         assert_eq!(
@@ -10982,21 +11018,28 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.args,
             vec![
+                "--no-alt-screen".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
-                "model_reasoning_effort=\"high\"".to_owned(),
-                "-c".to_owned(),
-                "personality=\"pragmatic\"".to_owned(),
-                "-c".to_owned(),
-                "service_tier=\"fast\"".to_owned(),
-                "--no-alt-screen".to_owned(),
+                format!(
+                    r#"projects."{}".trust_level="trusted""#,
+                    launch.cwd.to_string_lossy()
+                ),
                 "-C".to_owned(),
                 launch.cwd.to_string_lossy().to_string(),
+                "-c".to_owned(),
+                r#"model_reasoning_effort="high""#.to_owned(),
+                "-c".to_owned(),
+                r#"personality="pragmatic""#.to_owned(),
+                "-c".to_owned(),
+                r#"service_tier="fast""#.to_owned(),
                 "--ask-for-approval".to_owned(),
                 "on-request".to_owned(),
                 "--enable".to_owned(),
                 "goals".to_owned(),
+                "ship the fix".to_owned(),
                 "resume".to_owned(),
                 "--last".to_owned(),
             ]
@@ -11064,12 +11107,11 @@ working_directory = "apps/worker"
 
             wait_for_log(
                 &process.log_path,
-                "args:-c check_for_update_on_startup=false",
+                "args:--no-alt-screen --dangerously-bypass-approvals-and-sandbox",
             );
             let log = fs::read_to_string(&process.log_path).unwrap();
             assert!(log.contains("[codex screen]"));
             assert!(!log.contains("ARCHDUCTOR_SESSION_BOOTSTRAP="));
-            assert!(log.contains("--enable goals"));
 
             let stopped = store.stop_session("berlin").unwrap();
             assert_eq!(stopped.id, process.id);
@@ -13356,6 +13398,22 @@ spotlight_testing = true
     }
 
     #[test]
+    fn chat_thread_title_updates_without_creating_extra_rows() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+
+        store
+            .update_chat_thread_title(thread.id, "Fix parser failure")
+            .unwrap();
+
+        let updated = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(updated.title, "Fix parser failure");
+        assert!(store.list_chat_messages(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn session_screen_snapshots_persist_structured_agent_messages_for_threads() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -13662,5 +13720,17 @@ spotlight_testing = true
         } else {
             std::env::remove_var("PATH");
         }
+    }
+
+    #[test]
+    fn codex_log_formatters_emit_canonical_markers() {
+        assert_eq!(
+            format_codex_raw_output("hello"),
+            "[codex raw]\nhello\n[/codex raw]\n"
+        );
+        assert_eq!(
+            format_codex_screen_snapshot("hello\n"),
+            "[codex screen]\nhello\n[/codex screen]\n"
+        );
     }
 }

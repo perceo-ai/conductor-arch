@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use linux_archductor_core::paths::AppPaths;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tracing_subscriber::fmt;
@@ -11,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
 static LOGGER_GUARDS: OnceLock<LoggerGuards> = OnceLock::new();
+static PTY_SCREEN_LOG: OnceLock<PathBuf> = OnceLock::new();
 
 struct LoggerGuards {
     _json: tracing_appender::non_blocking::WorkerGuard,
@@ -85,6 +87,7 @@ pub(crate) fn init_dev_logger(paths: &AppPaths) -> Result<()> {
 
     let json_file = open_log_file(paths.logs_dir.join("gtk-dev.jsonl"))?;
     let text_file = open_log_file(paths.logs_dir.join("gtk-dev.log"))?;
+    let _ = PTY_SCREEN_LOG.set(paths.logs_dir.join("pty-screens.log"));
     let (json_writer, json_guard) = tracing_appender::non_blocking(json_file);
     let (text_writer, text_guard) = tracing_appender::non_blocking(text_file);
     let filter = build_filter(&config);
@@ -153,4 +156,22 @@ fn open_log_file(path: PathBuf) -> Result<std::fs::File> {
         .append(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))
+}
+
+pub(crate) fn write_pty_screen_snapshot(source: &str, process_id: i64, screen: &str) {
+    let Some(path) = PTY_SCREEN_LOG.get() else {
+        return;
+    };
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = writeln!(
+        file,
+        "=== [unix_ms={ts}] source={source} process_id={process_id} ===\n{}\n===",
+        screen.trim_end_matches('\n')
+    );
 }

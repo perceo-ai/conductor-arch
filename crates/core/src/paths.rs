@@ -33,6 +33,10 @@ impl AppPaths {
             cache_dir,
         }
     }
+
+    pub fn archcar_socket_path(&self) -> PathBuf {
+        self.state_dir.join("archcar.sock")
+    }
 }
 
 fn env_path(name: &str, fallback: PathBuf) -> PathBuf {

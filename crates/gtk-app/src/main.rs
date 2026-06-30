@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
+mod archcar_async;
 mod buttons;
 mod command_palette;
 mod dashboard;
@@ -27,6 +28,9 @@ use gtk::{
     Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overlay, ScrolledWindow, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
+use linux_archductor_core::archcar::server::{
+    reconcile_managed_sessions_on_startup, ArchcarServer,
+};
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -36,6 +40,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
+use std::time::Instant;
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
 
@@ -169,6 +174,18 @@ impl Default for LaunchTarget {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--archcar-serve") {
+        let paths = AppPaths::from_env();
+        if let Err(err) = reconcile_managed_sessions_on_startup(&paths)
+            .and_then(|_| ArchcarServer::bind(paths))
+            .and_then(|server| server.serve())
+        {
+            eprintln!("archcar serve failed: {err:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let launch_target = parse_launch_target(std::env::args()).unwrap_or_default();
 
     let app = Application::builder().application_id(APP_ID).build();
@@ -349,10 +366,16 @@ fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferen
 }
 
 fn build_ui(app: &Application, launch_target: LaunchTarget) {
+    let startup = Instant::now();
     let paths = AppPaths::from_env();
     if let Err(err) = logger::init_dev_logger(&paths) {
         eprintln!("failed to initialize dev logger: {err:#}");
     }
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        ?launch_target,
+        "gtk startup: build_ui entered"
+    );
     let initial_tab = if launch_target.explicit_workspace_tab {
         launch_target.workspace_tab.clone()
     } else {
@@ -375,13 +398,16 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         launch_target.page.clone(),
     );
     let refresh_hub = RefreshHub::default();
-
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Linux Archductor")
         .default_width(1280)
         .default_height(800)
         .build();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: window built"
+    );
     let initial_view_preferences = resolve_view_preferences(
         paths.database_path.clone(),
         launch_target.workspace.as_deref(),
@@ -390,7 +416,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         paths.database_path.clone(),
         launch_target.workspace.as_deref(),
     )));
-
     let css = CssProvider::new();
     css.load_from_data(theme::app_css());
     gtk::style_context_add_provider_for_display(
@@ -399,6 +424,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
     apply_view_preferences(&window, &initial_view_preferences);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: styles applied"
+    );
 
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(120.0);
@@ -411,11 +440,23 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     };
 
     let toast_overlay = adw::ToastOverlay::new();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building dashboard"
+    );
     let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
     let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: dashboard built"
+    );
 
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building workspace center"
+    );
     let (workspace_detail, refresh_workspace_detail) =
         workspace_command_center::build_workspace_command_center(
             &app_state,
@@ -423,14 +464,42 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
             toast_overlay.clone(),
             collapse_sidebar.clone(),
         );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: workspace center built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building projects page"
+    );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
         refresh_workspace_detail.clone(),
     );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: projects page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building settings page"
+    );
     let (settings_page, refresh_settings) = settings::build_settings_page(&app_state.paths);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: settings page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building history page"
+    );
     let (history_page, refresh_history) =
         history::build_history_page(app_state.workspace_database_path());
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: history page built"
+    );
 
     let main_stack = Stack::new();
     main_stack.set_hexpand(true);
@@ -472,6 +541,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         split.clone(),
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: sidebar built"
     );
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
@@ -564,6 +637,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     };
     window.set_content(Some(&split));
     window.present();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: window presented"
+    );
 
     if reconcile_runtime_state(&app_state.workspace_database_path())
         .map(|report| report.changed())

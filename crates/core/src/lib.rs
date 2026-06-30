@@ -1,3 +1,4 @@
+pub mod archcar;
 pub mod codex_tui;
 pub mod doctor;
 pub mod harness;

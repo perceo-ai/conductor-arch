@@ -4,14 +4,18 @@ use gtk::{
     Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
     ScrolledWindow, Stack,
 };
+use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
-use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceStore};
+use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
+use tracing::error;
 
+use crate::archcar_async::spawn_archcar_request;
 use crate::buttons::{icon_button, text_button};
 use crate::projects::show_repository_quick_add_dialog;
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -400,20 +404,32 @@ pub(crate) fn build_app_sidebar(
     let refresh_view_preferences_select = refresh_view_preferences.clone();
 
     let refresh_workspace_select = refresh_workspace.clone();
+    let archcar_paths = app_state.paths.clone();
     list.connect_row_selected(move |_, row| {
-        let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
-            return;
-        };
-        let default_tab = WorkspaceStore::open(db_path_select.clone())
-            .and_then(|store| store.workspace_view_defaults(&name))
-            .ok()
-            .and_then(|defaults| defaults.default_visible_tab)
-            .and_then(|tab| WorkspaceTab::from_config(&tab));
-        state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
-        refresh_view_preferences_select();
-        refresh_workspace_select();
-        refresh_select.refresh(RefreshScope::Dashboard);
-        stack_select.set_visible_child_name("workspace");
+        guarded_gtk_callback((), || {
+            let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned())
+            else {
+                return;
+            };
+            spawn_archcar_request(
+                archcar_paths.clone(),
+                ArchcarRequest::EnsureWorkspaceDefaultSession {
+                    workspace: name.clone(),
+                    kind: SessionKind::Codex,
+                    harness: None,
+                },
+            );
+            let default_tab = WorkspaceStore::open(db_path_select.clone())
+                .and_then(|store| store.workspace_view_defaults(&name))
+                .ok()
+                .and_then(|defaults| defaults.default_visible_tab)
+                .and_then(|tab| WorkspaceTab::from_config(&tab));
+            state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
+            refresh_view_preferences_select();
+            refresh_workspace_select();
+            refresh_select.refresh(RefreshScope::Dashboard);
+            stack_select.set_visible_child_name("workspace");
+        })
     });
 
     scroll.set_child(Some(&list));
@@ -566,6 +582,19 @@ fn sidebar_nav_button(icon: &str, tooltip: &str) -> Button {
 
     button.set_child(Some(&row));
     button
+}
+
+fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(value) => value,
+        Err(_) => {
+            error!("recovered panic inside sidebar GTK callback");
+            fallback
+        }
+    }
 }
 
 fn build_workspace_row(
@@ -828,7 +857,10 @@ mod tests {
         });
 
         assert!(start.elapsed() < Duration::from_millis(50));
-        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
         assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
     }
 }

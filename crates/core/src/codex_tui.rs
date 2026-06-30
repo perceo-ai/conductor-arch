@@ -36,7 +36,8 @@ pub fn detect_directory_trust_prompt(screen: &str) -> bool {
 }
 
 pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
-    let lines = screen.lines().collect::<Vec<_>>();
+    let lines = relevant_codex_screen_lines(screen);
+    let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
     let mut messages = Vec::new();
     let mut index = 0usize;
 
@@ -115,7 +116,10 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
                     index += 1;
                     while index < lines.len() {
                         if is_live_user_prompt_line(lines[index])
-                            || is_live_bullet_user_prompt(lines[index], lines.get(index + 1).copied())
+                            || is_live_bullet_user_prompt(
+                                lines[index],
+                                lines.get(index + 1).copied(),
+                            )
                             || is_box_header_line(lines[index])
                         {
                             break;
@@ -135,7 +139,46 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
             continue;
         }
 
-        index += 1;
+        if is_ignorable_transcript_line(line) {
+            index += 1;
+            continue;
+        }
+
+        let mut body = Vec::new();
+        while index < lines.len() {
+            let line = lines[index];
+            if is_box_header_line(line)
+                || is_live_user_prompt_line(line)
+                || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
+                || is_live_agent_prompt_line(line)
+            {
+                break;
+            }
+            if line.trim().is_empty() {
+                body.push(String::new());
+                index += 1;
+                continue;
+            }
+            if is_ignorable_transcript_line(line) {
+                if body.is_empty() {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            let trimmed = line.trim();
+            if body.is_empty() {
+                if let Some(bullet) = trimmed.strip_prefix('•') {
+                    body.push(bullet.trim_start().to_owned());
+                } else {
+                    body.push(trimmed.to_owned());
+                }
+            } else {
+                body.push(trimmed.to_owned());
+            }
+            index += 1;
+        }
+        push_message(&mut messages, ScreenMessageRole::Agent, body);
     }
 
     messages
@@ -149,12 +192,8 @@ pub fn merge_screen_messages(existing: &mut Vec<ScreenMessage>, incoming: &[Scre
     if let Some(last) = existing.last_mut() {
         let mut index = 0usize;
         while index < incoming.len() && incoming[index].role == last.role {
-            if incoming[index].content == last.content {
-                index += 1;
-                continue;
-            }
-            if incoming[index].content.starts_with(&last.content) {
-                last.content = incoming[index].content.clone();
+            if let Some(merged) = merge_message_content(&last.content, &incoming[index].content) {
+                last.content = merged;
                 index += 1;
                 continue;
             }
@@ -172,11 +211,12 @@ pub fn merge_screen_messages(existing: &mut Vec<ScreenMessage>, incoming: &[Scre
         if let (Some(last_existing), Some(last_incoming)) =
             (existing.last_mut(), incoming.get(overlap - 1))
         {
-            if last_incoming.role == last_existing.role
-                && last_incoming.content.starts_with(&last_existing.content)
-                && last_incoming.content.len() > last_existing.content.len()
-            {
-                last_existing.content = last_incoming.content.clone();
+            if last_incoming.role == last_existing.role {
+                if let Some(merged) =
+                    merge_message_content(&last_existing.content, &last_incoming.content)
+                {
+                    last_existing.content = merged;
+                }
             }
         }
         existing.extend_from_slice(&incoming[overlap..]);
@@ -221,10 +261,7 @@ fn slices_overlap(existing: &[ScreenMessage], incoming: &[ScreenMessage]) -> boo
             return false;
         }
         if index + 1 == existing.len() {
-            if incoming[index].content == existing[index].content {
-                continue;
-            }
-            if incoming[index].content.starts_with(&existing[index].content) {
+            if merge_message_content(&existing[index].content, &incoming[index].content).is_some() {
                 continue;
             }
             return false;
@@ -238,6 +275,40 @@ fn slices_overlap(existing: &[ScreenMessage], incoming: &[ScreenMessage]) -> boo
 
 fn dedupe_adjacent(messages: &mut Vec<ScreenMessage>) {
     messages.dedup_by(|right, left| left == right);
+}
+
+fn merge_message_content(existing: &str, incoming: &str) -> Option<String> {
+    if incoming == existing {
+        return Some(existing.to_owned());
+    }
+    if incoming.starts_with(existing) {
+        return Some(incoming.to_owned());
+    }
+    if existing.starts_with(incoming) {
+        return Some(existing.to_owned());
+    }
+    merge_message_content_by_line_overlap(existing, incoming)
+}
+
+fn merge_message_content_by_line_overlap(existing: &str, incoming: &str) -> Option<String> {
+    let existing_lines = existing.lines().collect::<Vec<_>>();
+    let incoming_lines = incoming.lines().collect::<Vec<_>>();
+    let max_overlap = existing_lines.len().min(incoming_lines.len());
+    for overlap in (1..=max_overlap).rev() {
+        if existing_lines[existing_lines.len() - overlap..] == incoming_lines[..overlap] {
+            let mut merged = existing_lines
+                .iter()
+                .map(|line| (*line).to_owned())
+                .collect::<Vec<_>>();
+            merged.extend(
+                incoming_lines[overlap..]
+                    .iter()
+                    .map(|line| (*line).to_owned()),
+            );
+            return Some(merged.join("\n"));
+        }
+    }
+    None
 }
 
 fn parse_box_role(line: &str) -> Option<ScreenMessageRole> {
@@ -365,6 +436,101 @@ fn is_transient_status_bullet(content: &str) -> bool {
         || content.starts_with("Thinking (")
 }
 
+fn relevant_codex_screen_lines(screen: &str) -> Vec<String> {
+    let lines = screen.lines().collect::<Vec<_>>();
+    let start = transcript_start_index(&lines);
+    let end = live_footer_start_index(&lines).unwrap_or(lines.len());
+    let mut kept = Vec::new();
+    let mut started = false;
+    let mut index = start;
+    while index < end {
+        let line = lines[index];
+        if !started && line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        if !started && is_ignorable_transcript_line(line) {
+            index += 1;
+            while index < end && is_ignorable_transcript_continuation(lines[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        started = true;
+        kept.push(line.to_owned());
+        index += 1;
+    }
+    while kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    kept
+}
+
+fn transcript_start_index(lines: &[&str]) -> usize {
+    let Some(first_bottom) = lines.iter().position(|line| is_box_bottom(line)) else {
+        return 0;
+    };
+
+    let leading_block = &lines[..=first_bottom];
+    if leading_block
+        .iter()
+        .any(|line| parse_box_role(line).is_some())
+    {
+        return 0;
+    }
+
+    first_bottom + 1
+}
+
+fn live_footer_start_index(lines: &[&str]) -> Option<usize> {
+    let model_index = lines.iter().rposition(|line| {
+        let trimmed = line.trim();
+        trimmed.contains(" · ") && trimmed.contains("gpt-")
+    })?;
+    let prompt_index = (0..=model_index)
+        .rev()
+        .find(|index| is_live_user_prompt_line(lines[*index]))?;
+    let transcript_start = transcript_start_index(lines);
+    let mut has_transcript_before_prompt = false;
+    let mut index = transcript_start;
+    while index < prompt_index {
+        let line = lines[index];
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        if is_ignorable_transcript_line(line) {
+            index += 1;
+            while index < prompt_index && is_ignorable_transcript_continuation(lines[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        has_transcript_before_prompt = true;
+        break;
+    }
+    has_transcript_before_prompt.then_some(prompt_index)
+}
+
+fn is_ignorable_transcript_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty()
+        || trimmed.starts_with("Tip:")
+        || trimmed == "immediately (except !)."
+        || trimmed.starts_with("status:")
+        || trimmed.starts_with("• You have ")
+        || trimmed.starts_with("• Booting MCP server")
+        || trimmed.starts_with("• Starting MCP servers")
+        || trimmed.starts_with("• Working (")
+        || trimmed.starts_with("• Thinking (")
+        || trimmed.starts_with("─ Worked for ")
+}
+
+fn is_ignorable_transcript_continuation(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    !trimmed.is_empty() && (trimmed.starts_with(' ') || trimmed.starts_with('\t'))
+}
+
 fn push_message(messages: &mut Vec<ScreenMessage>, role: ScreenMessageRole, body: Vec<String>) {
     let content = trim_blank_edges(&body.join("\n"));
     if content.is_empty() {
@@ -459,6 +625,37 @@ Do you trust the contents of this directory?
     }
 
     #[test]
+    fn skips_leading_chrome_box_but_keeps_following_boxed_transcript() {
+        let screen = "\
+╭────────────────────────────────────────────────────────╮
+│ model:       gpt-5.4 medium                            │
+│ directory:   ~/archductor/workspaces/chandelier/hoi-an │
+│ permissions: YOLO mode                                 │
+╰────────────────────────────────────────────────────────╯
+
+╭─ You ─────────────────╮
+│ Summarize the test.   │
+╰───────────────────────╯
+╭─ Codex ───────────────╮
+│ Ready.                │
+╰───────────────────────╯";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![
+                ScreenMessage {
+                    role: ScreenMessageRole::User,
+                    content: "Summarize the test.".to_owned(),
+                },
+                ScreenMessage {
+                    role: ScreenMessageRole::Agent,
+                    content: "Ready.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn parses_headerless_live_tui_bullet_responses_after_prompt() {
         let screen = "\
 › User prompt
@@ -522,6 +719,220 @@ Do you trust the contents of this directory?
                     content: "first agent line\ncontinuation line".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn ignores_live_footer_and_parses_scrolled_agent_tail() {
+        let screen = "\
+  5. Medium: production builds intentionally ignore TypeScript errors.
+     next.config.ts:3 sets typescript.ignoreBuildErrors = true. Impact: type
+     regressions can ship to production instead of blocking CI/build.
+
+  6. Low: the repo has test files but no runnable test script. package.json:5
+     defines no test command, and npm test fails. Impact: there is no standard
+     verification path for the existing tests, which makes regressions easier to
+     miss.
+
+  Verification
+
+  npm test fails because there is no test script. npm run typecheck, npm run
+  lint, and npm run build also could not run here because dependencies are not
+  installed in this checkout.
+
+  If you want, I can fix the auth holes and the webhook idempotency issue first.
+
+─ Worked for 2m 24s ────────────────────────────────────────────────────────────
+
+
+› Improve documentation in @filename
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "5. Medium: production builds intentionally ignore TypeScript errors.\nnext.config.ts:3 sets typescript.ignoreBuildErrors = true. Impact: type\nregressions can ship to production instead of blocking CI/build.\n\n6. Low: the repo has test files but no runnable test script. package.json:5\ndefines no test command, and npm test fails. Impact: there is no standard\nverification path for the existing tests, which makes regressions easier to\nmiss.\n\nVerification\n\nnpm test fails because there is no test script. npm run typecheck, npm run\nlint, and npm run build also could not run here because dependencies are not\ninstalled in this checkout.\n\nIf you want, I can fix the auth holes and the webhook idempotency issue first.".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_pty_screen_log_startup_prompt_when_model_is_loading() {
+        let screen = "\
+╭──────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.142.3)                       │
+│                                                  │
+│ model:       loading   /model to change          │
+│ directory:   ~/archductor/…/chandelier/islamabad │
+│ permissions: YOLO mode                           │
+╰──────────────────────────────────────────────────╯
+
+
+› Improve documentation in @filename
+
+  gpt-5.4 default · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::User,
+                content: "Improve documentation in @filename".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_pty_screen_log_prompt_while_ignoring_boot_noise() {
+        let screen = "\
+╭──────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.142.3)                       │
+│                                                  │
+│ model:       gpt-5.4 medium   /model to change   │
+│ directory:   ~/archductor/…/chandelier/islamabad │
+│ permissions: YOLO mode                           │
+╰──────────────────────────────────────────────────╯
+
+  Tip: NEW: Network proxy can now be enabled from /experimental. Restart Codex
+  after enabling it.
+
+• You have 2 usage limit resets available. Run /usage to use one.
+
+• Booting MCP server: codex_apps (0s • esc to interrupt)
+
+
+› Improve documentation in @filename
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::User,
+                content: "Improve documentation in @filename".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_pty_screen_log_scrolled_agent_tail_above_footer_prompt() {
+        let screen = "\
+• Repo state is quiet.
+
+  You’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/
+  hoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment
+  split (#14)). There are no tracked file changes. The only uncommitted thing is
+  an untracked .context/ folder with placeholder files:
+
+  - .context/brief.md
+  - .context/todos.md
+  - .context/agent-notes.md
+
+  Project-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier
+  Consulting with public marketing pages, admin routes, Supabase, and Stripe
+  APIs. The last few merged changes were:
+
+  - Add custom payment split
+  - simplify client agreement flow
+  - Stack projects page layout
+
+
+› Use /skills to list available skills
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/hoi-an";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/\nhoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn preserves_wrapped_live_agent_reply_before_footer() {
+        let screen = "\
+│                                                        │
+│ model:       gpt-5.4 medium   /model to change         │
+│ directory:   ~/archductor/workspaces/chandelier/hoi-an │
+│ permissions: YOLO mode                                 │
+╰────────────────────────────────────────────────────────╯
+
+  Tip: Press Tab to queue a message when a task is running; otherwise it sends
+  immediately (except !).
+
+• You have 2 usage limit resets available. Run /usage to use one.
+
+
+› What's my name?
+
+
+• I don’t know your name from the context here. If you want, tell me and I’ll
+  use it.
+
+
+› Implement {feature}
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/hoi-an";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![
+                ScreenMessage {
+                    role: ScreenMessageRole::User,
+                    content: "What's my name?".to_owned(),
+                },
+                ScreenMessage {
+                    role: ScreenMessageRole::Agent,
+                    content:
+                        "I don’t know your name from the context here. If you want, tell me and I’ll\nuse it."
+                            .to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_plain_status_lines_after_boxed_transcript() {
+        let screen = "\
+╭─ You\n│ run tests\n╰─\n╭─ Codex\n│ Running now.\n╰─\nstatus: spinner";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![
+                ScreenMessage {
+                    role: ScreenMessageRole::User,
+                    content: "run tests".to_owned(),
+                },
+                ScreenMessage {
+                    role: ScreenMessageRole::Agent,
+                    content: "Running now.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn merges_same_agent_message_when_visible_window_scrolls() {
+        let mut existing = vec![ScreenMessage {
+            role: ScreenMessageRole::Agent,
+            content: "2. High: several admin pages never check auth even when auth is configured.\nThe generic admin section route loads privileged data.\n3. High: the Stripe webhook can lose events permanently after a partial failure.".to_owned(),
+        }];
+        let incoming = vec![ScreenMessage {
+            role: ScreenMessageRole::Agent,
+            content: "3. High: the Stripe webhook can lose events permanently after a partial failure.\n4. Medium: AUTO_ADVANCE_PHASE_ON_SIGN is dead config.".to_owned(),
+        }];
+
+        merge_screen_messages(&mut existing, &incoming);
+
+        assert_eq!(
+            existing,
+            vec![ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "2. High: several admin pages never check auth even when auth is configured.\nThe generic admin section route loads privileged data.\n3. High: the Stripe webhook can lose events permanently after a partial failure.\n4. Medium: AUTO_ADVANCE_PHASE_ON_SIGN is dead config.".to_owned(),
+            }]
         );
     }
 

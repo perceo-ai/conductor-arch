@@ -194,34 +194,52 @@ pub fn build_bootstrap_payload(
     }
 }
 
-fn build_codex_args(cwd: &Path, harness: &SessionHarnessOptions) -> Vec<String> {
+fn codex_trust_level_config(cwd: &Path) -> String {
+    let escaped = cwd
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!(r#"projects."{escaped}".trust_level="trusted""#)
+}
+
+fn build_codex_args(cwd: &Path, _harness: &SessionHarnessOptions) -> Vec<String> {
     let mut args = vec![
+        "--no-alt-screen".to_owned(),
+        "--dangerously-bypass-approvals-and-sandbox".to_owned(),
         "-c".to_owned(),
         "check_for_update_on_startup=false".to_owned(),
+        "-c".to_owned(),
+        codex_trust_level_config(cwd),
+        "-C".to_owned(),
+        cwd.to_string_lossy().to_string(),
     ];
-    if let Some(value) = codex_reasoning_effort(harness.reasoning_mode.as_deref()) {
+
+    if let Some(value) = sanitize_text(_harness.reasoning_mode.as_deref()) {
         args.push("-c".to_owned());
-        args.push(codex_config_string("model_reasoning_effort", &value));
+        args.push(format!("model_reasoning_effort=\"{value}\""));
     }
-    if let Some(value) = codex_personality(harness.codex_personality.as_deref()) {
+    if let Some(value) = sanitize_text(_harness.codex_personality.as_deref()) {
         args.push("-c".to_owned());
-        args.push(codex_config_string("personality", &value));
+        args.push(format!("personality=\"{value}\""));
     }
-    if harness.fast_mode {
+    if _harness.fast_mode {
         args.push("-c".to_owned());
-        args.push(codex_config_string("service_tier", "fast"));
+        args.push("service_tier=\"fast\"".to_owned());
     }
-    args.push("--no-alt-screen".to_owned());
-    args.push("-C".to_owned());
-    args.push(cwd.to_string_lossy().to_string());
-    if let Some(policy) = codex_approval_policy(harness.approval_mode.as_deref()) {
+    if let Some(value) = sanitize_text(_harness.approval_mode.as_deref()) {
         args.push("--ask-for-approval".to_owned());
-        args.push(policy.to_owned());
+        args.push(match value.as_str() {
+            "never" => "never".to_owned(),
+            "auto" => "auto".to_owned(),
+            _ => "on-request".to_owned(),
+        });
     }
-    if sanitize_text(harness.codex_goals.as_deref()).is_some() {
+    if let Some(value) = sanitize_text(_harness.codex_goals.as_deref()) {
         args.push("--enable".to_owned());
         args.push("goals".to_owned());
+        args.push(value);
     }
+
     args
 }
 
@@ -296,49 +314,6 @@ fn optional_kv_line(label: &str, value: Option<&str>) -> Option<String> {
     sanitize_text(value).map(|value| format!("{label}: {value}"))
 }
 
-fn codex_approval_policy(value: Option<&str>) -> Option<&'static str> {
-    match sanitize_text(value).as_deref() {
-        Some("ask") | Some("on-request") => Some("on-request"),
-        Some("never") => Some("never"),
-        Some("untrusted") => Some("untrusted"),
-        Some("default") | None => None,
-        Some(_) => Some("on-request"),
-    }
-}
-
-fn codex_reasoning_effort(value: Option<&str>) -> Option<String> {
-    match sanitize_text(value)?
-        .to_ascii_lowercase()
-        .replace(['_', '-'], " ")
-        .as_str()
-    {
-        "minimal" => Some("minimal".to_owned()),
-        "low" => Some("low".to_owned()),
-        "medium" => Some("medium".to_owned()),
-        "high" => Some("high".to_owned()),
-        "extra high" | "xhigh" => Some("xhigh".to_owned()),
-        other => Some(other.replace(' ', "_")),
-    }
-}
-
-fn codex_personality(value: Option<&str>) -> Option<String> {
-    match sanitize_text(value)?.to_ascii_lowercase().as_str() {
-        "friendly" => Some("friendly".to_owned()),
-        "pragmatic" => Some("pragmatic".to_owned()),
-        "none" => Some("none".to_owned()),
-        "careful" | "thorough" => Some("pragmatic".to_owned()),
-        "fast" => Some("none".to_owned()),
-        _ => None,
-    }
-}
-
-fn codex_config_string(key: &str, value: &str) -> String {
-    format!(
-        r#"{key}="{}""#,
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    )
-}
-
 fn claude_permission_mode(harness: &SessionHarnessOptions) -> Option<String> {
     if harness.plan_mode {
         return Some("plan".to_owned());
@@ -411,21 +386,25 @@ mod tests {
         assert_eq!(
             &launch.args,
             &vec![
+                "--no-alt-screen",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "-c",
                 "check_for_update_on_startup=false",
                 "-c",
-                "model_reasoning_effort=\"high\"",
-                "-c",
-                "personality=\"pragmatic\"",
-                "-c",
-                "service_tier=\"fast\"",
-                "--no-alt-screen",
+                r#"projects."/tmp/work".trust_level="trusted""#,
                 "-C",
                 "/tmp/work",
+                "-c",
+                r#"model_reasoning_effort="high""#,
+                "-c",
+                r#"personality="pragmatic""#,
+                "-c",
+                r#"service_tier="fast""#,
                 "--ask-for-approval",
                 "on-request",
                 "--enable",
-                "goals"
+                "goals",
+                "ship the fix",
             ]
         );
         assert_eq!(
@@ -532,21 +511,25 @@ mod tests {
         assert_eq!(
             codex_resume.args,
             vec![
+                "--no-alt-screen".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
-                "model_reasoning_effort=\"high\"".to_owned(),
-                "-c".to_owned(),
-                "personality=\"pragmatic\"".to_owned(),
-                "-c".to_owned(),
-                "service_tier=\"fast\"".to_owned(),
-                "--no-alt-screen".to_owned(),
+                r#"projects."/tmp/work".trust_level="trusted""#.to_owned(),
                 "-C".to_owned(),
                 "/tmp/work".to_owned(),
+                "-c".to_owned(),
+                r#"model_reasoning_effort="high""#.to_owned(),
+                "-c".to_owned(),
+                r#"personality="pragmatic""#.to_owned(),
+                "-c".to_owned(),
+                r#"service_tier="fast""#.to_owned(),
                 "--ask-for-approval".to_owned(),
                 "on-request".to_owned(),
                 "--enable".to_owned(),
                 "goals".to_owned(),
+                "ship the fix".to_owned(),
                 "resume".to_owned(),
                 "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned()
             ]
@@ -599,21 +582,25 @@ mod tests {
         assert_eq!(
             codex_resume.args,
             vec![
+                "--no-alt-screen".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
-                "model_reasoning_effort=\"high\"".to_owned(),
-                "-c".to_owned(),
-                "personality=\"pragmatic\"".to_owned(),
-                "-c".to_owned(),
-                "service_tier=\"fast\"".to_owned(),
-                "--no-alt-screen".to_owned(),
+                r#"projects."/tmp/work".trust_level="trusted""#.to_owned(),
                 "-C".to_owned(),
                 "/tmp/work".to_owned(),
+                "-c".to_owned(),
+                r#"model_reasoning_effort="high""#.to_owned(),
+                "-c".to_owned(),
+                r#"personality="pragmatic""#.to_owned(),
+                "-c".to_owned(),
+                r#"service_tier="fast""#.to_owned(),
                 "--ask-for-approval".to_owned(),
                 "on-request".to_owned(),
                 "--enable".to_owned(),
                 "goals".to_owned(),
+                "ship the fix".to_owned(),
                 "resume".to_owned(),
                 "--last".to_owned()
             ]
@@ -630,9 +617,12 @@ mod tests {
         assert_eq!(
             launch.args,
             vec![
+                "--no-alt-screen".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
-                "--no-alt-screen".to_owned(),
+                "-c".to_owned(),
+                r#"projects."/tmp/work".trust_level="trusted""#.to_owned(),
                 "-C".to_owned(),
                 "/tmp/work".to_owned(),
             ]
