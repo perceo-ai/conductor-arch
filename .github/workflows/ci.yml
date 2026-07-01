@@ -19,10 +19,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
-    name: CI
+  lint-build:
+    name: Lint & Build
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -66,6 +66,45 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --locked
 
+      - name: Package debug binaries
+        run: |
+          mkdir -p ci-artifacts/bin
+          cp target/debug/linux-archductor ci-artifacts/bin/
+          cp target/debug/linux-archductor-gtk ci-artifacts/bin/
+          cp target/debug/archcar ci-artifacts/bin/
+
+      - name: Upload debug binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-debug-binaries
+          path: ci-artifacts/bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: lint-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-security-cargo-
+
       - name: Check dependency policy
         uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
@@ -82,6 +121,40 @@ jobs:
           scanners: vuln
           timeout: 10m
 
+      - name: Generate Trivy SARIF
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        if: always()
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-filesystem.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          scanners: vuln
+          timeout: 10m
+
+      - name: Upload Trivy SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: trivy-filesystem-sarif
+          path: trivy-filesystem.sarif
+          if-no-files-found: error
+          retention-days: 14
+
+  workflow-audit:
+    name: Workflow Audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: lint-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
       - name: Run actionlint
         uses: raven-actions/actionlint@205b530c5d9fa8f44ae9ed59f341a0db994aa6f8 # v2
 
@@ -92,6 +165,17 @@ jobs:
           min-severity: high
           advanced-security: false
           annotations: true
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: lint-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
@@ -122,10 +206,23 @@ jobs:
               end
           ' codeql-results/rust.sarif
 
-      - name: Upload CodeQL SARIF artifact
+      - name: Upload CodeQL SARIF
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: codeql-rust-sarif
           path: codeql-results/rust.sarif
           if-no-files-found: error
+          retention-days: 14
+
+  ci-complete:
+    name: CI Complete
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs:
+      - dependency-scan
+      - workflow-audit
+      - codeql
+    steps:
+      - name: Confirm all gates passed
+        run: echo "All CI gates passed."
