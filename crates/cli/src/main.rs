@@ -911,7 +911,7 @@ fn main() -> Result<()> {
                     codex_goals,
                     codex_skills,
                 } => {
-                    let harness = session_harness_options(
+                    let harness = SessionHarnessOptions {
                         plan_mode,
                         fast_mode,
                         approval_mode,
@@ -920,7 +920,7 @@ fn main() -> Result<()> {
                         codex_personality,
                         codex_goals,
                         codex_skills,
-                    );
+                    };
                     let process = if matches!(kind, CliSessionKind::Codex) {
                         let client = ArchcarClient::from_paths(&paths);
                         print_archcar_response(client.send(ArchcarRequest::SpawnSession {
@@ -1556,28 +1556,6 @@ fn command_exists(command: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
-}
-
-fn session_harness_options(
-    plan_mode: bool,
-    fast_mode: bool,
-    approval_mode: Option<String>,
-    reasoning_mode: Option<String>,
-    effort_mode: Option<String>,
-    codex_personality: Option<String>,
-    codex_goals: Option<String>,
-    codex_skills: Option<String>,
-) -> SessionHarnessOptions {
-    SessionHarnessOptions {
-        plan_mode,
-        fast_mode,
-        approval_mode,
-        reasoning_mode,
-        effort_mode,
-        codex_personality,
-        codex_goals,
-        codex_skills,
-    }
 }
 
 fn interactive_session_command(launch: &SessionLaunch) -> String {

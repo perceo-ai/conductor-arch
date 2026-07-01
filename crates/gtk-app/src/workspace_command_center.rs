@@ -24,6 +24,7 @@ const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
 const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
 const WORKSPACE_SPLIT_MIN_START: i32 = 360;
 const WORKSPACE_SPLIT_MIN_END: i32 = 280;
+type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
@@ -428,7 +429,7 @@ fn ws_center_panel(
     state: &AppState,
     refresh_hub: RefreshHub,
     collapse_sidebar: Rc<dyn Fn()>,
-) -> (GBox, Rc<dyn Fn(&str)>) {
+) -> (GBox, WorkspaceTabSelector) {
     let panel = GBox::new(Orientation::Vertical, 0);
     panel.add_css_class("ws-center");
     panel.set_hexpand(true);
@@ -579,9 +580,8 @@ fn ws_center_panel(
     // Sync active tab state
     let state_tabs = state.clone();
     content.connect_visible_child_name_notify(move |stack| {
-        match stack.visible_child_name().as_deref() {
-            _ => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
-        }
+        stack.visible_child_name().as_deref();
+        state_tabs.set_active_workspace_tab(WorkspaceTab::Chats);
     });
 
     content.set_visible_child_name(match state.snapshot().active_workspace_tab {
@@ -2834,7 +2834,7 @@ fn parallel_agents_panel(
     chat_box.append(&session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
-        &WorkspaceStore::open(db_path.to_path_buf())
+        &WorkspaceStore::open(db_path)
             .ok()
             .map(|store| workspace_repository_name(&store, &ws.name))
             .unwrap_or_else(|| ws.name.clone()),
@@ -3062,8 +3062,8 @@ fn apply_diff_tags(buffer: &gtk::TextBuffer) {
 
     let mut iter = buffer.start_iter();
     for line in text.split('\n') {
-        let line_start = iter.clone();
-        let mut line_end = iter.clone();
+        let line_start = iter;
+        let mut line_end = iter;
         line_end.forward_to_line_end();
 
         if line.starts_with('+') && !line.starts_with("+++") {
@@ -5644,8 +5644,10 @@ mod tests {
 
     #[test]
     fn run_console_state_falls_back_to_setup_when_active_terminal_is_missing() {
-        let mut state = WorkspaceRunConsoleState::default();
-        state.active_tab = "terminal-99".to_owned();
+        let state = WorkspaceRunConsoleState {
+            active_tab: "terminal-99".to_owned(),
+            ..Default::default()
+        };
 
         assert_eq!(state.active_tab_name(), "setup");
     }

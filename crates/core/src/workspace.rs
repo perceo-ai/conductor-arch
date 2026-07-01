@@ -941,6 +941,32 @@ struct LocalChatThreadRow {
     workspace_path: PathBuf,
 }
 
+struct ProcessSessionMetadata<'a> {
+    harness_metadata: Option<&'a str>,
+    resume_id: Option<&'a str>,
+}
+
+struct RecordProcessInput<'a> {
+    kind: ProcessKind,
+    workspace: &'a Workspace,
+    chat_thread_id: Option<i64>,
+    command: &'a str,
+    pid: u32,
+    file_prefix: &'a str,
+    session: ProcessSessionMetadata<'a>,
+}
+
+struct StartProcessInput<'a> {
+    kind: ProcessKind,
+    script: &'a str,
+    settings: &'a crate::settings::RepositorySettings,
+    repository: &'a RepositoryRecord,
+    workspace: &'a Workspace,
+    chat_thread_id: Option<i64>,
+    extra_env: &'a [(String, OsString)],
+    session: ProcessSessionMetadata<'a>,
+}
+
 pub struct WorkspaceStore {
     conn: Connection,
     db_path: PathBuf,
@@ -1281,17 +1307,19 @@ impl WorkspaceStore {
             }
         }
 
-        self.start_process(
-            ProcessKind::Run,
-            run,
-            &settings,
-            &repository,
-            &workspace,
-            None,
-            &[],
-            None,
-            None,
-        )
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Run,
+            script: run,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &[],
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
     }
 
     pub fn setup_workspace(&self, name: &str) -> Result<ProcessRecord> {
@@ -1302,17 +1330,19 @@ impl WorkspaceStore {
             anyhow::bail!("workspace {name} has no scripts.setup configured");
         };
 
-        self.start_process(
-            ProcessKind::Setup,
-            setup,
-            &settings,
-            &repository,
-            &workspace,
-            None,
-            &[],
-            None,
-            None,
-        )
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Setup,
+            script: setup,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &[],
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
     }
 
     pub fn stop_workspace(&self, name: &str) -> Result<ProcessRecord> {
@@ -1489,29 +1519,30 @@ impl WorkspaceStore {
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
         let workspace = self.get_by_name(name)?;
-        self.record_process(
-            ProcessKind::Terminal,
-            &workspace,
-            None,
+        self.record_process(RecordProcessInput {
+            kind: ProcessKind::Terminal,
+            workspace: &workspace,
+            chat_thread_id: None,
             command,
             pid,
-            "terminal",
-            None,
-            None,
-        )
+            file_prefix: "terminal",
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
     }
 
-    fn record_process(
-        &self,
-        kind: ProcessKind,
-        workspace: &Workspace,
-        chat_thread_id: Option<i64>,
-        command: &str,
-        pid: u32,
-        file_prefix: &str,
-        session_harness_metadata: Option<&str>,
-        session_resume_id: Option<&str>,
-    ) -> Result<ProcessRecord> {
+    fn record_process(&self, input: RecordProcessInput<'_>) -> Result<ProcessRecord> {
+        let RecordProcessInput {
+            kind,
+            workspace,
+            chat_thread_id,
+            command,
+            pid,
+            file_prefix,
+            session,
+        } = input;
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "process command is required");
         let now = timestamp();
@@ -1543,8 +1574,8 @@ impl WorkspaceStore {
                 log_path.to_string_lossy().to_string(),
                 ProcessStatus::Running.as_str(),
                 now,
-                session_harness_metadata,
-                session_resume_id,
+                session.harness_metadata,
+                session.resume_id,
             ],
         )?;
         self.get_process(self.conn.last_insert_rowid())
@@ -3769,17 +3800,19 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
         let command = shell_words(&launch.program, &launch.args);
-        self.start_process(
-            ProcessKind::Session,
-            &command,
-            &settings,
-            &repository,
-            &workspace,
-            None,
-            &launch.env,
-            launch.harness_metadata.as_deref(),
-            launch.session_resume_id.as_deref(),
-        )
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Session,
+            script: &command,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &launch.env,
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id: launch.session_resume_id.as_deref(),
+            },
+        })
     }
 
     fn start_codex_pty_session(&self, name: &str, launch: &SessionLaunch) -> Result<ProcessRecord> {
@@ -3797,16 +3830,18 @@ mutation($threadId: ID!) {{
             .process_id()
             .context("codex pty did not report a process id")?;
         let command = shell_words(&launch.program, &launch.args);
-        let process = self.record_process(
-            ProcessKind::Session,
-            &workspace,
-            None,
-            &command,
+        let process = self.record_process(RecordProcessInput {
+            kind: ProcessKind::Session,
+            workspace: &workspace,
+            chat_thread_id: None,
+            command: &command,
             pid,
-            "session",
-            launch.harness_metadata.as_deref(),
-            launch.session_resume_id.as_deref(),
-        )?;
+            file_prefix: "session",
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id: launch.session_resume_id.as_deref(),
+            },
+        })?;
         spawn_codex_session_monitor(self.db_path.clone(), process.id, pty);
         Ok(process)
     }
@@ -3820,16 +3855,18 @@ mutation($threadId: ID!) {{
         anyhow::ensure!(pid > 0, "session process id is required");
         let workspace = self.get_by_name(name)?;
         let command = shell_words(&launch.program, &launch.args);
-        self.record_process(
-            ProcessKind::Session,
-            &workspace,
-            None,
-            &command,
+        self.record_process(RecordProcessInput {
+            kind: ProcessKind::Session,
+            workspace: &workspace,
+            chat_thread_id: None,
+            command: &command,
             pid,
-            "session",
-            launch.harness_metadata.as_deref(),
-            launch.session_resume_id.as_deref(),
-        )
+            file_prefix: "session",
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id: launch.session_resume_id.as_deref(),
+            },
+        })
     }
 
     fn get_by_path(&self, path: &Path) -> Result<Workspace> {
@@ -3998,16 +4035,18 @@ mutation($threadId: ID!) {{
             SessionKind::Codex => thread.native_thread_id.as_deref(),
             _ => launch.session_resume_id.as_deref(),
         };
-        self.record_process(
-            ProcessKind::Session,
-            &workspace,
-            Some(thread_id),
-            &command,
+        self.record_process(RecordProcessInput {
+            kind: ProcessKind::Session,
+            workspace: &workspace,
+            chat_thread_id: Some(thread_id),
+            command: &command,
             pid,
-            "session",
-            launch.harness_metadata.as_deref(),
-            resume_id,
-        )
+            file_prefix: "session",
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id,
+            },
+        })
     }
 
     pub fn list_thread_processes(&self, thread_id: i64) -> Result<Vec<ProcessRecord>> {
@@ -4354,18 +4393,17 @@ mutation($threadId: ID!) {{
         format!("{prefix}/{}", slugify(workspace_name))
     }
 
-    fn start_process(
-        &self,
-        kind: ProcessKind,
-        script: &str,
-        settings: &crate::settings::RepositorySettings,
-        repository: &RepositoryRecord,
-        workspace: &Workspace,
-        chat_thread_id: Option<i64>,
-        extra_env: &[(String, OsString)],
-        session_harness_metadata: Option<&str>,
-        session_resume_id: Option<&str>,
-    ) -> Result<ProcessRecord> {
+    fn start_process(&self, input: StartProcessInput<'_>) -> Result<ProcessRecord> {
+        let StartProcessInput {
+            kind,
+            script,
+            settings,
+            repository,
+            workspace,
+            chat_thread_id,
+            extra_env,
+            session,
+        } = input;
         let now = timestamp();
         let log_path = self
             .logs_dir
@@ -4418,8 +4456,8 @@ mutation($threadId: ID!) {{
                 log_path.to_string_lossy().to_string(),
                 ProcessStatus::Running.as_str(),
                 now,
-                session_harness_metadata,
-                session_resume_id,
+                session.harness_metadata,
+                session.resume_id,
             ],
         )?;
 

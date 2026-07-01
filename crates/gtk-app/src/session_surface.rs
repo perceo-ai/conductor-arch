@@ -43,6 +43,8 @@ const SESSION_RECONCILE_EVERY_TICKS: u32 = 10;
 const DEFAULT_CHAT_TITLE_PREFIX: &str = "New Chat";
 
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
+type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 
 #[derive(Clone)]
 pub struct ExternalChatTabs {
@@ -125,10 +127,9 @@ pub fn agent_session_panel(
     let inflight_archcar_actions =
         Rc::new(RefCell::new(HashMap::<u64, PendingArchcarAction>::new()));
     let pending_archcar_status = Rc::new(RefCell::new(HashMap::<i64, u64>::new()));
-    let refresh_chat_surface: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    let switch_chat_harness: Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>> =
-        Rc::new(RefCell::new(None));
-    let sync_live_controls: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let refresh_chat_surface: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
+    let switch_chat_harness: SwitchChatHarnessController = Rc::new(RefCell::new(None));
+    let sync_live_controls: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
 
     let thread_row = GBox::new(Orientation::Horizontal, 8);
     thread_row.add_css_class("chat-thread-row");
@@ -784,10 +785,11 @@ pub fn agent_session_panel(
                             .unwrap_or(!screen.is_empty());
                         if !screen.is_empty() && changed {
                             let answered = trust_answered_for_refresh.borrow().contains(process_id);
-                            if !answered && detect_directory_trust_prompt(&screen) {
-                                if session.send_line("1").is_ok() {
-                                    trust_answered_for_refresh.borrow_mut().insert(*process_id);
-                                }
+                            if !answered
+                                && detect_directory_trust_prompt(&screen)
+                                && session.send_line("1").is_ok()
+                            {
+                                trust_answered_for_refresh.borrow_mut().insert(*process_id);
                             }
                             let _ =
                                 WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
@@ -3350,10 +3352,11 @@ fn agent_session_panel_impl(
                             .unwrap_or(!screen.is_empty());
                         if !screen.is_empty() && changed {
                             let answered = trust_answered_for_poll.borrow().contains(process_id);
-                            if !answered && detect_directory_trust_prompt(&screen) {
-                                if session.send_line("1").is_ok() {
-                                    trust_answered_for_poll.borrow_mut().insert(*process_id);
-                                }
+                            if !answered
+                                && detect_directory_trust_prompt(&screen)
+                                && session.send_line("1").is_ok()
+                            {
+                                trust_answered_for_poll.borrow_mut().insert(*process_id);
                             }
                             let _ = WorkspaceStore::open(db_for_poll.clone()).and_then(|store| {
                                 store.append_session_process_output(
