@@ -2,42 +2,6 @@ pub(crate) fn app_css() -> &'static str {
     APP_CSS
 }
 
-#[cfg(test)]
-mod tests {
-    use super::app_css;
-
-    #[test]
-    fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
-        let css = app_css();
-
-        assert!(css.contains("#101010"));
-        assert!(css.contains("#1f1f1f"));
-        assert!(css.contains("#333333"));
-        assert!(css.contains("#5a5a5a"));
-        assert!(css.contains("#8a8a8a"));
-        assert!(css.contains("#22c55e"));
-        assert!(css.contains("Mona Sans"));
-        assert!(css.contains("Commit Mono"));
-        assert!(css.contains(".workspace-modal-section"));
-        assert!(css.contains(".setup-modal"));
-        assert!(css.contains(".project-create-menu-row"));
-        assert!(css.contains(".project-template-card"));
-        assert!(css.contains("padding: 18px;"));
-        assert!(css.contains("entry placeholder"));
-        assert!(css.contains("combobox"));
-        assert!(css.contains(".kanban-column-header"));
-        assert!(css.contains(".dashboard-card-top"));
-        assert!(css.contains("outline-offset: 2px"));
-        assert!(!css.contains("#38bdf8"));
-        assert!(!css.contains("#2563eb"));
-        assert!(!css.contains("#1d4ed8"));
-        assert!(!css.contains("#eff6ff"));
-        assert!(!css.contains("#0f172a"));
-        assert!(!css.contains("#1e293b"));
-        assert!(!css.contains("#334155"));
-    }
-}
-
 const APP_CSS: &str = r#"
 window {
     background-color: #191919;
@@ -2517,3 +2481,39 @@ textview:focus,
     color: #fb7185;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::app_css;
+
+    #[test]
+    fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
+        let css = app_css();
+
+        assert!(css.contains("#101010"));
+        assert!(css.contains("#1f1f1f"));
+        assert!(css.contains("#333333"));
+        assert!(css.contains("#5a5a5a"));
+        assert!(css.contains("#8a8a8a"));
+        assert!(css.contains("#22c55e"));
+        assert!(css.contains("Mona Sans"));
+        assert!(css.contains("Commit Mono"));
+        assert!(css.contains(".workspace-modal-section"));
+        assert!(css.contains(".setup-modal"));
+        assert!(css.contains(".project-create-menu-row"));
+        assert!(css.contains(".project-template-card"));
+        assert!(css.contains("padding: 18px;"));
+        assert!(css.contains("entry placeholder"));
+        assert!(css.contains("combobox"));
+        assert!(css.contains(".kanban-column-header"));
+        assert!(css.contains(".dashboard-card-top"));
+        assert!(css.contains("outline-offset: 2px"));
+        assert!(!css.contains("#38bdf8"));
+        assert!(!css.contains("#2563eb"));
+        assert!(!css.contains("#1d4ed8"));
+        assert!(!css.contains("#eff6ff"));
+        assert!(!css.contains("#0f172a"));
+        assert!(!css.contains("#1e293b"));
+        assert!(!css.contains("#334155"));
+    }
+}
