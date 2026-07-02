@@ -7,14 +7,34 @@ mod tests {
     use super::app_css;
 
     #[test]
-    fn refreshed_theme_exposes_slate_palette_fonts_and_focus_color() {
+    fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
         let css = app_css();
 
-        assert!(css.contains("#0f172a"));
+        assert!(css.contains("#101010"));
+        assert!(css.contains("#1f1f1f"));
+        assert!(css.contains("#333333"));
+        assert!(css.contains("#5a5a5a"));
+        assert!(css.contains("#8a8a8a"));
         assert!(css.contains("#22c55e"));
-        assert!(css.contains("#38bdf8"));
-        assert!(css.contains("SF Pro Text"));
-        assert!(css.contains("SF Mono"));
+        assert!(css.contains("Mona Sans"));
+        assert!(css.contains("Commit Mono"));
+        assert!(css.contains(".workspace-modal-section"));
+        assert!(css.contains(".setup-modal"));
+        assert!(css.contains(".project-create-menu-row"));
+        assert!(css.contains(".project-template-card"));
+        assert!(css.contains("padding: 18px;"));
+        assert!(css.contains("entry placeholder"));
+        assert!(css.contains("combobox"));
+        assert!(css.contains(".kanban-column-header"));
+        assert!(css.contains(".dashboard-card-top"));
+        assert!(css.contains("outline-offset: 2px"));
+        assert!(!css.contains("#38bdf8"));
+        assert!(!css.contains("#2563eb"));
+        assert!(!css.contains("#1d4ed8"));
+        assert!(!css.contains("#eff6ff"));
+        assert!(!css.contains("#0f172a"));
+        assert!(!css.contains("#1e293b"));
+        assert!(!css.contains("#334155"));
     }
 }
 
@@ -22,7 +42,7 @@ const APP_CSS: &str = r#"
 window {
     background-color: #191919;
     color: #e4e4e4;
-    font-family: "Inter", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
 .dashboard,
@@ -70,7 +90,7 @@ window {
 .card-branch,
 .workspace-path-label,
 .detail-label {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 
 .card-meta,
@@ -198,18 +218,35 @@ window {
 .sidebar-search,
 .composer-bar entry,
 entry {
-    background-color: #191919;
+    background-color: #151515;
     color: #e4e4e4;
-    border: 1px solid #2a2a2a;
-    border-radius: 7px;
+    border: 1px solid #343434;
+    border-radius: 8px;
     font-size: 13px;
+    padding: 7px 10px;
+    caret-color: #f5f5f5;
 }
 
 .sidebar-search:focus,
 .composer-bar entry:focus,
 entry:focus {
-    border-color: #aaaaaa;
-    box-shadow: none;
+    border-color: #8a8a8a;
+    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.26);
+    outline: 1px solid transparent;
+    outline-offset: 2px;
+}
+
+entry placeholder,
+textview placeholder {
+    color: #737373;
+}
+
+entry:disabled,
+combobox:disabled,
+textview:disabled {
+    background-color: #121212;
+    color: #6f6f6f;
+    border-color: #242424;
 }
 
 .workspace-list {
@@ -282,13 +319,13 @@ entry:focus {
 }
 
 .workspace-status-chip {
-    color: #7fb6ff;
+    color: #b8b8b8;
     background-color: transparent;
     border: none;
 }
 
 .workspace-status-chip-active {
-    color: #7fb6ff;
+    color: #e4e4e4;
     background-color: transparent;
     border: none;
 }
@@ -424,7 +461,7 @@ checkbutton {
 }
 
 .project-tabs {
-    padding-bottom: 10px;
+    padding-bottom: 8px;
 }
 
 .project-tab,
@@ -445,7 +482,21 @@ checkbutton {
 }
 
 .kanban-column {
-    min-width: 240px;
+    min-width: 250px;
+    padding: 12px;
+    border-radius: 12px;
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
+}
+
+.kanban-board {
+    background-color: #101010;
+}
+
+.kanban-column-header {
+    border-bottom: 1px solid #2b2b2b;
+    padding-bottom: 8px;
+    margin-bottom: 2px;
 }
 
 .shell-card,
@@ -467,7 +518,25 @@ checkbutton {
 }
 
 .workspace-card {
-    min-height: 116px;
+    min-height: 104px;
+}
+
+.kanban-column .workspace-card {
+    background-color: #151515;
+    border-color: #303030;
+    border-radius: 10px;
+    padding: 10px;
+    box-shadow: none;
+}
+
+.kanban-column .workspace-card:hover {
+    background-color: #1d1d1d;
+    border-color: #454545;
+}
+
+.dashboard-card-top,
+.dashboard-card-footer {
+    min-height: 22px;
 }
 
 .card-branch,
@@ -552,7 +621,7 @@ checkbutton {
     background-color: #151515;
     color: #e4e4e4;
     font-size: 12px;
-    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 
 .session-surface .card-meta,
@@ -690,15 +759,171 @@ separator {
     background-color: #1e1e1e;
     border: 1px solid #2a2a2a;
     border-radius: 14px;
-    padding: 2px;
+    padding: 18px;
 }
 
 .workspace-modal {
-    padding: 8px;
+    padding: 18px;
+}
+
+.setup-modal {
+    background-color: #1a1a1a;
+    border: 1px solid #2f2f2f;
+    border-radius: 14px;
+    padding: 18px;
+}
+
+.setup-title {
+    color: #f2f2f2;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.setup-copy,
+.setup-feedback,
+.setup-status-detail {
+    color: #9a9a9a;
+    font-size: 12px;
+}
+
+.setup-status-list,
+.setup-guidance {
+    background-color: #151515;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.setup-status-row {
+    border-radius: 10px;
+    padding: 10px;
+}
+
+.setup-status-ready {
+    background-color: #142018;
+    border: 1px solid #264633;
+}
+
+.setup-status-missing-required {
+    background-color: #24191a;
+    border: 1px solid #4a2b2f;
+}
+
+.setup-status-missing {
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
+}
+
+.setup-status-pill {
+    min-width: 58px;
+    color: #e4e4e4;
+    background-color: #2c2c2c;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.setup-status-name {
+    color: #f2f2f2;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.setup-link {
+    color: #f2f2f2;
+    background-color: #202020;
+    border: 1px solid #303030;
+    border-radius: 9px;
+    padding: 9px 10px;
+}
+
+.setup-link:hover {
+    background-color: #2a2a2a;
+    border-color: #3a3a3a;
+}
+
+.project-create-menu {
+    background-color: #1e1e1e;
+    border: 1px solid #343434;
+    border-radius: 10px;
+}
+
+.project-create-menu-row {
+    min-width: 260px;
+    min-height: 34px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    background-color: transparent;
+    border: 1px solid transparent;
+}
+
+.project-create-menu-row:hover {
+    background-color: #2c2c2c;
+}
+
+.project-create-menu-icon {
+    color: #a8a8a8;
+    min-width: 16px;
+}
+
+.project-create-menu-label {
+    color: #e4e4e4;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.project-folder-picker,
+.project-repo-list,
+.project-template-grid {
+    background-color: #151515;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.project-path-preview,
+.project-template-copy {
+    color: #8a8a8a;
+    font-size: 12px;
+}
+
+.project-repo-row {
+    border-radius: 9px;
+    margin: 2px;
+}
+
+.project-repo-row:hover,
+.project-repo-row:selected {
+    background-color: #262626;
+}
+
+.project-template-card {
+    background-color: #1b1b1b;
+    border: 1px solid #303030;
+    border-radius: 10px;
+    padding: 0;
+}
+
+.project-template-card:hover {
+    background-color: #242424;
+    border-color: #454545;
+}
+
+.project-template-card-selected {
+    background-color: #2a2a2a;
+    border-color: #6a6a6a;
+}
+
+.project-template-title {
+    color: #f2f2f2;
+    font-size: 13px;
+    font-weight: 700;
 }
 
 .workspace-modal-split {
-    margin-top: 4px;
+    margin-top: 10px;
+    margin-bottom: 2px;
 }
 
 .workspace-modal-field {
@@ -706,9 +931,23 @@ separator {
     min-width: 0;
 }
 
+.workspace-modal-section {
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 4px;
+}
+
+.workspace-modal-section-title {
+    color: #f2f2f2;
+    font-size: 12px;
+    font-weight: 700;
+}
+
 .workspace-modal-hint {
-    margin-top: 2px;
-    margin-bottom: 2px;
+    margin-top: 6px;
+    margin-bottom: 4px;
 }
 
 .workspace-modal-preview {
@@ -716,7 +955,7 @@ separator {
     border: 1px solid #2a2a2a;
     border-radius: 12px;
     padding: 12px;
-    margin-top: 4px;
+    margin-top: 8px;
 }
 
 .workspace-modal-preview-copy {
@@ -724,7 +963,7 @@ separator {
 }
 
 .workspace-modal-feedback {
-    margin-top: 2px;
+    margin-top: 6px;
 }
 
 .settings-shell {
@@ -858,7 +1097,7 @@ separator {
 .settings-editor text,
 .settings-editor view,
 .settings-editor widget {
-    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 
 .settings-editor-shell {
@@ -891,13 +1130,13 @@ separator {
 .lc-accent-blue .chat-mode-selected,
 .lc-accent-blue .chat-send-btn-active,
 .lc-accent-blue .chat-user-bubble {
-    color: #eff6ff;
-    border-color: #2563eb;
+    color: #f5f5f5;
+    border-color: #5a5a5a;
 }
 .lc-accent-blue .chat-mode-selected,
 .lc-accent-blue .chat-send-btn-active,
 .lc-accent-blue .chat-user-bubble {
-    background-color: #2563eb;
+    background-color: #333333;
 }
 
 .lc-accent-green .section-title,
@@ -1105,14 +1344,14 @@ window.lc-theme-dark,
 
 /* ── Sidebar row timestamp ── */
 .workspace-row-timestamp {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     color: #8a8a8a;
 }
 
 /* ── Workspace ahead-commits badge ── */
 .workspace-badge {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     font-weight: 600;
     color: #aaaaaa;
@@ -1322,7 +1561,7 @@ window.lc-theme-dark,
     border-bottom: 1px solid #232323;
 }
 .ws-pr-number {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 13px;
     font-weight: 700;
     color: #d9d9d9;
@@ -1381,7 +1620,7 @@ window.lc-theme-dark,
     min-width: 14px;
 }
 .ws-folder-name {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     font-weight: 600;
     color: #909090;
@@ -1390,19 +1629,19 @@ window.lc-theme-dark,
     padding: 5px 11px;
 }
 .ws-file-badge {
-    font-family: "JetBrains Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 10px;
     font-weight: 600;
     color: #5d5d5d;
     min-width: 18px;
 }
 .ws-file-name {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 13px;
     color: #b2b2b2;
 }
 .ws-file-dir {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     color: #5d5d5d;
 }
@@ -1495,7 +1734,7 @@ row:hover .ws-folder-name {
 .ws-run-output text {
     background-color: #111111;
     color: #c8c8c8;
-    font-family: "JetBrains Mono", "Cascadia Mono", "Fira Code", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     border-radius: 0;
 }
@@ -1709,7 +1948,7 @@ row:hover .ws-folder-name {
 }
 .chat-inline-event-meta {
     color: #8f8f8f;
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
 }
 .chat-inline-event-body {
@@ -1717,7 +1956,7 @@ row:hover .ws-folder-name {
     border: 1px solid #2a2a2a;
     border-radius: 6px;
     color: #c9c9c9;
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     line-height: 1.45;
     padding: 10px;
@@ -1797,7 +2036,7 @@ row:hover .ws-folder-name {
     border: 1px solid #333333;
     border-radius: 8px;
     color: #a6a6a6;
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     font-weight: 700;
     min-width: 44px;
@@ -1838,16 +2077,16 @@ row:hover .ws-folder-name {
     padding: 0;
 }
 .chat-send-btn-active {
-    background-color: #2563eb;
-    color: #eff6ff;
+    background-color: #333333;
+    color: #f5f5f5;
 }
 .chat-send-btn:hover {
     background-color: #383838;
     color: #e4e4e4;
 }
 .chat-send-btn-active:hover {
-    background-color: #1d4ed8;
-    color: #eff6ff;
+    background-color: #3f3f3f;
+    color: #ffffff;
 }
 
 /* ── Diff view ── */
@@ -1855,7 +2094,7 @@ row:hover .ws-folder-name {
 .ws-diff-view text {
     background-color: #131313;
     color: #c0c0c0;
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     line-height: 1.5;
 }
@@ -1865,7 +2104,7 @@ row:hover .ws-folder-name {
 .ws-file-code-view text {
     background-color: #161616;
     color: #c8c8c8;
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 13px;
     line-height: 1.6;
 }
@@ -1901,7 +2140,7 @@ row:hover .ws-folder-name {
 .ws-check-icon {
     font-size: 11px;
     min-width: 22px;
-    font-family: "JetBrains Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 .ws-check-icon-muted {
     color: #5a5a5a;
@@ -1919,7 +2158,7 @@ row:hover .ws-folder-name {
     min-width: 140px;
 }
 .ws-check-val {
-    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     color: #c0c0c0;
     padding-left: 8px;
@@ -1927,12 +2166,12 @@ row:hover .ws-folder-name {
 .ws-check-sub {
     font-size: 11px;
     color: #666666;
-    font-family: "JetBrains Mono", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     padding-top: 1px;
     padding-bottom: 1px;
 }
 
-/* ── 2026 design refresh: dark slate developer cockpit ── */
+/* ── 2026 design refresh: graphite developer cockpit ── */
 window,
 .dashboard,
 .page-shell,
@@ -1941,9 +2180,9 @@ window,
 .session-surface,
 .terminal-panel,
 .settings-shell {
-    background-color: #0f172a;
+    background-color: #101010;
     color: #f8fafc;
-    font-family: "Inter", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
 .page-header,
@@ -1966,23 +2205,22 @@ window,
 .history-row,
 .project-row,
 .workspace-row-shell {
-    background-color: #111827;
-    border-color: #334155;
+    background-color: #181818;
+    border-color: #2b2b2b;
     color: #f8fafc;
 }
 
 .chat-composer-box,
 .workspace-card,
 .shell-card,
-.kanban-column,
 .settings-content-panel,
 .settings-inspector,
 .workspace-modal-preview,
 .chat-inline-event,
 .chat-menu-popover {
-    background-color: #1e293b;
-    border: 1px solid #334155;
-    box-shadow: 0 14px 34px rgba(2, 6, 23, 0.34);
+    background-color: #1f1f1f;
+    border: 1px solid #2b2b2b;
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
 }
 
 .dashboard-title,
@@ -2016,7 +2254,7 @@ window,
 .chat-inline-event-meta,
 .chat-mode-label,
 .chat-editor-label {
-    color: #94a3b8;
+    color: #a3a3a3;
 }
 
 .workspace-meta,
@@ -2035,7 +2273,7 @@ window,
 .ws-diff-view text,
 .ws-file-code-view,
 .ws-file-code-view text {
-    font-family: "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 
 .sidebar-chrome-button,
@@ -2052,7 +2290,7 @@ window,
 .text-button,
 .flat-action,
 .secondary-action {
-    color: #cbd5e1;
+    color: #d0d0d0;
     background-color: transparent;
     border-color: transparent;
 }
@@ -2075,7 +2313,7 @@ window,
 .nav-button:hover,
 .nav-row:hover,
 .chat-menu-item:hover {
-    background-color: #243449;
+    background-color: #2a2a2a;
     color: #f8fafc;
 }
 
@@ -2086,9 +2324,35 @@ window,
 .chat-mode-selected,
 .chat-menu-item-selected,
 .project-tab-active {
-    background-color: #1e3a5f;
-    border-color: #38bdf8;
+    background-color: #2c2c2c;
+    border-color: #5a5a5a;
     color: #f8fafc;
+}
+
+.kanban-board {
+    background-color: #101010;
+}
+
+.kanban-column {
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+.kanban-column-header {
+    border-bottom: 1px solid #2b2b2b;
+}
+
+.kanban-column .workspace-card {
+    background-color: #151515;
+    border-color: #303030;
+    box-shadow: none;
+}
+
+.kanban-column .workspace-card:hover {
+    background-color: #1d1d1d;
+    border-color: #454545;
 }
 
 .suggested-action,
@@ -2113,6 +2377,10 @@ window,
 }
 
 entry,
+entry text,
+combobox,
+combobox button,
+combobox box,
 .sidebar-search,
 .composer-bar entry,
 .workspace-modal-field,
@@ -2122,9 +2390,34 @@ entry,
 .chat-input-scroll,
 .chat-input-view,
 .chat-input-view text {
-    background-color: #0b1120;
-    border-color: #334155;
+    background-color: #0d0d0d;
+    border-color: #343434;
     color: #f8fafc;
+}
+
+entry,
+combobox,
+combobox button,
+textview,
+.workspace-modal-field,
+.settings-machine-entry {
+    border-radius: 8px;
+    min-height: 40px;
+}
+
+entry placeholder,
+textview placeholder {
+    color: #737373;
+}
+
+entry:disabled,
+combobox:disabled,
+textview:disabled,
+.workspace-modal-field:disabled,
+.settings-machine-entry:disabled {
+    background-color: #121212;
+    border-color: #242424;
+    color: #6f6f6f;
 }
 
 entry:focus,
@@ -2133,34 +2426,51 @@ entry:focus,
 .workspace-modal-field:focus,
 .settings-machine-entry:focus,
 .settings-editor:focus,
+combobox:focus,
+combobox button:focus,
+textview:focus,
+.chat-input-view:focus,
+.chat-input-view text:focus,
+.chat-input-scroll:focus-within,
 .chat-composer-box:focus-within {
-    border-color: #38bdf8;
-    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.48);
+    border-color: #8a8a8a;
+    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
+    outline: 1px solid transparent;
+    outline-offset: 2px;
+}
+
+.workspace-modal-field:focus,
+.settings-machine-entry:focus,
+.settings-editor:focus,
+.chat-composer-box:focus-within {
+    border-color: #8a8a8a;
+    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
+    outline-offset: 2px;
 }
 
 .chat-user-bubble {
-    background-color: #1d4ed8;
-    color: #eff6ff;
+    background-color: #2f2f2f;
+    color: #f5f5f5;
 }
 
 .chat-inline-event-title {
-    color: #e0f2fe;
+    color: #f2f2f2;
 }
 
 .chat-inline-event-body {
-    background-color: #0b1120;
-    border-color: #334155;
-    color: #dbeafe;
+    background-color: #0d0d0d;
+    border-color: #2b2b2b;
+    color: #d6d6d6;
 }
 
 .chat-inline-event-loading {
-    border-color: #38bdf8;
+    border-color: #8a8a8a;
 }
 
 .chat-context-usage-empty {
-    background-color: #111827;
-    border-color: #334155;
-    color: #94a3b8;
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
 }
 
 .chat-context-usage-normal {

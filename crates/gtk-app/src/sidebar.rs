@@ -17,7 +17,7 @@ use tracing::error;
 
 use crate::archcar_async::spawn_archcar_request;
 use crate::buttons::{icon_button, resolve_icon_name, text_button};
-use crate::projects::show_repository_quick_add_dialog;
+use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
@@ -154,8 +154,9 @@ pub(crate) fn build_app_sidebar(
         let hub_hdr = refresh_hub.clone();
         let rw_hdr = refresh_workspace.clone();
         let rvp_hdr = refresh_view_preferences.clone();
-        add_workspace_btn.connect_clicked(move |_| {
-            show_repository_quick_add_dialog(
+        add_workspace_btn.connect_clicked(move |button| {
+            show_project_creation_popover(
+                button,
                 db_path_hdr.clone(),
                 Rc::new({
                     let hub_hdr = hub_hdr.clone();
@@ -168,7 +169,6 @@ pub(crate) fn build_app_sidebar(
                         rvp_hdr();
                     }
                 }),
-                Some("folder"),
             );
         });
     }
@@ -448,8 +448,9 @@ pub(crate) fn build_app_sidebar(
         let hub_bar = refresh_hub.clone();
         let rw_bar = refresh_workspace.clone();
         let rvp_bar = refresh_view_preferences.clone();
-        add_repo_btn.connect_clicked(move |_| {
-            show_repository_quick_add_dialog(
+        add_repo_btn.connect_clicked(move |button| {
+            show_project_creation_popover(
+                button,
                 db_path_bar.clone(),
                 Rc::new({
                     let hub_bar = hub_bar.clone();
@@ -462,7 +463,6 @@ pub(crate) fn build_app_sidebar(
                         rvp_bar();
                     }
                 }),
-                Some("folder"),
             );
         });
     }
