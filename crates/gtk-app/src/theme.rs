@@ -2,6 +2,22 @@ pub(crate) fn app_css() -> &'static str {
     APP_CSS
 }
 
+#[cfg(test)]
+mod tests {
+    use super::app_css;
+
+    #[test]
+    fn refreshed_theme_exposes_slate_palette_fonts_and_focus_color() {
+        let css = app_css();
+
+        assert!(css.contains("#0f172a"));
+        assert!(css.contains("#22c55e"));
+        assert!(css.contains("#38bdf8"));
+        assert!(css.contains("SF Pro Text"));
+        assert!(css.contains("SF Mono"));
+    }
+}
+
 const APP_CSS: &str = r#"
 window {
     background-color: #191919;
@@ -1677,6 +1693,41 @@ row:hover .ws-folder-name {
     line-height: 1.55;
     margin-bottom: 18px;
 }
+.chat-inline-event {
+    background-color: #202020;
+    border: 1px solid #313131;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+.chat-inline-event-header {
+    min-height: 28px;
+}
+.chat-inline-event-title {
+    color: #e4e4e4;
+    font-size: 13px;
+    font-weight: 650;
+}
+.chat-inline-event-meta {
+    color: #8f8f8f;
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-size: 11px;
+}
+.chat-inline-event-body {
+    background-color: #181818;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    color: #c9c9c9;
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 10px;
+}
+.chat-inline-event-loading {
+    border-color: #3f4a5f;
+}
+.chat-inline-event-failed {
+    border-color: #7f3838;
+}
 .chat-composer {
     padding: 0 16px 16px;
     background-color: #151515;
@@ -1741,6 +1792,37 @@ row:hover .ws-folder-name {
     min-width: 0;
     min-height: 0;
     padding: 0 6px;
+}
+.chat-context-usage {
+    border: 1px solid #333333;
+    border-radius: 8px;
+    color: #a6a6a6;
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 44px;
+    min-height: 28px;
+    padding: 0 6px;
+}
+.chat-context-usage-empty {
+    background-color: transparent;
+    border-color: #303030;
+    color: #777777;
+}
+.chat-context-usage-normal {
+    background-color: #1f2a22;
+    border-color: #395540;
+    color: #b8d7bf;
+}
+.chat-context-usage-warning {
+    background-color: #2c281b;
+    border-color: #6b5c2a;
+    color: #e2cf8a;
+}
+.chat-context-usage-danger {
+    background-color: #2c1f1f;
+    border-color: #753838;
+    color: #efb0b0;
 }
 .chat-send-btn {
     min-width: 0;
@@ -1848,5 +1930,280 @@ row:hover .ws-folder-name {
     font-family: "JetBrains Mono", monospace;
     padding-top: 1px;
     padding-bottom: 1px;
+}
+
+/* ── 2026 design refresh: dark slate developer cockpit ── */
+window,
+.dashboard,
+.page-shell,
+.history-view,
+.chat-surface,
+.session-surface,
+.terminal-panel,
+.settings-shell {
+    background-color: #0f172a;
+    color: #f8fafc;
+    font-family: "Inter", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+}
+
+.page-header,
+.dashboard-header,
+.sidebar,
+.chat-composer,
+.chat-composer-box,
+.settings-toolbar,
+.settings-rail,
+.settings-content-panel,
+.workspace-card,
+.shell-card,
+.kanban-column,
+.modal-body,
+.workspace-modal,
+.terminal-panel,
+.session-tool-surface,
+.session-transcript,
+.terminal-transcript-dark,
+.history-row,
+.project-row,
+.workspace-row-shell {
+    background-color: #111827;
+    border-color: #334155;
+    color: #f8fafc;
+}
+
+.chat-composer-box,
+.workspace-card,
+.shell-card,
+.kanban-column,
+.settings-content-panel,
+.settings-inspector,
+.workspace-modal-preview,
+.chat-inline-event,
+.chat-menu-popover {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    box-shadow: 0 14px 34px rgba(2, 6, 23, 0.34);
+}
+
+.dashboard-title,
+.card-title,
+.workspace-name,
+.detail-value,
+.metric-value,
+.column-title,
+.chat-repo-label,
+.chat-branch-label,
+.chat-agent-text,
+.chat-input-view,
+.chat-input-view text,
+.settings-group-title,
+.settings-field-title {
+    color: #f8fafc;
+}
+
+.card-meta,
+.workspace-meta,
+.detail-label,
+.project-tab,
+.column-count,
+.workspace-path-label,
+.section-title,
+.sidebar-header,
+.repo-section-header,
+.settings-group-copy,
+.settings-field-copy,
+.chat-placeholder,
+.chat-inline-event-meta,
+.chat-mode-label,
+.chat-editor-label {
+    color: #94a3b8;
+}
+
+.workspace-meta,
+.card-branch,
+.workspace-path-label,
+.detail-label,
+.chat-context-usage,
+.chat-inline-event-meta,
+.chat-inline-event-body,
+.terminal-transcript-dark,
+.session-transcript,
+.history-view,
+.settings-editor,
+.settings-machine-entry,
+.ws-diff-view,
+.ws-diff-view text,
+.ws-file-code-view,
+.ws-file-code-view text {
+    font-family: "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+}
+
+.sidebar-chrome-button,
+.sidebar-icon-button,
+.sidebar-reopen-button,
+.sidebar-arrow-button,
+.chat-focus-btn,
+.chat-context-btn,
+.chat-toolbar-btn,
+.chat-mode-btn,
+.chat-mode-menu,
+.chat-editor-menu,
+.icon-button,
+.text-button,
+.flat-action,
+.secondary-action {
+    color: #cbd5e1;
+    background-color: transparent;
+    border-color: transparent;
+}
+
+.sidebar-chrome-button:hover,
+.sidebar-icon-button:hover,
+.sidebar-reopen-button:hover,
+.sidebar-arrow-button:hover,
+.chat-focus-btn:hover,
+.chat-context-btn:hover,
+.chat-toolbar-btn:hover,
+.chat-mode-btn:hover,
+.chat-mode-menu:hover,
+.chat-editor-menu:hover,
+.icon-button:hover,
+.text-button:hover,
+.flat-action:hover,
+.secondary-action:hover,
+.workspace-list row:hover,
+.nav-button:hover,
+.nav-row:hover,
+.chat-menu-item:hover {
+    background-color: #243449;
+    color: #f8fafc;
+}
+
+.nav-row-active,
+.nav-button-active,
+.workspace-row-active,
+.workspace-list row:selected,
+.chat-mode-selected,
+.chat-menu-item-selected,
+.project-tab-active {
+    background-color: #1e3a5f;
+    border-color: #38bdf8;
+    color: #f8fafc;
+}
+
+.suggested-action,
+.chat-send-btn-active {
+    background-color: #22c55e;
+    border-color: #22c55e;
+    color: #052e16;
+}
+
+.suggested-action:hover,
+.chat-send-btn-active:hover {
+    background-color: #4ade80;
+    border-color: #4ade80;
+    color: #052e16;
+}
+
+.destructive-action,
+.chat-inline-event-failed {
+    background-color: #3f1d2a;
+    border-color: #ef4444;
+    color: #fecdd3;
+}
+
+entry,
+.sidebar-search,
+.composer-bar entry,
+.workspace-modal-field,
+.settings-machine-entry,
+.settings-editor,
+.settings-editor text,
+.chat-input-scroll,
+.chat-input-view,
+.chat-input-view text {
+    background-color: #0b1120;
+    border-color: #334155;
+    color: #f8fafc;
+}
+
+entry:focus,
+.sidebar-search:focus,
+.composer-bar entry:focus,
+.workspace-modal-field:focus,
+.settings-machine-entry:focus,
+.settings-editor:focus,
+.chat-composer-box:focus-within {
+    border-color: #38bdf8;
+    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.48);
+}
+
+.chat-user-bubble {
+    background-color: #1d4ed8;
+    color: #eff6ff;
+}
+
+.chat-inline-event-title {
+    color: #e0f2fe;
+}
+
+.chat-inline-event-body {
+    background-color: #0b1120;
+    border-color: #334155;
+    color: #dbeafe;
+}
+
+.chat-inline-event-loading {
+    border-color: #38bdf8;
+}
+
+.chat-context-usage-empty {
+    background-color: #111827;
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+.chat-context-usage-normal {
+    background-color: #0f2f1c;
+    border-color: #22c55e;
+    color: #bbf7d0;
+}
+
+.chat-context-usage-warning {
+    background-color: #332b12;
+    border-color: #f59e0b;
+    color: #fde68a;
+}
+
+.chat-context-usage-danger {
+    background-color: #3f1d2a;
+    border-color: #ef4444;
+    color: #fecdd3;
+}
+
+.chat-repo-icon,
+.chat-editor-icon,
+.chat-mode-icon,
+.chat-menu-item-icon,
+.chat-focus-btn image,
+.chat-toolbar-btn image,
+.sidebar-nav-icon,
+.workspace-row-branch-icon,
+.workspace-row-branch-icon-active {
+    color: #93c5fd;
+}
+
+.ws-check-icon-active,
+.diff-added,
+.status-running,
+.workspace-status-running {
+    color: #22c55e;
+}
+
+.diff-removed,
+.status-error,
+.workspace-status-error,
+.ws-check-icon-fail {
+    color: #fb7185;
 }
 "#;
