@@ -1,7 +1,8 @@
 use crate::codex_tui::{
-    detect_directory_trust_prompt, merge_screen_messages, parse_codex_screen_delta,
-    parse_codex_screen_messages, CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor,
-    CodexParsedItem, CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
+    detect_directory_trust_prompt, merge_message_content, merge_screen_messages,
+    parse_codex_screen_delta, parse_codex_screen_messages, CodexFileChangeAction,
+    CodexParseBenchmark, CodexParseCursor, CodexParsedItem, CodexTranscriptEvent, ScreenMessage,
+    ScreenMessageRole,
 };
 use crate::harness;
 use crate::pty::PtySession;
@@ -3980,6 +3981,11 @@ mutation($threadId: ID!) {{
         {
             return Ok(existing);
         }
+        if let Some(existing) =
+            self.update_latest_mergeable_chat_message(thread_id, role, content, source)?
+        {
+            return Ok(existing);
+        }
 
         let now = timestamp();
         let timeline_seq = self.next_chat_timeline_seq()?;
@@ -4060,6 +4066,101 @@ mutation($threadId: ID!) {{
         ))
     }
 
+    fn update_latest_mergeable_chat_message(
+        &self,
+        thread_id: i64,
+        role: &str,
+        content: &str,
+        source: &str,
+    ) -> Result<Option<ChatMessageRecord>> {
+        let Some(existing) = self.latest_adjacent_chat_message(thread_id, role, source)? else {
+            return Ok(None);
+        };
+        let Some(merged) = merge_message_content(&existing.content, content) else {
+            return Ok(None);
+        };
+        if merged != content || existing.content == content {
+            return Ok(None);
+        }
+
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_messages
+             SET content = ?1,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![content, now, existing.id],
+        )?;
+        self.touch_chat_thread(thread_id, &now)?;
+        self.get_chat_message(existing.id).map(Some)
+    }
+
+    fn latest_adjacent_chat_message(
+        &self,
+        thread_id: i64,
+        role: &str,
+        source: &str,
+    ) -> Result<Option<ChatMessageRecord>> {
+        let latest = self
+            .conn
+            .query_row(
+                "SELECT item_type, id, thread_id, role, content, source, timeline_seq, created_at, updated_at
+                 FROM (
+                   SELECT 'message' AS item_type, id, thread_id, role, content, source, timeline_seq, created_at, updated_at, COALESCE(timeline_seq, id) AS timeline_order
+                   FROM chat_messages
+                   WHERE thread_id = ?1
+                   UNION ALL
+                   SELECT 'event' AS item_type, id, thread_id, NULL AS role, NULL AS content, NULL AS source, timeline_seq, NULL AS created_at, NULL AS updated_at, timeline_seq AS timeline_order
+                   FROM chat_events
+                   WHERE thread_id = ?1
+                 )
+                 ORDER BY timeline_order DESC, id DESC
+                 LIMIT 1",
+                [thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(latest.and_then(
+            |(
+                item_type,
+                id,
+                thread_id,
+                latest_role,
+                latest_content,
+                latest_source,
+                timeline_seq,
+                created_at,
+                updated_at,
+            )| {
+                (item_type == "message"
+                    && latest_role.as_deref() == Some(role)
+                    && latest_source.as_deref() == Some(source))
+                .then(|| ChatMessageRecord {
+                    id,
+                    thread_id,
+                    role: latest_role.unwrap(),
+                    content: latest_content.unwrap(),
+                    source: latest_source.unwrap(),
+                    timeline_seq,
+                    created_at: created_at.unwrap(),
+                    updated_at: updated_at.unwrap(),
+                })
+            },
+        ))
+    }
+
     pub fn get_codex_parse_cursor(&self, process_id: i64) -> Result<Option<CodexParseCursor>> {
         let fingerprint = self
             .conn
@@ -4096,7 +4197,7 @@ mutation($threadId: ID!) {{
         let fields = chat_event_fields(event)?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let outcome = (|| -> Result<ChatEventRecord> {
-            if let Some(existing) = self.find_existing_chat_event(
+            if let Some(existing) = self.find_latest_exact_chat_event(
                 thread_id,
                 process_id,
                 &fields.kind,
@@ -4105,6 +4206,29 @@ mutation($threadId: ID!) {{
                 &fields.payload_json,
             )? {
                 return Ok(existing);
+            }
+
+            if let Some(existing) =
+                self.find_latest_updatable_chat_event(thread_id, process_id, &fields)?
+            {
+                let now = timestamp();
+                self.conn.execute(
+                    "UPDATE chat_events
+                     SET body = ?1,
+                         path = ?2,
+                         payload_json = ?3,
+                         updated_at = ?4
+                     WHERE id = ?5",
+                    params![
+                        fields.body,
+                        fields.path,
+                        fields.payload_json,
+                        now,
+                        existing.id
+                    ],
+                )?;
+                self.touch_chat_thread(thread_id, &now)?;
+                return self.get_chat_event(existing.id);
             }
 
             let now = timestamp();
@@ -4347,7 +4471,69 @@ mutation($threadId: ID!) {{
         Ok(self.conn.last_insert_rowid())
     }
 
-    fn find_existing_chat_event(
+    fn latest_chat_timeline_seq(&self, thread_id: i64) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT timeline_seq
+                 FROM (
+                   SELECT COALESCE(timeline_seq, id) AS timeline_seq
+                   FROM chat_messages
+                   WHERE thread_id = ?1
+                   UNION ALL
+                   SELECT timeline_seq
+                   FROM chat_events
+                   WHERE thread_id = ?1
+                 )
+                 ORDER BY timeline_seq DESC
+                 LIMIT 1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn find_latest_updatable_chat_event(
+        &self,
+        thread_id: i64,
+        process_id: i64,
+        fields: &ChatEventFields,
+    ) -> Result<Option<ChatEventRecord>> {
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+                 FROM chat_events
+                 WHERE thread_id = ?1
+                   AND process_id = ?2
+                   AND kind = ?3
+                   AND title = ?4
+                   AND COALESCE(path, '') = COALESCE(?5, '')
+                   AND (?3 != 'file_change' OR body = ?6)
+                 ORDER BY timeline_seq DESC, id DESC
+                 LIMIT 1",
+                params![
+                    thread_id,
+                    process_id,
+                    fields.kind,
+                    fields.title,
+                    fields.path,
+                    fields.body,
+                ],
+                row_to_chat_event,
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        let is_latest = Some(existing.timeline_seq) == self.latest_chat_timeline_seq(thread_id)?;
+        Ok(
+            (is_latest && is_streaming_body_growth(&existing.body, &fields.body))
+                .then_some(existing),
+        )
+    }
+
+    fn find_latest_exact_chat_event(
         &self,
         thread_id: i64,
         process_id: i64,
@@ -4356,7 +4542,8 @@ mutation($threadId: ID!) {{
         body: &str,
         payload_json: &str,
     ) -> Result<Option<ChatEventRecord>> {
-        self.conn
+        let existing = self
+            .conn
             .query_row(
                 "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
                  FROM chat_events
@@ -4371,8 +4558,14 @@ mutation($threadId: ID!) {{
                 params![thread_id, process_id, kind, title, body, payload_json],
                 row_to_chat_event,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        Ok(
+            (Some(existing.timeline_seq) == self.latest_chat_timeline_seq(thread_id)?)
+                .then_some(existing),
+        )
     }
 
     fn get_by_name(&self, name: &str) -> Result<Workspace> {
@@ -4879,11 +5072,11 @@ mutation($threadId: ID!) {{
               payload_json TEXT NOT NULL,
               timeline_seq INTEGER NOT NULL,
               created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              UNIQUE(thread_id, process_id, kind, title, body, payload_json)
+              updated_at TEXT NOT NULL
             );
             ",
         )?;
+        self.remove_chat_events_exact_unique_constraint()?;
         ensure_column(
             &self.conn,
             "processes",
@@ -4915,6 +5108,47 @@ mutation($threadId: ID!) {{
             "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
         )?;
         self.backfill_chat_message_timeline_seq()?;
+        Ok(())
+    }
+
+    fn remove_chat_events_exact_unique_constraint(&self) -> Result<()> {
+        let create_sql = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chat_events'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        if !create_sql.contains("UNIQUE(thread_id, process_id, kind, title, body, payload_json)") {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
+            ALTER TABLE chat_events RENAME TO chat_events_with_exact_unique;
+            CREATE TABLE chat_events (
+              id INTEGER PRIMARY KEY,
+              thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL DEFAULT '',
+              path TEXT,
+              payload_json TEXT NOT NULL,
+              timeline_seq INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO chat_events (
+              id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+            )
+            SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+            FROM chat_events_with_exact_unique;
+            DROP TABLE chat_events_with_exact_unique;
+            ",
+        )?;
         Ok(())
     }
 
@@ -5081,6 +5315,10 @@ fn codex_parse_benchmark_from_messages(messages: &[ChatMessageRecord]) -> CodexP
             .find(|message| message.role == "agent")
             .map(|message| message.content.clone()),
     }
+}
+
+fn is_streaming_body_growth(existing: &str, incoming: &str) -> bool {
+    !incoming.is_empty() && incoming != existing && incoming.starts_with(existing)
 }
 
 struct ChatEventFields {
@@ -14011,6 +14249,154 @@ spotlight_testing = true
             .append_chat_message(thread.id, "user", "run tests", "user_send")
             .unwrap();
         assert_eq!(message.timeline_seq, Some(2));
+    }
+
+    #[test]
+    fn streaming_chat_event_updates_latest_matching_event_without_duplicate_chip() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        let first = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "running".to_owned(),
+                },
+            )
+            .unwrap();
+        let updated = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "running\nok".to_owned(),
+                },
+            )
+            .unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(first.id, updated.id);
+        assert_eq!(updated.timeline_seq, 1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].body, "running\nok");
+        let message = store
+            .append_chat_message(thread.id, "agent", "done", "agent_screen_parse")
+            .unwrap();
+        assert_eq!(message.timeline_seq, Some(2));
+    }
+
+    #[test]
+    fn same_tool_title_after_later_timeline_item_creates_new_event() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "first".to_owned(),
+                },
+            )
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "between", "agent_screen_parse")
+            .unwrap();
+        let second = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "second".to_owned(),
+                },
+            )
+            .unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(second.timeline_seq, 3);
+    }
+
+    #[test]
+    fn exact_same_tool_event_after_later_timeline_item_creates_new_event() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "ok".to_owned(),
+                },
+            )
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "between", "agent_screen_parse")
+            .unwrap();
+        let second = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "ok".to_owned(),
+                },
+            )
+            .unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(second.timeline_seq, 3);
+    }
+
+    #[test]
+    fn adjacent_same_tool_title_with_distinct_body_creates_new_event() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "first".to_owned(),
+                },
+            )
+            .unwrap();
+        let second = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "second".to_owned(),
+                },
+            )
+            .unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(second.timeline_seq, 2);
     }
 
     #[test]
