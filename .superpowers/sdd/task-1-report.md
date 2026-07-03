@@ -32,3 +32,9 @@ Task 1 multiline anchor fix:
 - Reworked `delta_event_start_index` to anchor from parsed message spans and assembled message bodies instead of single physical lines.
 - Kept `parse_codex_screen_messages` behavior intact and left the change scoped to `crates/core/src/codex_tui.rs`.
 - Verified with `cargo test -p linux-archductor-core codex_tui -- --nocapture` — passed (`31` tests).
+
+Task 1 parser review fixes:
+- Added regressions for event blocks being skipped by generic message parsing and for anchor selection favoring the later of matched user/agent boundaries.
+- Updated `parse_codex_screen_message_spans` to skip top-level event blocks before generic fallback parsing.
+- Updated both delta anchor helpers to choose the later matching boundary across user and agent benchmarks.
+- Verified with `cargo test -p linux-archductor-core codex_tui -- --nocapture` — passed (`33` tests).

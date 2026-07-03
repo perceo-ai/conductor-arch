@@ -253,6 +253,11 @@ fn parse_codex_screen_message_spans(lines: &[String]) -> Vec<ScreenMessageSpan> 
     while index < lines.len() {
         let line = lines[index];
 
+        if let Some(next_index) = skip_codex_event_block(&lines, index) {
+            index = next_index;
+            continue;
+        }
+
         if let Some(role) = parse_box_role(line) {
             let start = index;
             index += 1;
@@ -443,41 +448,97 @@ fn parse_codex_screen_delta_events(
 
 fn delta_event_start_index(lines: &[String], benchmark: &CodexParseBenchmark) -> usize {
     let messages = parse_codex_screen_message_spans(lines);
-    if let Some(last_user) = benchmark.last_user_message.as_deref() {
-        if let Some(span_index) = messages.iter().rposition(|message| {
-            message.message.role == ScreenMessageRole::User
-                && message.message.content == last_user
-        }) {
-            return messages[span_index].end_index;
-        }
-    }
-    if let Some(last_agent) = benchmark.last_agent_message.as_deref() {
-        if let Some(span_index) = messages.iter().rposition(|message| {
-            message.message.role == ScreenMessageRole::Agent
-                && message.message.content == last_agent
-        }) {
-            return messages[span_index].end_index;
-        }
-    }
-    0
+    [
+        latest_message_span_end_index(
+            &messages,
+            ScreenMessageRole::User,
+            benchmark.last_user_message.as_deref(),
+        ),
+        latest_message_span_end_index(
+            &messages,
+            ScreenMessageRole::Agent,
+            benchmark.last_agent_message.as_deref(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0)
 }
 
 fn delta_start_index(messages: &[ScreenMessage], benchmark: &CodexParseBenchmark) -> usize {
-    if let Some(last_user) = benchmark.last_user_message.as_deref() {
-        if let Some(index) = messages.iter().rposition(|message| {
-            message.role == ScreenMessageRole::User && message.content == last_user
-        }) {
-            return index + 1;
-        }
+    [
+        latest_message_index(
+            messages,
+            ScreenMessageRole::User,
+            benchmark.last_user_message.as_deref(),
+        ),
+        latest_message_index(
+            messages,
+            ScreenMessageRole::Agent,
+            benchmark.last_agent_message.as_deref(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0)
+}
+
+fn latest_message_index(
+    messages: &[ScreenMessage],
+    role: ScreenMessageRole,
+    content: Option<&str>,
+) -> Option<usize> {
+    let content = content?;
+    messages
+        .iter()
+        .rposition(|message| message.role == role && message.content == content)
+        .map(|index| index + 1)
+}
+
+fn latest_message_span_end_index(
+    messages: &[ScreenMessageSpan],
+    role: ScreenMessageRole,
+    content: Option<&str>,
+) -> Option<usize> {
+    let content = content?;
+    messages
+        .iter()
+        .rposition(|message| message.message.role == role && message.message.content == content)
+        .map(|index| messages[index].end_index)
+}
+
+fn skip_codex_event_block(lines: &[&str], index: usize) -> Option<usize> {
+    let line = lines[index].trim_end();
+
+    if line.starts_with("Ran ") || line.starts_with("Read SKILL.md ") {
+        return Some(skip_codex_event_body(lines, index + 1));
     }
-    if let Some(last_agent) = benchmark.last_agent_message.as_deref() {
-        if let Some(index) = messages.iter().rposition(|message| {
-            message.role == ScreenMessageRole::Agent && message.content == last_agent
-        }) {
-            return index + 1;
-        }
+
+    if is_raw_file_change_event_line(line) {
+        return Some(skip_codex_event_body(lines, index + 1));
     }
-    0
+
+    None
+}
+
+fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
+    while index < lines.len() {
+        let line = lines[index];
+        if is_box_header_line(line)
+            || is_live_user_prompt_line(line)
+            || is_live_agent_prompt_line(line)
+            || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
+            || line.starts_with("Ran ")
+            || line.starts_with("Read SKILL.md ")
+            || is_raw_file_change_event_line(line)
+        {
+            break;
+        }
+        index += 1;
+    }
+    index
 }
 
 fn screen_fingerprint(screen: &str) -> Option<String> {
@@ -1556,6 +1617,25 @@ Do you trust the contents of this directory?
     }
 
     #[test]
+    fn parse_codex_screen_messages_skips_event_blocks() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+Read SKILL.md (graphify), SKILL.md (skill-creator)
+# Graphify
+Build a knowledge graph from input.
+
+Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line
+";
+
+        assert!(parse_codex_screen_messages(screen).is_empty());
+    }
+
+    #[test]
     fn screen_delta_starts_after_latest_known_user_message() {
         let screen = "\
 › old question
@@ -1578,6 +1658,24 @@ Do you trust the contents of this directory?
                 content: "new answer line 1\nnew answer line 2".to_owned(),
             })]
         );
+    }
+
+    #[test]
+    fn screen_delta_prefers_later_agent_boundary_over_earlier_user_boundary() {
+        let screen = "\
+› earlier question
+• earlier answer
+› latest question
+• latest answer
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("earlier question".to_owned()),
+            last_agent_message: Some("latest answer".to_owned()),
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
     }
 
     #[test]
