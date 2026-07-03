@@ -645,7 +645,8 @@ pub fn agent_session_panel(
                                 )
                             })
                             .unwrap_or_default();
-                    let render_legacy_inline_events = thread_events.is_empty();
+                    let render_legacy_inline_events =
+                        render_legacy_inline_events_for_thread(&thread_events);
                     let timeline =
                         merge_chat_timeline_for_render(thread_messages.clone(), thread_events);
                     debug!(
@@ -2188,6 +2189,10 @@ fn chat_event_widget(event: &ChatEventRecord) -> Widget {
             label.set_margin_bottom(18);
             label.upcast()
         })
+}
+
+fn render_legacy_inline_events_for_thread(thread_events: &[ChatEventRecord]) -> bool {
+    thread_events.is_empty()
 }
 
 fn stored_chat_event_inline_event(event: &ChatEventRecord) -> Option<CodexInlineEvent> {
@@ -7311,6 +7316,56 @@ I summarized the result.
     }
 
     #[test]
+    fn stored_chat_event_inline_event_reconstructs_tool_and_file_change_payloads() {
+        let tool_event = ChatEventRecord {
+            id: 100,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "tool".to_owned(),
+            title: "cargo test".to_owned(),
+            body: "ok".to_owned(),
+            path: None,
+            payload_json: r#"{"type":"tool","title":"cargo test","body":"ok"}"#.to_owned(),
+            timeline_seq: 1,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        let file_change_event = ChatEventRecord {
+            id: 101,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "file_change".to_owned(),
+            title: "edited src/lib.rs".to_owned(),
+            body: "updated".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
+            payload_json: r#"{"type":"file_change","action":"edited","path":"src/lib.rs","additions":2,"deletions":1,"lines":[{"kind":"context","old_line":10,"new_line":10,"content":"fn old() {}"},{"kind":"added","old_line":null,"new_line":11,"content":"fn new() {}"},{"kind":"deleted","old_line":12,"new_line":null,"content":"fn removed() {}"}]}"#.to_owned(),
+            timeline_seq: 2,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+
+        let tool_inline = stored_chat_event_inline_event(&tool_event).unwrap();
+        let file_change_inline = stored_chat_event_inline_event(&file_change_event).unwrap();
+
+        assert_eq!(tool_inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(tool_inline.title, "cargo test");
+        assert_eq!(tool_inline.body.as_deref(), Some("ok"));
+
+        assert_eq!(file_change_inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(file_change_inline.title, "Edited src/lib.rs");
+        assert_eq!(file_change_inline.path.as_deref(), Some(Path::new("src/lib.rs")));
+        assert_eq!(file_change_inline.status, CodexInlineEventStatus::Complete);
+        assert_eq!(file_change_inline.subtitle.as_deref(), Some("+2 -1"));
+        assert!(
+            file_change_inline
+                .body
+                .as_deref()
+                .unwrap()
+                .contains("fn new() {}")
+        );
+    }
+
+    #[test]
     fn legacy_inline_event_parsing_only_runs_without_persisted_events() {
         let message = ChatMessageRecord {
             id: 10,
@@ -7323,8 +7378,22 @@ I summarized the result.
             updated_at: "now".to_owned(),
         };
 
-        let legacy_events = legacy_inline_events_for_message(&message, true);
-        let persisted_timeline_events = legacy_inline_events_for_message(&message, false);
+        let legacy_enabled = render_legacy_inline_events_for_thread(&[]);
+        let legacy_disabled = render_legacy_inline_events_for_thread(&[ChatEventRecord {
+            id: 88,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "tool".to_owned(),
+            title: "cargo test".to_owned(),
+            body: "ok".to_owned(),
+            path: None,
+            payload_json: r#"{"type":"tool","title":"cargo test","body":"ok"}"#.to_owned(),
+            timeline_seq: 1,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }]);
+        let legacy_events = legacy_inline_events_for_message(&message, legacy_enabled);
+        let persisted_timeline_events = legacy_inline_events_for_message(&message, legacy_disabled);
 
         assert_eq!(legacy_events.len(), 1);
         assert!(persisted_timeline_events.is_empty());
