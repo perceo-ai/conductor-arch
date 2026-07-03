@@ -1946,11 +1946,15 @@ fn chat_user_bubble(text: &str) -> GBox {
 }
 
 fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
-    if REVEAL_EXISTING_CHAT_REFRESH_ROWS {
+    if reveal_existing_chat_refresh_rows() {
         append_revealed(container, child);
     } else {
         container.append(child);
     }
+}
+
+fn reveal_existing_chat_refresh_rows() -> bool {
+    REVEAL_EXISTING_CHAT_REFRESH_ROWS
 }
 
 fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
@@ -6551,7 +6555,7 @@ fix it
 
     #[test]
     fn chat_refresh_rows_do_not_reveal_existing_messages_on_poll() {
-        assert!(!REVEAL_EXISTING_CHAT_REFRESH_ROWS);
+        assert!(!reveal_existing_chat_refresh_rows());
     }
 
     #[test]
