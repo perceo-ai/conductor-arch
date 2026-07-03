@@ -387,12 +387,13 @@ pub fn parse_codex_screen_delta(
 ) -> CodexParsedDelta {
     let messages = parse_codex_screen_messages(screen);
     let start = delta_start_index(&messages, benchmark);
-    let items = messages
+    let mut items = messages
         .into_iter()
         .skip(start)
         .filter(|message| message.role != ScreenMessageRole::User)
         .map(CodexParsedItem::Message)
         .collect::<Vec<_>>();
+    items.extend(parse_codex_screen_delta_events(screen, benchmark));
     let fingerprint = screen_fingerprint(screen);
     if previous_cursor
         .and_then(|cursor| cursor.fingerprint.as_ref())
@@ -407,6 +408,45 @@ pub fn parse_codex_screen_delta(
         items,
         cursor: CodexParseCursor { fingerprint },
     }
+}
+
+fn parse_codex_screen_delta_events(
+    screen: &str,
+    benchmark: &CodexParseBenchmark,
+) -> Vec<CodexParsedItem> {
+    let lines = relevant_codex_screen_lines(screen);
+    let start = delta_event_start_index(&lines, benchmark);
+    if start >= lines.len() {
+        return Vec::new();
+    }
+
+    parse_codex_event_blocks(&lines[start..].join("\n"))
+        .into_iter()
+        .map(CodexParsedItem::Event)
+        .collect()
+}
+
+fn delta_event_start_index(lines: &[String], benchmark: &CodexParseBenchmark) -> usize {
+    if let Some(last_user) = benchmark.last_user_message.as_deref() {
+        if let Some(index) = lines.iter().rposition(|line| {
+            parse_live_prompt_content(line) == last_user && is_live_user_prompt_line(line)
+        }) {
+            return index + 1;
+        }
+        if let Some(index) = lines
+            .iter()
+            .rposition(|line| parse_box_content(line).as_deref() == Some(last_user))
+        {
+            let mut end = index + 1;
+            while end < lines.len() {
+                if is_box_bottom(&lines[end]) {
+                    return end + 1;
+                }
+                end += 1;
+            }
+        }
+    }
+    0
 }
 
 fn delta_start_index(messages: &[ScreenMessage], benchmark: &CodexParseBenchmark) -> usize {
@@ -428,13 +468,12 @@ fn delta_start_index(messages: &[ScreenMessage], benchmark: &CodexParseBenchmark
 }
 
 fn screen_fingerprint(screen: &str) -> Option<String> {
-    let normalized = screen.trim();
-    (!normalized.is_empty()).then(|| {
-        let line_count = normalized.lines().count();
-        let byte_count = normalized.len();
-        let tail = normalized.lines().rev().take(8).collect::<Vec<_>>().join("\n");
-        format!("{line_count}:{byte_count}:{tail}")
-    })
+    let normalized = normalize_screen(screen);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_screen(screen: &str) -> String {
+    screen.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn parse_codex_tool_call(line: &str) -> Option<CodexToolCall> {
@@ -1514,6 +1553,93 @@ Do you trust the contents of this directory?
                 content: "new answer line 1\nnew answer line 2".to_owned(),
             })]
         );
+    }
+
+    #[test]
+    fn screen_delta_emits_events_after_latest_known_user_message() {
+        let screen = "\
+› latest question
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
+
+Read SKILL.md (graphify), SKILL.md (skill-creator)
+# Graphify
+Build a knowledge graph from input.
+
+Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![
+                CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                    title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+                    body: "running 24 tests\n\
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
+                        .to_owned(),
+                }),
+                CodexParsedItem::Event(CodexTranscriptEvent::Skill {
+                    title: "graphify, skill-creator".to_owned(),
+                    body: "# Graphify\nBuild a knowledge graph from input.".to_owned(),
+                }),
+                CodexParsedItem::Event(CodexTranscriptEvent::FileChange(CodexFileChange {
+                    action: CodexFileChangeAction::Edited,
+                    path: "crates/core/src/codex_tui.rs".to_owned(),
+                    additions: Some(2),
+                    deletions: Some(1),
+                    lines: vec![
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Context,
+                            old_line: Some(10),
+                            new_line: Some(10),
+                            content: "old context".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Deleted,
+                            old_line: Some(11),
+                            new_line: None,
+                            content: "old line".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Added,
+                            old_line: None,
+                            new_line: Some(12),
+                            content: "new line".to_owned(),
+                        },
+                    ],
+                })),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_delta_suppresses_exact_same_screen_when_previous_cursor_matches() {
+        let screen = "\
+› latest question
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let first = parse_codex_screen_delta(screen, &benchmark, None);
+        let second = parse_codex_screen_delta(screen, &benchmark, Some(&first.cursor));
+
+        assert_eq!(first.cursor.fingerprint.as_deref(), Some(screen));
+        assert!(second.items.is_empty());
     }
 
     #[test]
