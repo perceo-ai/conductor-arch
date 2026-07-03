@@ -34,3 +34,19 @@
   - `cargo test -p linux-archductor-core chat_events_are_idempotent_without_allocating_new_timeline_sequence -- --nocapture` -> passed
 - Concerns:
   - None beyond the pre-existing `timeline_seq` backfill note above.
+
+## Upgrade backfill fix
+
+- Status: complete
+- Files changed:
+  - `crates/core/src/workspace.rs`
+  - `.superpowers/sdd/task-3-report.md`
+- Summary:
+  - Backfilled `chat_messages.timeline_seq` during migration for rows that still had `NULL`, ordered by `created_at` and `id`.
+  - Kept existing non-null timeline sequence values unchanged.
+  - Added a regression test that simulates an upgraded database with stale `NULL` message sequences, verifies migration backfill, and checks that a message after an intervening event is still persisted.
+- Tests run:
+  - `cargo test -p linux-archductor-core chat_messages_backfill_null_timeline_seq_before_event_dedupes -- --nocapture` -> passed
+  - `cargo test -p linux-archductor-core chat_messages -- --nocapture` -> passed
+- Concerns:
+  - None.

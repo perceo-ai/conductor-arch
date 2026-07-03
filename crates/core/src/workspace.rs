@@ -4956,7 +4956,46 @@ mutation($threadId: ID!) {{
             "timeline_seq",
             "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
         )?;
+        self.backfill_chat_message_timeline_seq()?;
         Ok(())
+    }
+
+    fn backfill_chat_message_timeline_seq(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            let mut stmt = self.conn.prepare(
+                "SELECT id
+                 FROM chat_messages
+                 WHERE timeline_seq IS NULL
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let message_ids = stmt
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            for message_id in message_ids {
+                let timeline_seq = self.next_chat_timeline_seq()?;
+                self.conn.execute(
+                    "UPDATE chat_messages
+                     SET timeline_seq = ?1
+                     WHERE id = ?2",
+                    params![timeline_seq, message_id],
+                )?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 }
 
@@ -13865,6 +13904,82 @@ spotlight_testing = true
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "run tests");
         assert_eq!(messages[1].content, "run tests");
+    }
+
+    #[test]
+    fn chat_messages_backfill_null_timeline_seq_before_event_dedupes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "running tests", "agent_screen_parse")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+
+        store
+            .conn
+            .execute("UPDATE chat_messages SET timeline_seq = NULL", [])
+            .unwrap();
+        drop(store);
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert!(messages.iter().all(|message| message.timeline_seq.is_some()));
+        assert_eq!(messages[0].timeline_seq, Some(4));
+        assert_eq!(messages[1].timeline_seq, Some(5));
+        assert_eq!(messages[2].timeline_seq, Some(6));
+
+        let process = process_record_for_thread(&store, thread.id);
+        let event = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "ok".to_owned(),
+                },
+            )
+            .unwrap();
+        let repeated = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+        assert_eq!(event.timeline_seq, 7);
+        assert_eq!(messages.len(), 4);
+        assert_ne!(messages[2].id, repeated.id);
+        assert_eq!(messages[3].content, "run tests");
+        assert_eq!(messages[3].timeline_seq, Some(8));
+        assert_eq!(events.len(), 1);
     }
 
     #[test]
