@@ -437,16 +437,40 @@ fn delta_event_start_index(lines: &[String], benchmark: &CodexParseBenchmark) ->
             .iter()
             .rposition(|line| parse_box_content(line).as_deref() == Some(last_user))
         {
-            let mut end = index + 1;
-            while end < lines.len() {
-                if is_box_bottom(&lines[end]) {
-                    return end + 1;
-                }
-                end += 1;
-            }
+            return boxed_prompt_end_index(lines, index);
+        }
+    }
+    if let Some(last_agent) = benchmark.last_agent_message.as_deref() {
+        if let Some(index) = lines.iter().rposition(|line| {
+            parse_live_prompt_content(line) == last_agent && is_live_agent_prompt_line(line)
+        }) {
+            return index + 1;
+        }
+        if let Some(index) = (0..lines.len()).rev().find(|&index| {
+            parse_live_agent_bullet(&lines[index]).as_deref() == Some(last_agent)
+                && !is_live_bullet_user_prompt(&lines[index], lines.get(index + 1).map(String::as_str))
+        }) {
+            return index + 1;
+        }
+        if let Some(index) = lines
+            .iter()
+            .rposition(|line| parse_box_content(line).as_deref() == Some(last_agent))
+        {
+            return boxed_prompt_end_index(lines, index);
         }
     }
     0
+}
+
+fn boxed_prompt_end_index(lines: &[String], start: usize) -> usize {
+    let mut end = start + 1;
+    while end < lines.len() {
+        if is_box_bottom(&lines[end]) {
+            return end + 1;
+        }
+        end += 1;
+    }
+    lines.len()
 }
 
 fn delta_start_index(messages: &[ScreenMessage], benchmark: &CodexParseBenchmark) -> usize {
@@ -1620,6 +1644,48 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
                 })),
             ]
         );
+    }
+
+    #[test]
+    fn screen_delta_skips_events_before_latest_known_agent_message_in_boxed_transcript() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+╭─ You ─────────────────╮
+│ latest question       │
+╰───────────────────────╯
+╭─ Codex ───────────────╮
+│ latest answer         │
+╰───────────────────────╯
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: None,
+            last_agent_message: Some("latest answer".to_owned()),
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
+    }
+
+    #[test]
+    fn screen_delta_respects_live_user_prompt_boundary_before_latest_known_agent_message() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+› latest question
+• latest answer
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: None,
+            last_agent_message: Some("latest answer".to_owned()),
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
     }
 
     #[test]

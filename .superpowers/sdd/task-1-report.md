@@ -20,3 +20,9 @@ Follow-up after Task 2 review:
 - Replaced the lossy cursor summary with the full normalized screen text, so duplicate suppression now keys off the exact screen contents.
 - Added regression tests for event emission after the latest known user message and exact-screen duplicate suppression.
 - Verified with `cargo test -p linux-archductor-core codex_tui -- --nocapture` — passed (`28` tests).
+
+Task 1 parser review follow-up:
+- Added failing regressions for event delta anchoring after the latest agent message in boxed and live TUI layouts.
+- Extended `delta_event_start_index` to honor `last_agent_message` with the same boundary handling used for user anchors.
+- Kept the change scoped to `crates/core/src/codex_tui.rs`.
+- Verified with `cargo test -p linux-archductor-core codex_tui -- --nocapture` — passed (`30` tests).
