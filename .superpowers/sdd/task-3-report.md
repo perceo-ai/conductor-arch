@@ -16,3 +16,21 @@
   - `cargo test -p linux-archductor-core workspace::tests::chat -- --nocapture` -> passed
 - Concerns:
   - Existing `chat_messages` rows are not backfilled with `timeline_seq`; they continue to sort via `COALESCE(timeline_seq, id)` until rewritten.
+
+## Review fix pass
+
+- Status: complete
+- Files changed:
+  - `crates/core/src/workspace.rs`
+  - `.superpowers/sdd/task-3-report.md`
+- Summary:
+  - Made chat-message adjacent dedupe inspect the latest shared timeline item across `chat_messages` and `chat_events`.
+  - Made chat-event insertion idempotent inside a write transaction so duplicate inserts do not consume a new timeline sequence.
+  - Added tests for mixed message/event dedupe and `payload_json` round-trip coverage.
+- Tests run:
+  - `cargo test -p linux-archductor-core chat_messages -- --nocapture` -> passed
+  - `cargo test -p linux-archductor-core codex_parser_cursor_and_events_persist_separately_from_messages -- --nocapture` -> passed
+  - `cargo test -p linux-archductor-core chat_events_round_trip_payload_json_for_file_changes -- --nocapture` -> passed
+  - `cargo test -p linux-archductor-core chat_events_are_idempotent_without_allocating_new_timeline_sequence -- --nocapture` -> passed
+- Concerns:
+  - None beyond the pre-existing `timeline_seq` backfill note above.

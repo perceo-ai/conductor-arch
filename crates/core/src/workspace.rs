@@ -4006,18 +4006,52 @@ mutation($threadId: ID!) {{
         let latest = self
             .conn
             .query_row(
-                "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
-                 FROM chat_messages
-                 WHERE thread_id = ?1
-                 ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
+                "SELECT item_type, id, thread_id, role, content, source, timeline_seq, created_at, updated_at
+                 FROM (
+                   SELECT 'message' AS item_type, id, thread_id, role, content, source, timeline_seq, created_at, updated_at, COALESCE(timeline_seq, id) AS timeline_order
+                   FROM chat_messages
+                   WHERE thread_id = ?1
+                   UNION ALL
+                   SELECT 'event' AS item_type, id, thread_id, NULL AS role, NULL AS content, NULL AS source, timeline_seq, NULL AS created_at, NULL AS updated_at, timeline_seq AS timeline_order
+                   FROM chat_events
+                   WHERE thread_id = ?1
+                 )
+                 ORDER BY timeline_order DESC, id DESC
                  LIMIT 1",
                 [thread_id],
-                row_to_chat_message,
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
             )
             .optional()?;
-        Ok(latest.filter(|message| {
-            message.role == role && message.content == content && message.source == source
-        }))
+        Ok(latest.and_then(
+            |(item_type, id, thread_id, latest_role, latest_content, latest_source, timeline_seq, created_at, updated_at)| {
+                (item_type == "message"
+                    && latest_role.as_deref() == Some(role)
+                    && latest_content.as_deref() == Some(content)
+                    && latest_source.as_deref() == Some(source))
+                .then(|| ChatMessageRecord {
+                    id,
+                    thread_id,
+                    role: latest_role.unwrap(),
+                    content: latest_content.unwrap(),
+                    source: latest_source.unwrap(),
+                    timeline_seq,
+                    created_at: created_at.unwrap(),
+                    updated_at: updated_at.unwrap(),
+                })
+            },
+        ))
     }
 
     pub fn get_codex_parse_cursor(&self, process_id: i64) -> Result<Option<CodexParseCursor>> {
@@ -4054,46 +4088,61 @@ mutation($threadId: ID!) {{
         event: &CodexTranscriptEvent,
     ) -> Result<ChatEventRecord> {
         let fields = chat_event_fields(event)?;
-        if let Some(existing) = self.find_existing_chat_event(
-            thread_id,
-            process_id,
-            &fields.kind,
-            &fields.title,
-            &fields.body,
-            &fields.payload_json,
-        )? {
-            return Ok(existing);
-        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<ChatEventRecord> {
+            if let Some(existing) = self.find_existing_chat_event(
+                thread_id,
+                process_id,
+                &fields.kind,
+                &fields.title,
+                &fields.body,
+                &fields.payload_json,
+            )? {
+                return Ok(existing);
+            }
 
-        let now = timestamp();
-        let timeline_seq = self.next_chat_timeline_seq()?;
-        self.conn.execute(
-            "INSERT INTO chat_events (
-                thread_id,
-                process_id,
-                kind,
-                title,
-                body,
-                path,
-                payload_json,
-                timeline_seq,
-                created_at,
-                updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-            params![
-                thread_id,
-                process_id,
-                fields.kind,
-                fields.title,
-                fields.body,
-                fields.path,
-                fields.payload_json,
-                timeline_seq,
-                now
-            ],
-        )?;
-        self.touch_chat_thread(thread_id, &now)?;
-        self.get_chat_event(self.conn.last_insert_rowid())
+            let now = timestamp();
+            let timeline_seq = self.next_chat_timeline_seq()?;
+            self.conn.execute(
+                "INSERT INTO chat_events (
+                    thread_id,
+                    process_id,
+                    kind,
+                    title,
+                    body,
+                    path,
+                    payload_json,
+                    timeline_seq,
+                    created_at,
+                    updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                params![
+                    thread_id,
+                    process_id,
+                    fields.kind,
+                    fields.title,
+                    fields.body,
+                    fields.path,
+                    fields.payload_json,
+                    timeline_seq,
+                    now
+                ],
+            )?;
+            self.touch_chat_thread(thread_id, &now)?;
+            let event_id = self.conn.last_insert_rowid();
+            Ok(self.get_chat_event(event_id)?)
+        })();
+
+        match outcome {
+            Ok(event) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(event)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     pub fn list_chat_events(&self, thread_id: i64) -> Result<Vec<ChatEventRecord>> {
@@ -13787,6 +13836,38 @@ spotlight_testing = true
     }
 
     #[test]
+    fn chat_messages_only_dedupe_against_the_latest_shared_timeline_item() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        let first_message = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "ok".to_owned(),
+                },
+            )
+            .unwrap();
+        let second_message = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_ne!(first_message.id, second_message.id);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "run tests");
+        assert_eq!(messages[1].content, "run tests");
+    }
+
+    #[test]
     fn codex_parser_cursor_and_events_persist_separately_from_messages() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -13870,6 +13951,74 @@ spotlight_testing = true
         assert_eq!(first.id, second.id);
         assert_eq!(first.timeline_seq, second.timeline_seq);
         assert_eq!(events.len(), 1);
+
+        let message = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        assert_eq!(message.timeline_seq, Some(2));
+    }
+
+    #[test]
+    fn chat_events_round_trip_payload_json_for_file_changes() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let event = CodexTranscriptEvent::FileChange(crate::codex_tui::CodexFileChange {
+            action: CodexFileChangeAction::Edited,
+            path: "src/lib.rs".to_owned(),
+            additions: Some(2),
+            deletions: Some(1),
+            lines: vec![
+                crate::codex_tui::CodexFileChangeLine {
+                    kind: crate::codex_tui::CodexFileChangeLineKind::Context,
+                    old_line: Some(10),
+                    new_line: Some(10),
+                    content: "fn keep() {}".to_owned(),
+                },
+                crate::codex_tui::CodexFileChangeLine {
+                    kind: crate::codex_tui::CodexFileChangeLineKind::Added,
+                    old_line: None,
+                    new_line: Some(11),
+                    content: "fn add() {}".to_owned(),
+                },
+            ],
+        });
+
+        let inserted = store
+            .append_chat_event(thread.id, process.id, &event)
+            .unwrap();
+        let stored = store.list_chat_events(thread.id).unwrap();
+        let expected_payload = json!({
+            "type": "file_change",
+            "action": "edited",
+            "path": "src/lib.rs",
+            "additions": 2,
+            "deletions": 1,
+            "lines": [
+                {
+                    "kind": "context",
+                    "old_line": 10,
+                    "new_line": 10,
+                    "content": "fn keep() {}",
+                },
+                {
+                    "kind": "added",
+                    "old_line": null,
+                    "new_line": 11,
+                    "content": "fn add() {}",
+                },
+            ],
+        });
+
+        assert_eq!(inserted.payload_json, expected_payload.to_string());
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].payload_json, expected_payload.to_string());
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored[0].payload_json).unwrap(),
+            expected_payload
+        );
     }
 
     #[test]
