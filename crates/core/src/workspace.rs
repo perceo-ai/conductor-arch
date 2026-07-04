@@ -1206,31 +1206,59 @@ impl WorkspaceStore {
         Ok(workspace)
     }
 
+    pub fn delete(
+        &self,
+        name: &str,
+        remove_worktree: bool,
+        delete_branch: bool,
+    ) -> Result<Workspace> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+
+        self.stop_workspace_processes(workspace.id)?;
+
+        if remove_worktree && workspace.path.exists() {
+            git_dynamic(
+                &repository.root_path,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    workspace.path.to_string_lossy().as_ref(),
+                ],
+            )?;
+        }
+
+        if delete_branch {
+            let _ = git_dynamic(
+                &repository.root_path,
+                &["branch", "-D", workspace.branch.as_str()],
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            self.delete_workspace_rows(workspace.id)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(workspace)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
 
-        for kind in [
-            ProcessKind::Setup,
-            ProcessKind::Run,
-            ProcessKind::Session,
-            ProcessKind::Terminal,
-        ] {
-            if let Some(process) = self.find_latest_running_process(workspace.id, kind)? {
-                stop_process(process.pid)?;
-                let now = timestamp();
-                self.conn.execute(
-                    "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
-                    params![
-                        ProcessStatus::Stopped.as_str(),
-                        now,
-                        SIGTERM_EXIT_CODE,
-                        process.id
-                    ],
-                )?;
-            }
-        }
+        self.stop_workspace_processes(workspace.id)?;
 
         if let Some(archive_script) = &settings.scripts.archive {
             if workspace.path.exists() {
@@ -1265,6 +1293,89 @@ impl WorkspaceStore {
         )?;
         anyhow::ensure!(changed > 0, "workspace {name} not found");
         self.get_by_name(name)
+    }
+
+    fn stop_workspace_processes(&self, workspace_id: i64) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes
+             WHERE workspace_id = ?1 AND status = ?2",
+        )?;
+        let processes = stmt
+            .query_map(
+                params![workspace_id, ProcessStatus::Running.as_str()],
+                row_to_process,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for process in processes {
+            stop_process(process.pid)?;
+            let now = timestamp();
+            self.conn.execute(
+                "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+                params![
+                    ProcessStatus::Stopped.as_str(),
+                    now,
+                    SIGTERM_EXIT_CODE,
+                    process.id
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn delete_workspace_rows(&self, workspace_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM chat_events
+             WHERE process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM codex_parse_cursors
+             WHERE process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM checkpoints WHERE workspace_id = ?1 OR session_id IN (
+               SELECT id FROM processes WHERE workspace_id = ?1
+             )",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM processes WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM chat_messages
+             WHERE thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM chat_threads WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM linked_directories WHERE workspace_id = ?1 OR target_workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM pull_requests WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM todos WHERE workspace_id = ?1", [workspace_id])?;
+        self.conn.execute(
+            "DELETE FROM review_comments WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM spotlight_sessions WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        let changed = self
+            .conn
+            .execute("DELETE FROM workspaces WHERE id = ?1", [workspace_id])?;
+        anyhow::ensure!(changed > 0, "workspace id {workspace_id} not found");
+        Ok(())
     }
 
     pub fn restore(&self, name: &str) -> Result<Workspace> {
@@ -8723,6 +8834,96 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         assert!(!workspace.path.exists());
         let summary = store.checks_summary("berlin").unwrap();
         assert_eq!(summary.run_status, Some(ProcessStatus::Stopped));
+    }
+
+    #[test]
+    fn delete_workspace_removes_record_dependents_and_keeps_worktree_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store.add_todo("berlin", "clean up").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "hi", "user_send")
+            .unwrap();
+
+        let deleted = store.delete("berlin", false, false).unwrap();
+
+        assert_eq!(deleted.name, "berlin");
+        assert!(workspace.path.exists());
+        assert!(store.get_by_name("berlin").is_err());
+        assert!(store.list_todos("berlin").is_err());
+        let orphan_threads: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_threads WHERE workspace_id = ?1",
+                [workspace.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_threads, 0);
+    }
+
+    #[test]
+    fn delete_workspace_can_remove_worktree_and_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        store.delete("berlin", true, true).unwrap();
+
+        assert!(!workspace.path.exists());
+        let branches = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "--list", "lc/berlin"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
     }
 
     #[test]

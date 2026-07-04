@@ -2316,10 +2316,11 @@ fn lifecycle_panel(
     rename_entry.set_placeholder_text(Some("new workspace name"));
     rename_entry.set_text(&ws.name);
     let rename_btn = secondary_button("Rename");
-    let confirm = CheckButton::with_label("Confirm archive/discard");
+    let confirm = CheckButton::with_label("Confirm archive/discard/delete");
     let archive_btn = secondary_button("Archive");
     let restore_btn = flat_button("Restore");
     let discard_btn = destructive_button("Discard");
+    let delete_btn = destructive_button("Delete");
     let progress = Label::new(None);
     progress.add_css_class("card-meta");
     progress.set_xalign(0.0);
@@ -2359,6 +2360,7 @@ fn lifecycle_panel(
         (archive_btn.clone(), "archive"),
         (restore_btn.clone(), "restore"),
         (discard_btn.clone(), "discard"),
+        (delete_btn.clone(), "delete"),
     ] {
         let workspace = ws.name.clone();
         let db_action = db_path.to_path_buf();
@@ -2367,8 +2369,8 @@ fn lifecycle_panel(
         let progress_action = progress.clone();
         let toast_action = toast_overlay.clone();
         button.connect_clicked(move |_| {
-            if matches!(action, "archive" | "discard") && !confirm_action.is_active() {
-                progress_action.set_text("Check confirm before archive/discard.");
+            if matches!(action, "archive" | "discard" | "delete") && !confirm_action.is_active() {
+                progress_action.set_text("Check confirm before archive/discard/delete.");
                 return;
             }
             progress_action.set_text(&format!("{action} in progress..."));
@@ -2376,9 +2378,13 @@ fn lifecycle_panel(
                 "archive" => store.archive(&workspace, false),
                 "restore" => store.restore(&workspace),
                 "discard" => store.discard(&workspace),
+                "delete" => store.delete(&workspace, true, true),
                 _ => unreachable!(),
             });
             match result {
+                Ok(workspace) if action == "delete" => {
+                    progress_action.set_text(&workspace_delete_feedback(Ok(workspace)))
+                }
                 Ok(workspace) => progress_action.set_text(&format!(
                     "{} complete: {}",
                     title_case_workspace(action),
@@ -2387,7 +2393,11 @@ fn lifecycle_panel(
                 Err(err) => apply_runtime_action_feedback(
                     &progress_action,
                     &toast_action,
-                    lifecycle_action_failure_feedback(&title_case_workspace(action), &err),
+                    if action == "delete" {
+                        lifecycle_action_failure_feedback("Delete", &err)
+                    } else {
+                        lifecycle_action_failure_feedback(&title_case_workspace(action), &err)
+                    },
                 ),
             }
             refresh_after_action.refresh(RefreshScope::All);
@@ -2402,6 +2412,7 @@ fn lifecycle_panel(
     lifecycle_row.append(&archive_btn);
     lifecycle_row.append(&restore_btn);
     lifecycle_row.append(&discard_btn);
+    lifecycle_row.append(&delete_btn);
     row.append(&rename_row);
     row.append(&lifecycle_row);
     panel.append(&row);
@@ -4768,6 +4779,13 @@ fn pull_request_archive_feedback(result: anyhow::Result<Workspace>) -> String {
     }
 }
 
+fn workspace_delete_feedback(result: anyhow::Result<Workspace>) -> String {
+    match result {
+        Ok(workspace) => format!("Deleted workspace {}.", workspace.name),
+        Err(err) => format!("Delete failed: {err:#}"),
+    }
+}
+
 fn merge_blockers_text(
     open_todos: usize,
     open_review_comments: usize,
@@ -6075,6 +6093,27 @@ mod tests {
 
         let failure = pull_request_archive_feedback(Err(anyhow::anyhow!("archive script failed")));
         assert_eq!(failure, "Archive failed: archive script failed");
+    }
+
+    #[test]
+    fn workspace_delete_feedback_summarizes_permanent_delete() {
+        let success = workspace_delete_feedback(Ok(Workspace {
+            id: 1,
+            repository_id: 2,
+            name: "berlin".to_owned(),
+            path: std::path::PathBuf::from("/tmp/berlin"),
+            branch: "lc/berlin".to_owned(),
+            base_ref: "main".to_owned(),
+            port_base: 4200,
+            status: "active".to_owned(),
+            archived_at: None,
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        }));
+        assert_eq!(success, "Deleted workspace berlin.");
+
+        let failure = workspace_delete_feedback(Err(anyhow::anyhow!("worktree remove failed")));
+        assert_eq!(failure, "Delete failed: worktree remove failed");
     }
 
     #[test]

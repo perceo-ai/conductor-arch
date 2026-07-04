@@ -268,6 +268,13 @@ enum WorkspaceCommand {
     Discard {
         name: String,
     },
+    Delete {
+        name: String,
+        #[arg(long)]
+        remove_worktree: bool,
+        #[arg(long)]
+        delete_branch: bool,
+    },
     Rename {
         name: String,
         new_name: String,
@@ -719,6 +726,14 @@ fn main() -> Result<()> {
                         "Discarded {} — worktree removed and branch deleted",
                         workspace.name
                     );
+                }
+                WorkspaceCommand::Delete {
+                    name,
+                    remove_worktree,
+                    delete_branch,
+                } => {
+                    let workspace = store.delete(&name, remove_worktree, delete_branch)?;
+                    println!("Deleted workspace {}", workspace.name);
                 }
                 WorkspaceCommand::Rename { name, new_name } => {
                     let workspace = store.rename(&name, &new_name)?;
@@ -1944,5 +1959,34 @@ mod tests {
             Cli::try_parse_from(["linux-archductor", "internal", "run-codex-session", "demo"]);
 
         assert!(parse.is_err());
+    }
+
+    #[test]
+    fn cli_parses_workspace_delete_cleanup_flags() {
+        let parse = Cli::try_parse_from([
+            "linux-archductor",
+            "workspace",
+            "delete",
+            "berlin",
+            "--remove-worktree",
+            "--delete-branch",
+        ])
+        .unwrap();
+
+        match parse.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Delete {
+                        name,
+                        remove_worktree,
+                        delete_branch,
+                    },
+            } => {
+                assert_eq!(name, "berlin");
+                assert!(remove_worktree);
+                assert!(delete_branch);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }
