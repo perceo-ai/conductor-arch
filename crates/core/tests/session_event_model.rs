@@ -6,6 +6,7 @@ use linux_archductor_core::session_event::{
     SessionEvent, SessionEventPayload, SessionEventSource, SessionEventStatus, SessionInputKind,
     SessionMetadataValue, SessionPromptOption, SessionPromptStyle,
 };
+use linux_archductor_core::session_state::{AgentSessionState, SessionStateMachine};
 
 #[test]
 fn event_model_serializes_all_required_event_families_with_raw_text() {
@@ -178,4 +179,67 @@ fn codex_screen_event_delta_returns_appendable_session_events_with_cursor() {
             },
         )]
     );
+}
+
+#[test]
+fn session_state_machine_tracks_agent_runtime_states_and_invalid_transitions() {
+    let mut machine = SessionStateMachine::new();
+
+    assert_eq!(machine.state(), AgentSessionState::Starting);
+
+    machine.apply_event(&SessionEvent::new(
+        SessionEventSource::Runtime,
+        None,
+        SessionEventPayload::StatusChange {
+            status: SessionEventStatus::Running,
+            message: None,
+        },
+    ));
+    assert_eq!(machine.state(), AgentSessionState::Running);
+
+    machine.apply_event(&SessionEvent::new(
+        SessionEventSource::Assistant,
+        Some("working".to_owned()),
+        SessionEventPayload::AssistantText {
+            text: "working".to_owned(),
+        },
+    ));
+    assert_eq!(machine.state(), AgentSessionState::Streaming);
+
+    machine.apply_event(&SessionEvent::new(
+        SessionEventSource::Runtime,
+        Some("Ran cargo test".to_owned()),
+        SessionEventPayload::CommandOutput {
+            title: "cargo test".to_owned(),
+            output: "running".to_owned(),
+            status: SessionCommandOutputStatus::Running,
+        },
+    ));
+    assert_eq!(machine.state(), AgentSessionState::ToolRunning);
+
+    machine.apply_event(&SessionEvent::new(
+        SessionEventSource::System,
+        None,
+        SessionEventPayload::StatusChange {
+            status: SessionEventStatus::WaitingForInput,
+            message: None,
+        },
+    ));
+    assert_eq!(machine.state(), AgentSessionState::WaitingForInput);
+
+    machine.mark_interrupted("user stopped session");
+    assert_eq!(machine.state(), AgentSessionState::Interrupted);
+
+    machine.apply_event(&SessionEvent::new(
+        SessionEventSource::Assistant,
+        Some("late output".to_owned()),
+        SessionEventPayload::AssistantText {
+            text: "late output".to_owned(),
+        },
+    ));
+    assert_eq!(machine.state(), AgentSessionState::Interrupted);
+    assert_eq!(machine.invalid_transitions().len(), 1);
+
+    machine.mark_archived();
+    assert_eq!(machine.state(), AgentSessionState::Archived);
 }

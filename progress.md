@@ -20,6 +20,26 @@ The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
 and render structured app-native transcript events, terminal rendering is not a
 full emulator, and several app controls remain unfinished.
 
+July 6 core planning slice is in progress on 2026-07-04: the V1 PTY/runtime
+model now has an explicit session state machine for starting, running,
+streaming, waiting-for-input, tool-running, interrupted, failed, exited, and
+archived states. Codex screen deltas now persist typed `SessionEvent` rows
+beside raw PTY logs and structured chat messages/events, and local history
+prefers those typed events when present. Core Project and Workspace model
+snapshots expose repository settings, scripts, environment, prompts, workspace
+IDs, branch/worktree paths, session IDs, checkpoint IDs, and review/todo counts.
+Focused verification passed:
+`cargo fmt --all -- --check`,
+`cargo test -p linux-archductor-core --lib`,
+`cargo test -p linux-archductor-core --test session_event_model -- --nocapture`,
+and `cargo test -p linux-archductor-core --test pty_parser_fixture_corpus -- --nocapture`.
+Linux VM verification also passed for the same core lib/event/corpus tests, and
+the GTK app was built and launched on the Lima `ubuntu` VM VNC display `:1`
+from `target/lima-debug/debug/linux-archductor-gtk`.
+`cargo test --workspace` is not yet green on the macOS host because
+`linux-archductor session attach --print-pty-path` expects Linux `/proc/<pid>/fd/0`;
+that path must be verified inside the Linux VM.
+
 Latest verification on 2026-06-20: `cargo fmt --all -- --check`,
 `cargo test -p linux-archductor-core --lib` (96 tests), and
 `cargo test -p linux-archductor-gtk` (92 tests) passed for PTY session input,
