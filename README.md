@@ -488,6 +488,7 @@ linux-archductor workspace list
 linux-archductor workspace archive <name> [--remove-worktree]
 linux-archductor workspace restore <name>
 linux-archductor workspace discard <name>
+linux-archductor workspace delete <name> [--remove-worktree] [--delete-branch]
 linux-archductor workspace rename <name> <new-name>
 
 linux-archductor session start <workspace> --kind shell|codex|claude|cursor

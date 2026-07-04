@@ -98,6 +98,36 @@ pub struct ScreenMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CodexParseBenchmark {
+    pub last_user_message: Option<String>,
+    pub last_agent_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CodexParseCursor {
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexParsedDelta {
+    pub items: Vec<CodexParsedItem>,
+    pub cursor: CodexParseCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexParsedItem {
+    Message(ScreenMessage),
+    Event(CodexTranscriptEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexTranscriptEvent {
+    Tool { title: String, body: String },
+    Skill { title: String, body: String },
+    FileChange(CodexFileChange),
+}
+
 pub fn encode_send_line(line: &str) -> Vec<u8> {
     let mut encoded = line.as_bytes().to_vec();
     encoded.push(b'\r');
@@ -134,6 +164,53 @@ pub fn parse_codex_file_change_block(text: &str) -> Option<CodexFileChange> {
     Some(change)
 }
 
+pub fn parse_codex_event_blocks(text: &str) -> Vec<CodexTranscriptEvent> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut events = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let header = lines[index].trim_end();
+        if header.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if let Some(command) = header.strip_prefix("Ran ") {
+            let (body, next) = collect_event_body(&lines, index + 1);
+            events.push(CodexTranscriptEvent::Tool {
+                title: command.trim().to_owned(),
+                body,
+            });
+            index = next;
+            continue;
+        }
+
+        if header.starts_with("Read SKILL.md ") {
+            let (body, next) = collect_event_body(&lines, index + 1);
+            events.push(CodexTranscriptEvent::Skill {
+                title: skill_titles_from_read_header(header),
+                body,
+            });
+            index = next;
+            continue;
+        }
+
+        if is_raw_file_change_event_line(header) {
+            let (body, next) = collect_event_body_including_header(&lines, index);
+            if let Some(change) = parse_codex_file_change_block(&body) {
+                events.push(CodexTranscriptEvent::FileChange(change));
+            }
+            index = next;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    events
+}
+
 pub fn parse_codex_structured_lines(text: &str) -> Vec<CodexParsedLine> {
     text.lines()
         .filter_map(|line| {
@@ -156,6 +233,27 @@ pub fn parse_codex_structured_lines(text: &str) -> Vec<CodexParsedLine> {
 
 pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
     let lines = relevant_codex_screen_lines(screen);
+    parse_codex_screen_message_spans(&lines)
+        .into_iter()
+        .map(|span| span.message)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenMessageSpan {
+    message: ScreenMessage,
+    start_index: usize,
+    end_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexEventSpan {
+    event: CodexTranscriptEvent,
+    start_index: usize,
+    end_index: usize,
+}
+
+fn parse_codex_screen_message_spans(lines: &[String]) -> Vec<ScreenMessageSpan> {
     let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
     let mut messages = Vec::new();
     let mut index = 0usize;
@@ -163,7 +261,13 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
     while index < lines.len() {
         let line = lines[index];
 
+        if let Some(next_index) = skip_codex_event_block(&lines, index) {
+            index = next_index;
+            continue;
+        }
+
         if let Some(role) = parse_box_role(line) {
+            let start = index;
             index += 1;
             let mut body = Vec::new();
             while index < lines.len() {
@@ -177,12 +281,19 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
                 }
                 index += 1;
             }
-            push_message(&mut messages, role, body);
+            push_message_span(&mut messages, role, body, start, index);
+            debug_assert!(index >= start);
             continue;
         }
 
         if is_live_user_prompt_line(line) {
-            push_live_prompt_message(&mut messages, ScreenMessageRole::User, line);
+            push_live_prompt_message_span(
+                &mut messages,
+                ScreenMessageRole::User,
+                line,
+                index,
+                index + 1,
+            );
             index += 1;
             while index < lines.len() {
                 if is_live_user_prompt_line(lines[index])
@@ -191,6 +302,7 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
                 {
                     break;
                 }
+                let agent_start = index;
                 if let Some(first_line) = parse_live_agent_bullet(lines[index]) {
                     let mut body = vec![first_line];
                     index += 1;
@@ -212,7 +324,13 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
                         }
                         break;
                     }
-                    push_message(&mut messages, ScreenMessageRole::Agent, body);
+                    push_message_span(
+                        &mut messages,
+                        ScreenMessageRole::Agent,
+                        body,
+                        agent_start,
+                        index,
+                    );
                     continue;
                 }
                 index += 1;
@@ -221,7 +339,13 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
         }
 
         if is_live_bullet_user_prompt(line, lines.get(index + 1).copied()) {
-            push_live_prompt_message(&mut messages, ScreenMessageRole::User, line);
+            push_live_prompt_message_span(
+                &mut messages,
+                ScreenMessageRole::User,
+                line,
+                index,
+                index + 1,
+            );
             index += 1;
             while index < lines.len() {
                 if is_live_user_prompt_line(lines[index])
@@ -230,6 +354,7 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
                 {
                     break;
                 }
+                let agent_start = index;
                 if let Some(first_line) = parse_live_agent_prompt(lines[index]) {
                     let mut body = vec![first_line];
                     index += 1;
@@ -250,7 +375,13 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
                         }
                         break;
                     }
-                    push_message(&mut messages, ScreenMessageRole::Agent, body);
+                    push_message_span(
+                        &mut messages,
+                        ScreenMessageRole::Agent,
+                        body,
+                        agent_start,
+                        index,
+                    );
                     continue;
                 }
                 index += 1;
@@ -263,6 +394,7 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
             continue;
         }
 
+        let start = index;
         let mut body = Vec::new();
         while index < lines.len() {
             let line = lines[index];
@@ -297,10 +429,201 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
             }
             index += 1;
         }
-        push_message(&mut messages, ScreenMessageRole::Agent, body);
+        push_message_span(&mut messages, ScreenMessageRole::Agent, body, start, index);
     }
 
     messages
+}
+
+pub fn parse_codex_screen_delta(
+    screen: &str,
+    benchmark: &CodexParseBenchmark,
+    previous_cursor: Option<&CodexParseCursor>,
+) -> CodexParsedDelta {
+    let fingerprint = screen_fingerprint(screen);
+    if previous_cursor
+        .and_then(|cursor| cursor.fingerprint.as_ref())
+        .is_some_and(|previous| Some(previous) == fingerprint.as_ref())
+    {
+        return CodexParsedDelta {
+            items: Vec::new(),
+            cursor: CodexParseCursor { fingerprint },
+        };
+    }
+    let items = parse_codex_screen_delta_items(screen, benchmark);
+    CodexParsedDelta {
+        items,
+        cursor: CodexParseCursor { fingerprint },
+    }
+}
+
+fn parse_codex_screen_delta_items(
+    screen: &str,
+    benchmark: &CodexParseBenchmark,
+) -> Vec<CodexParsedItem> {
+    let lines = relevant_codex_screen_lines(screen);
+    let start = delta_line_start_index(&lines, benchmark);
+    if start >= lines.len() {
+        return Vec::new();
+    }
+
+    let mut positioned = parse_codex_screen_message_spans(&lines)
+        .into_iter()
+        .filter(|span| span.start_index >= start && span.message.role != ScreenMessageRole::User)
+        .map(|span| {
+            (
+                span.start_index,
+                span.end_index,
+                CodexParsedItem::Message(span.message),
+            )
+        })
+        .collect::<Vec<_>>();
+    positioned.extend(
+        parse_codex_event_spans(&lines, start)
+            .into_iter()
+            .map(|span| {
+                (
+                    span.start_index,
+                    span.end_index,
+                    CodexParsedItem::Event(span.event),
+                )
+            }),
+    );
+    positioned.sort_by_key(|(start_index, end_index, _)| (*start_index, *end_index));
+    positioned.into_iter().map(|(_, _, item)| item).collect()
+}
+
+fn delta_line_start_index(lines: &[String], benchmark: &CodexParseBenchmark) -> usize {
+    let messages = parse_codex_screen_message_spans(lines);
+    [
+        latest_message_span_end_index(
+            &messages,
+            ScreenMessageRole::User,
+            benchmark.last_user_message.as_deref(),
+        ),
+        latest_message_span_end_index(
+            &messages,
+            ScreenMessageRole::Agent,
+            benchmark.last_agent_message.as_deref(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0)
+}
+
+fn parse_codex_event_spans(lines: &[String], start: usize) -> Vec<CodexEventSpan> {
+    let line_refs = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut index = start;
+
+    while index < line_refs.len() {
+        let header = line_refs[index].trim_end();
+        if header.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if let Some(command) = header.strip_prefix("Ran ") {
+            let (body, next) = collect_event_body(&line_refs, index + 1);
+            spans.push(CodexEventSpan {
+                event: CodexTranscriptEvent::Tool {
+                    title: command.trim().to_owned(),
+                    body,
+                },
+                start_index: index,
+                end_index: next,
+            });
+            index = next;
+            continue;
+        }
+
+        if header.starts_with("Read SKILL.md ") {
+            let (body, next) = collect_event_body(&line_refs, index + 1);
+            spans.push(CodexEventSpan {
+                event: CodexTranscriptEvent::Skill {
+                    title: skill_titles_from_read_header(header),
+                    body,
+                },
+                start_index: index,
+                end_index: next,
+            });
+            index = next;
+            continue;
+        }
+
+        if is_raw_file_change_event_line(header) {
+            let (body, next) = collect_event_body_including_header(&line_refs, index);
+            if let Some(change) = parse_codex_file_change_block(&body) {
+                spans.push(CodexEventSpan {
+                    event: CodexTranscriptEvent::FileChange(change),
+                    start_index: index,
+                    end_index: next,
+                });
+            }
+            index = next;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    spans
+}
+
+fn latest_message_span_end_index(
+    messages: &[ScreenMessageSpan],
+    role: ScreenMessageRole,
+    content: Option<&str>,
+) -> Option<usize> {
+    let content = content?;
+    messages
+        .iter()
+        .rposition(|message| message.message.role == role && message.message.content == content)
+        .map(|index| messages[index].end_index)
+}
+
+fn skip_codex_event_block(lines: &[&str], index: usize) -> Option<usize> {
+    let line = lines[index].trim_end();
+
+    if line.starts_with("Ran ") || line.starts_with("Read SKILL.md ") {
+        return Some(skip_codex_event_body(lines, index + 1));
+    }
+
+    if is_raw_file_change_event_line(line) {
+        return Some(skip_codex_event_body(lines, index + 1));
+    }
+
+    None
+}
+
+fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
+    while index < lines.len() {
+        let line = lines[index];
+        if is_box_header_line(line)
+            || is_live_user_prompt_line(line)
+            || is_live_agent_prompt_line(line)
+            || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
+            || parse_live_agent_bullet(line).is_some()
+            || line.starts_with("Ran ")
+            || line.starts_with("Read SKILL.md ")
+            || is_raw_file_change_event_line(line)
+        {
+            break;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn screen_fingerprint(screen: &str) -> Option<String> {
+    let normalized = normalize_screen(screen);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_screen(screen: &str) -> String {
+    screen.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn parse_codex_tool_call(line: &str) -> Option<CodexToolCall> {
@@ -460,6 +783,59 @@ fn parse_file_change_count(line: &str, sign: char) -> Option<u32> {
                 .then(|| digits.parse::<u32>().ok())
                 .flatten()
         })
+}
+
+fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
+    let mut body = Vec::new();
+    let mut index = start;
+
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line.starts_with("Ran ")
+            || line.starts_with("Read SKILL.md ")
+            || is_raw_file_change_event_line(line)
+            || is_box_header_line(line)
+            || is_live_user_prompt_line(line)
+            || is_live_agent_prompt_line(line)
+            || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
+            || parse_live_agent_bullet(line).is_some()
+        {
+            break;
+        }
+        body.push(line);
+        index += 1;
+    }
+
+    (body.join("\n").trim().to_owned(), index)
+}
+
+fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String, usize) {
+    let (tail, next) = collect_event_body(lines, start + 1);
+    let mut block = lines[start].to_owned();
+    if !tail.is_empty() {
+        block.push('\n');
+        block.push_str(&tail);
+    }
+    (block, next)
+}
+
+fn skill_titles_from_read_header(header: &str) -> String {
+    let skills = header
+        .split('(')
+        .skip(1)
+        .filter_map(|part| part.split(')').next())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if skills.is_empty() {
+        "SKILL.md".to_owned()
+    } else {
+        skills.join(", ")
+    }
+}
+
+fn is_raw_file_change_event_line(line: &str) -> bool {
+    parse_codex_file_change(normalize_codex_bullet_line(line)).is_some()
 }
 
 fn is_probable_changed_file_path(path: &str) -> bool {
@@ -716,7 +1092,7 @@ fn dedupe_adjacent(messages: &mut Vec<ScreenMessage>) {
     messages.dedup_by(|right, left| left == right);
 }
 
-fn merge_message_content(existing: &str, incoming: &str) -> Option<String> {
+pub(crate) fn merge_message_content(existing: &str, incoming: &str) -> Option<String> {
     if incoming == existing {
         return Some(existing.to_owned());
     }
@@ -817,14 +1193,20 @@ fn parse_live_prompt_content(line: &str) -> String {
     String::new()
 }
 
-fn push_live_prompt_message(
-    messages: &mut Vec<ScreenMessage>,
+fn push_live_prompt_message_span(
+    messages: &mut Vec<ScreenMessageSpan>,
     role: ScreenMessageRole,
     line: &str,
+    start_index: usize,
+    end_index: usize,
 ) {
     let content = parse_live_prompt_content(line);
     if !content.is_empty() {
-        messages.push(ScreenMessage { role, content });
+        messages.push(ScreenMessageSpan {
+            message: ScreenMessage { role, content },
+            start_index,
+            end_index,
+        });
     }
 }
 
@@ -970,12 +1352,22 @@ fn is_ignorable_transcript_continuation(line: &str) -> bool {
     !trimmed.is_empty() && (trimmed.starts_with(' ') || trimmed.starts_with('\t'))
 }
 
-fn push_message(messages: &mut Vec<ScreenMessage>, role: ScreenMessageRole, body: Vec<String>) {
+fn push_message_span(
+    messages: &mut Vec<ScreenMessageSpan>,
+    role: ScreenMessageRole,
+    body: Vec<String>,
+    start_index: usize,
+    end_index: usize,
+) {
     let content = trim_blank_edges(&body.join("\n"));
     if content.is_empty() {
         return;
     }
-    messages.push(ScreenMessage { role, content });
+    messages.push(ScreenMessageSpan {
+        message: ScreenMessage { role, content },
+        start_index,
+        end_index,
+    });
 }
 
 fn trim_blank_edges(content: &str) -> String {
@@ -996,11 +1388,13 @@ fn trim_blank_edges(content: &str) -> String {
 mod tests {
     use super::{
         detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
-        merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
-        parse_codex_inline_event, parse_codex_screen_messages, parse_codex_structured_lines,
-        CodexContextUsage, CodexFileChange, CodexFileChangeAction, CodexFileChangeLine,
-        CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent, CodexParsedLine,
-        CodexSkillAnnouncement, CodexToolCall, ScreenMessage, ScreenMessageRole,
+        merge_screen_messages, parse_codex_context_usage, parse_codex_event_blocks,
+        parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_delta,
+        parse_codex_screen_messages, parse_codex_structured_lines, CodexContextUsage,
+        CodexFileChange, CodexFileChangeAction, CodexFileChangeLine, CodexFileChangeLineKind,
+        CodexFileReference, CodexInlineEvent, CodexParseBenchmark, CodexParsedItem,
+        CodexParsedLine, CodexSkillAnnouncement, CodexToolCall, CodexTranscriptEvent,
+        ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
@@ -1229,6 +1623,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_tool_skill_and_file_change_blocks_as_events() {
+        let text = include_str!("../tests/fixtures/codex_tool_skill_file_events.txt");
+
+        let events = parse_codex_event_blocks(text);
+
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(&events[0], CodexTranscriptEvent::Tool { title, body }
+            if title == "cargo test -p linux-archductor-core codex_tui"
+                && body.contains("running 24 tests"))
+        );
+        assert!(
+            matches!(&events[1], CodexTranscriptEvent::Skill { title, body }
+            if title == "graphify, skill-creator" && body.contains("# Graphify"))
+        );
+        assert!(
+            matches!(&events[2], CodexTranscriptEvent::FileChange(change)
+            if change.path == "crates/core/src/codex_tui.rs" && change.lines.len() == 3)
+        );
+    }
+
+    #[test]
     fn parses_context_usage_percent_and_token_fraction() {
         assert_eq!(
             parse_codex_context_usage("Context window: 42%"),
@@ -1289,6 +1705,253 @@ Do you trust the contents of this directory?
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parse_codex_screen_messages_skips_event_blocks() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+Read SKILL.md (graphify), SKILL.md (skill-creator)
+# Graphify
+Build a knowledge graph from input.
+
+Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line
+";
+
+        assert!(parse_codex_screen_messages(screen).is_empty());
+    }
+
+    #[test]
+    fn screen_delta_starts_after_latest_known_user_message() {
+        let screen = "\
+› old question
+• old answer
+› new question
+• new answer line 1
+  new answer line 2
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("new question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![CodexParsedItem::Message(ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "new answer line 1\nnew answer line 2".to_owned(),
+            })]
+        );
+    }
+
+    #[test]
+    fn screen_delta_prefers_later_agent_boundary_over_earlier_user_boundary() {
+        let screen = "\
+› earlier question
+• earlier answer
+› latest question
+• latest answer
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("earlier question".to_owned()),
+            last_agent_message: Some("latest answer".to_owned()),
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
+    }
+
+    #[test]
+    fn screen_delta_skips_events_before_multiline_latest_known_user_message() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+╭─ You ───────────────╮
+│ first line          │
+│ second line         │
+╰─────────────────────╯
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("first line\nsecond line".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
+    }
+
+    #[test]
+    fn screen_delta_emits_events_after_latest_known_user_message() {
+        let screen = "\
+› latest question
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
+
+Read SKILL.md (graphify), SKILL.md (skill-creator)
+# Graphify
+Build a knowledge graph from input.
+
+Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![
+                CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                    title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+                    body: "running 24 tests\n\
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
+                        .to_owned(),
+                }),
+                CodexParsedItem::Event(CodexTranscriptEvent::Skill {
+                    title: "graphify, skill-creator".to_owned(),
+                    body: "# Graphify\nBuild a knowledge graph from input.".to_owned(),
+                }),
+                CodexParsedItem::Event(CodexTranscriptEvent::FileChange(CodexFileChange {
+                    action: CodexFileChangeAction::Edited,
+                    path: "crates/core/src/codex_tui.rs".to_owned(),
+                    additions: Some(2),
+                    deletions: Some(1),
+                    lines: vec![
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Context,
+                            old_line: Some(10),
+                            new_line: Some(10),
+                            content: "old context".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Deleted,
+                            old_line: Some(11),
+                            new_line: None,
+                            content: "old line".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Added,
+                            old_line: None,
+                            new_line: Some(12),
+                            content: "new line".to_owned(),
+                        },
+                    ],
+                })),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_delta_keeps_messages_and_events_in_screen_order() {
+        let screen = "\
+› latest question
+• before tool
+Ran cargo test
+running
+• after tool
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![
+                CodexParsedItem::Message(ScreenMessage {
+                    role: ScreenMessageRole::Agent,
+                    content: "before tool".to_owned(),
+                }),
+                CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "running".to_owned(),
+                }),
+                CodexParsedItem::Message(ScreenMessage {
+                    role: ScreenMessageRole::Agent,
+                    content: "after tool".to_owned(),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_delta_skips_events_before_latest_known_agent_message_in_boxed_transcript() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+╭─ You ─────────────────╮
+│ latest question       │
+╰───────────────────────╯
+╭─ Codex ───────────────╮
+│ latest answer         │
+╰───────────────────────╯
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: None,
+            last_agent_message: Some("latest answer".to_owned()),
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
+    }
+
+    #[test]
+    fn screen_delta_respects_live_user_prompt_boundary_before_latest_known_agent_message() {
+        let screen = "\
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+
+› latest question
+• latest answer
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: None,
+            last_agent_message: Some("latest answer".to_owned()),
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert!(delta.items.is_empty());
+    }
+
+    #[test]
+    fn screen_delta_suppresses_exact_same_screen_when_previous_cursor_matches() {
+        let screen = "\
+› latest question
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let first = parse_codex_screen_delta(screen, &benchmark, None);
+        let second = parse_codex_screen_delta(screen, &benchmark, Some(&first.cursor));
+
+        assert_eq!(first.cursor.fingerprint.as_deref(), Some(screen));
+        assert!(second.items.is_empty());
     }
 
     #[test]
