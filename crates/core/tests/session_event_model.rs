@@ -114,7 +114,56 @@ fn codex_parser_items_map_to_ui_neutral_session_events() {
             SessionEventPayload::CommandOutput {
                 title: "cargo test".to_owned(),
                 output: "test result: ok".to_owned(),
-                status: SessionCommandOutputStatus::Unknown,
+                status: SessionCommandOutputStatus::Succeeded,
+            },
+        )
+    );
+}
+
+#[test]
+fn codex_parser_items_map_prompts_and_errors_to_typed_session_events() {
+    let prompt = CodexParsedItem::Message(ScreenMessage {
+        role: ScreenMessageRole::Agent,
+        content: "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, exit"
+            .to_owned(),
+    });
+    assert_eq!(
+        codex_parsed_item_to_session_event(prompt),
+        SessionEvent::new(
+            SessionEventSource::Assistant,
+            Some(
+                "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, exit"
+                    .to_owned()
+            ),
+            SessionEventPayload::Prompt {
+                style: SessionPromptStyle::Confirmation,
+                text: "Do you trust the contents of this directory?".to_owned(),
+                options: vec![
+                    SessionPromptOption {
+                        label: "Yes, continue".to_owned(),
+                        value: "yes".to_owned(),
+                    },
+                    SessionPromptOption {
+                        label: "No, exit".to_owned(),
+                        value: "no".to_owned(),
+                    },
+                ],
+            },
+        )
+    );
+
+    let error = CodexParsedItem::Message(ScreenMessage {
+        role: ScreenMessageRole::Agent,
+        content: "Error: missing permission".to_owned(),
+    });
+    assert_eq!(
+        codex_parsed_item_to_session_event(error),
+        SessionEvent::new(
+            SessionEventSource::Assistant,
+            Some("Error: missing permission".to_owned()),
+            SessionEventPayload::Error {
+                message: "Error: missing permission".to_owned(),
+                recoverable: false,
             },
         )
     );
@@ -220,9 +269,10 @@ fn session_state_machine_tracks_agent_runtime_states_and_invalid_transitions() {
     machine.apply_event(&SessionEvent::new(
         SessionEventSource::System,
         None,
-        SessionEventPayload::StatusChange {
-            status: SessionEventStatus::WaitingForInput,
-            message: None,
+        SessionEventPayload::Prompt {
+            style: SessionPromptStyle::Confirmation,
+            text: "Do you trust the contents of this directory?".to_owned(),
+            options: Vec::new(),
         },
     ));
     assert_eq!(machine.state(), AgentSessionState::WaitingForInput);

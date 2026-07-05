@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::codex_tui::{
-    parse_codex_screen_delta, CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor,
-    CodexParsedItem, CodexTranscriptEvent, ScreenMessageRole,
+    detect_directory_trust_prompt, parse_codex_screen_delta, CodexFileChangeAction,
+    CodexParseBenchmark, CodexParseCursor, CodexParsedItem, CodexTranscriptEvent,
+    ScreenMessageRole,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,9 +194,7 @@ pub fn codex_parsed_item_to_session_event(item: CodexParsedItem) -> SessionEvent
             ScreenMessageRole::Agent => SessionEvent::new(
                 SessionEventSource::Assistant,
                 Some(message.content.clone()),
-                SessionEventPayload::AssistantText {
-                    text: message.content,
-                },
+                assistant_message_payload(message.content),
             ),
         },
         CodexParsedItem::Event(event) => codex_transcript_event_to_session_event(event),
@@ -225,8 +224,8 @@ pub fn codex_transcript_event_to_session_event(event: CodexTranscriptEvent) -> S
             Some(format!("Ran {title}\n{body}")),
             SessionEventPayload::CommandOutput {
                 title,
+                status: command_output_status(&body),
                 output: body,
-                status: SessionCommandOutputStatus::Unknown,
             },
         ),
         CodexTranscriptEvent::Skill { title, body } => SessionEvent::new(
@@ -276,6 +275,63 @@ pub fn codex_transcript_event_to_session_event(event: CodexTranscriptEvent) -> S
             )
         }
     }
+}
+
+fn assistant_message_payload(text: String) -> SessionEventPayload {
+    if detect_directory_trust_prompt(&text) {
+        return SessionEventPayload::Prompt {
+            style: SessionPromptStyle::Confirmation,
+            text: "Do you trust the contents of this directory?".to_owned(),
+            options: vec![
+                SessionPromptOption {
+                    label: "Yes, continue".to_owned(),
+                    value: "yes".to_owned(),
+                },
+                SessionPromptOption {
+                    label: "No, exit".to_owned(),
+                    value: "no".to_owned(),
+                },
+            ],
+        };
+    }
+
+    if looks_like_error_message(&text) {
+        return SessionEventPayload::Error {
+            message: text,
+            recoverable: false,
+        };
+    }
+
+    SessionEventPayload::AssistantText { text }
+}
+
+fn command_output_status(output: &str) -> SessionCommandOutputStatus {
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("not found")
+    {
+        SessionCommandOutputStatus::Failed
+    } else if lower.contains("ok")
+        || lower.contains("success")
+        || lower.contains("passed")
+        || lower.contains("finished")
+    {
+        SessionCommandOutputStatus::Succeeded
+    } else if lower.contains("running") {
+        SessionCommandOutputStatus::Running
+    } else {
+        SessionCommandOutputStatus::Unknown
+    }
+}
+
+fn looks_like_error_message(text: &str) -> bool {
+    let lower = text.trim_start().to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("fatal:")
+        || lower.starts_with("failed:")
+        || lower.starts_with("panic:")
 }
 
 fn session_event_status_label(status: SessionEventStatus) -> &'static str {
