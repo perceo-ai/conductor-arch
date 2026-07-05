@@ -6,12 +6,15 @@ use crate::codex_tui::{
 };
 use crate::harness;
 use crate::pty::PtySession;
+use crate::session_event::{
+    codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
+};
 use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 #[cfg(unix)]
@@ -242,6 +245,75 @@ pub struct Workspace {
     pub port_base: u16,
     pub status: String,
     pub archived_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRepositoryModel {
+    pub id: i64,
+    pub root_path: PathBuf,
+    pub default_branch: String,
+    pub remote_name: String,
+    pub workspace_parent_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectModel {
+    pub id: i64,
+    pub name: String,
+    pub repository: ProjectRepositoryModel,
+    pub scripts: crate::settings::ScriptSettings,
+    pub environment_variables: BTreeMap<String, String>,
+    pub prompts: crate::settings::PromptSettings,
+    pub workspace_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceModelStatus {
+    Active,
+    Paused,
+    Review,
+    Merged,
+    Archived,
+    Failed,
+}
+
+impl WorkspaceModelStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Review => "review",
+            Self::Merged => "merged",
+            Self::Archived => "archived",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_workspace_status(value: &str) -> Self {
+        match value {
+            "paused" => Self::Paused,
+            "review" => Self::Review,
+            "merged" => Self::Merged,
+            "archived" => Self::Archived,
+            "failed" => Self::Failed,
+            _ => Self::Active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceModel {
+    pub workspace: Workspace,
+    pub project_id: i64,
+    pub branch: String,
+    pub worktree_path: PathBuf,
+    pub session_ids: Vec<i64>,
+    pub checkpoint_ids: Vec<i64>,
+    pub open_todos: usize,
+    pub open_review_comments: usize,
+    pub status: WorkspaceModelStatus,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1113,6 +1185,91 @@ impl WorkspaceStore {
         Ok(workspaces)
     }
 
+    pub fn project_model(&self, name: &str) -> Result<ProjectModel> {
+        let repository = self.load_repository(name)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM workspaces WHERE repository_id = ?1 ORDER BY id")?;
+        let workspace_ids = stmt
+            .query_map([repository.id], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(ProjectModel {
+            id: repository.id,
+            name: name.to_owned(),
+            repository: ProjectRepositoryModel {
+                id: repository.id,
+                root_path: repository.root_path,
+                default_branch: repository.default_branch,
+                remote_name: repository.remote_name,
+                workspace_parent_path: repository.workspace_parent_path,
+            },
+            scripts: settings.scripts,
+            environment_variables: settings.environment_variables.into_iter().collect(),
+            prompts: settings.prompts.unwrap_or_default(),
+            workspace_ids,
+        })
+    }
+
+    pub fn workspace_model(&self, name: &str) -> Result<WorkspaceModel> {
+        let workspace = self.get_by_name(name)?;
+        let session_ids = self.ids_for_workspace_kind(workspace.id, ProcessKind::Session)?;
+        let checkpoint_ids = self.ids_for_table(
+            "SELECT id FROM checkpoints WHERE workspace_id = ?1 ORDER BY id",
+            workspace.id,
+        )?;
+        let open_todos = self.count_workspace_rows(
+            "SELECT COUNT(*) FROM todos WHERE workspace_id = ?1 AND status = 'open'",
+            workspace.id,
+        )?;
+        let open_review_comments = self.count_workspace_rows(
+            "SELECT COUNT(*) FROM review_comments WHERE workspace_id = ?1 AND status = 'open'",
+            workspace.id,
+        )?;
+
+        Ok(WorkspaceModel {
+            project_id: workspace.repository_id,
+            branch: workspace.branch.clone(),
+            worktree_path: workspace.path.clone(),
+            session_ids,
+            checkpoint_ids,
+            open_todos,
+            open_review_comments,
+            status: WorkspaceModelStatus::from_workspace_status(&workspace.status),
+            created_at: workspace.created_at.clone(),
+            updated_at: workspace.updated_at.clone(),
+            workspace,
+        })
+    }
+
+    fn ids_for_workspace_kind(&self, workspace_id: i64, kind: ProcessKind) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM processes WHERE workspace_id = ?1 AND kind = ?2 ORDER BY id",
+        )?;
+        let ids = stmt
+            .query_map(params![workspace_id, kind.as_str()], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    fn ids_for_table(&self, query: &str, workspace_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(query)?;
+        let ids = stmt
+            .query_map([workspace_id], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    fn count_workspace_rows(&self, query: &str, workspace_id: i64) -> Result<usize> {
+        let count = self
+            .conn
+            .query_row(query, [workspace_id], |row| row.get::<_, i64>(0))?;
+        Ok(count as usize)
+    }
+
     pub fn list_status(&self) -> Result<Vec<WorkspaceStatusLine>> {
         let workspaces = self.list()?;
         let mut lines = Vec::with_capacity(workspaces.len());
@@ -1603,6 +1760,86 @@ impl WorkspaceStore {
             .write_all(output.as_bytes())
             .with_context(|| format!("write log {}", process.log_path.display()))?;
         Ok(())
+    }
+
+    pub fn append_session_events(
+        &self,
+        process_id: i64,
+        events: Vec<SessionEvent>,
+    ) -> Result<Vec<SessionEvent>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        let next_sequence = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE process_id = ?1",
+                [process_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(1) as u64;
+        let occurred_at_ms = timestamp_millis();
+        let now = timestamp();
+        let mut saved = Vec::with_capacity(events.len());
+
+        for (offset, event) in events.into_iter().enumerate() {
+            let sequence = next_sequence + offset as u64;
+            let occurred_at_ms = event.occurred_at_ms.unwrap_or(occurred_at_ms);
+            let event = event
+                .with_sequence(sequence)
+                .with_occurred_at_ms(occurred_at_ms);
+            let payload_json = serde_json::to_string(&event.payload)?;
+            self.conn.execute(
+                "INSERT INTO session_events (
+                    process_id, sequence, occurred_at_ms, source, raw_text, payload_json, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    process_id,
+                    sequence as i64,
+                    occurred_at_ms as i64,
+                    session_event_source_to_str(event.source),
+                    event.raw_text,
+                    payload_json,
+                    now,
+                ],
+            )?;
+            saved.push(event);
+        }
+
+        Ok(saved)
+    }
+
+    pub fn list_session_events(&self, process_id: i64) -> Result<Vec<SessionEvent>> {
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, occurred_at_ms, source, raw_text, payload_json
+             FROM session_events
+             WHERE process_id = ?1
+             ORDER BY sequence",
+        )?;
+        let rows = stmt.query_map([process_id], |row| {
+            let source = session_event_source_from_str(row.get::<_, String>(2)?.as_str())?;
+            let payload_json: String = row.get(4)?;
+            let payload: SessionEventPayload = serde_json::from_str(&payload_json)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+            Ok(SessionEvent {
+                sequence: Some(row.get::<_, i64>(0)? as u64),
+                occurred_at_ms: Some(row.get::<_, i64>(1)? as u64),
+                source,
+                raw_text: row.get(3)?,
+                payload,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn reconcile_session_processes(&self) -> Result<Vec<ProcessRecord>> {
@@ -3633,6 +3870,11 @@ mutation($threadId: ID!) {{
             process.kind == ProcessKind::Session,
             "process {process_id} is not a session process"
         );
+        let session_events = self.list_session_events(process_id)?;
+        let messages = session_events_to_local_chat_messages(&session_events);
+        if !messages.is_empty() {
+            return Ok(messages);
+        }
         let transcript = fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))?;
         Ok(parse_local_chat_transcript(&transcript))
@@ -4396,6 +4638,12 @@ mutation($threadId: ID!) {{
         let benchmark = codex_parse_benchmark_from_messages(&messages);
         let previous_cursor = self.get_codex_parse_cursor(process_id)?;
         let delta = parse_codex_screen_delta(screen, &benchmark, previous_cursor.as_ref());
+        let session_events = delta
+            .items
+            .iter()
+            .cloned()
+            .map(codex_parsed_item_to_session_event)
+            .collect::<Vec<_>>();
 
         for item in delta.items {
             match item {
@@ -4414,6 +4662,7 @@ mutation($threadId: ID!) {{
                 }
             }
         }
+        self.append_session_events(process_id, session_events)?;
 
         self.set_codex_parse_cursor(process_id, &delta.cursor)?;
         Ok(())
@@ -5185,6 +5434,18 @@ mutation($threadId: ID!) {{
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS session_events (
+              id INTEGER PRIMARY KEY,
+              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+              sequence INTEGER NOT NULL,
+              occurred_at_ms INTEGER NOT NULL,
+              source TEXT NOT NULL,
+              raw_text TEXT,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(process_id, sequence)
+            );
             ",
         )?;
         self.remove_chat_events_exact_unique_constraint()?;
@@ -5643,6 +5904,25 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         session_harness_metadata,
         session_resume_id,
     })
+}
+
+fn session_event_source_to_str(source: SessionEventSource) -> &'static str {
+    match source {
+        SessionEventSource::User => "user",
+        SessionEventSource::Assistant => "assistant",
+        SessionEventSource::Runtime => "runtime",
+        SessionEventSource::System => "system",
+    }
+}
+
+fn session_event_source_from_str(value: &str) -> rusqlite::Result<SessionEventSource> {
+    match value {
+        "user" => Ok(SessionEventSource::User),
+        "assistant" => Ok(SessionEventSource::Assistant),
+        "runtime" => Ok(SessionEventSource::Runtime),
+        "system" => Ok(SessionEventSource::System),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 fn row_to_local_chat_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalChatHistoryRow> {
@@ -6321,6 +6601,46 @@ fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage>
 
     for message in codex_messages {
         push_local_chat_message(&mut messages, message.role.as_str(), message.content);
+    }
+    messages
+}
+
+fn session_events_to_local_chat_messages(events: &[SessionEvent]) -> Vec<LocalChatHistoryMessage> {
+    let mut messages = Vec::new();
+    for event in events {
+        match &event.payload {
+            SessionEventPayload::UserInput { text, kind } => {
+                let role = match kind {
+                    crate::session_event::SessionInputKind::ReviewPrompt => "review",
+                    crate::session_event::SessionInputKind::ControlCommand => "system",
+                    crate::session_event::SessionInputKind::User => "user",
+                };
+                push_local_chat_message(&mut messages, role, text.clone());
+            }
+            SessionEventPayload::AssistantText { text } => {
+                push_local_chat_message(&mut messages, "agent", text.clone());
+            }
+            SessionEventPayload::CommandOutput { title, output, .. } => {
+                let content = if output.is_empty() {
+                    title.clone()
+                } else {
+                    format!("{title}\n{output}")
+                };
+                push_local_chat_message(&mut messages, "system", content);
+            }
+            SessionEventPayload::StatusChange { message, .. } => {
+                if let Some(message) = message {
+                    push_local_chat_message(&mut messages, "system", message.clone());
+                }
+            }
+            SessionEventPayload::Error { message, .. } => {
+                push_local_chat_message(&mut messages, "system", message.clone());
+            }
+            SessionEventPayload::Prompt { text, .. } => {
+                push_local_chat_message(&mut messages, "system", text.clone());
+            }
+            SessionEventPayload::Metadata { .. } => {}
+        }
     }
     messages
 }
@@ -7326,6 +7646,13 @@ fn timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_owned())
+}
+
+fn timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn timestamp_nanos() -> String {
@@ -12181,6 +12508,253 @@ working_directory = "apps/worker"
         assert_eq!(reconciled.id, process.id);
         assert_eq!(reconciled.status, ProcessStatus::Exited);
         assert!(reconciled.ended_at.is_some());
+    }
+
+    #[test]
+    fn session_events_are_persisted_with_raw_logs_and_reload_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, &logs_dir).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let process = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+
+        store
+            .append_session_process_output(process.id, "[codex raw]\nhello\n[/codex raw]\n")
+            .unwrap();
+        store
+            .append_session_events(
+                process.id,
+                vec![
+                    crate::session_event::SessionEvent::new(
+                        crate::session_event::SessionEventSource::User,
+                        Some("› run tests".to_owned()),
+                        crate::session_event::SessionEventPayload::UserInput {
+                            text: "run tests".to_owned(),
+                            kind: crate::session_event::SessionInputKind::User,
+                        },
+                    ),
+                    crate::session_event::SessionEvent::new(
+                        crate::session_event::SessionEventSource::Assistant,
+                        Some("Tests passed.".to_owned()),
+                        crate::session_event::SessionEventPayload::AssistantText {
+                            text: "Tests passed.".to_owned(),
+                        },
+                    ),
+                ],
+            )
+            .unwrap();
+
+        drop(store);
+        let reopened = WorkspaceStore::open_with_logs(&db_path, &logs_dir).unwrap();
+        let raw = fs::read_to_string(&process.log_path).unwrap();
+        let events = reopened.list_session_events(process.id).unwrap();
+        let history_messages = reopened.local_chat_history_messages(process.id).unwrap();
+
+        assert!(raw.contains("[codex raw]"));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, Some(1));
+        assert_eq!(events[1].sequence, Some(2));
+        assert_eq!(events[0].raw_text.as_deref(), Some("› run tests"));
+        assert_eq!(events[1].render_text(), "Tests passed.");
+        assert_eq!(events[0].occurred_at_ms, events[1].occurred_at_ms);
+        assert_eq!(
+            events[0].source,
+            crate::session_event::SessionEventSource::User
+        );
+        assert_eq!(
+            events[1].source,
+            crate::session_event::SessionEventSource::Assistant
+        );
+        assert_eq!(process.workspace_id, workspace.id);
+        assert_eq!(
+            history_messages,
+            vec![
+                LocalChatHistoryMessage {
+                    role: "user".to_owned(),
+                    content: "run tests".to_owned(),
+                },
+                LocalChatHistoryMessage {
+                    role: "agent".to_owned(),
+                    content: "Tests passed.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_screen_delta_persists_typed_session_events_for_ui_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let _workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Parser work", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+
+        store
+            .append_chat_message(thread.id, "user", "run tests", "composer")
+            .unwrap();
+        store
+            .persist_codex_screen_delta(
+                thread.id,
+                process.id,
+                "› run tests\n• Running now.\nRan cargo test\nok\n",
+            )
+            .unwrap();
+
+        let session_events = store.list_session_events(process.id).unwrap();
+        assert_eq!(
+            session_events
+                .iter()
+                .map(crate::session_event::SessionEvent::render_text)
+                .collect::<Vec<_>>(),
+            vec!["Running now.", "cargo test\nok"]
+        );
+        assert!(matches!(
+            session_events[0].payload,
+            crate::session_event::SessionEventPayload::AssistantText { .. }
+        ));
+        assert!(matches!(
+            session_events[1].payload,
+            crate::session_event::SessionEventPayload::CommandOutput { .. }
+        ));
+    }
+
+    #[test]
+    fn project_and_workspace_models_include_runtime_review_and_config_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts]
+setup = "make setup"
+run = "make dev"
+
+[environment_variables]
+API_BASE_URL = "http://localhost:3000"
+
+[prompts]
+general = "Keep changes focused."
+"#,
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let first_session = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+        let second_session = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+        let checkpoint = store
+            .checkpoint_create("berlin", "before refactor", Some(first_session.id))
+            .unwrap();
+        store.add_todo("berlin", "finish parser").unwrap();
+        store
+            .add_review_comment("berlin", "src/lib.rs", Some(12), "handle failure")
+            .unwrap();
+
+        let project = store.project_model("demo").unwrap();
+        let model = store.workspace_model("berlin").unwrap();
+
+        assert_eq!(project.id, workspace.repository_id);
+        assert_eq!(project.name, "demo");
+        assert_eq!(project.repository.default_branch, "main");
+        assert_eq!(project.scripts.setup.as_deref(), Some("make setup"));
+        assert_eq!(project.scripts.run.as_deref(), Some("make dev"));
+        assert_eq!(
+            project
+                .environment_variables
+                .get("API_BASE_URL")
+                .map(String::as_str),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(
+            project.prompts.general.as_deref(),
+            Some("Keep changes focused.")
+        );
+        assert_eq!(project.workspace_ids, vec![workspace.id]);
+
+        assert_eq!(model.workspace.id, workspace.id);
+        assert_eq!(model.project_id, workspace.repository_id);
+        assert_eq!(model.branch, "lc/berlin");
+        assert_eq!(model.worktree_path, workspace.path);
+        assert_eq!(model.session_ids, vec![first_session.id, second_session.id]);
+        assert_eq!(model.checkpoint_ids, vec![checkpoint.id]);
+        assert_eq!(model.open_todos, 1);
+        assert_eq!(model.open_review_comments, 1);
+        assert_eq!(model.status.as_str(), "active");
     }
 
     #[test]

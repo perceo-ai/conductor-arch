@@ -7,6 +7,8 @@ pub mod mcp;
 pub mod paths;
 pub mod pty;
 pub mod repository;
+pub mod session_event;
+pub mod session_state;
 pub mod settings;
 pub mod workspace;
 
