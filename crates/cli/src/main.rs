@@ -1676,7 +1676,8 @@ fn resolve_attachable_session(
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
     let fd = format!("/proc/{process_id}/fd/0");
-    let target = fs::read_link(&fd).with_context(|| format!("read {}", fd))?;
+    let target = fs::read_link(&fd)
+        .with_context(|| format!("process {process_id} is not attached to a PTY slave"))?;
     anyhow::ensure!(
         target.starts_with("/dev/pts/"),
         "process {process_id} is not attached to a PTY slave"

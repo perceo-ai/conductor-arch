@@ -5087,6 +5087,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "GTK init must run on main thread on macOS"
+    )]
     fn rebuild_terminal_tabs_does_not_panic_on_transient_state_borrow() {
         let _ = gtk::init();
         let terminal_tabs = GBox::new(Orientation::Horizontal, 6);
