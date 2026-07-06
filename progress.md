@@ -20,7 +20,7 @@ The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
 and render structured app-native transcript events, terminal rendering is not a
 full emulator, and several app controls remain unfinished.
 
-July 9 workspace/review slice now has focused core, CLI, and GTK coverage:
+July 6 workspace/review slice now has focused core, CLI, and GTK coverage:
 workspace lifecycle actions, including duplicate, keep persisted event history;
 workspace timeline events are recorded for creation, duplicate, rename, archive,
 restore, delete, session start/stop/exit, branch actions, commits, PR recording,

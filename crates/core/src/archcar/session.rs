@@ -13,12 +13,10 @@ use crate::archcar::harness::{controller_for_kind, ensure_thread_for_kind, Harne
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputKind};
 use crate::codex_tui::{codex_persistent_screen_fingerprint, ScreenMessage};
 use crate::pty::PtySession;
+use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_pipeline::PtyChunkInput;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
-use crate::workspace::{
-    format_codex_raw_output, format_codex_screen_snapshot, ProcessStatus, SessionHarnessOptions,
-    SessionKind, WorkspaceStore,
-};
+use crate::workspace::{ProcessStatus, SessionHarnessOptions, SessionKind, WorkspaceStore};
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -359,27 +357,15 @@ fn format_input_audit_log(
     match kind {
         ArchcarInputKind::ReviewPrompt => format!(
             "\n[staged review prompt]\n{}\n[/staged review prompt]\n",
-            input
+            crate::redaction::redact_sensitive_text(input)
         ),
         ArchcarInputKind::User => format!(
             "\n[user input {}#{}]\n{}\n[/user input]\n",
-            workspace, session_id, input
+            workspace,
+            session_id,
+            crate::redaction::redact_sensitive_text(input)
         ),
         ArchcarInputKind::ControlCommand => String::new(),
-    }
-}
-
-fn format_session_raw_output(kind: SessionKind, raw: &str) -> String {
-    match kind {
-        SessionKind::Codex => format_codex_raw_output(raw),
-        _ => raw.to_owned(),
-    }
-}
-
-fn format_session_screen_output(kind: SessionKind, screen: &str) -> String {
-    match kind {
-        SessionKind::Codex => format_codex_screen_snapshot(screen),
-        _ => screen.to_owned(),
     }
 }
 
@@ -424,14 +410,7 @@ fn write_pty_screen_snapshot(
 }
 
 fn pty_screen_snapshot_logging_enabled() -> bool {
-    std::env::var("ARCHDUCTOR_LOG_PTY_SCREENS")
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+    crate::env_flags::enabled("ARCHDUCTOR_LOG_PTY_SCREENS")
 }
 
 fn should_emit_message_update(
@@ -470,6 +449,7 @@ fn run_session_loop(
     let mut last_messages = Vec::new();
     let mut native_thread_id_resolved = false;
     let mut pending_chunks = Vec::<PtyChunkInput>::new();
+    let runtime_store = RuntimeSessionStore::new(db_path.clone());
     loop {
         while let Ok(command) = command_rx.try_recv() {
             match command {
@@ -483,21 +463,25 @@ fn run_session_loop(
                         chars = input.chars().count(),
                         "archcar session send_input dequeued"
                     );
-                    if let Ok(store) = WorkspaceStore::open(&db_path) {
-                        let (role, source) = match kind {
-                            ArchcarInputKind::User => ("user", "user_send"),
-                            ArchcarInputKind::ReviewPrompt => ("user", "staged_review_send"),
-                            ArchcarInputKind::ControlCommand => ("system", "control_command"),
-                        };
-                        let _ = store.append_chat_message(current.thread_id, role, &input, source);
-                        let log_text = format_input_audit_log(
-                            &current.workspace,
-                            current.session_id,
-                            &input,
-                            &kind,
-                        );
-                        let _ = store.append_session_process_output(current.session_id, &log_text);
-                    }
+                    let (role, source) = match kind {
+                        ArchcarInputKind::User => ("user", "user_send"),
+                        ArchcarInputKind::ReviewPrompt => ("user", "staged_review_send"),
+                        ArchcarInputKind::ControlCommand => ("system", "control_command"),
+                    };
+                    let log_text = format_input_audit_log(
+                        &current.workspace,
+                        current.session_id,
+                        &input,
+                        &kind,
+                    );
+                    let _ = runtime_store.append_input_and_audit_log(
+                        current.thread_id,
+                        current.session_id,
+                        role,
+                        &input,
+                        source,
+                        &log_text,
+                    );
                     match pty.send_line(&input) {
                         Ok(()) => {
                             info!(
@@ -563,15 +547,13 @@ fn run_session_loop(
         let raw = pty.read_available();
         if !raw.is_empty() {
             let current = snapshot.lock().unwrap().clone();
-            if let Ok(store) = WorkspaceStore::open(&db_path) {
-                if let Ok(chunk) = store.append_pty_chunk(current.session_id, "stdout_pty", &raw) {
-                    pending_chunks.push(PtyChunkInput {
-                        sequence: chunk.sequence,
-                        text: chunk.text,
-                    });
-                }
-                let formatted = format_session_raw_output(current.kind, &raw);
-                let _ = store.append_session_process_output(current.session_id, &formatted);
+            if let Ok(Some(chunk)) =
+                runtime_store.append_raw_output(current.session_id, current.kind, &raw)
+            {
+                pending_chunks.push(PtyChunkInput {
+                    sequence: chunk.sequence,
+                    text: chunk.text,
+                });
             }
         }
 
@@ -592,33 +574,31 @@ fn run_session_loop(
                 &screen,
             );
             if persist_screen {
-                if let Ok(store) = WorkspaceStore::open(&db_path) {
-                    let formatted = format_session_screen_output(current.kind, &screen);
-                    let _ = store.append_session_process_output(current.session_id, &formatted);
-                    if current.kind == SessionKind::Codex {
-                        match store.persist_codex_pipeline_update(
-                            current.thread_id,
-                            current.session_id,
-                            std::mem::take(&mut pending_chunks),
-                            &screen,
-                            current.runtime_state,
-                        ) {
-                            Ok(output) => {
-                                codex_pipeline_ready = Some(output.ready_for_input);
-                                emit_codex_ready = !current.ready && output.ready_for_input;
-                                if let Ok(mut state) = snapshot.lock() {
-                                    state.runtime_state = output.state;
-                                    state.ready = output.ready_for_input;
-                                }
+                let _ =
+                    runtime_store.append_screen_output(current.session_id, current.kind, &screen);
+                if current.kind == SessionKind::Codex {
+                    match runtime_store.persist_codex_pipeline_update(
+                        current.thread_id,
+                        current.session_id,
+                        std::mem::take(&mut pending_chunks),
+                        &screen,
+                        current.runtime_state,
+                    ) {
+                        Ok(output) => {
+                            codex_pipeline_ready = Some(output.ready_for_input);
+                            emit_codex_ready = !current.ready && output.ready_for_input;
+                            if let Ok(mut state) = snapshot.lock() {
+                                state.runtime_state = output.state;
+                                state.ready = output.ready_for_input;
                             }
-                            Err(err) => {
-                                warn!(
-                                    session_id = current.session_id,
-                                    thread_id = current.thread_id,
-                                    error = %err,
-                                    "archcar session pipeline persistence failed"
-                                );
-                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                session_id = current.session_id,
+                                thread_id = current.thread_id,
+                                error = %err,
+                                "archcar session pipeline persistence failed"
+                            );
                         }
                     }
                 }
@@ -662,21 +642,17 @@ fn run_session_loop(
 
         let current = snapshot.lock().unwrap().clone();
         if should_attempt_native_thread_resolution(current.kind, native_thread_id_resolved) {
-            if let Ok(store) = WorkspaceStore::open(&db_path) {
-                native_thread_id_resolved = store
-                    .resolve_codex_native_thread_id_for_process(current.session_id)
-                    .ok()
-                    .flatten()
-                    .is_some();
-            }
+            native_thread_id_resolved = runtime_store
+                .resolve_codex_native_thread_id_for_process(current.session_id)
+                .ok()
+                .flatten()
+                .is_some();
         }
 
         match pty.has_exited() {
             Ok(true) => {
                 let current = snapshot.lock().unwrap().clone();
-                if let Ok(store) = WorkspaceStore::open(&db_path) {
-                    let _ = store.mark_session_process_exited(current.session_id, None);
-                }
+                let _ = runtime_store.mark_session_process_exited(current.session_id, None);
                 if let Ok(mut state) = snapshot.lock() {
                     state.status = ProcessStatus::Exited;
                     let mut machine = SessionStateMachine::from_state(state.runtime_state);
@@ -758,21 +734,39 @@ mod tests {
     }
 
     #[test]
+    fn input_audit_logs_redact_sensitive_values() {
+        let log = format_input_audit_log(
+            "berlin",
+            7,
+            "use OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish",
+            &ArchcarInputKind::User,
+        );
+
+        assert!(log.contains("[redacted]"));
+        assert!(!log.contains("sk-secret"));
+        assert!(!log.contains("ghp_secret"));
+        assert!(!log.contains("swordfish"));
+    }
+
+    #[test]
     fn codex_outputs_use_canonical_wrappers() {
         assert_eq!(
-            format_session_raw_output(SessionKind::Codex, "hello"),
+            crate::runtime_session_store::format_session_raw_output(SessionKind::Codex, "hello"),
             "[codex raw]\nhello\n[/codex raw]\n"
         );
         assert_eq!(
-            format_session_screen_output(SessionKind::Codex, "hello\n"),
+            crate::runtime_session_store::format_session_screen_output(
+                SessionKind::Codex,
+                "hello\n"
+            ),
             "[codex screen]\nhello\n[/codex screen]\n"
         );
         assert_eq!(
-            format_session_raw_output(SessionKind::Shell, "plain"),
+            crate::runtime_session_store::format_session_raw_output(SessionKind::Shell, "plain"),
             "plain"
         );
         assert_eq!(
-            format_session_screen_output(SessionKind::Shell, "plain"),
+            crate::runtime_session_store::format_session_screen_output(SessionKind::Shell, "plain"),
             "plain"
         );
     }
@@ -807,6 +801,18 @@ mod tests {
         assert!(
             !source.contains(direct_delta_call),
             "archcar runtime loop should use the typed session pipeline"
+        );
+    }
+
+    #[test]
+    fn archcar_runtime_loop_uses_runtime_session_store_boundary() {
+        let source = include_str!("session.rs");
+        let broad_store_open = concat!("WorkspaceStore::", "open(&db_path)");
+
+        assert!(source.contains("RuntimeSessionStore::new"));
+        assert!(
+            !source.contains(broad_store_open),
+            "archcar runtime loop should use the narrow runtime session store boundary"
         );
     }
 

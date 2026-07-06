@@ -5522,263 +5522,8 @@ mutation($threadId: ID!) {{
     }
 
     fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS repositories (
-              id INTEGER PRIMARY KEY,
-              name TEXT NOT NULL,
-              root_path TEXT NOT NULL UNIQUE,
-              default_branch TEXT NOT NULL,
-              remote_name TEXT NOT NULL DEFAULT 'origin',
-              workspace_parent_path TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS workspaces (
-              id INTEGER PRIMARY KEY,
-              repository_id INTEGER NOT NULL REFERENCES repositories(id),
-              name TEXT NOT NULL,
-              path TEXT NOT NULL UNIQUE,
-              branch TEXT NOT NULL,
-              base_ref TEXT NOT NULL,
-              port_base INTEGER NOT NULL,
-              status TEXT NOT NULL,
-              archived_at TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS processes (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              chat_thread_id INTEGER REFERENCES chat_threads(id),
-              kind TEXT NOT NULL,
-              command TEXT NOT NULL,
-              pid INTEGER NOT NULL,
-              log_path TEXT NOT NULL,
-              status TEXT NOT NULL,
-              started_at TEXT NOT NULL,
-              ended_at TEXT,
-              session_harness_metadata TEXT,
-              session_resume_id TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS pull_requests (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspaces(id),
-              provider TEXT NOT NULL,
-              number INTEGER NOT NULL,
-              url TEXT NOT NULL,
-              state TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS todos (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              text TEXT NOT NULL,
-              status TEXT NOT NULL,
-              source TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS review_comments (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              file_path TEXT NOT NULL,
-              line_number INTEGER,
-              body TEXT NOT NULL,
-              status TEXT NOT NULL,
-              github_thread_id TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS checkpoints (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              session_id INTEGER REFERENCES processes(id),
-              git_ref TEXT NOT NULL,
-              message TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS spotlight_sessions (
-              id INTEGER PRIMARY KEY,
-              repository_id INTEGER NOT NULL REFERENCES repositories(id),
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              workspace_name TEXT NOT NULL,
-              patch_path TEXT NOT NULL,
-              status TEXT NOT NULL,
-              started_at TEXT NOT NULL,
-              ended_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS linked_directories (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              target_workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              created_at TEXT NOT NULL,
-              UNIQUE(workspace_id, target_workspace_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_threads (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              provider TEXT NOT NULL,
-              title TEXT NOT NULL,
-              status TEXT NOT NULL,
-              native_thread_id TEXT,
-              harness_metadata TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              archived_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_messages (
-              id INTEGER PRIMARY KEY,
-              thread_id INTEGER NOT NULL REFERENCES chat_threads(id),
-              role TEXT NOT NULL,
-              content TEXT NOT NULL,
-              source TEXT NOT NULL,
-              timeline_seq INTEGER,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_timeline_seq (
-              id INTEGER PRIMARY KEY AUTOINCREMENT
-            );
-
-            CREATE TABLE IF NOT EXISTS codex_parse_cursors (
-              process_id INTEGER PRIMARY KEY REFERENCES processes(id) ON DELETE CASCADE,
-              fingerprint TEXT,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_events (
-              id INTEGER PRIMARY KEY,
-              thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              kind TEXT NOT NULL,
-              title TEXT NOT NULL,
-              body TEXT NOT NULL DEFAULT '',
-              path TEXT,
-              payload_json TEXT NOT NULL,
-              timeline_seq INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS session_events (
-              id INTEGER PRIMARY KEY,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              sequence INTEGER NOT NULL,
-              occurred_at_ms INTEGER NOT NULL,
-              source TEXT NOT NULL,
-              raw_text TEXT,
-              payload_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              UNIQUE(process_id, sequence)
-            );
-
-            CREATE TABLE IF NOT EXISTS pty_chunks (
-              id INTEGER PRIMARY KEY,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              sequence INTEGER NOT NULL,
-              occurred_at_ms INTEGER NOT NULL,
-              stream TEXT NOT NULL DEFAULT 'stdout_pty',
-              text TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              UNIQUE(process_id, sequence)
-            );
-
-            CREATE TABLE IF NOT EXISTS workspace_timeline (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL,
-              workspace_name TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              summary TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-            ",
-        )?;
-        self.remove_chat_events_exact_unique_constraint()?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "exit_code",
-            "ALTER TABLE processes ADD COLUMN exit_code INTEGER",
-        )?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "session_harness_metadata",
-            "ALTER TABLE processes ADD COLUMN session_harness_metadata TEXT",
-        )?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "session_resume_id",
-            "ALTER TABLE processes ADD COLUMN session_resume_id TEXT",
-        )?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "chat_thread_id",
-            "ALTER TABLE processes ADD COLUMN chat_thread_id INTEGER REFERENCES chat_threads(id)",
-        )?;
-        ensure_column(
-            &self.conn,
-            "chat_messages",
-            "timeline_seq",
-            "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
-        )?;
+        crate::storage::migrate_workspace_db(&self.conn)?;
         self.backfill_chat_message_timeline_seq()?;
-        Ok(())
-    }
-
-    fn remove_chat_events_exact_unique_constraint(&self) -> Result<()> {
-        let create_sql = self
-            .conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chat_events'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .unwrap_or_default();
-        if !create_sql.contains("UNIQUE(thread_id, process_id, kind, title, body, payload_json)") {
-            return Ok(());
-        }
-
-        self.conn.execute_batch(
-            "
-            ALTER TABLE chat_events RENAME TO chat_events_with_exact_unique;
-            CREATE TABLE chat_events (
-              id INTEGER PRIMARY KEY,
-              thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              kind TEXT NOT NULL,
-              title TEXT NOT NULL,
-              body TEXT NOT NULL DEFAULT '',
-              path TEXT,
-              payload_json TEXT NOT NULL,
-              timeline_seq INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            INSERT INTO chat_events (
-              id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
-            )
-            SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
-            FROM chat_events_with_exact_unique;
-            DROP TABLE chat_events_with_exact_unique;
-            ",
-        )?;
         Ok(())
     }
 
@@ -5819,17 +5564,6 @@ mutation($threadId: ID!) {{
             }
         }
     }
-}
-
-fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let names = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !names.iter().any(|name| name == column) {
-        conn.execute(alter_sql, [])?;
-    }
-    Ok(())
 }
 
 fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
@@ -8483,6 +8217,25 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         store
             .append_chat_message(thread.id, "user", "hi", "user_send")
             .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        store
+            .append_pty_chunk(process.id, "stdout_pty", "raw codex output\n")
+            .unwrap();
+        store
+            .append_session_events(
+                process.id,
+                vec![crate::session_event::SessionEvent::new(
+                    crate::session_event::SessionEventSource::Assistant,
+                    Some("parsed output".to_owned()),
+                    crate::session_event::SessionEventPayload::AssistantText {
+                        text: "parsed output".to_owned(),
+                    },
+                )],
+            )
+            .unwrap();
 
         let deleted = store.delete("berlin", false, false).unwrap();
 
@@ -8499,6 +8252,16 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             )
             .unwrap();
         assert_eq!(orphan_threads, 0);
+        let orphan_pty_chunks: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pty_chunks", [], |row| row.get(0))
+            .unwrap();
+        let orphan_session_events: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM session_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphan_pty_chunks, 0);
+        assert_eq!(orphan_session_events, 0);
     }
 
     #[test]
@@ -15669,6 +15432,28 @@ spotlight_testing = true
         assert_eq!(
             format_codex_screen_snapshot("hello\n"),
             "[codex screen]\nhello\n[/codex screen]\n"
+        );
+    }
+
+    #[test]
+    fn workspace_store_delegates_schema_migration_to_storage_module() {
+        let source = include_str!("workspace.rs");
+        let create_table_marker = concat!("CREATE TABLE", " IF NOT EXISTS");
+
+        assert!(source.contains("crate::storage::migrate_workspace_db(&self.conn)"));
+        assert!(
+            !source.contains(create_table_marker),
+            "workspace store should not own schema DDL"
+        );
+    }
+
+    #[test]
+    fn git_review_service_boundary_exists_for_pr_review_flows() {
+        let git_review_service =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git_review_service.rs");
+        assert!(
+            git_review_service.exists(),
+            "git/review flows need a narrow service boundary outside the WorkspaceStore monolith"
         );
     }
 }
