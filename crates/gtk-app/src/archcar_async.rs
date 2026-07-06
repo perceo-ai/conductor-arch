@@ -19,10 +19,19 @@ pub enum AsyncArchcarRequestKind {
         workspace: String,
         kind: SessionKind,
     },
+    SpawnSession {
+        workspace: String,
+        kind: SessionKind,
+    },
     SendInput {
         session_id: i64,
         input: String,
         kind: ArchcarInputKind,
+    },
+    ResizeSession {
+        session_id: i64,
+        rows: u16,
+        cols: u16,
     },
     GetSessionStatus {
         session_id: i64,
@@ -79,6 +88,14 @@ impl AsyncArchcarBridge {
         })
     }
 
+    pub fn spawn_session(&self, workspace: String, kind: SessionKind) -> Option<u64> {
+        self.submit(ArchcarRequest::SpawnSession {
+            workspace,
+            kind,
+            harness: None,
+        })
+    }
+
     pub fn get_session_status(&self, session_id: i64) -> Option<u64> {
         self.submit(ArchcarRequest::GetSessionStatus { session_id })
     }
@@ -98,6 +115,14 @@ impl AsyncArchcarBridge {
 
     pub fn kill_session(&self, session_id: i64) -> Option<u64> {
         self.submit(ArchcarRequest::KillSession { session_id })
+    }
+
+    pub fn resize_session(&self, session_id: i64, rows: u16, cols: u16) -> Option<u64> {
+        self.submit(ArchcarRequest::ResizeSession {
+            session_id,
+            rows,
+            cols,
+        })
     }
 
     pub fn try_recv(&self) -> Option<AsyncArchcarMessage> {
@@ -204,6 +229,12 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             workspace: workspace.clone(),
             kind: *kind,
         },
+        ArchcarRequest::SpawnSession {
+            workspace, kind, ..
+        } => AsyncArchcarRequestKind::SpawnSession {
+            workspace: workspace.clone(),
+            kind: *kind,
+        },
         ArchcarRequest::SendInput {
             session_id,
             input,
@@ -213,6 +244,15 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             input: input.clone(),
             kind: kind.clone(),
         },
+        ArchcarRequest::ResizeSession {
+            session_id,
+            rows,
+            cols,
+        } => AsyncArchcarRequestKind::ResizeSession {
+            session_id: *session_id,
+            rows: *rows,
+            cols: *cols,
+        },
         ArchcarRequest::GetSessionStatus { session_id } => {
             AsyncArchcarRequestKind::GetSessionStatus {
                 session_id: *session_id,
@@ -220,12 +260,6 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         }
         ArchcarRequest::KillSession { session_id } => AsyncArchcarRequestKind::KillSession {
             session_id: *session_id,
-        },
-        ArchcarRequest::SpawnSession {
-            workspace, kind, ..
-        } => AsyncArchcarRequestKind::EnsureWorkspaceDefaultSession {
-            workspace: workspace.clone(),
-            kind: *kind,
         },
         ArchcarRequest::GetSessionScreen { session_id } => {
             AsyncArchcarRequestKind::GetSessionStatus {
@@ -265,6 +299,20 @@ mod tests {
 
         clear_archcar_ready(&mut cache, 7);
         assert!(!cache.contains_key(&7));
+    }
+
+    #[test]
+    fn ready_cache_rebuilds_after_gtk_restart_reconnect() {
+        let mut before_restart = HashMap::new();
+        note_archcar_ready(&mut before_restart, 7, true);
+
+        let mut after_restart = HashMap::new();
+        note_archcar_ready(&mut after_restart, 8, false);
+        note_archcar_ready(&mut after_restart, 8, true);
+
+        assert_eq!(before_restart.get(&7), Some(&true));
+        assert!(!after_restart.contains_key(&7));
+        assert_eq!(after_restart.get(&8), Some(&true));
     }
 
     #[test]

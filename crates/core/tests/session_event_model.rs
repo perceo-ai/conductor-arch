@@ -6,6 +6,9 @@ use linux_archductor_core::session_event::{
     SessionEvent, SessionEventPayload, SessionEventSource, SessionEventStatus, SessionInputKind,
     SessionMetadataValue, SessionPromptOption, SessionPromptStyle,
 };
+use linux_archductor_core::session_pipeline::{
+    process_codex_pty_pipeline, PtyChunkInput, SessionPipelineInput,
+};
 use linux_archductor_core::session_state::{AgentSessionState, SessionStateMachine};
 
 #[test]
@@ -231,6 +234,70 @@ fn codex_screen_event_delta_returns_appendable_session_events_with_cursor() {
             },
         )]
     );
+}
+
+#[test]
+fn codex_pipeline_maps_chunk_backed_screen_to_events_and_state() {
+    let input = SessionPipelineInput {
+        chunks: vec![
+            PtyChunkInput {
+                sequence: 1,
+                text: "› run tests\n".to_owned(),
+            },
+            PtyChunkInput {
+                sequence: 2,
+                text: "• Working\nRan cargo test\nrunning\n".to_owned(),
+            },
+        ],
+        screen: "› run tests\n• Working\nRan cargo test\nrunning\n".to_owned(),
+        benchmark: CodexParseBenchmark {
+            last_user_message: Some("run tests".to_owned()),
+            last_agent_message: None,
+        },
+        previous_cursor: None,
+        previous_state: AgentSessionState::Running,
+    };
+
+    let output = process_codex_pty_pipeline(input);
+
+    assert_eq!(output.chunk_range, Some((1, 2)));
+    assert_eq!(
+        output.normalized_text,
+        "› run tests\n• Working\nRan cargo test\nrunning\n"
+    );
+    assert_eq!(
+        output
+            .events
+            .iter()
+            .map(SessionEvent::render_text)
+            .collect::<Vec<_>>(),
+        vec!["Working", "cargo test\nrunning"]
+    );
+    assert_eq!(output.state, AgentSessionState::ToolRunning);
+    assert!(!output.ready_for_input);
+}
+
+#[test]
+fn codex_pipeline_emits_trust_prompt_as_waiting_state() {
+    let prompt = "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, exit";
+    let output = process_codex_pty_pipeline(SessionPipelineInput {
+        chunks: vec![PtyChunkInput {
+            sequence: 5,
+            text: prompt.to_owned(),
+        }],
+        screen: prompt.to_owned(),
+        benchmark: CodexParseBenchmark::default(),
+        previous_cursor: None,
+        previous_state: AgentSessionState::Starting,
+    });
+
+    assert_eq!(output.chunk_range, Some((5, 5)));
+    assert_eq!(output.state, AgentSessionState::WaitingForInput);
+    assert!(output.trust_prompt);
+    assert!(matches!(
+        output.events.first().map(|event| &event.payload),
+        Some(SessionEventPayload::Prompt { .. })
+    ));
 }
 
 #[test]

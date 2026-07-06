@@ -1,14 +1,16 @@
 use crate::codex_tui::{
-    codex_persistent_screen_fingerprint, detect_directory_trust_prompt, merge_message_content,
-    merge_screen_messages, parse_codex_screen_delta, parse_codex_screen_messages,
-    CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor, CodexParsedItem,
-    CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
+    merge_message_content, merge_screen_messages, parse_codex_screen_delta,
+    parse_codex_screen_messages, CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor,
+    CodexParsedItem, CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
 use crate::harness;
-use crate::pty::PtySession;
 use crate::session_event::{
     codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
 };
+use crate::session_pipeline::{
+    process_codex_pty_pipeline, PtyChunkInput, SessionPipelineInput, SessionPipelineOutput,
+};
+use crate::session_state::AgentSessionState;
 use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -21,15 +23,11 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 const SIGTERM_EXIT_CODE: i32 = 143;
-const CODEX_PTY_ROWS: u16 = 24;
-const CODEX_PTY_COLS: u16 = 80;
-const CODEX_PTY_POLL_INTERVAL_MS: u64 = 50;
 const TERMINAL_SEARCH_CONTEXT_LINES: usize = 4;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
@@ -631,6 +629,17 @@ pub struct ProcessRecord {
     pub ended_at: Option<String>,
     pub session_harness_metadata: Option<String>,
     pub session_resume_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtyChunkRecord {
+    pub id: i64,
+    pub process_id: i64,
+    pub sequence: u64,
+    pub occurred_at_ms: u64,
+    pub stream: String,
+    pub text: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1760,6 +1769,69 @@ impl WorkspaceStore {
             .write_all(output.as_bytes())
             .with_context(|| format!("write log {}", process.log_path.display()))?;
         Ok(())
+    }
+
+    pub fn append_pty_chunk(
+        &self,
+        process_id: i64,
+        stream: &str,
+        text: &str,
+    ) -> Result<PtyChunkRecord> {
+        if text.is_empty() {
+            anyhow::bail!("pty chunk text is empty");
+        }
+        let stream = stream.trim();
+        anyhow::ensure!(!stream.is_empty(), "pty chunk stream is required");
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        let sequence = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM pty_chunks WHERE process_id = ?1",
+                [process_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(1);
+        let occurred_at_ms = timestamp_millis() as i64;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO pty_chunks (
+                process_id, sequence, occurred_at_ms, stream, text, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![process_id, sequence, occurred_at_ms, stream, text, now],
+        )?;
+        self.get_pty_chunk(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_pty_chunks(&self, process_id: i64) -> Result<Vec<PtyChunkRecord>> {
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        let mut stmt = self.conn.prepare(
+            "SELECT id, process_id, sequence, occurred_at_ms, stream, text, created_at
+             FROM pty_chunks
+             WHERE process_id = ?1
+             ORDER BY sequence ASC",
+        )?;
+        let rows = stmt.query_map([process_id], row_to_pty_chunk)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn get_pty_chunk(&self, id: i64) -> Result<PtyChunkRecord> {
+        self.conn
+            .query_row(
+                "SELECT id, process_id, sequence, occurred_at_ms, stream, text, created_at
+                 FROM pty_chunks
+                 WHERE id = ?1",
+                [id],
+                row_to_pty_chunk,
+            )
+            .with_context(|| format!("load PTY chunk {id}"))
     }
 
     pub fn append_session_events(
@@ -4158,10 +4230,11 @@ mutation($threadId: ID!) {{
         kind: SessionKind,
         harness: SessionHarnessOptions,
     ) -> Result<ProcessRecord> {
+        anyhow::ensure!(
+            !matches!(kind, SessionKind::Codex),
+            "Codex sessions are owned by archcar; use ArchcarRequest::SpawnSession"
+        );
         let launch = self.session_launch_with_options(name, kind, harness)?;
-        if matches!(kind, SessionKind::Codex) {
-            return self.start_codex_pty_session(name, &launch);
-        }
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
@@ -4179,37 +4252,6 @@ mutation($threadId: ID!) {{
                 resume_id: launch.session_resume_id.as_deref(),
             },
         })
-    }
-
-    fn start_codex_pty_session(&self, name: &str, launch: &SessionLaunch) -> Result<ProcessRecord> {
-        let workspace = self.get_by_name(name)?;
-        let pty = PtySession::spawn(
-            launch.program.clone(),
-            launch.args.clone(),
-            &launch.cwd,
-            launch.env.clone(),
-            CODEX_PTY_ROWS,
-            CODEX_PTY_COLS,
-        )
-        .with_context(|| format!("spawn codex pty in {}", launch.cwd.display()))?;
-        let pid = pty
-            .process_id()
-            .context("codex pty did not report a process id")?;
-        let command = shell_words(&launch.program, &launch.args);
-        let process = self.record_process(RecordProcessInput {
-            kind: ProcessKind::Session,
-            workspace: &workspace,
-            chat_thread_id: None,
-            command: &command,
-            pid,
-            file_prefix: "session",
-            session: ProcessSessionMetadata {
-                harness_metadata: launch.harness_metadata.as_deref(),
-                resume_id: launch.session_resume_id.as_deref(),
-            },
-        })?;
-        spawn_codex_session_monitor(self.db_path.clone(), process.id, pty);
-        Ok(process)
     }
 
     pub fn record_session_process(
@@ -4666,6 +4708,48 @@ mutation($threadId: ID!) {{
 
         self.set_codex_parse_cursor(process_id, &delta.cursor)?;
         Ok(())
+    }
+
+    pub fn persist_codex_pipeline_update(
+        &self,
+        thread_id: i64,
+        process_id: i64,
+        chunks: Vec<PtyChunkInput>,
+        screen: &str,
+        previous_state: AgentSessionState,
+    ) -> Result<SessionPipelineOutput> {
+        let messages = self.list_chat_messages(thread_id)?;
+        let benchmark = codex_parse_benchmark_from_messages(&messages);
+        let previous_cursor = self.get_codex_parse_cursor(process_id)?;
+        let output = process_codex_pty_pipeline(SessionPipelineInput {
+            chunks,
+            screen: screen.to_owned(),
+            benchmark: benchmark.clone(),
+            previous_cursor: previous_cursor.clone(),
+            previous_state,
+        });
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, previous_cursor.as_ref());
+        for item in delta.items {
+            match item {
+                CodexParsedItem::Message(message) => {
+                    if message.role == ScreenMessageRole::Agent {
+                        self.append_chat_message(
+                            thread_id,
+                            "agent",
+                            &message.content,
+                            "agent_screen_parse",
+                        )?;
+                    }
+                }
+                CodexParsedItem::Event(event) => {
+                    self.append_chat_event(thread_id, process_id, &event)?;
+                }
+            }
+        }
+        self.append_session_events(process_id, output.events.clone())?;
+        self.set_codex_parse_cursor(process_id, &output.cursor)?;
+        Ok(output)
     }
 
     pub fn list_chat_events(&self, thread_id: i64) -> Result<Vec<ChatEventRecord>> {
@@ -5446,6 +5530,17 @@ mutation($threadId: ID!) {{
               created_at TEXT NOT NULL,
               UNIQUE(process_id, sequence)
             );
+
+            CREATE TABLE IF NOT EXISTS pty_chunks (
+              id INTEGER PRIMARY KEY,
+              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+              sequence INTEGER NOT NULL,
+              occurred_at_ms INTEGER NOT NULL,
+              stream TEXT NOT NULL DEFAULT 'stdout_pty',
+              text TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(process_id, sequence)
+            );
             ",
         )?;
         self.remove_chat_events_exact_unique_constraint()?;
@@ -5594,77 +5689,6 @@ fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
                 process_id
             ],
         );
-    });
-}
-
-fn spawn_codex_session_monitor(db_path: PathBuf, process_id: i64, mut pty: PtySession) {
-    thread::spawn(move || {
-        let mut trust_answered = false;
-        let mut last_screen = String::new();
-        let mut last_persisted_screen_fingerprint = None;
-        let mut native_thread_id_resolved = false;
-
-        loop {
-            let raw = pty.read_available();
-            if !raw.is_empty() {
-                if let Ok(store) = WorkspaceStore::open(&db_path) {
-                    let _ = store
-                        .append_session_process_output(process_id, &format_codex_raw_output(&raw));
-                }
-            }
-            let screen = pty.visible_screen_text();
-            if !screen.is_empty() && screen != last_screen {
-                if !trust_answered && detect_directory_trust_prompt(&screen) {
-                    let _ = pty.send_line("1");
-                    trust_answered = true;
-                }
-
-                if let Ok(store) = WorkspaceStore::open(&db_path) {
-                    let fingerprint = codex_persistent_screen_fingerprint(&screen);
-                    if fingerprint.is_some() && fingerprint != last_persisted_screen_fingerprint {
-                        last_persisted_screen_fingerprint = fingerprint;
-                        let _ = store.append_session_process_output(
-                            process_id,
-                            &format_codex_screen_snapshot(&screen),
-                        );
-                    }
-                }
-                last_screen = screen;
-            }
-
-            if !native_thread_id_resolved {
-                if let Ok(store) = WorkspaceStore::open(&db_path) {
-                    native_thread_id_resolved = store
-                        .resolve_codex_native_thread_id_for_process(process_id)
-                        .ok()
-                        .flatten()
-                        .is_some();
-                }
-            }
-
-            match pty.has_exited() {
-                Ok(true) => {
-                    if let Ok(conn) = Connection::open(&db_path) {
-                        let _ = conn.execute(
-                            "UPDATE processes
-                             SET status = ?1, ended_at = ?2, exit_code = ?3
-                             WHERE id = ?4 AND status = 'running'",
-                            params![
-                                ProcessStatus::Exited.as_str(),
-                                timestamp(),
-                                Option::<i32>::None,
-                                process_id
-                            ],
-                        );
-                    }
-                    break;
-                }
-                Ok(false) => {}
-                Err(_) => break,
-            }
-
-            thread::sleep(Duration::from_millis(CODEX_PTY_POLL_INTERVAL_MS));
-        }
     });
 }
 
@@ -5989,6 +6013,18 @@ fn row_to_chat_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEventRecor
         timeline_seq: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+    })
+}
+
+fn row_to_pty_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<PtyChunkRecord> {
+    Ok(PtyChunkRecord {
+        id: row.get(0)?,
+        process_id: row.get(1)?,
+        sequence: row.get::<_, i64>(2)? as u64,
+        occurred_at_ms: row.get::<_, i64>(3)? as u64,
+        stream: row.get(4)?,
+        text: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
@@ -12212,22 +12248,8 @@ working_directory = "apps/worker"
     }
 
     #[test]
-    fn start_session_with_options_uses_real_codex_flags_without_bootstrap_env() {
+    fn start_session_with_options_rejects_codex_runtime_ownership() {
         let temp = tempfile::tempdir().unwrap();
-        let fake_bin = temp.path().join("bin");
-        fs::create_dir(&fake_bin).unwrap();
-        let fake_codex = fake_bin.join("codex");
-        fs::write(
-            &fake_codex,
-            "#!/bin/sh\nenv | grep '^ARCHDUCTOR_SESSION_BOOTSTRAP=' || true\nprintf 'args:%s\\n' \"$*\"\nwhile true; do sleep 1; done\n",
-        )
-        .unwrap();
-        Command::new("chmod")
-            .arg("+x")
-            .arg(&fake_codex)
-            .status()
-            .unwrap();
-
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
         RepositoryStore::open(&db_path)
@@ -12250,31 +12272,23 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        temp_path_var(&fake_bin, || {
-            let process = store
-                .start_session_with_options(
-                    "berlin",
-                    SessionKind::Codex,
-                    SessionHarnessOptions {
-                        plan_mode: true,
-                        codex_goals: Some("ship the fix".to_owned()),
-                        ..SessionHarnessOptions::default()
-                    },
-                )
-                .unwrap();
+        let err = store
+            .start_session_with_options(
+                "berlin",
+                SessionKind::Codex,
+                SessionHarnessOptions {
+                    plan_mode: true,
+                    codex_goals: Some("ship the fix".to_owned()),
+                    ..SessionHarnessOptions::default()
+                },
+            )
+            .unwrap_err();
 
-            wait_for_log(
-                &process.log_path,
-                "args:--no-alt-screen --dangerously-bypass-approvals-and-sandbox",
-            );
-            wait_for_log(&process.log_path, "[codex screen]");
-            let log = fs::read_to_string(&process.log_path).unwrap();
-            assert!(log.contains("[codex screen]"));
-            assert!(!log.contains("ARCHDUCTOR_SESSION_BOOTSTRAP="));
-
-            let stopped = store.stop_session("berlin").unwrap();
-            assert_eq!(stopped.id, process.id);
-        });
+        assert!(
+            err.to_string()
+                .contains("Codex sessions are owned by archcar"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -12672,6 +12686,110 @@ working_directory = "apps/worker"
             session_events[1].payload,
             crate::session_event::SessionEventPayload::CommandOutput { .. }
         ));
+    }
+
+    #[test]
+    fn pty_chunks_are_persisted_with_monotonic_session_sequences() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, &logs_dir).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+
+        store
+            .append_session_process_output(process.id, "[codex raw]\nformatted\n[/codex raw]\n")
+            .unwrap();
+        let first = store
+            .append_pty_chunk(process.id, "stdout_pty", "› run tests\n")
+            .unwrap();
+        let second = store
+            .append_pty_chunk(process.id, "stdout_pty", "• Done.\n")
+            .unwrap();
+
+        drop(store);
+        let reopened = WorkspaceStore::open_with_logs(&db_path, &logs_dir).unwrap();
+        let chunks = reopened.list_pty_chunks(process.id).unwrap();
+        let log = fs::read_to_string(&process.log_path).unwrap();
+
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<String>(),
+            "› run tests\n• Done.\n"
+        );
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.stream == "stdout_pty" && chunk.process_id == process.id));
+        assert!(
+            log.contains("[codex raw]"),
+            "human-readable log should remain independent from chunk rows"
+        );
+        assert!(
+            !log.contains("› run tests\n• Done.\n"),
+            "raw chunks should not be reconstructed from formatted log text"
+        );
+
+        let replay_screen = chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        let replay = process_codex_pty_pipeline(SessionPipelineInput {
+            chunks: chunks
+                .into_iter()
+                .map(|chunk| PtyChunkInput {
+                    sequence: chunk.sequence,
+                    text: chunk.text,
+                })
+                .collect(),
+            screen: replay_screen,
+            benchmark: CodexParseBenchmark {
+                last_user_message: Some("run tests".to_owned()),
+                last_agent_message: None,
+            },
+            previous_cursor: None,
+            previous_state: AgentSessionState::Running,
+        });
+        assert!(
+            replay
+                .events
+                .iter()
+                .any(|event| event.render_text() == "Done."),
+            "persisted PTY chunks should replay into typed parser events"
+        );
     }
 
     #[test]
@@ -15535,6 +15653,211 @@ spotlight_testing = true
     }
 
     #[test]
+    fn concurrent_codex_sessions_in_different_workspaces_keep_persisted_state_separate() {
+        let (temp, store) = test_workspace_store();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "paris".to_owned(),
+                branch: "lc/paris".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let berlin_thread = store
+            .create_chat_thread("berlin", "codex", "Berlin task", None)
+            .unwrap();
+        let paris_thread = store
+            .create_chat_thread("paris", "codex", "Paris task", None)
+            .unwrap();
+        let berlin_process = process_record_for_thread(&store, berlin_thread.id);
+        let paris_process = store
+            .record_session_process_for_thread(
+                "paris",
+                paris_thread.id,
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: vec!["--no-alt-screen".to_owned()],
+                    cwd: temp.path().join("workspaces/demo/paris"),
+                    env: Vec::new(),
+                    harness_metadata: Some("harness=codex".to_owned()),
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+
+        store
+            .append_pty_chunk(berlin_process.id, "stdout_pty", "berlin raw chunk\n")
+            .unwrap();
+        store
+            .append_pty_chunk(paris_process.id, "stdout_pty", "paris raw chunk\n")
+            .unwrap();
+        store
+            .append_session_events(
+                berlin_process.id,
+                vec![SessionEvent::new(
+                    SessionEventSource::Assistant,
+                    Some("berlin raw event".to_owned()),
+                    SessionEventPayload::AssistantText {
+                        text: "berlin transcript".to_owned(),
+                    },
+                )],
+            )
+            .unwrap();
+        store
+            .append_session_events(
+                paris_process.id,
+                vec![SessionEvent::new(
+                    SessionEventSource::Assistant,
+                    Some("paris raw event".to_owned()),
+                    SessionEventPayload::AssistantText {
+                        text: "paris transcript".to_owned(),
+                    },
+                )],
+            )
+            .unwrap();
+        store
+            .append_chat_message(
+                berlin_thread.id,
+                "agent",
+                "berlin screen snapshot",
+                "agent_screen_parse",
+            )
+            .unwrap();
+        store
+            .append_chat_message(
+                paris_thread.id,
+                "agent",
+                "paris screen snapshot",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let reopened =
+            WorkspaceStore::open_with_logs(temp.path().join("state.db"), temp.path().join("logs"))
+                .unwrap();
+        let berlin_sessions = reopened.list_sessions("berlin").unwrap();
+        let paris_sessions = reopened.list_sessions("paris").unwrap();
+
+        assert_eq!(berlin_sessions.len(), 1);
+        assert_eq!(paris_sessions.len(), 1);
+        assert_ne!(berlin_sessions[0].pid, paris_sessions[0].pid);
+        assert_eq!(berlin_sessions[0].chat_thread_id, Some(berlin_thread.id));
+        assert_eq!(paris_sessions[0].chat_thread_id, Some(paris_thread.id));
+        assert_eq!(
+            reopened.list_pty_chunks(berlin_process.id).unwrap()[0].text,
+            "berlin raw chunk\n"
+        );
+        assert_eq!(
+            reopened.list_pty_chunks(paris_process.id).unwrap()[0].text,
+            "paris raw chunk\n"
+        );
+        assert_eq!(
+            reopened.list_session_events(berlin_process.id).unwrap()[0].render_text(),
+            "berlin transcript"
+        );
+        assert_eq!(
+            reopened.list_session_events(paris_process.id).unwrap()[0].render_text(),
+            "paris transcript"
+        );
+        assert_eq!(
+            reopened.list_chat_messages(berlin_thread.id).unwrap()[0].content,
+            "berlin screen snapshot"
+        );
+        assert_eq!(
+            reopened.list_chat_messages(paris_thread.id).unwrap()[0].content,
+            "paris screen snapshot"
+        );
+    }
+
+    #[test]
+    fn concurrent_codex_sessions_in_same_workspace_keep_thread_transcripts_separate() {
+        let (_temp, store) = test_workspace_store();
+        let thread_a = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let thread_b = store
+            .create_chat_thread("berlin", "codex", "Bugfix B", None)
+            .unwrap();
+        let process_a = process_record_for_thread(&store, thread_a.id);
+        let process_b = process_record_for_thread(&store, thread_b.id);
+
+        store
+            .append_pty_chunk(process_a.id, "stdout_pty", "thread A raw\n")
+            .unwrap();
+        store
+            .append_pty_chunk(process_b.id, "stdout_pty", "thread B raw\n")
+            .unwrap();
+        store
+            .append_chat_message(thread_a.id, "agent", "thread A transcript", "agent_reply")
+            .unwrap();
+        store
+            .append_chat_message(thread_b.id, "agent", "thread B transcript", "agent_reply")
+            .unwrap();
+        store
+            .append_session_events(
+                process_a.id,
+                vec![SessionEvent::new(
+                    SessionEventSource::Assistant,
+                    None,
+                    SessionEventPayload::AssistantText {
+                        text: "thread A event".to_owned(),
+                    },
+                )],
+            )
+            .unwrap();
+        store
+            .append_session_events(
+                process_b.id,
+                vec![SessionEvent::new(
+                    SessionEventSource::Assistant,
+                    None,
+                    SessionEventPayload::AssistantText {
+                        text: "thread B event".to_owned(),
+                    },
+                )],
+            )
+            .unwrap();
+
+        let sessions = store.list_sessions("berlin").unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_ne!(process_a.pid, process_b.pid);
+        assert_eq!(
+            store.list_thread_processes(thread_a.id).unwrap()[0].id,
+            process_a.id
+        );
+        assert_eq!(
+            store.list_thread_processes(thread_b.id).unwrap()[0].id,
+            process_b.id
+        );
+        assert_eq!(
+            store.list_chat_messages(thread_a.id).unwrap()[0].content,
+            "thread A transcript"
+        );
+        assert_eq!(
+            store.list_chat_messages(thread_b.id).unwrap()[0].content,
+            "thread B transcript"
+        );
+        assert_eq!(
+            store.list_pty_chunks(process_a.id).unwrap()[0].text,
+            "thread A raw\n"
+        );
+        assert_eq!(
+            store.list_pty_chunks(process_b.id).unwrap()[0].text,
+            "thread B raw\n"
+        );
+        assert_eq!(
+            store.list_session_events(process_a.id).unwrap()[0].render_text(),
+            "thread A event"
+        );
+        assert_eq!(
+            store.list_session_events(process_b.id).unwrap()[0].render_text(),
+            "thread B event"
+        );
+    }
+
+    #[test]
     fn slugify_converts_to_kebab_case() {
         assert_eq!(slugify("Add search feature"), "add-search-feature");
         assert_eq!(slugify("Fix: weird  spaces"), "fix-weird-spaces");
@@ -15687,22 +16010,6 @@ spotlight_testing = true
             std::env::set_var(key, previous);
         } else {
             std::env::remove_var(key);
-        }
-    }
-
-    fn temp_path_var(path: &Path, run: impl FnOnce()) {
-        let previous = std::env::var_os("PATH");
-        let mut paths = vec![path.to_path_buf()];
-        if let Some(existing) = previous.as_ref() {
-            paths.extend(std::env::split_paths(existing));
-        }
-        let joined = std::env::join_paths(paths).unwrap();
-        std::env::set_var("PATH", &joined);
-        run();
-        if let Some(previous) = previous {
-            std::env::set_var("PATH", previous);
-        } else {
-            std::env::remove_var("PATH");
         }
     }
 

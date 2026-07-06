@@ -913,6 +913,7 @@ name = "linux-archductor-gtk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-channel",
  "glib",
  "gtk4",
  "libadwaita",

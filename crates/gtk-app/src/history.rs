@@ -85,6 +85,8 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
             let list = list.clone();
             let session_ids = Rc::clone(&session_ids);
             let refresh_generation = Rc::clone(&refresh_generation);
+            // PER-190: temporary worker-result poll for DB/import history load;
+            // remove when this page switches to a GLib main-context future.
             glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
                 Ok(sessions) => {
                     if *refresh_generation.borrow() != generation {
@@ -146,6 +148,8 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
             });
             let message_view = message_view.clone();
             let message_generation = Rc::clone(&message_generation);
+            // PER-190: temporary worker-result poll for selected transcript load;
+            // remove when this page switches to a GLib main-context future.
             glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
                 Ok(text) => {
                     if *message_generation.borrow() == generation {

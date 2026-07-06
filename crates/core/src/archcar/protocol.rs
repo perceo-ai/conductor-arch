@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
+use crate::session_state::AgentSessionState;
 use crate::workspace::{SessionHarnessOptions, SessionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +36,11 @@ pub enum ArchcarRequest {
         input: String,
         kind: ArchcarInputKind,
     },
+    ResizeSession {
+        session_id: i64,
+        rows: u16,
+        cols: u16,
+    },
     GetSessionStatus {
         session_id: i64,
     },
@@ -68,6 +74,7 @@ pub enum ArchcarResponse {
     SessionStatus {
         session_id: i64,
         status: String,
+        runtime_state: AgentSessionState,
         ready: bool,
     },
     SessionScreen {
@@ -122,6 +129,11 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             input_kind_label(kind),
             input.chars().count()
         ),
+        ArchcarRequest::ResizeSession {
+            session_id,
+            rows,
+            cols,
+        } => format!("resize_session session_id={session_id} rows={rows} cols={cols}"),
         ArchcarRequest::GetSessionStatus { session_id } => {
             format!("get_session_status session_id={session_id}")
         }
@@ -158,8 +170,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::SessionStatus {
             session_id,
             status,
+            runtime_state,
             ready,
-        } => format!("session_status session_id={session_id} status={status} ready={ready}"),
+        } => format!(
+            "session_status session_id={session_id} status={status} state={} ready={ready}",
+            runtime_state.as_str()
+        ),
         ArchcarResponse::SessionScreen { session_id, screen } => format!(
             "session_screen session_id={session_id} chars={}",
             screen.chars().count()
@@ -301,6 +317,20 @@ mod tests {
     }
 
     #[test]
+    fn request_summary_describes_resize_session() {
+        let request = ArchcarRequest::ResizeSession {
+            session_id: 9,
+            rows: 33,
+            cols: 111,
+        };
+
+        assert_eq!(
+            archcar_request_summary(&request),
+            "resize_session session_id=9 rows=33 cols=111"
+        );
+    }
+
+    #[test]
     fn archcar_message_skips_absent_codex_metadata_and_round_trips_present_metadata() {
         let message = ArchcarMessage {
             id: 1,
@@ -389,6 +419,24 @@ mod tests {
         assert_eq!(
             archcar_event_summary(&event),
             "session_ready session_id=11 thread_id=5"
+        );
+    }
+
+    #[test]
+    fn session_status_response_carries_typed_runtime_state() {
+        let response = ArchcarResponse::SessionStatus {
+            session_id: 11,
+            status: "running".to_owned(),
+            ready: false,
+            runtime_state: crate::session_state::AgentSessionState::ToolRunning,
+        };
+
+        let encoded = serde_json::to_string(&response).unwrap();
+
+        assert!(encoded.contains("\"runtime_state\":\"tool_running\""));
+        assert_eq!(
+            archcar_response_summary(&response),
+            "session_status session_id=11 status=running state=tool_running ready=false"
         );
     }
 }

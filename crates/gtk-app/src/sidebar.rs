@@ -309,6 +309,9 @@ pub(crate) fn build_app_sidebar(
                             let refresh_view_preferences = refresh_view_preferences.clone();
                             let app_state = app_state.clone();
                             let stack = stack.clone();
+                            // PER-190: temporary worker-result poll for workspace
+                            // creation; remove when sidebar jobs return through a
+                            // GLib main-context future.
                             glib::timeout_add_local(Duration::from_millis(100), move || {
                                 match rx.try_recv() {
                                     Ok(result) => {

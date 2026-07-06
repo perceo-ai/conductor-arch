@@ -153,6 +153,11 @@ enum ArchcarCommand {
         #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
         kind: CliSessionKind,
     },
+    Spawn {
+        workspace: String,
+        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
+        kind: CliSessionKind,
+    },
     Status {
         session_id: i64,
     },
@@ -162,6 +167,11 @@ enum ArchcarCommand {
     Send {
         session_id: i64,
         input: Vec<String>,
+    },
+    Resize {
+        session_id: i64,
+        rows: u16,
+        cols: u16,
     },
     Kill {
         session_id: i64,
@@ -500,6 +510,13 @@ fn main() -> Result<()> {
                         },
                     )?);
                 }
+                ArchcarCommand::Spawn { workspace, kind } => {
+                    print_archcar_response(client.send(ArchcarRequest::SpawnSession {
+                        workspace,
+                        kind: kind.into(),
+                        harness: None,
+                    })?);
+                }
                 ArchcarCommand::Status { session_id } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSessionStatus { session_id })?,
@@ -515,6 +532,17 @@ fn main() -> Result<()> {
                         session_id,
                         input: input.join(" "),
                         kind: ArchcarInputKind::User,
+                    })?);
+                }
+                ArchcarCommand::Resize {
+                    session_id,
+                    rows,
+                    cols,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::ResizeSession {
+                        session_id,
+                        rows,
+                        cols,
                     })?);
                 }
                 ArchcarCommand::Kill { session_id } => {
@@ -1212,9 +1240,16 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::SessionStatus {
             session_id,
             status,
+            runtime_state,
             ready,
         } => {
-            println!("session {} status={} ready={}", session_id, status, ready);
+            println!(
+                "session {} status={} state={} ready={}",
+                session_id,
+                status,
+                runtime_state.as_str(),
+                ready
+            );
         }
         ArchcarResponse::SessionScreen { screen, .. } => print!("{screen}"),
         ArchcarResponse::SessionMessages { messages, .. } => {

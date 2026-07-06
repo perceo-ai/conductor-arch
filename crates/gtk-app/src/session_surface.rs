@@ -6,13 +6,14 @@ use gtk::{
 };
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
-    detect_directory_trust_prompt, merge_screen_messages, parse_codex_context_usage,
-    parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_messages,
+    merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
+    parse_codex_inline_event, parse_codex_screen_messages,
     CodexFileChangeAction as CoreCodexFileChangeAction,
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
     CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
-use linux_archductor_core::pty::PtySession;
+#[cfg(test)]
+use linux_archductor_core::session_state::AgentSessionState;
 use linux_archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
@@ -21,12 +22,11 @@ use std::any::Any;
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs as stdfs};
 use tracing::{debug, error, info, trace, warn};
@@ -44,8 +44,6 @@ use crate::terminal::terminal_display_text;
 
 const SESSION_SCROLLBACK_LINES: usize = 2_000;
 const SESSION_TAIL_HISTORY: usize = 120;
-const SESSION_POLL_INTERVAL_MS: u64 = 100;
-const SESSION_RECONCILE_EVERY_TICKS: u32 = 10;
 const DEFAULT_CHAT_TITLE_PREFIX: &str = "New Chat";
 const REVEAL_EXISTING_CHAT_REFRESH_ROWS: bool = false;
 
@@ -180,19 +178,17 @@ pub fn agent_session_panel(
     let selected_thread: Rc<RefCell<Option<i64>>> =
         Rc::new(RefCell::new(app_state.selected_chat_thread()));
     let pending_commands = Rc::new(RefCell::new(HashMap::<i64, Vec<String>>::new()));
-    let pending_session_inputs = Rc::new(RefCell::new(
-        HashMap::<i64, Vec<DeferredSessionInput>>::new(),
-    ));
     let pending_archcar_inputs =
         Rc::new(RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new()));
     let codex_ready: Rc<RefCell<bool>> = Rc::new(RefCell::new(true));
     let codex_startup_states = Rc::new(RefCell::new(HashMap::<i64, CodexStartupState>::new()));
-    let codex_session_threads = Rc::new(RefCell::new(HashMap::<i64, i64>::new()));
     let archcar_bridge = AsyncArchcarBridge::new(app_state.paths.clone());
     let archcar_ready_cache = Rc::new(RefCell::new(HashMap::<i64, bool>::new()));
+    let pending_archcar_status = Rc::new(RefCell::new(HashMap::<i64, u64>::new()));
+    let archcar_session_threads = Rc::new(RefCell::new(HashMap::<i64, i64>::new()));
     let inflight_archcar_actions =
         Rc::new(RefCell::new(HashMap::<u64, PendingArchcarAction>::new()));
-    let pending_archcar_status = Rc::new(RefCell::new(HashMap::<i64, u64>::new()));
+    let bridge_error_state = Rc::new(RefCell::new(BridgeErrorUiState::default()));
     let refresh_chat_surface: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
     let switch_chat_harness: SwitchChatHarnessController = Rc::new(RefCell::new(None));
     let sync_live_controls: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
@@ -436,13 +432,8 @@ pub fn agent_session_panel(
     update_composer_state();
 
     let selected_session: Rc<RefCell<Option<i64>>> = Rc::new(RefCell::new(None));
-    let active_sessions: Rc<RefCell<HashMap<i64, SessionConnection>>> =
-        Rc::new(RefCell::new(HashMap::new()));
+    let active_sessions: Rc<RefCell<HashSet<i64>>> = Rc::new(RefCell::new(HashSet::new()));
     let last_output = Rc::new(RefCell::new(HashMap::<i64, Instant>::new()));
-    let last_screen = Rc::new(RefCell::new(HashMap::<i64, String>::new()));
-    let trust_answered = Rc::new(RefCell::new(HashSet::<i64>::new()));
-    let last_size = Rc::new(RefCell::new(None::<(u16, u16)>));
-    let reconcile_tick = Rc::new(RefCell::new(0_u32));
     let refresh_chat_surface_for_view = refresh_chat_surface.clone();
 
     let refresh_view = {
@@ -461,19 +452,40 @@ pub fn agent_session_panel(
         let app_state_for_thread_select = app_state.clone();
         let codex_startup_states = codex_startup_states.clone();
         let archcar_ready_cache = archcar_ready_cache.clone();
+        let pending_archcar_status = pending_archcar_status.clone();
+        let archcar_session_threads = archcar_session_threads.clone();
+        let inflight_archcar_actions = inflight_archcar_actions.clone();
+        let pending_commands = pending_commands.clone();
+        let pending_archcar_inputs = pending_archcar_inputs.clone();
+        let archcar_bridge = archcar_bridge.clone();
+        let bridge_error_state = bridge_error_state.clone();
+        let codex_ready = codex_ready.clone();
         let update_composer_for_view = update_composer_state.clone();
         let external_chat_tabs = external_chat_tabs.clone();
         let context_usage = context_usage.clone();
         Rc::new(move || {
             debug!(workspace = %workspace, "chat refresh_view start");
-            let (loaded, loaded_threads) = WorkspaceStore::open(database_path.clone())
-                .map(|store| {
-                    (
-                        store.list_sessions(&workspace).unwrap_or_default(),
-                        store.list_chat_threads(&workspace).unwrap_or_default(),
-                    )
-                })
-                .unwrap_or_default();
+            let (loaded, loaded_threads) = match WorkspaceStore::open(database_path.clone())
+                .and_then(|store| {
+                    let sessions = store.list_sessions(&workspace)?;
+                    let threads = store.list_chat_threads(&workspace)?;
+                    Ok((sessions, threads))
+                }) {
+                Ok(loaded) => loaded,
+                Err(err) => {
+                    error!(workspace = %workspace, error = %err, "chat refresh_view failed to load workspace state");
+                    clear_box(&thread_row);
+                    clear_box(&messages);
+                    apply_context_usage_state(&context_usage, None);
+                    let label =
+                        Label::new(Some(&session_refresh_error_text("load sessions", &err)));
+                    label.add_css_class("chat-agent-text");
+                    label.set_wrap(true);
+                    label.set_xalign(0.0);
+                    append_chat_refresh_row(&messages, &label);
+                    return;
+                }
+            };
             {
                 let mut current = record_state.borrow_mut();
                 current.clear();
@@ -492,6 +504,73 @@ pub fn agent_session_panel(
             );
 
             let current_kind = *selected_harness.borrow();
+            let selected_thread_id = *selected_thread.borrow();
+            let mut archcar_changed = false;
+            while let Some(message) = archcar_bridge.try_recv() {
+                match message {
+                    AsyncArchcarMessage::Event(event) => {
+                        handle_archcar_event(
+                            &event,
+                            &record_state.borrow(),
+                            archcar_ready_cache.as_ref(),
+                            codex_startup_states.as_ref(),
+                            archcar_session_threads.as_ref(),
+                            current_kind,
+                            selected_thread_id,
+                            codex_ready.as_ref(),
+                            update_composer_for_view.as_ref(),
+                        );
+                        archcar_changed = true;
+                    }
+                    AsyncArchcarMessage::Response(response) => {
+                        archcar_changed |= handle_archcar_response(
+                            response,
+                            &database_path,
+                            &workspace,
+                            archcar_bridge.clone(),
+                            &record_state.borrow(),
+                            archcar_ready_cache.as_ref(),
+                            pending_archcar_status.as_ref(),
+                            inflight_archcar_actions.as_ref(),
+                            pending_commands.as_ref(),
+                            pending_archcar_inputs.as_ref(),
+                            codex_startup_states.as_ref(),
+                            archcar_session_threads.as_ref(),
+                            codex_ready.as_ref(),
+                            update_composer_for_view.as_ref(),
+                            &app_state,
+                        );
+                    }
+                    AsyncArchcarMessage::BridgeError { message } => {
+                        if let Some(visible_message) =
+                            bridge_error_state.borrow_mut().record(&message)
+                        {
+                            warn!(workspace = %workspace, error = %visible_message, "archcar bridge error");
+                            if current_kind == SessionKind::Codex {
+                                if let Some(thread_id) = selected_thread_id {
+                                    apply_codex_startup_signal(
+                                        &mut codex_startup_states.borrow_mut(),
+                                        CodexStartupSignal::Error {
+                                            thread_id,
+                                            message: visible_message,
+                                        },
+                                    );
+                                    set_codex_ready_state(
+                                        codex_ready.as_ref(),
+                                        update_composer_for_view.as_ref(),
+                                        false,
+                                    );
+                                    archcar_changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if archcar_changed {
+                update_composer_for_view();
+            }
+
             let preferred_thread = *selected_thread.borrow();
             let active_thread = {
                 let current = thread_state.borrow();
@@ -620,7 +699,7 @@ pub fn agent_session_panel(
                     let runtime_summary = record.as_ref().map(|record| {
                         let attached_sessions = active_sessions
                             .borrow()
-                            .keys()
+                            .iter()
                             .copied()
                             .collect::<HashSet<_>>();
                         let attached = attached_sessions.contains(&record.id);
@@ -647,15 +726,28 @@ pub fn agent_session_panel(
 
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
-                            let (thread_messages, thread_events) =
-                                WorkspaceStore::open(database_path.clone())
-                                    .map(|store| {
-                                        (
-                                            store.list_chat_messages(thread_id).unwrap_or_default(),
-                                            store.list_chat_events(thread_id).unwrap_or_default(),
-                                        )
-                                    })
-                                    .unwrap_or_default();
+                            let (thread_messages, thread_events) = match WorkspaceStore::open(
+                                database_path.clone(),
+                            )
+                            .and_then(|store| {
+                                let messages = store.list_chat_messages(thread_id)?;
+                                let events = store.list_chat_events(thread_id)?;
+                                Ok((messages, events))
+                            }) {
+                                Ok(timeline) => timeline,
+                                Err(err) => {
+                                    error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
+                                    let label = Label::new(Some(&session_refresh_error_text(
+                                        "load chat timeline",
+                                        &err,
+                                    )));
+                                    label.add_css_class("chat-agent-text");
+                                    label.set_wrap(true);
+                                    label.set_xalign(0.0);
+                                    append_chat_refresh_row(&messages, &label);
+                                    return;
+                                }
+                            };
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(&thread_events);
                             let timeline = merge_chat_timeline_for_render(
@@ -729,325 +821,20 @@ pub fn agent_session_panel(
     let refresh_session_surface = refresh_view.clone();
     refresh_session_surface();
 
-    let db_for_refresh = database_path.clone();
-    let workspace_for_refresh = _workspace_name.to_owned();
-    let active_sessions_for_refresh = active_sessions.clone();
-    let selected_session_for_refresh = selected_session.clone();
-    let record_state_for_poll = record_state.clone();
-    let last_output_for_refresh = last_output.clone();
-    let last_screen_for_refresh = last_screen.clone();
-    let trust_answered_for_refresh = trust_answered.clone();
-    let pending_session_inputs_for_refresh = pending_session_inputs.clone();
-    let pending_archcar_inputs_for_refresh = pending_archcar_inputs.clone();
-    let last_size_for_refresh = last_size.clone();
-    let reconcile_tick_for_refresh = reconcile_tick.clone();
-    let refresh_view_for_poll = refresh_view.clone();
-    let refresh_for_poll = refresh.clone();
-    let messages_for_resize = messages.clone();
-    let codex_ready_for_poll = codex_ready.clone();
-    let update_composer_for_poll = update_composer_state.clone();
-    let archcar_bridge_for_poll = archcar_bridge.clone();
-    let archcar_ready_cache_for_poll = archcar_ready_cache.clone();
-    let inflight_archcar_actions_for_poll = inflight_archcar_actions.clone();
-    let pending_archcar_status_for_poll = pending_archcar_status.clone();
-    let pending_commands_for_poll = pending_commands.clone();
-    let app_state_for_poll = app_state.clone();
-    let codex_startup_states_for_poll = codex_startup_states.clone();
-    let codex_session_threads_for_poll = codex_session_threads.clone();
-    let selected_harness_for_poll = selected_harness.clone();
-    let selected_thread_for_poll = selected_thread.clone();
-    glib::timeout_add_local(Duration::from_millis(SESSION_POLL_INTERVAL_MS), move || {
-        if messages_for_resize.root().is_none() {
-            info!(workspace = %workspace_for_refresh, "session surface poll stopped after widget detach");
-            return glib::ControlFlow::Break;
-        }
-        let size = session_size_from_widget(
-            messages_for_resize.allocated_width(),
-            messages_for_resize.allocated_height(),
-        );
-        let should_resize = match *last_size_for_refresh.borrow() {
-            Some(previous) => previous != size,
-            None => true,
-        };
-        *last_size_for_refresh.borrow_mut() = Some(size);
-
-        let mut ended = Vec::<i64>::new();
-        let mut should_refresh_view = false;
-        let mut should_refresh_outer = false;
-        while let Some(message) = archcar_bridge_for_poll.try_recv() {
-            let (refresh_view_after_message, refresh_outer_after_message) =
-                archcar_message_refresh_scope(&message);
-            match message {
-                AsyncArchcarMessage::Event(event) => {
-                    handle_archcar_event(
-                        &event,
-                        &record_state_for_poll.borrow(),
-                        archcar_ready_cache_for_poll.as_ref(),
-                        codex_startup_states_for_poll.as_ref(),
-                        codex_session_threads_for_poll.as_ref(),
-                        *selected_harness_for_poll.borrow(),
-                        *selected_thread_for_poll.borrow(),
-                        codex_ready_for_poll.as_ref(),
-                        update_composer_for_poll.as_ref(),
-                    );
-                }
-                AsyncArchcarMessage::Response(response) => {
-                    should_refresh_view |= handle_archcar_response(
-                        response,
-                        &db_for_refresh,
-                        &workspace_for_refresh,
-                        archcar_bridge_for_poll.clone(),
-                        &record_state_for_poll.borrow(),
-                        archcar_ready_cache_for_poll.as_ref(),
-                        pending_archcar_status_for_poll.as_ref(),
-                        inflight_archcar_actions_for_poll.as_ref(),
-                        pending_commands_for_poll.as_ref(),
-                        pending_archcar_inputs_for_refresh.as_ref(),
-                        codex_startup_states_for_poll.as_ref(),
-                        codex_session_threads_for_poll.as_ref(),
-                        codex_ready_for_poll.as_ref(),
-                        update_composer_for_poll.as_ref(),
-                        &app_state_for_poll,
-                    );
-                }
-                AsyncArchcarMessage::BridgeError { message } => {
-                    warn!(%message, "async archcar bridge error");
-                }
-            }
-            should_refresh_view |= refresh_view_after_message;
-            should_refresh_outer |= refresh_outer_after_message;
-        }
-        if flush_pending_archcar_inputs(
-            &archcar_bridge_for_poll,
-            &db_for_refresh,
-            pending_commands_for_poll.as_ref(),
-            pending_archcar_inputs_for_refresh.as_ref(),
-            archcar_ready_cache_for_poll.as_ref(),
-            inflight_archcar_actions_for_poll.as_ref(),
-            &app_state_for_poll,
-        ) {
-            should_refresh_view = true;
-            should_refresh_outer = true;
-        }
-        request_codex_status_probes(
-            &archcar_bridge_for_poll,
-            &record_state_for_poll.borrow(),
-            pending_archcar_status_for_poll.as_ref(),
-            inflight_archcar_actions_for_poll.as_ref(),
-        );
-        if let Some(process_id) = any_running_archcar_codex_ready(
-            &record_state_for_poll.borrow(),
-            archcar_ready_cache_for_poll.as_ref(),
-        ) {
-            if !*codex_ready_for_poll.borrow() {
-                info!(
-                    process_id,
-                    "reconciled codex ready state from archcar session status"
-                );
-                set_codex_ready_state(
-                    codex_ready_for_poll.as_ref(),
-                    update_composer_for_poll.as_ref(),
-                    true,
-                );
-                should_refresh_view = true;
-                should_refresh_outer = true;
-            }
-        }
-        {
-            let mut sessions = active_sessions_for_refresh.borrow_mut();
-            for (process_id, session) in sessions.iter_mut() {
-                let output = session.read_available();
-                if !output.is_empty() {
-                    trace!(process_id, bytes = output.len(), "session chunk received");
-                    let is_codex =
-                        is_codex_session_record(&record_state_for_poll.borrow(), *process_id);
-                    let _ = WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
-                        if is_codex {
-                            store.append_session_process_output(
-                                *process_id,
-                                &format_codex_raw_output(&output),
-                            )
-                        } else {
-                            store.append_session_process_output(*process_id, &output)
-                        }
-                    });
-                    let is_selected = *selected_session_for_refresh.borrow() == Some(*process_id);
-                    if is_selected {
-                        should_refresh_view = true;
-                    }
-                    last_output_for_refresh
-                        .borrow_mut()
-                        .insert(*process_id, Instant::now());
-                }
-
-                if is_codex_session_record(&record_state_for_poll.borrow(), *process_id) {
-                    if let Some(screen) = session.visible_screen_text() {
-                        let changed = last_screen_for_refresh
-                            .borrow()
-                            .get(process_id)
-                            .map(|previous| previous != &screen)
-                            .unwrap_or(!screen.is_empty());
-                        if !screen.is_empty() && changed {
-                            let answered = trust_answered_for_refresh.borrow().contains(process_id);
-                            if !answered
-                                && detect_directory_trust_prompt(&screen)
-                                && session.send_line("1").is_ok()
-                            {
-                                trust_answered_for_refresh.borrow_mut().insert(*process_id);
-                            }
-                            let _ =
-                                WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
-                                    store.append_session_process_output(
-                                        *process_id,
-                                        &format_codex_screen_snapshot(&screen),
-                                    )
-                                });
-                            log_codex_screen_snapshot("chat-poll", *process_id, &screen);
-                            if codex_screen_ready_for_input(&screen) {
-                                if !*codex_ready_for_poll.borrow() {
-                                    *codex_ready_for_poll.borrow_mut() = true;
-                                    update_composer_for_poll();
-                                }
-                                if let Some(thread_id) = codex_thread_id_for_session(
-                                    *process_id,
-                                    codex_session_threads_for_poll.as_ref(),
-                                    &record_state_for_poll.borrow(),
-                                ) {
-                                    apply_codex_startup_signal(
-                                        &mut codex_startup_states_for_poll.borrow_mut(),
-                                        CodexStartupSignal::Ready { thread_id },
-                                    );
-                                }
-                                flush_deferred_session_inputs(
-                                    pending_session_inputs_for_refresh.as_ref(),
-                                    &db_for_refresh,
-                                    &workspace_for_refresh,
-                                    *process_id,
-                                    session,
-                                );
-                            }
-                            last_screen_for_refresh
-                                .borrow_mut()
-                                .insert(*process_id, screen);
-                            let is_selected =
-                                *selected_session_for_refresh.borrow() == Some(*process_id);
-                            if is_selected {
-                                should_refresh_view = true;
-                            }
-                        }
-                    }
-                }
-
-                if should_resize {
-                    if let Err(err) = session.resize(size.0, size.1) {
-                        warn!(
-                            process_id,
-                            rows = size.0,
-                            cols = size.1,
-                            error = %err,
-                            "session resize failed"
-                        );
-                        let err_label =
-                            Label::new(Some(&format!("[session resize error] {err:#}")));
-                        err_label.add_css_class("chat-agent-text");
-                        err_label.set_wrap(true);
-                        err_label.set_xalign(0.0);
-                        append_revealed(&messages_for_resize, &err_label);
-                    }
-                }
-
-                match session.has_exited() {
-                    Ok(true) => ended.push(*process_id),
-                    Ok(false) => {}
-                    Err(err) => {
-                        warn!(process_id, error = %err, "session poll failed");
-                        let err_label = Label::new(Some(&format!("[session poll error] {err:#}")));
-                        err_label.add_css_class("chat-agent-text");
-                        err_label.set_wrap(true);
-                        err_label.set_xalign(0.0);
-                        append_revealed(&messages_for_resize, &err_label);
-                    }
-                }
-            }
-        }
-
-        for process_id in ended {
-            info!(process_id, "session exited");
-            active_sessions_for_refresh.borrow_mut().remove(&process_id);
-            let _ = WorkspaceStore::open(db_for_refresh.clone())
-                .and_then(|store| store.mark_session_process_exited(process_id, None));
-            codex_session_threads_for_poll
-                .borrow_mut()
-                .remove(&process_id);
-            last_output_for_refresh.borrow_mut().remove(&process_id);
-            last_screen_for_refresh.borrow_mut().remove(&process_id);
-            trust_answered_for_refresh.borrow_mut().remove(&process_id);
-            if active_sessions_for_refresh.borrow().is_empty() {
-                *codex_ready_for_poll.borrow_mut() = false;
-                update_composer_for_poll();
-            }
-            update_composer_for_poll();
-            should_refresh_view = true;
-            should_refresh_outer = true;
-        }
-
-        *reconcile_tick_for_refresh.borrow_mut() += 1;
-        if (*reconcile_tick_for_refresh.borrow()).is_multiple_of(SESSION_RECONCILE_EVERY_TICKS) {
-            if let Ok(reconciled) = WorkspaceStore::open(db_for_refresh.clone())
-                .and_then(|store| store.reconcile_session_processes())
-            {
-                if reconciled
-                    .iter()
-                    .any(|process| process.status != ProcessStatus::Running)
-                {
-                    for process in reconciled {
-                        active_sessions_for_refresh.borrow_mut().remove(&process.id);
-                        last_output_for_refresh.borrow_mut().remove(&process.id);
-                        last_screen_for_refresh.borrow_mut().remove(&process.id);
-                        trust_answered_for_refresh.borrow_mut().remove(&process.id);
-                    }
-                    update_composer_for_poll();
-                    should_refresh_view = true;
-                    should_refresh_outer = true;
-                }
-            }
-        }
-
-        if should_refresh_view {
-            debug!(
-                workspace = %workspace_for_refresh,
-                "chat poll entering refresh_view"
-            );
-            refresh_view_for_poll();
-            debug!(
-                workspace = %workspace_for_refresh,
-                "chat poll finished refresh_view"
-            );
-        }
-        if should_refresh_outer {
-            refresh_for_poll();
-        }
-        glib::ControlFlow::Continue
-    });
-
     let db_for_send = database_path.clone();
     let workspace_for_send = _workspace_name.to_owned();
     let selected_harness_for_send = selected_harness.clone();
-    let reasoning_mode_for_send = reasoning_mode.clone();
     let thread_state_for_send = thread_state.clone();
     let selected_thread_for_send = selected_thread.clone();
     let pending_commands_for_send = pending_commands.clone();
-    let pending_session_inputs_for_send = pending_session_inputs.clone();
     let pending_archcar_inputs_for_send = pending_archcar_inputs.clone();
     let active_sessions_for_send = active_sessions.clone();
     let selected_session_for_send = selected_session.clone();
     let record_state_for_send = record_state.clone();
-    let last_output_for_send = last_output.clone();
     let refresh_view_for_send = refresh_view.clone();
     let refresh_for_send = refresh.clone();
     let app_state_for_send = app_state.clone();
     let messages_for_send = messages.clone();
-    let messages_for_send_size = messages.clone();
     let archcar_bridge_for_send = archcar_bridge.clone();
     let archcar_ready_cache_for_send = archcar_ready_cache.clone();
     let inflight_archcar_actions_for_send = inflight_archcar_actions.clone();
@@ -1085,16 +872,6 @@ pub fn agent_session_panel(
                 );
             }
         }
-        let current_harness = SessionHarnessOptions {
-            plan_mode: false,
-            fast_mode: false,
-            approval_mode: None,
-            reasoning_mode: reasoning_mode_for_send.borrow().clone(),
-            effort_mode: None,
-            codex_personality: None,
-            codex_goals: None,
-            codex_skills: None,
-        };
         let thread_id = match resolve_or_create_thread_id_for_send(
             thread_state_for_send.as_ref(),
             selected_thread_for_send.as_ref(),
@@ -1284,440 +1061,73 @@ pub fn agent_session_panel(
             refresh_for_send();
             return;
         }
-        if let Some(record) = selected_record.as_ref() {
-            if record.status == ProcessStatus::Running
-                && session_kind_matches_record(record, selected_kind)
-                && !active_sessions_for_send.borrow().contains_key(&record.id)
-            {
-                if let Ok(session) = SessionConnection::try_reattach_running(record.pid) {
-                    info!(
-                        workspace = %workspace_for_send,
-                        process_id = record.id,
-                        pid = record.pid,
-                        harness = ?selected_kind,
-                        "reattached running session"
-                    );
-                    active_sessions_for_send
-                        .borrow_mut()
-                        .insert(record.id, session);
-                }
-            }
-        }
-        let live_session_id = current_live_session_id(
-            &thread_records,
-            *selected_session_for_send.borrow(),
-            selected_kind,
-            &active_sessions_for_send.borrow(),
-        );
-        debug!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            thread_id,
-            live_session_id,
-            "session send stage: resolved live session"
-        );
-        let launch_session = |harness: SessionHarnessOptions,
-                              resume_session_id: Option<String>|
-         -> Option<i64> {
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                resume_session_id,
-                "session send stage: building launch"
-            );
-            let launch = match WorkspaceStore::open(db_for_send.clone()).and_then(|store| {
-                if let Some(resume_session_id) = resume_session_id.as_deref() {
-                    store.session_launch_with_options_and_resume(
-                        &workspace_for_send,
-                        selected_kind,
-                        harness,
-                        Some(resume_session_id),
-                    )
-                } else {
-                    store.session_launch_with_options(&workspace_for_send, selected_kind, harness)
-                }
-            }) {
-                Ok(launch) => launch,
-                Err(err) => {
-                    error!(
-                        workspace = %workspace_for_send,
-                        harness = ?selected_kind,
-                        error = %err,
-                        "failed to build session launch"
-                    );
-                    let error = Label::new(Some(&format!("[session start] {err:#}")));
-                    error.add_css_class("chat-agent-text");
-                    error.set_wrap(true);
-                    error.set_xalign(0.0);
-                    append_revealed(&messages_for_send, &error);
-                    return None;
-                }
-            };
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                program = %launch.program.display(),
-                arg_count = launch.args.len(),
-                env_count = launch.env.len(),
-                "session send stage: launch built"
-            );
+        let running_record = thread_records
+            .iter()
+            .find(|record| {
+                record.status == ProcessStatus::Running
+                    && session_kind_matches_record(record, selected_kind)
+            })
+            .cloned();
 
-            if matches!(selected_kind, SessionKind::Codex) {
-                error!(
-                    workspace = %workspace_for_send,
-                    thread_id,
-                    "codex launch reached generic frontend pty path; refusing launch"
+        let Some(record) = running_record else {
+            let token =
+                archcar_bridge_for_send.spawn_session(workspace_for_send.clone(), selected_kind);
+            if let Some(token) = token {
+                inflight_archcar_actions_for_send.borrow_mut().insert(
+                    token,
+                    PendingArchcarAction::EnsureWorkspace {
+                        workspace: workspace_for_send.clone(),
+                        thread_id: Some(thread_id),
+                    },
                 );
-                let error = Label::new(Some(
-                    "[session start] Codex must be launched by archcar, not the GTK PTY path.",
-                ));
-                error.add_css_class("chat-agent-text");
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return None;
             }
-
-            let (rows, cols) = session_size_from_widget(
-                messages_for_send_size.allocated_width(),
-                messages_for_send_size.allocated_height(),
-            );
-
-            let mut pty = match PtySession::spawn(
-                launch.program.clone(),
-                launch.args.clone(),
-                &launch.cwd,
-                launch.env.clone(),
-                rows,
-                cols,
-            ) {
-                Ok(session) => session,
-                Err(err) => {
-                    error!(
-                        workspace = %workspace_for_send,
-                        harness = ?selected_kind,
-                        error = %err,
-                        "failed to spawn session pty"
-                    );
-                    let error = Label::new(Some(&format!(
-                        "[session start] {:?} launch failed: {err:#}",
-                        selected_kind
-                    )));
-                    error.add_css_class("chat-agent-text");
-                    error.set_wrap(true);
-                    error.set_xalign(0.0);
-                    append_revealed(&messages_for_send, &error);
-                    return None;
-                }
-            };
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                rows,
-                cols,
-                "session send stage: pty spawned"
-            );
-
-            let pid = match pty.process_id() {
-                Some(pid) => pid,
-                None => {
-                    error!(
-                        workspace = %workspace_for_send,
-                        harness = ?selected_kind,
-                        "session pty missing process id"
-                    );
-                    let _ = pty.stop();
-                    let error = Label::new(Some("[session start] failed to allocate process id."));
-                    error.add_css_class("chat-agent-text");
-                    error.set_wrap(true);
-                    error.set_xalign(0.0);
-                    append_revealed(&messages_for_send, &error);
-                    return None;
-                }
-            };
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                pid,
-                "session send stage: resolved child pid"
-            );
-
-            let session_record = match WorkspaceStore::open(db_for_send.clone()).and_then(|store| {
-                store.record_session_process_for_thread(
-                    &workspace_for_send,
-                    thread_id,
-                    &launch,
-                    pid,
-                )
-            }) {
-                Ok(record) => record,
-                Err(err) => {
-                    error!(
-                        workspace = %workspace_for_send,
-                        pid,
-                        harness = ?selected_kind,
-                        error = %err,
-                        "failed to record session process"
-                    );
-                    let _ = pty.stop();
-                    let error = Label::new(Some(&format!(
-                        "[session start] failed to record process: {err:#}"
-                    )));
-                    error.add_css_class("chat-agent-text");
-                    error.set_wrap(true);
-                    error.set_xalign(0.0);
-                    append_revealed(&messages_for_send, &error);
-                    return None;
-                }
-            };
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                process_id = session_record.id,
-                pid,
-                "session send stage: recorded session process"
-            );
-
-            active_sessions_for_send
-                .borrow_mut()
-                .insert(session_record.id, SessionConnection::Live(pty));
-            info!(
-                workspace = %workspace_for_send,
-                process_id = session_record.id,
-                pid,
-                harness = ?selected_kind,
-                resumed = resume_session_id.is_some(),
-                session_log_path = %session_record.log_path.display(),
-                "session launched"
-            );
-            last_output_for_send
-                .borrow_mut()
-                .insert(session_record.id, Instant::now());
-            *selected_session_for_send.borrow_mut() = Some(session_record.id);
-            app_state_for_send.set_selected_agent_session(Some(session_record.id));
-            Some(session_record.id)
-        };
-
-        let mut launched_new_session = false;
-        let process_id = if let Some(process_id) = live_session_id {
-            *selected_session_for_send.borrow_mut() = Some(process_id);
-            app_state_for_send.set_selected_agent_session(Some(process_id));
-            process_id
-        } else if let Some(record) = selected_record.as_ref() {
-            let record_kind = session_kind_matches_record(record, selected_kind);
-            if record_kind && record.status == ProcessStatus::Running {
-                let error = Label::new(Some(&format!(
-                    "[session send] Session #{} is running but not attached.",
-                    record.id
-                )));
-                error.add_css_class("chat-agent-text");
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return;
-            } else if record_kind && record.status != ProcessStatus::Running {
-                let mut harness = session_harness_options_from_record(record);
-                if harness.is_empty() {
-                    harness = current_harness.clone();
-                }
-                let resume_id = match selected_kind {
-                    SessionKind::Codex => thread.native_thread_id.clone(),
-                    SessionKind::Claude => record.session_resume_id.clone(),
-                    SessionKind::Shell => None,
-                };
-                if let Some(process_id) = launch_session(harness, resume_id) {
-                    launched_new_session = true;
-                    process_id
-                } else {
-                    return;
-                }
-            } else if let Some(process_id) = launch_session(current_harness.clone(), None) {
-                launched_new_session = true;
-                process_id
-            } else {
-                return;
-            }
-        } else if let Some(process_id) = launch_session(current_harness.clone(), None) {
-            launched_new_session = true;
-            process_id
-        } else {
-            return;
-        };
-        debug!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            thread_id,
-            process_id,
-            launched_new_session,
-            "session send stage: resolved destination process"
-        );
-
-        if launched_new_session && matches!(selected_kind, SessionKind::Codex) {
-            let deferred_inputs = {
-                let mut deferred =
-                    flush_pending_commands_for_send(&pending_commands_for_send, thread_id)
-                        .into_iter()
-                        .map(|command| DeferredSessionInput::Control { thread_id, command })
-                        .collect::<Vec<_>>();
-                deferred.push(DeferredSessionInput::User {
-                    thread_id,
-                    command: command.clone(),
-                    staged_review,
-                });
-                deferred
-            };
             if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
-                let _ = writer.append_chat_message(thread_id, "user", &command, "user_send");
+                let _ =
+                    writer.append_chat_message(thread_id, "user", &command, "queued_before_spawn");
             }
-            pending_session_inputs_for_send
-                .borrow_mut()
-                .entry(process_id)
-                .or_default()
-                .extend(deferred_inputs);
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                process_id,
-                "session send stage: queued deferred inputs until codex is ready"
-            );
-            if staged_review {
-                app_state_for_send.set_staged_review_prompt(None);
-            }
+            let queued = Label::new(Some(
+                "[session start] Runtime session requested through archcar. Send again once the session is ready.",
+            ));
+            queued.add_css_class("chat-agent-text");
+            queued.set_wrap(true);
+            queued.set_xalign(0.0);
+            append_revealed(&messages_for_send, &queued);
             refresh_view_for_send();
-            if launched_new_session {
-                refresh_for_send();
-            }
+            refresh_for_send();
             return;
-        }
-
-        {
-            let mut sessions = active_sessions_for_send.borrow_mut();
-            let Some(session) = sessions.get_mut(&process_id) else {
-                warn!(
-                    workspace = %workspace_for_send,
-                    process_id,
-                    harness = ?selected_kind,
-                    "session missing from active attachments"
-                );
-                let error = Label::new(Some(&format!(
-                    "[session send] Session #{process_id} is detached from this UI."
-                )));
-                error.add_css_class("chat-agent-text");
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return;
-            };
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                process_id,
-                "session send stage: acquired live session attachment"
-            );
-            for control in flush_pending_commands_for_send(&pending_commands_for_send, thread_id) {
-                if let Err(err) = session.send_line(&control) {
-                    error!(
-                        workspace = %workspace_for_send,
-                        process_id,
-                        harness = ?selected_kind,
-                        control = %control,
-                        error = %err,
-                        "failed to write pending control command"
-                    );
-                    let error = Label::new(Some(&format!(
-                        "[session control error for #{process_id}] {err:#}"
-                    )));
-                    error.add_css_class("chat-agent-text");
-                    error.set_wrap(true);
-                    error.set_xalign(0.0);
-                    append_revealed(&messages_for_send, &error);
-                    return;
-                }
-                if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
-                    let _ = writer.append_chat_message(
-                        thread_id,
-                        "system",
-                        &control,
-                        "control_command",
-                    );
-                }
-            }
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                process_id,
-                "session send stage: flushed pending commands"
-            );
-            if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
-                let _ = writer.append_chat_message(thread_id, "user", &command, "user_send");
-            }
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                process_id,
-                "session send stage: persisted user chat message"
-            );
-            if let Err(err) = session.send_line(&command) {
-                error!(
-                    workspace = %workspace_for_send,
-                    process_id,
-                    harness = ?selected_kind,
-                    error = %err,
-                    "failed to write command to session"
-                );
-                let error = Label::new(Some(&format!(
-                    "[session send error for #{process_id}] {err:#}"
-                )));
-                error.add_css_class("chat-agent-text");
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return;
-            }
-            debug!(
-                workspace = %workspace_for_send,
-                harness = ?selected_kind,
-                thread_id,
-                process_id,
-                "session send stage: wrote user command to session"
-            );
-        }
-
-        let log_text = if staged_review {
-            staged_review_prompt_text(&command)
-        } else {
-            session_input_log_text(&workspace_for_send, process_id, &command)
         };
-        if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
-            let _ = writer.append_session_process_output(process_id, &log_text);
+
+        let process_id = record.id;
+        *selected_session_for_send.borrow_mut() = Some(process_id);
+        app_state_for_send.set_selected_agent_session(Some(process_id));
+        active_sessions_for_send.borrow_mut().insert(process_id);
+
+        for control in flush_pending_commands_for_send(&pending_commands_for_send, thread_id) {
+            queue_archcar_control_send(
+                &archcar_bridge_for_send,
+                inflight_archcar_actions_for_send.as_ref(),
+                thread_id,
+                process_id,
+                control,
+            );
         }
-        debug!(
-            workspace = %workspace_for_send,
+        let input_kind = if staged_review {
+            ArchcarInputKind::ReviewPrompt
+        } else {
+            ArchcarInputKind::User
+        };
+        queue_archcar_user_send(
+            &archcar_bridge_for_send,
+            inflight_archcar_actions_for_send.as_ref(),
+            thread_id,
             process_id,
-            harness = ?selected_kind,
-            staged_review,
-            logged_bytes = log_text.len(),
-            "session input appended to transcript"
+            command.clone(),
+            input_kind,
         );
-        last_output_for_send
-            .borrow_mut()
-            .insert(process_id, Instant::now());
         if staged_review {
             app_state_for_send.set_staged_review_prompt(None);
         }
         refresh_view_for_send();
-        if launched_new_session {
-            refresh_for_send();
-        }
     });
 
     {
@@ -3226,11 +2636,11 @@ fn current_live_session_id(
     records: &[ProcessRecord],
     preferred: Option<i64>,
     kind: SessionKind,
-    active_sessions: &HashMap<i64, SessionConnection>,
+    active_sessions: &HashSet<i64>,
 ) -> Option<i64> {
     preferred
         .filter(|id| {
-            active_sessions.contains_key(id)
+            active_sessions.contains(id)
                 && records
                     .iter()
                     .any(|record| record.id == *id && session_kind_matches_record(record, kind))
@@ -3241,22 +2651,35 @@ fn current_live_session_id(
                 .find(|record| {
                     record.status == ProcessStatus::Running
                         && session_kind_matches_record(record, kind)
-                        && active_sessions.contains_key(&record.id)
+                        && active_sessions.contains(&record.id)
                 })
                 .map(|record| record.id)
         })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStopRoute {
+    Archcar,
+    Local,
+}
+
+fn session_stop_route(records: &[ProcessRecord], process_id: i64) -> Option<SessionStopRoute> {
+    let record = records.iter().find(|record| record.id == process_id)?;
+    if record.status == ProcessStatus::Running {
+        Some(SessionStopRoute::Archcar)
+    } else {
+        Some(SessionStopRoute::Local)
+    }
 }
 
 fn stop_active_chat_session(
     database_path: &Path,
     workspace_name: &str,
     process_id: i64,
-    active_sessions: &Rc<RefCell<HashMap<i64, SessionConnection>>>,
+    active_sessions: &Rc<RefCell<HashSet<i64>>>,
     last_output: &Rc<RefCell<HashMap<i64, Instant>>>,
 ) -> anyhow::Result<()> {
-    if let Some(mut session) = active_sessions.borrow_mut().remove(&process_id) {
-        session.stop()?;
-    }
+    active_sessions.borrow_mut().remove(&process_id);
     last_output.borrow_mut().remove(&process_id);
     WorkspaceStore::open(database_path)?
         .stop_session_process(workspace_name, process_id)
@@ -3266,7 +2689,7 @@ fn stop_active_chat_session(
 fn seed_chat_running_sessions(
     database_path: &Path,
     workspace_name: &str,
-    active_sessions: &Rc<RefCell<HashMap<i64, SessionConnection>>>,
+    active_sessions: &Rc<RefCell<HashSet<i64>>>,
     last_output: &Rc<RefCell<HashMap<i64, Instant>>>,
 ) {
     let Ok(store) = WorkspaceStore::open(database_path) else {
@@ -3278,16 +2701,11 @@ fn seed_chat_running_sessions(
 
     let mut sessions = active_sessions.borrow_mut();
     for record in records {
-        if record.status != ProcessStatus::Running || sessions.contains_key(&record.id) {
+        if record.status != ProcessStatus::Running || sessions.contains(&record.id) {
             continue;
         }
-        if session_kind_matches_record(&record, SessionKind::Codex) {
-            continue;
-        }
-        if let Ok(session) = SessionConnection::try_reattach_running(record.pid) {
-            sessions.insert(record.id, session);
-            last_output.borrow_mut().insert(record.id, Instant::now());
-        }
+        sessions.insert(record.id);
+        last_output.borrow_mut().insert(record.id, Instant::now());
     }
 }
 
@@ -3556,809 +2974,6 @@ fn executable_file_exists(path: &Path) -> bool {
     {
         meta.is_file()
     }
-}
-
-#[allow(dead_code)]
-fn agent_session_panel_impl(
-    database_path: PathBuf,
-    workspace_name: &str,
-    app_state: AppState,
-    refresh: impl Fn() + Clone + 'static,
-) -> GBox {
-    let root = GBox::new(Orientation::Vertical, 0);
-    root.add_css_class("agent-panel");
-    root.add_css_class("session-surface");
-
-    // ── Status labels ────────────────────────────────────────────
-    let provider_status = Label::new(Some("Loading provider and MCP status..."));
-    provider_status.add_css_class("card-meta");
-    provider_status.set_xalign(0.0);
-    provider_status.set_wrap(true);
-
-    let active_status = Label::new(Some("No active session."));
-    active_status.add_css_class("card-meta");
-    active_status.set_xalign(0.0);
-
-    // ── Config options (collapsed by default) ────────────────────
-    let harness_row = GBox::new(Orientation::Horizontal, 8);
-    let plan_mode = CheckButton::with_label("Plan mode");
-    let fast_mode = CheckButton::with_label("Fast mode");
-    let approval_mode = ComboBoxText::new();
-    approval_mode.append(Some("default"), "Approvals: default");
-    approval_mode.append(Some("ask"), "Approvals: ask");
-    approval_mode.append(Some("never"), "Approvals: never");
-    approval_mode.set_active(Some(0));
-    let reasoning_mode = ComboBoxText::new();
-    reasoning_mode.append(Some("default"), "Reasoning: default");
-    reasoning_mode.append(Some("low"), "Reasoning: low");
-    reasoning_mode.append(Some("medium"), "Reasoning: medium");
-    reasoning_mode.append(Some("high"), "Reasoning: high");
-    reasoning_mode.set_active(Some(0));
-    let effort_mode = ComboBoxText::new();
-    effort_mode.append(Some("default"), "Effort: default");
-    effort_mode.append(Some("low"), "Effort: low");
-    effort_mode.append(Some("medium"), "Effort: medium");
-    effort_mode.append(Some("high"), "Effort: high");
-    effort_mode.set_active(Some(0));
-    plan_mode.set_tooltip_text(Some("Plan mode applies to session startup."));
-    fast_mode.set_tooltip_text(Some("Fast mode applies to session startup."));
-    approval_mode.set_tooltip_text(Some("Tool approval preference for this session."));
-    reasoning_mode.set_tooltip_text(Some("Reasoning preference for this session."));
-    effort_mode.set_tooltip_text(Some("Effort preference for this session."));
-    harness_row.append(&plan_mode);
-    harness_row.append(&fast_mode);
-    harness_row.append(&approval_mode);
-    harness_row.append(&reasoning_mode);
-    harness_row.append(&effort_mode);
-
-    let codex_row = GBox::new(Orientation::Horizontal, 8);
-    let codex_personality = ComboBoxText::new();
-    codex_personality.append(Some("default"), "Personality: default");
-    codex_personality.append(Some("friendly"), "Personality: friendly");
-    codex_personality.append(Some("pragmatic"), "Personality: pragmatic");
-    codex_personality.append(Some("none"), "Personality: none");
-    codex_personality.set_active(Some(0));
-    let codex_goals = Entry::new();
-    codex_goals.set_placeholder_text(Some("Codex goals"));
-    let codex_skills = Entry::new();
-    codex_skills.set_placeholder_text(Some("Codex skills"));
-    codex_personality.set_tooltip_text(Some("Codex personality for session startup."));
-    codex_goals.set_tooltip_text(Some("Codex goals for this session."));
-    codex_skills.set_tooltip_text(Some("Codex skills for this session."));
-    codex_row.append(&codex_personality);
-    codex_row.append(&codex_goals);
-    codex_row.append(&codex_skills);
-
-    // ── Launch buttons ───────────────────────────────────────────
-    let mut agent_buttons: Vec<(Button, SessionKind)> = Vec::new();
-    for (label, kind) in [
-        ("Shell", SessionKind::Shell),
-        ("Codex", SessionKind::Codex),
-        ("Claude", SessionKind::Claude),
-    ] {
-        let button = text_button(label);
-        match kind {
-            SessionKind::Codex | SessionKind::Claude => button.add_css_class("suggested-action"),
-            SessionKind::Shell => button.add_css_class("flat-action"),
-        }
-        let tooltip = match kind {
-            SessionKind::Shell => "Open a PTY shell inside this workspace.",
-            SessionKind::Codex => "Open a PTY Codex session inside this workspace.",
-            SessionKind::Claude => "Open a PTY Claude session inside this workspace.",
-        };
-        button.set_tooltip_text(Some(tooltip));
-        agent_buttons.push((button, kind));
-    }
-
-    // ── Session selector + controls ──────────────────────────────
-    let sessions_combo = ComboBoxText::new();
-    sessions_combo.set_hexpand(true);
-    let refresh_btn = session_flat_button("Refresh");
-    let stop_btn = session_destructive_button("Stop session");
-    stop_btn.set_tooltip_text(Some("Stop the selected running session."));
-
-    // ── Transcript ───────────────────────────────────────────────
-    let transcript = TextView::new();
-    transcript.set_editable(false);
-    transcript.set_monospace(true);
-    transcript.add_css_class("history-view");
-    transcript.add_css_class("session-transcript");
-    transcript.set_vexpand(true);
-    let transcript_buffer = transcript.buffer();
-    let transcript_text = initial_session_text(&database_path, workspace_name);
-    transcript_buffer.set_text(&transcript_text);
-    let transcript_scroll = ScrolledWindow::new();
-    transcript_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    transcript_scroll.set_vexpand(true);
-    transcript_scroll.set_child(Some(&transcript));
-
-    // ── Input row ────────────────────────────────────────────────
-    let input_row = session_action_row();
-    let input = Entry::new();
-    input.set_placeholder_text(Some("Type session input..."));
-    input.set_hexpand(true);
-    let send_btn = text_button("Send");
-    send_btn.add_css_class("suggested-action");
-    send_btn.set_tooltip_text(Some("Send a line to the selected session."));
-    input_row.append(&input);
-    input_row.append(&send_btn);
-
-    // ── Staged review row ────────────────────────────────────────
-    let staged_review_row = session_action_row();
-    let staged_review_status = Label::new(Some("No staged review prompt."));
-    staged_review_status.add_css_class("card-meta");
-    staged_review_status.set_xalign(0.0);
-    staged_review_status.set_wrap(true);
-    staged_review_status.set_hexpand(true);
-    let send_review_btn = session_secondary_button("Send review prompt");
-    send_review_btn.set_tooltip_text(Some(
-        "Send the staged review prompt to the selected session.",
-    ));
-    staged_review_row.append(&staged_review_status);
-    staged_review_row.append(&send_review_btn);
-
-    // ── Checkpoint row ───────────────────────────────────────────
-    let checkpoint_row = session_action_row();
-    let checkpoint_message = Entry::new();
-    checkpoint_message.set_placeholder_text(Some("Checkpoint message (optional)"));
-    checkpoint_message.set_hexpand(true);
-    let checkpoint_btn = session_secondary_button("Create checkpoint");
-    checkpoint_btn.set_tooltip_text(Some(
-        "Create workspace checkpoint tied to selected session.",
-    ));
-    checkpoint_row.append(&checkpoint_message);
-    checkpoint_row.append(&checkpoint_btn);
-
-    // ── Layout: top bar → spawn bar → options → transcript → input ──
-
-    // Top bar: active session selector + stop + refresh
-    let top_bar = session_action_row();
-    top_bar.append(&sessions_combo);
-    top_bar.append(&refresh_btn);
-    top_bar.append(&stop_btn);
-
-    // Spawn bar: pick what to launch
-    let spawn_bar = session_action_row();
-    let spawn_label = Label::new(Some("New:"));
-    spawn_label.add_css_class("detail-label");
-    spawn_bar.append(&spawn_label);
-    for (button, _) in &agent_buttons {
-        spawn_bar.append(button);
-    }
-
-    // Options expander (collapsed by default): harness config + checkpoint
-    let options_inner = GBox::new(Orientation::Vertical, 6);
-    options_inner.set_margin_top(4);
-    options_inner.set_margin_bottom(4);
-    options_inner.append(&harness_row);
-    options_inner.append(&codex_row);
-    options_inner.append(&provider_status);
-    options_inner.append(&checkpoint_row);
-    let options_expander = gtk::Expander::new(Some("Session options"));
-    options_expander.set_child(Some(&options_inner));
-    options_expander.set_expanded(false);
-
-    root.append(&top_bar);
-    root.append(&spawn_bar);
-    root.append(&options_expander);
-    root.append(&active_status);
-    root.append(&transcript_scroll);
-    root.append(&staged_review_row);
-    root.append(&input_row);
-
-    let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
-    let selected_session: Rc<RefCell<Option<i64>>> =
-        Rc::new(RefCell::new(app_state.selected_agent_session()));
-    let active_sessions: Rc<RefCell<HashMap<i64, SessionConnection>>> =
-        Rc::new(RefCell::new(HashMap::new()));
-    let last_output = Rc::new(RefCell::new(HashMap::<i64, Instant>::new()));
-    let last_size = Rc::new(RefCell::new(None::<(u16, u16)>));
-    let reconcile_tick = Rc::new(RefCell::new(0_u32));
-
-    let refresh_view = {
-        let db_path = database_path.clone();
-        let workspace = workspace_name.to_owned();
-        let combo = sessions_combo.clone();
-        let selected = selected_session.clone();
-        let records = record_state.clone();
-        let status = active_status.clone();
-        let transcript_buffer = transcript_buffer.clone();
-        let provider_status = provider_status.clone();
-        let active_sessions = active_sessions.clone();
-        let last_output = last_output.clone();
-        let app_state = app_state.clone();
-        Rc::new(move || {
-            let loaded = WorkspaceStore::open(db_path.clone())
-                .and_then(|store| store.list_sessions(&workspace))
-                .unwrap_or_default();
-
-            {
-                let mut current = records.borrow_mut();
-                current.clear();
-                current.extend(loaded);
-            }
-
-            let preserved = *selected.borrow();
-            let attached_sessions = active_sessions
-                .borrow()
-                .keys()
-                .copied()
-                .collect::<HashSet<_>>();
-            let active_record = {
-                let current = records.borrow();
-                preserve_combo_selection(&combo, &current, preserved, &attached_sessions)
-            };
-            *selected.borrow_mut() = active_record;
-            app_state.set_selected_agent_session(active_record);
-
-            match active_record {
-                Some(process_id) => {
-                    let current = records.borrow();
-                    let Some(record) = current.iter().find(|record| record.id == process_id) else {
-                        status.set_text("No session selected.");
-                        transcript_buffer.set_text("No session selected.");
-                        return;
-                    };
-                    let attached = attached_sessions.contains(&process_id);
-                    let last_seen = last_output.borrow().get(&process_id).copied();
-                    let runtime_state = session_runtime_state(
-                        record,
-                        if record.status == ProcessStatus::Running {
-                            last_seen
-                        } else {
-                            None
-                        },
-                        attached,
-                    );
-                    let contents = fs::read_to_string(&record.log_path)
-                        .unwrap_or_else(|_| "[could not read selected session log]\n".to_string());
-                    transcript_buffer.set_text(&format_selected_session_surface(
-                        record,
-                        &contents,
-                        runtime_state,
-                        attached,
-                    ));
-                    status.set_text(&format!(
-                        "Selected #{}: {} (status={}, state={}, pid={}, started={}{})",
-                        process_id,
-                        session_kind_label(&record.command),
-                        record.status.as_str(),
-                        runtime_state,
-                        record.pid,
-                        record.started_at,
-                        session_harness_metadata_label(&record.session_harness_metadata),
-                    ));
-                }
-                None => {
-                    status.set_text("No session selected.");
-                    transcript_buffer
-                        .set_text("No local sessions yet. Start Shell/Codex/Claude above.");
-                }
-            }
-
-            if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
-                if let Ok(mcp_status) = store.mcp_status(&workspace) {
-                    provider_status.set_text(&provider_status_text(&mcp_status));
-                }
-            }
-            staged_review_status.set_text(&staged_review_status_text(
-                app_state.staged_review_prompt().as_deref(),
-            ));
-        }) as Rc<dyn Fn()>
-    };
-
-    refresh_view();
-    seed_running_sessions(
-        &database_path,
-        workspace_name,
-        &active_sessions,
-        &transcript_buffer,
-    );
-    refresh_view();
-
-    let db_for_refresh = database_path.clone();
-    let refresh_view_for_btn = refresh_view.clone();
-    let active_sessions_for_refresh = active_sessions.clone();
-    let transcript_buffer_for_refresh = transcript_buffer.clone();
-    let workspace_for_refresh = workspace_name.to_owned();
-    let refresh_after_refresh = refresh.clone();
-    refresh_btn.connect_clicked(move |_| {
-        let _ = WorkspaceStore::open(db_for_refresh.clone())
-            .and_then(|store| store.reconcile_session_processes())
-            .map(|_| ());
-        seed_running_sessions(
-            &db_for_refresh,
-            &workspace_for_refresh,
-            &active_sessions_for_refresh,
-            &transcript_buffer_for_refresh,
-        );
-        refresh_view_for_btn();
-        refresh_after_refresh();
-    });
-
-    let db_for_send = database_path.clone();
-    let workspace_for_send = workspace_name.to_owned();
-    let active_sessions_send = active_sessions.clone();
-    let selected_send = selected_session.clone();
-    let last_output_send = last_output.clone();
-    let transcript_buffer_send = transcript_buffer.clone();
-    let refresh_view_send = refresh_view.clone();
-    let app_state_for_send = app_state.clone();
-    let send_text = Rc::new({
-        move |text: String, staged_review: bool| {
-            let Some(process_id) = *selected_send.borrow() else {
-                append_text(
-                    &transcript_buffer_send,
-                    "[session send] No session selected; cannot send input.\n",
-                );
-                return;
-            };
-            let command = text.trim().to_owned();
-            if command.is_empty() {
-                return;
-            }
-            {
-                let mut sessions = active_sessions_send.borrow_mut();
-                let Some(session) = sessions.get_mut(&process_id) else {
-                    append_text(
-                        &transcript_buffer_send,
-                        &format!(
-                            "[session send] Session #{process_id} is detached from this UI.\n"
-                        ),
-                    );
-                    return;
-                };
-                if let Err(err) = session.send_line(&command) {
-                    append_text(
-                        &transcript_buffer_send,
-                        &format!("[session send error for #{process_id}] {err:#}\n"),
-                    );
-                    return;
-                }
-            }
-            let log_text = if staged_review {
-                staged_review_prompt_text(&command)
-            } else {
-                session_input_log_text(&workspace_for_send, process_id, &command)
-            };
-            if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
-                let _ = writer.append_session_process_output(process_id, &log_text);
-            }
-            last_output_send
-                .borrow_mut()
-                .insert(process_id, Instant::now());
-            append_text(
-                &transcript_buffer_send,
-                &live_session_append_text(&log_text),
-            );
-            if staged_review {
-                app_state_for_send.set_staged_review_prompt(None);
-            }
-            refresh_view_send();
-        }
-    });
-    send_btn.connect_clicked({
-        let send_text = send_text.clone();
-        let input = input.clone();
-        move |_| {
-            let command = input.text().to_string();
-            if command.trim().is_empty() {
-                return;
-            }
-            input.set_text("");
-            (send_text)(command, false);
-        }
-    });
-    input.connect_activate({
-        let send_text = send_text.clone();
-        let input = input.clone();
-        move |_| {
-            let command = input.text().to_string();
-            if command.trim().is_empty() {
-                return;
-            }
-            input.set_text("");
-            (send_text)(command, false);
-        }
-    });
-    send_review_btn.connect_clicked({
-        let send_text = send_text.clone();
-        let app_state = app_state.clone();
-        move |_| {
-            let Some(prompt) = app_state.staged_review_prompt() else {
-                return;
-            };
-            (send_text)(prompt, true);
-        }
-    });
-
-    let db_for_stop = database_path.clone();
-    let workspace_for_stop = workspace_name.to_owned();
-    let active_sessions_stop = active_sessions.clone();
-    let selected_session_stop = selected_session.clone();
-    let last_output_stop = last_output.clone();
-    let transcript_buffer_stop = transcript_buffer.clone();
-    let refresh_view_stop = refresh_view.clone();
-    let refresh_stop = refresh.clone();
-    stop_btn.connect_clicked(move |_| {
-        let Some(process_id) = *selected_session_stop.borrow() else {
-            append_text(
-                &transcript_buffer_stop,
-                "[session stop] No session selected.\n",
-            );
-            return;
-        };
-
-        if let Some(mut session) = active_sessions_stop.borrow_mut().remove(&process_id) {
-            if let Err(err) = session.stop() {
-                append_text(
-                    &transcript_buffer_stop,
-                    &format!("[session stop local #{process_id}] {err:#}\n"),
-                );
-            }
-        }
-
-        last_output_stop.borrow_mut().remove(&process_id);
-        let result = WorkspaceStore::open(db_for_stop.clone())
-            .and_then(|store| store.stop_session_process(&workspace_for_stop, process_id));
-        match result {
-            Ok(process) => append_text(
-                &transcript_buffer_stop,
-                &format!(
-                    "[session stop] #{process_id} status={} pid={}\n",
-                    process.status.as_str(),
-                    process.pid
-                ),
-            ),
-            Err(err) => append_text(
-                &transcript_buffer_stop,
-                &format!("[session stop #{process_id}] {err:#}\n"),
-            ),
-        }
-        refresh_view_stop();
-        refresh_stop();
-    });
-
-    let selected_checkpoint = selected_session.clone();
-    let db_for_checkpoint = database_path.clone();
-    let workspace_for_checkpoint = workspace_name.to_owned();
-    let transcript_buffer_checkpoint = transcript_buffer.clone();
-    let checkpoint_message_field = checkpoint_message.clone();
-    checkpoint_btn.connect_clicked(move |_| {
-        let Some(process_id) = *selected_checkpoint.borrow() else {
-            append_text(
-                &transcript_buffer_checkpoint,
-                "[session checkpoint] Select a session to attach checkpoint metadata.\n",
-            );
-            return;
-        };
-        let mut message = checkpoint_message_field.text().to_string();
-        if message.trim().is_empty() {
-            message = format!("Session {process_id} checkpoint");
-        }
-        match WorkspaceStore::open(db_for_checkpoint.clone()).and_then(|store| {
-            store.checkpoint_create(&workspace_for_checkpoint, &message, Some(process_id))
-        }) {
-            Ok(checkpoint) => append_text(
-                &transcript_buffer_checkpoint,
-                &format!(
-                    "[checkpoint] created #{}: {}\n",
-                    checkpoint.id, checkpoint.message
-                ),
-            ),
-            Err(err) => append_text(
-                &transcript_buffer_checkpoint,
-                &format!("[checkpoint error] {err:#}\n"),
-            ),
-        }
-    });
-
-    sessions_combo.connect_changed({
-        let selected_for_change = selected_session.clone();
-        let app_state = app_state.clone();
-        let refresh_view = refresh_view.clone();
-        move |combo| {
-            let selected = combo
-                .active_id()
-                .and_then(|value| value.as_str().parse::<i64>().ok());
-            *selected_for_change.borrow_mut() = selected;
-            app_state.set_selected_agent_session(selected);
-            refresh_view();
-        }
-    });
-
-    for (button, kind) in agent_buttons {
-        let db_path_for_launch = database_path.clone();
-        let workspace_for_launch = workspace_name.to_owned();
-        let active_sessions_for_launch = active_sessions.clone();
-        let refresh_view_for_launch = refresh_view.clone();
-        let last_output_for_launch = last_output.clone();
-        let transcript_for_launch = transcript.clone();
-        let buffer_for_launch = transcript_buffer.clone();
-        let refresh_for_launch = refresh.clone();
-        let selected_for_launch = selected_session.clone();
-        let app_state_for_launch = app_state.clone();
-        let plan_mode_for_launch = plan_mode.clone();
-        let fast_mode_for_launch = fast_mode.clone();
-        let approval_mode_for_launch = approval_mode.clone();
-        let reasoning_mode_for_launch = reasoning_mode.clone();
-        let effort_mode_for_launch = effort_mode.clone();
-        let codex_personality_for_launch = codex_personality.clone();
-        let codex_goals_for_launch = codex_goals.clone();
-        let codex_skills_for_launch = codex_skills.clone();
-        button.connect_clicked(move |_| {
-            let launch_options = collect_session_harness_options(
-                &plan_mode_for_launch,
-                &fast_mode_for_launch,
-                &approval_mode_for_launch,
-                &reasoning_mode_for_launch,
-                &effort_mode_for_launch,
-                &codex_personality_for_launch,
-                &codex_goals_for_launch,
-                &codex_skills_for_launch,
-            );
-            let launch = match WorkspaceStore::open(db_path_for_launch.clone()).and_then(|store| {
-                store.session_launch_with_options(&workspace_for_launch, kind, launch_options)
-            }) {
-                Ok(launch) => launch,
-                Err(err) => {
-                    append_text(&buffer_for_launch, &format!("[session start] {err:#}\n"));
-                    return;
-                }
-            };
-
-            let (rows, cols) = session_size_from_widget(
-                transcript_for_launch.allocated_width(),
-                transcript_for_launch.allocated_height(),
-            );
-
-            let mut pty = match PtySession::spawn(
-                launch.program.clone(),
-                launch.args.clone(),
-                &launch.cwd,
-                launch.env.clone(),
-                rows,
-                cols,
-            ) {
-                Ok(session) => session,
-                Err(err) => {
-                    append_text(
-                        &buffer_for_launch,
-                        &format!("[session start] {kind:?} launch failed: {err:#}\n"),
-                    );
-                    return;
-                }
-            };
-
-            if matches!(kind, SessionKind::Codex) {
-                if let Some(bootstrap) = launch.env_value("ARCHDUCTOR_SESSION_BOOTSTRAP") {
-                    if let Err(err) = pty.write(&(bootstrap.to_owned() + "\n")) {
-                        let _ = pty.stop();
-                        append_text(
-                            &buffer_for_launch,
-                            &format!("[session start] failed to send Codex bootstrap: {err:#}\n"),
-                        );
-                        return;
-                    }
-                }
-            }
-
-            let pid = match pty.process_id() {
-                Some(pid) => pid,
-                None => {
-                    let _ = pty.stop();
-                    append_text(
-                        &buffer_for_launch,
-                        "[session start] failed to allocate process id.\n",
-                    );
-                    return;
-                }
-            };
-
-            let session_record = match WorkspaceStore::open(db_path_for_launch.clone())
-                .and_then(|store| store.record_session_process(&workspace_for_launch, &launch, pid))
-            {
-                Ok(record) => record,
-                Err(err) => {
-                    let _ = pty.stop();
-                    append_text(
-                        &buffer_for_launch,
-                        &format!("[session start] failed to record process: {err:#}\n"),
-                    );
-                    return;
-                }
-            };
-
-            active_sessions_for_launch
-                .borrow_mut()
-                .insert(session_record.id, SessionConnection::Live(pty));
-            last_output_for_launch
-                .borrow_mut()
-                .insert(session_record.id, Instant::now());
-            info!(
-                workspace = %workspace_for_launch,
-                process_id = session_record.id,
-                pid,
-                harness = ?kind,
-                session_log_path = %session_record.log_path.display(),
-                "session launched from legacy session surface"
-            );
-            append_text(
-                &buffer_for_launch,
-                &format!(
-                    "[session started] #{} kind={} pid={}\n",
-                    session_record.id,
-                    session_kind_label(&session_record.command),
-                    pid
-                ),
-            );
-            *selected_for_launch.borrow_mut() = Some(session_record.id);
-            app_state_for_launch.set_selected_agent_session(Some(session_record.id));
-            refresh_view_for_launch();
-            refresh_for_launch();
-        });
-    }
-
-    let db_for_poll = database_path.clone();
-    let active_sessions_for_poll = active_sessions.clone();
-    let transcript_buffer_for_poll = transcript_buffer.clone();
-    let transcript_for_poll = transcript.clone();
-    let selected_for_poll = selected_session.clone();
-    let last_output_for_poll = last_output.clone();
-    let record_state_for_poll = record_state.clone();
-    let last_screen_for_poll = Rc::new(RefCell::new(HashMap::<i64, String>::new()));
-    let trust_answered_for_poll = Rc::new(RefCell::new(HashSet::<i64>::new()));
-    let last_size_for_poll = last_size.clone();
-    let reconcile_tick_for_poll = reconcile_tick.clone();
-    let refresh_view_for_poll = refresh_view.clone();
-    let refresh_for_poll = refresh.clone();
-    glib::timeout_add_local(Duration::from_millis(SESSION_POLL_INTERVAL_MS), move || {
-        let size = session_size_from_widget(
-            transcript_for_poll.allocated_width(),
-            transcript_for_poll.allocated_height(),
-        );
-        let should_resize = match *last_size_for_poll.borrow() {
-            Some(previous) => previous != size,
-            None => true,
-        };
-        *last_size_for_poll.borrow_mut() = Some(size);
-
-        let mut ended = Vec::<i64>::new();
-        let mut should_refresh_view = false;
-        let mut should_refresh_outer = false;
-        {
-            let mut sessions = active_sessions_for_poll.borrow_mut();
-            for (process_id, session) in sessions.iter_mut() {
-                let output = session.read_available();
-                if !output.is_empty() {
-                    let is_codex =
-                        is_codex_session_record(&record_state_for_poll.borrow(), *process_id);
-                    let _ = WorkspaceStore::open(db_for_poll.clone()).and_then(|store| {
-                        if is_codex {
-                            store.append_session_process_output(
-                                *process_id,
-                                &format_codex_raw_output(&output),
-                            )
-                        } else {
-                            store.append_session_process_output(*process_id, &output)
-                        }
-                    });
-                    let is_selected = *selected_for_poll.borrow() == Some(*process_id);
-                    if is_selected && !is_codex {
-                        append_text(
-                            &transcript_buffer_for_poll,
-                            &live_session_append_text(&output),
-                        );
-                    }
-                    last_output_for_poll
-                        .borrow_mut()
-                        .insert(*process_id, Instant::now());
-                    if is_selected {
-                        should_refresh_view = true;
-                    }
-                }
-
-                if is_codex_session_record(&record_state_for_poll.borrow(), *process_id) {
-                    if let Some(screen) = session.visible_screen_text() {
-                        let changed = last_screen_for_poll
-                            .borrow()
-                            .get(process_id)
-                            .map(|previous| previous != &screen)
-                            .unwrap_or(!screen.is_empty());
-                        if !screen.is_empty() && changed {
-                            let answered = trust_answered_for_poll.borrow().contains(process_id);
-                            if !answered
-                                && detect_directory_trust_prompt(&screen)
-                                && session.send_line("1").is_ok()
-                            {
-                                trust_answered_for_poll.borrow_mut().insert(*process_id);
-                            }
-                            let _ = WorkspaceStore::open(db_for_poll.clone()).and_then(|store| {
-                                store.append_session_process_output(
-                                    *process_id,
-                                    &format_codex_screen_snapshot(&screen),
-                                )
-                            });
-                            log_codex_screen_snapshot("legacy-poll", *process_id, &screen);
-                            last_screen_for_poll
-                                .borrow_mut()
-                                .insert(*process_id, screen);
-                            if *selected_for_poll.borrow() == Some(*process_id) {
-                                should_refresh_view = true;
-                            }
-                        }
-                    }
-                }
-
-                if should_resize {
-                    if let Err(err) = session.resize(size.0, size.1) {
-                        append_text(
-                            &transcript_buffer_for_poll,
-                            &format!("[session resize error] {err:#}\n"),
-                        );
-                    }
-                }
-
-                match session.has_exited() {
-                    Ok(true) => ended.push(*process_id),
-                    Ok(false) => {}
-                    Err(err) => append_text(
-                        &transcript_buffer_for_poll,
-                        &format!("[session poll error] {err:#}\n"),
-                    ),
-                }
-            }
-        }
-
-        for process_id in ended {
-            let was_active = *selected_for_poll.borrow() == Some(process_id);
-            active_sessions_for_poll.borrow_mut().remove(&process_id);
-            let _ = WorkspaceStore::open(db_for_poll.clone())
-                .and_then(|store| store.mark_session_process_exited(process_id, None));
-            last_output_for_poll.borrow_mut().remove(&process_id);
-            last_screen_for_poll.borrow_mut().remove(&process_id);
-            trust_answered_for_poll.borrow_mut().remove(&process_id);
-            if was_active {
-                append_text(
-                    &transcript_buffer_for_poll,
-                    &live_session_append_text(&format!("[session finished] #{process_id}\n")),
-                );
-            }
-            should_refresh_view = true;
-            should_refresh_outer = true;
-        }
-
-        *reconcile_tick_for_poll.borrow_mut() += 1;
-        if (*reconcile_tick_for_poll.borrow()).is_multiple_of(SESSION_RECONCILE_EVERY_TICKS) {
-            if let Ok(reconciled) = WorkspaceStore::open(db_for_poll.clone())
-                .and_then(|store| store.reconcile_session_processes())
-            {
-                if reconciled
-                    .iter()
-                    .any(|process| process.status != ProcessStatus::Running)
-                {
-                    for process in reconciled {
-                        active_sessions_for_poll.borrow_mut().remove(&process.id);
-                        last_output_for_poll.borrow_mut().remove(&process.id);
-                        last_screen_for_poll.borrow_mut().remove(&process.id);
-                        trust_answered_for_poll.borrow_mut().remove(&process.id);
-                    }
-                    should_refresh_view = true;
-                    should_refresh_outer = true;
-                }
-            }
-        }
-
-        if should_refresh_view {
-            refresh_view_for_poll();
-        }
-        if should_refresh_outer {
-            refresh_for_poll();
-        }
-        glib::ControlFlow::Continue
-    });
-
-    root
 }
 
 fn preserve_combo_selection(
@@ -5219,7 +3834,7 @@ fn raw_tool_target_looks_path_like(rest: &str) -> bool {
 fn seed_running_sessions(
     database_path: &Path,
     workspace_name: &str,
-    active_sessions: &Rc<RefCell<HashMap<i64, SessionConnection>>>,
+    active_sessions: &Rc<RefCell<HashSet<i64>>>,
     transcript_buffer: &TextBuffer,
 ) {
     let Ok(store) = WorkspaceStore::open(database_path) else {
@@ -5231,32 +3846,20 @@ fn seed_running_sessions(
     };
 
     let mut attached = 0usize;
-    let mut detached = 0usize;
     let mut sessions = active_sessions.borrow_mut();
     for record in records {
-        if record.status != ProcessStatus::Running || sessions.contains_key(&record.id) {
+        if record.status != ProcessStatus::Running || sessions.contains(&record.id) {
             continue;
         }
-        match SessionConnection::try_reattach_running(record.pid) {
-            Ok(session) => {
-                sessions.insert(record.id, session);
-                attached += 1;
-            }
-            Err(_) => detached += 1,
-        }
+        sessions.insert(record.id);
+        attached += 1;
     }
     drop(sessions);
 
     if attached > 0 {
         append_text(
             transcript_buffer,
-            &format!("[session resume] reattached {attached} running session(s).\n"),
-        );
-    }
-    if detached > 0 {
-        append_text(
-            transcript_buffer,
-            &format!("[session resume] {detached} running session(s) are visible but detached.\n"),
+            &format!("[session resume] restored {attached} runtime-managed session(s).\n"),
         );
     }
 }
@@ -5458,6 +4061,10 @@ fn staged_review_status_text(prompt: Option<&str>) -> String {
     }
 }
 
+fn session_refresh_error_text(operation: &str, err: &anyhow::Error) -> String {
+    format!("[session refresh] {operation} failed: {err:#}")
+}
+
 fn is_codex_session_record(records: &[ProcessRecord], process_id: i64) -> bool {
     records
         .iter()
@@ -5466,33 +4073,32 @@ fn is_codex_session_record(records: &[ProcessRecord], process_id: i64) -> bool {
         .unwrap_or(false)
 }
 
-fn format_codex_raw_output(raw: &str) -> String {
-    format!("[codex raw]\n{raw}\n[/codex raw]\n")
-}
-
-fn format_codex_screen_snapshot(screen: &str) -> String {
-    format!(
-        "[codex screen]\n{}\n[/codex screen]\n",
-        screen.trim_end_matches('\n')
-    )
-}
-
-enum DeferredSessionInput {
-    Control {
-        thread_id: i64,
-        command: String,
-    },
-    User {
-        thread_id: i64,
-        command: String,
-        staged_review: bool,
-    },
-}
-
 #[derive(Clone)]
 struct QueuedArchcarInput {
     input: String,
     kind: ArchcarInputKind,
+}
+
+#[derive(Default)]
+struct BridgeErrorUiState {
+    last_message: Option<String>,
+    suppressed_count: usize,
+}
+
+impl BridgeErrorUiState {
+    fn record(&mut self, message: &str) -> Option<String> {
+        if self.last_message.as_deref() == Some(message) {
+            self.suppressed_count += 1;
+            return None;
+        }
+        let visible = match self.suppressed_count {
+            0 => message.to_owned(),
+            count => format!("{message} ({count} repeated bridge errors suppressed)"),
+        };
+        self.last_message = Some(message.to_owned());
+        self.suppressed_count = 0;
+        Some(visible)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -5515,16 +4121,6 @@ enum PendingArchcarAction {
         input: String,
         kind: ArchcarInputKind,
     },
-}
-
-fn log_codex_screen_snapshot(source: &str, process_id: i64, screen: &str) {
-    debug!(
-        source,
-        process_id,
-        rendered_screen = %screen.trim_end_matches('\n'),
-        "codex rendered screen snapshot"
-    );
-    crate::logger::write_pty_screen_snapshot(source, process_id, screen);
 }
 
 fn any_running_archcar_codex_ready(
@@ -6140,16 +4736,6 @@ fn set_codex_ready_state(
     update_composer_state();
 }
 
-fn codex_screen_ready_for_input(screen: &str) -> bool {
-    let trimmed = screen.trim();
-    !trimmed.is_empty()
-        && trimmed.contains('›')
-        && !detect_directory_trust_prompt(screen)
-        && !screen.contains("Booting MCP server")
-        && !screen.contains("Starting MCP servers")
-        && !screen.contains("model:       loading")
-}
-
 fn composer_ready_for_input(has_live_codex_session: bool, codex_ready: bool) -> bool {
     !has_live_codex_session || codex_ready
 }
@@ -6172,70 +4758,6 @@ fn composer_ready_for_codex_thread(
             startup_states.borrow().get(&thread_id),
         ),
     )
-}
-
-fn flush_deferred_session_inputs(
-    pending_inputs: &RefCell<HashMap<i64, Vec<DeferredSessionInput>>>,
-    database_path: &Path,
-    workspace_name: &str,
-    process_id: i64,
-    session: &mut SessionConnection,
-) {
-    let queued = pending_inputs
-        .borrow_mut()
-        .remove(&process_id)
-        .unwrap_or_default();
-    if queued.is_empty() {
-        return;
-    }
-
-    let mut remaining = Vec::new();
-    for input in queued {
-        let send_result = match &input {
-            DeferredSessionInput::Control { command, .. }
-            | DeferredSessionInput::User { command, .. } => session.send_line(command),
-        };
-        if let Err(err) = send_result {
-            warn!(
-                process_id,
-                error = %err,
-                "failed to flush deferred session input"
-            );
-            remaining.push(input);
-            continue;
-        }
-
-        match input {
-            DeferredSessionInput::Control { thread_id, command } => {
-                if let Ok(writer) = WorkspaceStore::open(database_path) {
-                    let _ = writer.append_chat_message(
-                        thread_id,
-                        "system",
-                        &command,
-                        "control_command",
-                    );
-                }
-            }
-            DeferredSessionInput::User {
-                thread_id: _,
-                command,
-                staged_review,
-            } => {
-                let log_text = if staged_review {
-                    staged_review_prompt_text(&command)
-                } else {
-                    session_input_log_text(workspace_name, process_id, &command)
-                };
-                if let Ok(writer) = WorkspaceStore::open(database_path) {
-                    let _ = writer.append_session_process_output(process_id, &log_text);
-                }
-            }
-        }
-    }
-
-    if !remaining.is_empty() {
-        pending_inputs.borrow_mut().insert(process_id, remaining);
-    }
 }
 
 fn session_history_bootstrap_markdown(events: &[SessionTranscriptEvent]) -> Option<String> {
@@ -6276,142 +4798,6 @@ Do not answer this message. Use it only for continuity and wait for the next rea
         markdown.push_str("\n\n");
     }
     Some(markdown.trim_end().to_owned())
-}
-
-enum SessionConnection {
-    Live(PtySession),
-    Reattached {
-        write: std::fs::File,
-        output: Arc<Mutex<String>>,
-        read_cursor: usize,
-        pid: u32,
-    },
-}
-
-impl SessionConnection {
-    fn try_reattach_running(pid: u32) -> anyhow::Result<Self> {
-        let path = terminal_device_path_for_pid(pid)?;
-        let mut reader = OpenOptions::new().read(true).open(&path)?;
-        let write = OpenOptions::new().write(true).open(&path)?;
-        let output = Arc::new(Mutex::new(String::new()));
-        let reader_output = Arc::clone(&output);
-        std::thread::spawn(move || {
-            let mut buffer = [0u8; 4096];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Ok(mut output) = reader_output.lock() {
-                            output.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Ok(Self::Reattached {
-            write,
-            output,
-            read_cursor: 0,
-            pid,
-        })
-    }
-
-    fn write(&mut self, input: &str) -> anyhow::Result<()> {
-        match self {
-            Self::Live(session) => session.write(input),
-            Self::Reattached { write, .. } => {
-                write.write_all(input.as_bytes())?;
-                write.flush()?;
-                Ok(())
-            }
-        }
-    }
-
-    fn send_line(&mut self, input: &str) -> anyhow::Result<()> {
-        match self {
-            Self::Live(session) => session.send_line(input),
-            Self::Reattached { write, .. } => {
-                write.write_all(input.as_bytes())?;
-                write.flush()?;
-                std::thread::sleep(Duration::from_millis(20));
-                write.write_all(b"\r")?;
-                write.flush()?;
-                Ok(())
-            }
-        }
-    }
-
-    fn stop(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Live(session) => session.stop(),
-            Self::Reattached { .. } => Ok(()),
-        }
-    }
-
-    fn resize(&mut self, rows: u16, cols: u16) -> anyhow::Result<()> {
-        match self {
-            Self::Live(session) => session.resize(rows, cols),
-            Self::Reattached { .. } => Ok(()),
-        }
-    }
-
-    fn has_exited(&mut self) -> anyhow::Result<bool> {
-        match self {
-            Self::Live(session) => session.has_exited(),
-            Self::Reattached { pid, .. } => Ok(!terminal_process_alive(*pid)),
-        }
-    }
-
-    fn visible_screen_text(&self) -> Option<String> {
-        match self {
-            Self::Live(session) => Some(session.visible_screen_text()),
-            Self::Reattached { .. } => None,
-        }
-    }
-
-    fn read_available(&mut self) -> String {
-        match self {
-            Self::Live(session) => session.read_available(),
-            Self::Reattached {
-                output,
-                read_cursor,
-                ..
-            } => {
-                let Ok(output) = output.lock() else {
-                    return String::new();
-                };
-                let next = output.get(*read_cursor..).unwrap_or_default().to_owned();
-                *read_cursor = output.len();
-                next
-            }
-        }
-    }
-}
-
-fn terminal_process_alive(process_id: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(process_id.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn terminal_device_path_for_pid(process_id: u32) -> anyhow::Result<PathBuf> {
-    let fd = format!("/proc/{process_id}/fd/0");
-    let target = fs::read_link(&fd)?;
-    let path = target
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("terminal fd path is not valid UTF-8"))?
-        .to_owned();
-    anyhow::ensure!(
-        !path.is_empty() && path.starts_with("/dev/pts/"),
-        "process {process_id} is not attached to a PTY slave"
-    );
-    Ok(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -6548,16 +4934,7 @@ fix it
             session_record(1, "/opt/bin/codex", ProcessStatus::Running, None),
             session_record(2, "/opt/bin/codex", ProcessStatus::Exited, None),
         ];
-        let mut active_sessions = HashMap::new();
-        active_sessions.insert(
-            1,
-            SessionConnection::Reattached {
-                write: tempfile::tempfile().unwrap(),
-                output: Arc::new(Mutex::new(String::new())),
-                read_cursor: 0,
-                pid: 1234,
-            },
-        );
+        let mut active_sessions = HashSet::from([1]);
 
         assert_eq!(
             current_live_session_id(&records, Some(1), SessionKind::Codex, &active_sessions),
@@ -6572,6 +4949,76 @@ fix it
             current_live_session_id(&records, Some(1), SessionKind::Codex, &active_sessions),
             None
         );
+    }
+
+    #[test]
+    fn codex_sessions_are_not_spawned_by_gtk_session_surface() {
+        let source = include_str!("session_surface.rs");
+
+        let legacy_bootstrap = concat!(
+            "if matches!(kind, SessionKind::Codex) {\n",
+            "                if let Some(bootstrap)"
+        );
+        assert!(
+            !source.contains(legacy_bootstrap),
+            "legacy agent buttons must route Codex launch through archcar"
+        );
+        assert!(
+            source.contains("Codex launch requested through archcar"),
+            "legacy Codex launch button should route through archcar"
+        );
+    }
+
+    #[test]
+    fn codex_sessions_are_not_reattached_or_polled_by_gtk_session_surface() {
+        let source = include_str!("session_surface.rs");
+        let codex_record_poll = concat!(
+            "is_codex_session_record(&record_state_for_poll.borrow(), ",
+            "*process_id)"
+        );
+        let codex_screen_snapshot = concat!("format_codex_", "screen_snapshot");
+
+        assert!(
+            !source.contains(codex_record_poll),
+            "GTK poll loop must not parse Codex screens directly"
+        );
+        assert!(
+            !source.contains(codex_screen_snapshot),
+            "GTK chat surface must not persist Codex screen snapshots from a local PTY"
+        );
+    }
+
+    #[test]
+    fn running_codex_stop_routes_through_archcar() {
+        let records = vec![
+            session_record(1, "/opt/bin/codex", ProcessStatus::Running, None),
+            session_record(2, "/bin/bash", ProcessStatus::Running, None),
+        ];
+
+        assert_eq!(
+            session_stop_route(&records, 1),
+            Some(SessionStopRoute::Archcar)
+        );
+        assert_eq!(
+            session_stop_route(&records, 2),
+            Some(SessionStopRoute::Archcar)
+        );
+    }
+
+    #[test]
+    fn saved_codex_stop_stays_local_state_only() {
+        let records = vec![session_record(
+            1,
+            "/opt/bin/codex",
+            ProcessStatus::Exited,
+            None,
+        )];
+
+        assert_eq!(
+            session_stop_route(&records, 1),
+            Some(SessionStopRoute::Local)
+        );
+        assert_eq!(session_stop_route(&records, 99), None);
     }
 
     #[test]
@@ -7623,6 +6070,7 @@ I summarized the result.
             result: Ok(ArchcarResponse::SessionStatus {
                 session_id: 61,
                 status: "running".to_owned(),
+                runtime_state: AgentSessionState::WaitingForInput,
                 ready: true,
             }),
         };
@@ -7668,6 +6116,7 @@ I summarized the result.
                 result: Ok(ArchcarResponse::SessionStatus {
                     session_id: 61,
                     status: "running".to_owned(),
+                    runtime_state: AgentSessionState::WaitingForInput,
                     ready: true,
                 }),
             },
@@ -7711,6 +6160,7 @@ I summarized the result.
                 result: Ok(ArchcarResponse::SessionStatus {
                     session_id: 61,
                     status: "running".to_owned(),
+                    runtime_state: AgentSessionState::WaitingForInput,
                     ready: true,
                 }),
             }));
@@ -7727,6 +6177,86 @@ I summarized the result.
         assert_eq!(ready_scope, (true, false));
         assert_eq!(status_scope, (false, false));
         assert_eq!(started_scope, (true, true));
+    }
+
+    #[test]
+    fn bridge_error_notice_dedupes_repeated_subscribe_failures() {
+        let mut state = BridgeErrorUiState::default();
+
+        assert_eq!(
+            state.record("archcar subscribe failed: socket missing"),
+            Some("archcar subscribe failed: socket missing".to_owned())
+        );
+        assert_eq!(
+            state.record("archcar subscribe failed: socket missing"),
+            None
+        );
+        assert_eq!(
+            state.record("archcar subscribe failed: socket missing"),
+            None
+        );
+        assert_eq!(
+            state.record("archcar subscribe failed: permission denied"),
+            Some(
+                "archcar subscribe failed: permission denied (2 repeated bridge errors suppressed)"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn session_refresh_error_text_names_failed_operation() {
+        let err = anyhow::anyhow!("database is locked");
+
+        assert_eq!(
+            session_refresh_error_text("load sessions", &err),
+            "[session refresh] load sessions failed: database is locked"
+        );
+    }
+
+    #[test]
+    fn gtk_refresh_timers_are_documented_or_removed() {
+        let recurring_sources = [
+            ("main.rs", include_str!("main.rs")),
+            ("history.rs", include_str!("history.rs")),
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            ("session_surface.rs", include_str!("session_surface.rs")),
+            ("terminal.rs", include_str!("terminal.rs")),
+            (
+                "workspace_command_center.rs",
+                include_str!("workspace_command_center.rs"),
+            ),
+        ];
+
+        for (path, source) in recurring_sources {
+            for needle in [
+                concat!("timeout", "_add_local"),
+                concat!("timeout", "_add_seconds_local"),
+            ] {
+                let mut cursor = 0;
+                while let Some(found) = source[cursor..].find(needle) {
+                    let absolute = cursor + found;
+                    let context_start = absolute.saturating_sub(260);
+                    let context_end = (absolute + 260).min(source.len());
+                    let context = &source[context_start..context_end];
+                    assert!(
+                        context.contains("PER-190"),
+                        "{path} has recurring GTK timer `{needle}` without PER-190 ownership/removal note"
+                    );
+                    cursor = absolute + needle.len();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_hub_documents_page_owned_error_handling() {
+        let source = include_str!("refresh.rs");
+
+        assert!(
+            source.contains("page-owned error handling") && source.contains("PER-190"),
+            "RefreshHub must document that it is dumb fanout and pages own load errors"
+        );
     }
 
     #[test]
@@ -7878,32 +6408,77 @@ I summarized the result.
     }
 
     #[test]
-    fn codex_screen_ready_for_input_waits_for_boot_to_finish() {
-        let booting = "\
-╭────────────────────────────────────────────────────────╮
-│ >_ OpenAI Codex (v0.142.3)                             │
-╰────────────────────────────────────────────────────────╯
-
-• Booting MCP server: codex_apps (0s • esc to interrupt)
-
-› Implement {feature}
-";
-        let ready = "\
-╭────────────────────────────────────────────────────────╮
-│ >_ OpenAI Codex (v0.142.3)                             │
-╰────────────────────────────────────────────────────────╯
-
-› Implement {feature}
-";
-
-        assert!(!codex_screen_ready_for_input(booting));
-        assert!(codex_screen_ready_for_input(ready));
-    }
-
-    #[test]
     fn composer_stays_ready_when_no_live_codex_session_exists() {
         assert!(composer_ready_for_input(false, false));
         assert!(!composer_ready_for_input(true, false));
         assert!(composer_ready_for_input(true, true));
+    }
+
+    #[test]
+    fn gtk_sources_do_not_own_or_poll_ptys() {
+        let session_surface = include_str!("session_surface.rs");
+        let terminal = include_str!("terminal.rs");
+        let workspace_command_center = include_str!("workspace_command_center.rs");
+        let gtk_sources = [
+            ("session_surface.rs", session_surface),
+            ("terminal.rs", terminal),
+            ("workspace_command_center.rs", workspace_command_center),
+        ];
+        let pty_session = concat!("Pty", "Session");
+        let pty_spawn = concat!("Pty", "Session", "::", "spawn");
+        let proc_prefix = concat!("/", "proc", "/");
+        let fd_zero = concat!("fd", "/", "0");
+        let session_poll_timer = concat!(
+            "timeout",
+            "_add",
+            "_local(Duration::from_",
+            "millis(",
+            "SESSION",
+            "_POLL",
+            "_INTERVAL",
+            "_MS",
+            ")"
+        );
+        let run_console_live = concat!("WorkspaceRunConsoleTerminalConnection", "::", "Live");
+        let terminal_ownership_marker = concat!("active", "_", "ptys");
+        let run_console_timer = concat!(
+            "timeout",
+            "_add",
+            "_local(std::time::Duration::from_",
+            "millis(100), ",
+            "move ||"
+        );
+
+        for (path, source) in gtk_sources {
+            assert!(
+                !source.contains(pty_session),
+                "{path} must not import, store, or wrap GTK PTY sessions"
+            );
+            assert!(
+                !source.contains(pty_spawn),
+                "{path} must not spawn PTYs directly"
+            );
+            assert!(
+                !source.contains(proc_prefix) && !source.contains(fd_zero),
+                "{path} must not reattach PTYs through process fd paths"
+            );
+        }
+
+        assert!(
+            !session_surface.contains(session_poll_timer),
+            "session/chat PTY poll loop must be removed from GTK"
+        );
+        assert!(
+            !terminal.contains(terminal_ownership_marker),
+            "shell terminal PTY ownership must be removed from GTK"
+        );
+        assert!(
+            !workspace_command_center.contains(run_console_live),
+            "run-console PTY ownership must be removed from GTK"
+        );
+        assert!(
+            !workspace_command_center.contains(run_console_timer),
+            "run-console PTY poll loop must be removed from GTK"
+        );
     }
 }

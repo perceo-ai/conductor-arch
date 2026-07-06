@@ -483,6 +483,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
 
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
+    let runtime_error_reporter = Rc::new(RefCell::new(RuntimeErrorReporter::default()));
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building dashboard"
@@ -694,10 +695,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: window presented"
     );
 
-    if reconcile_runtime_state(&app_state.workspace_database_path())
-        .map(|report| report.changed())
-        .unwrap_or(false)
-    {
+    if reconcile_runtime_state_for_ui(
+        &app_state.workspace_database_path(),
+        &runtime_error_reporter,
+        &toast_manager,
+        "startup",
+    ) {
         refresh_hub.refresh(RefreshScope::All);
     }
 
@@ -705,11 +708,18 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let (tx, rx) = mpsc::channel();
         let hub_spotlight_events = refresh_hub.clone();
         let db_path_spotlight_events = app_state.workspace_database_path();
+        let runtime_reporter_spotlight_events = runtime_error_reporter.clone();
+        let toast_spotlight_events = toast_manager.clone();
+        // PER-190: Spotlight file events arrive on a notify thread via std::mpsc;
+        // remove this timer when a GLib main-context channel replaces that bridge.
         glib::timeout_add_seconds_local(1, move || {
             if rx.try_iter().next().is_some()
-                && reconcile_runtime_state(&db_path_spotlight_events)
-                    .map(|report| report.changed())
-                    .unwrap_or(false)
+                && reconcile_runtime_state_for_ui(
+                    &db_path_spotlight_events,
+                    &runtime_reporter_spotlight_events,
+                    &toast_spotlight_events,
+                    "spotlight event",
+                )
             {
                 hub_spotlight_events.refresh(RefreshScope::All);
             }
@@ -719,22 +729,33 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     };
 
     let spotlight_watcher = Rc::new(RefCell::new(None));
-    let _ = refresh_spotlight_file_watcher(
+    if let Err(err) = refresh_spotlight_file_watcher(
         &app_state.workspace_database_path(),
         &spotlight_event_tx,
         &spotlight_watcher,
-    );
+    ) {
+        report_runtime_error(
+            &runtime_error_reporter,
+            &toast_manager,
+            "spotlight watcher",
+            err,
+        );
+    }
 
     {
         let db_path_on_close = app_state.workspace_database_path();
         let hub_on_close = refresh_hub.clone();
         let spotlight_watcher_on_close = spotlight_watcher.clone();
+        let runtime_reporter_on_close = runtime_error_reporter.clone();
+        let toast_on_close = toast_manager.clone();
         window.connect_destroy(move |_| {
             *spotlight_watcher_on_close.borrow_mut() = None;
-            if reconcile_runtime_state(&db_path_on_close)
-                .map(|report| report.changed())
-                .unwrap_or(false)
-            {
+            if reconcile_runtime_state_for_ui(
+                &db_path_on_close,
+                &runtime_reporter_on_close,
+                &toast_on_close,
+                "close",
+            ) {
                 hub_on_close.refresh(RefreshScope::All);
             }
         });
@@ -743,14 +764,18 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_on_focus = app_state.workspace_database_path();
         let hub_on_focus = refresh_hub.clone();
+        let runtime_reporter_on_focus = runtime_error_reporter.clone();
+        let toast_on_focus = toast_manager.clone();
         window.connect_is_active_notify(move |window| {
             if !window.is_active() {
                 return;
             }
-            if reconcile_runtime_state(&db_path_on_focus)
-                .map(|report| report.changed())
-                .unwrap_or(false)
-            {
+            if reconcile_runtime_state_for_ui(
+                &db_path_on_focus,
+                &runtime_reporter_on_focus,
+                &toast_on_focus,
+                "focus",
+            ) {
                 hub_on_focus.refresh(RefreshScope::All);
             }
         });
@@ -828,6 +853,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let state_notif = app_state.clone();
         let toast_notif = toast_manager.clone();
         let prev_notif = notification_prev.clone();
+        // PER-190: Notification rules intentionally sample persisted workspace
+        // status every five seconds; remove when process-exit events drive rules.
         glib::timeout_add_seconds_local(5, move || {
             let Some(workspace) = state_notif.selected_workspace() else {
                 *prev_notif.borrow_mut() = None;
@@ -876,18 +903,31 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let hub_runtime_auto = refresh_hub.clone();
     let spotlight_watcher_auto = spotlight_watcher.clone();
     let spotlight_event_tx_auto = spotlight_event_tx.clone();
+    let runtime_reporter_auto = runtime_error_reporter.clone();
+    let toast_auto = toast_manager.clone();
+    // PER-190: This is the fallback runtime reconciler for missed focus/file
+    // events; remove when all runtime producers emit reliable RefreshHub events.
     glib::timeout_add_seconds_local(5, move || {
-        if reconcile_runtime_state(&db_path_runtime_auto)
-            .map(|report| report.changed())
-            .unwrap_or(false)
-        {
+        if reconcile_runtime_state_for_ui(
+            &db_path_runtime_auto,
+            &runtime_reporter_auto,
+            &toast_auto,
+            "timer",
+        ) {
             hub_runtime_auto.refresh(RefreshScope::All);
         }
-        let _ = refresh_spotlight_file_watcher(
+        if let Err(err) = refresh_spotlight_file_watcher(
             &db_path_runtime_auto,
             &spotlight_event_tx_auto,
             &spotlight_watcher_auto,
-        );
+        ) {
+            report_runtime_error(
+                &runtime_reporter_auto,
+                &toast_auto,
+                "spotlight watcher",
+                err,
+            );
+        }
         glib::ControlFlow::Continue
     });
 }
@@ -1045,6 +1085,58 @@ struct RuntimeReconciliationReport {
 impl RuntimeReconciliationReport {
     fn changed(self) -> bool {
         self.spotlight_sessions_synced > 0 || self.terminal_processes_reconciled > 0
+    }
+}
+
+#[derive(Default)]
+struct RuntimeErrorReporter {
+    last_key: Option<String>,
+    suppressed_count: usize,
+}
+
+impl RuntimeErrorReporter {
+    fn record(&mut self, trigger: &str, message: &str) -> Option<String> {
+        let key = format!("{trigger}\n{message}");
+        if self.last_key.as_deref() == Some(key.as_str()) {
+            self.suppressed_count += 1;
+            return None;
+        }
+        let visible = match self.suppressed_count {
+            0 => format!("{trigger} runtime refresh failed: {message}"),
+            count => format!(
+                "{trigger} runtime refresh failed: {message} ({count} repeated runtime errors suppressed)"
+            ),
+        };
+        self.last_key = Some(key);
+        self.suppressed_count = 0;
+        Some(visible)
+    }
+}
+
+fn report_runtime_error(
+    reporter: &Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: &ToastManager,
+    trigger: &str,
+    err: anyhow::Error,
+) {
+    tracing::error!(trigger, error = %err, "runtime refresh failed");
+    if let Some(message) = reporter.borrow_mut().record(trigger, &format!("{err:#}")) {
+        toast_manager.show(ToastMessage::warning(message));
+    }
+}
+
+fn reconcile_runtime_state_for_ui(
+    db_path: &Path,
+    reporter: &Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: &ToastManager,
+    trigger: &str,
+) -> bool {
+    match reconcile_runtime_state(db_path) {
+        Ok(report) => report.changed(),
+        Err(err) => {
+            report_runtime_error(reporter, toast_manager, trigger, err);
+            false
+        }
     }
 }
 
@@ -1398,6 +1490,28 @@ mod tests {
         });
 
         assert!(preferences.css_classes().is_empty());
+    }
+
+    #[test]
+    fn runtime_error_reporter_dedupes_repeated_reconciliation_failures() {
+        let mut reporter = RuntimeErrorReporter::default();
+
+        assert_eq!(
+            reporter.record("startup", "database is locked"),
+            Some("startup runtime refresh failed: database is locked".to_owned())
+        );
+        assert_eq!(reporter.record("startup", "database is locked"), None);
+        assert_eq!(
+            reporter.record("focus", "database is locked"),
+            Some(
+                "focus runtime refresh failed: database is locked (1 repeated runtime errors suppressed)"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            reporter.record("spotlight watcher", "watch permission denied"),
+            Some("spotlight watcher runtime refresh failed: watch permission denied".to_owned())
+        );
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

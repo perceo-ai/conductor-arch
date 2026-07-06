@@ -13,6 +13,12 @@ pub enum RefreshScope {
 
 type RefreshHandler = Rc<dyn Fn()>;
 
+/// Dumb UI fanout for page refresh callbacks.
+///
+/// PER-190: RefreshHub intentionally has no typed error channel; each page owns
+/// its load/store error handling and renders failures in-place before or during
+/// its registered callback. Replace this with typed refresh results only if
+/// multiple pages need shared page-owned error handling semantics.
 #[derive(Clone, Default)]
 pub struct RefreshHub {
     sidebar: Rc<RefCell<Option<RefreshHandler>>>,

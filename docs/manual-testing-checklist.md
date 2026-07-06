@@ -108,6 +108,22 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   the subdirectory.
 - [ ] Start multiple sessions in one workspace.
 - [ ] Start sessions in two workspaces for the same repository.
+- [ ] Start two Codex sessions in different workspaces at the same time; confirm
+  each keeps its own PID, chat thread, raw chunks, parsed events, screen
+  snapshot, readiness/composer state, and transcript after switching between
+  workspaces.
+- [ ] Start two Codex sessions in the same workspace but different chat threads;
+  confirm selecting one thread never shows the other thread's transcript,
+  runtime state, readiness state, or queued input.
+- [ ] While a managed Codex session is running, stop and restart the archcar
+  daemon; confirm the GTK session surface reconnects or shows a single
+  deduped bridge error, persisted transcript state reloads, and stale managed
+  rows reconcile to exited without affecting unmanaged processes.
+- [ ] Quit and relaunch GTK while a managed Codex session record exists; confirm
+  service/bridge readiness is rebuilt from sidecar/store state and no session
+  state is available only from the previous GTK process memory.
+- [ ] Send input while Codex is still starting; confirm the composer defers the
+  queued input and flushes it only after the selected session reports ready.
 - [ ] Select a saved or running agent session and confirm the session surface
   shows kind, status, runtime state, attachment state, harness metadata,
   command, event counts, and labeled transcript events for user input, review
@@ -154,6 +170,17 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 
 ## Runtime
 
+- [ ] Start a Codex/agent session from GTK and confirm normal session start,
+  status, readiness, transcript rendering, and stop behavior.
+- [ ] Stop or block the archcar sidecar socket and confirm the session UI shows
+  a visible bridge error without repeating a toast/status update every second.
+- [ ] Temporarily point GTK at a missing, locked, or corrupt workspace database
+  and confirm session refresh renders an explicit store/list error instead of
+  an empty state.
+- [ ] Force a terminal/runtime reconcile or command-send failure and confirm the
+  relevant terminal or run-console transcript displays the error with context.
+- [ ] Force Spotlight autosync/watch setup to fail and confirm the runtime
+  failure is logged and surfaced once through the deduped toast/status path.
 - [ ] Run setup from the workspace page and confirm logs/process status.
 - [ ] Run the app script and confirm logs/process status.
 - [ ] Stop the run script and confirm exit status.

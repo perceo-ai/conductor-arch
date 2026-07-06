@@ -213,6 +213,29 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 message: err.to_string(),
             },
         },
+        ArchcarRequest::ResizeSession {
+            session_id,
+            rows,
+            cols,
+        } => match load_or_restore_session_handle(state, session_id) {
+            Ok(Some(handle)) => {
+                match handle
+                    .command_tx
+                    .send(crate::archcar::session::SessionCommand::Resize { rows, cols })
+                {
+                    Ok(_) => ArchcarResponse::Ack,
+                    Err(err) => ArchcarResponse::Error {
+                        message: err.to_string(),
+                    },
+                }
+            }
+            Ok(None) => ArchcarResponse::Error {
+                message: format!("unknown session {session_id}"),
+            },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
         ArchcarRequest::GetSessionStatus { session_id } => {
             match load_or_restore_session_handle(state, session_id) {
                 Ok(Some(handle)) => {
@@ -220,6 +243,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     ArchcarResponse::SessionStatus {
                         session_id,
                         status: snapshot.status.as_str().to_owned(),
+                        runtime_state: snapshot.runtime_state,
                         ready: snapshot.ready,
                     }
                 }
@@ -530,7 +554,12 @@ fn session_kind_matches_command(command: &str, kind: SessionKind) -> bool {
     match kind {
         SessionKind::Codex => trimmed == "codex" || trimmed.starts_with("codex "),
         SessionKind::Claude => trimmed == "claude" || trimmed.starts_with("claude "),
-        SessionKind::Shell => false,
+        SessionKind::Shell => {
+            !(trimmed == "codex"
+                || trimmed.starts_with("codex ")
+                || trimmed == "claude"
+                || trimmed.starts_with("claude "))
+        }
     }
 }
 
@@ -540,7 +569,61 @@ fn spawn_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    ensure_default_session(state, workspace, kind, harness)
+    let mut guard = state.lock().unwrap();
+    let db_path = guard.db_path.clone();
+    let logs_dir = guard.logs_dir.clone();
+    let state_for_spawn = state.clone();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::SessionSpawnQueued {
+            workspace: workspace.clone(),
+            kind,
+        },
+    );
+    info!(%workspace, ?kind, "archcar queued explicit session spawn");
+    drop(guard);
+
+    let workspace_for_spawn = workspace.clone();
+    std::thread::spawn(move || {
+        let (event_tx, event_rx) = mpsc::channel();
+        match spawn_managed_session(
+            db_path,
+            logs_dir,
+            workspace_for_spawn.clone(),
+            kind,
+            harness,
+            event_tx,
+        ) {
+            Ok(handle) => {
+                let session_id = handle.snapshot.lock().unwrap().session_id;
+                info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned explicit managed session");
+                let mut guard = state_for_spawn.lock().unwrap();
+                guard.sessions.insert(session_id, handle);
+                drop(guard);
+                while let Ok(event) = event_rx.recv() {
+                    let mut guard = state_for_spawn.lock().unwrap();
+                    if let ArchcarEvent::SessionExited { session_id, .. } = &event {
+                        guard.sessions.remove(session_id);
+                    }
+                    broadcast(&mut guard, event);
+                }
+            }
+            Err(err) => {
+                let detail = format!("{err:#}");
+                error!(%workspace_for_spawn, ?kind, error = %detail, "archcar failed to spawn explicit managed session");
+                let mut guard = state_for_spawn.lock().unwrap();
+                broadcast(
+                    &mut guard,
+                    ArchcarEvent::SessionError {
+                        session_id: None,
+                        message: detail,
+                    },
+                );
+            }
+        }
+    });
+
+    ArchcarResponse::SessionSpawnQueued { workspace, kind }
 }
 
 fn load_or_restore_session_handle(
@@ -648,6 +731,34 @@ mod tests {
     }
 
     #[test]
+    fn explicit_spawn_session_accepts_shell_runtime_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir,
+            queued_defaults: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let response = spawn_session(
+            &state,
+            "missing-workspace".to_owned(),
+            SessionKind::Shell,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+
+        assert_ne!(
+            response,
+            ArchcarResponse::Error {
+                message: "only codex auto-spawn is implemented".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn archcar_rpc_log_payload_is_omitted_by_default_for_send_input() {
         let envelope = RpcEnvelope {
             id: "abc".to_owned(),
@@ -675,6 +786,7 @@ mod tests {
             kind: SessionKind::Codex,
             pid: 12345,
             status: crate::workspace::ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
             screen: String::new(),
         };

@@ -1,23 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::Context;
+use futures_channel::oneshot;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation, PolicyType,
+    Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation,
     ScrolledWindow, TextBuffer, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_archductor_core::pty::PtySession;
+use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use linux_archductor_core::workspace::{
     ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
     WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Read;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
 
 use crate::buttons::text_button;
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -26,8 +22,6 @@ use std::hash::{Hash, Hasher};
 
 const TERMINAL_SCROLLBACK_LINES: usize = 2_000;
 const TERMINAL_SCROLLBACK_TRIM_MARKER: &str = "[terminal scrollback trimmed]\n";
-const SIGTERM_EXIT_CODE: i32 = 143;
-const TERMINAL_TAB_LIMIT: usize = 12;
 const TERMINAL_SEARCH_CONTEXT_LINES: usize = 4;
 const TERMINAL_TAIL_PREVIEW_LINES: usize = 160;
 const TERMINAL_HEAD_PREVIEW_LINES: usize = 160;
@@ -38,6 +32,25 @@ const TERMINAL_MAX_SCROLLBACK_LINES: usize = 20_000;
 
 thread_local! {
     static TERMINAL_BUFFER_SCROLLBACK: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+fn run_terminal_worker<T, W, F, D>(work: W, on_result: F, on_disconnect: D)
+where
+    T: Send + 'static,
+    W: FnOnce() -> T + Send + 'static,
+    F: FnOnce(T) + 'static,
+    D: FnOnce() + 'static,
+{
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    glib::spawn_future_local(async move {
+        match rx.await {
+            Ok(value) => on_result(value),
+            Err(_) => on_disconnect(),
+        }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +154,7 @@ pub fn embedded_terminal_panel(
     workspace_name: &str,
     workspace_path: &Path,
     full_mode: bool,
-    refresh_hub: RefreshHub,
+    _refresh_hub: RefreshHub,
     preferences: TerminalPreferences,
     command_presets: Vec<TerminalCommandPreset>,
 ) -> GBox {
@@ -173,165 +186,6 @@ pub fn embedded_terminal_panel(
         &preferences,
     ));
 
-    let active_ptys: Rc<RefCell<Vec<Option<TerminalSession>>>> = Rc::new(RefCell::new(Vec::new()));
-    let terminal_tab_states: Rc<RefCell<Vec<TerminalTabState>>> = Rc::new(RefCell::new(Vec::new()));
-    let last_pty_size: Rc<RefCell<Option<(u16, u16)>>> = Rc::new(RefCell::new(None));
-    let active_pty_combo = ComboBoxText::new();
-    active_pty_combo.set_hexpand(true);
-    active_pty_combo.set_visible(false);
-    let tab_buttons: Rc<RefCell<Vec<Button>>> = Rc::new(RefCell::new(Vec::new()));
-    let buffer_for_poll = transcript.buffer();
-    let ptys_for_poll = active_ptys.clone();
-    let terminal_tab_states_for_poll = terminal_tab_states.clone();
-    let transcript_for_poll = transcript.clone();
-    let tab_buttons_for_poll = tab_buttons.clone();
-    let active_pty_combo_for_poll = active_pty_combo.clone();
-    let refresh_for_poll = refresh_hub.clone();
-    let last_size_for_poll = last_pty_size.clone();
-    let database_path_for_poll = database_path.clone();
-    let reconcile_counter_for_poll = Rc::new(RefCell::new(0_u32));
-    let reconcile_counter_for_poll_for_tick = reconcile_counter_for_poll.clone();
-    glib::timeout_add_local(Duration::from_millis(100), move || {
-        let mut ended_indices = Vec::new();
-        let mut should_refresh_processes = false;
-        let size = terminal_size_from_pixels(
-            transcript_for_poll.allocated_width(),
-            transcript_for_poll.allocated_height(),
-        );
-        let should_resize = *last_size_for_poll.borrow() != Some(size);
-        {
-            let mut sessions = ptys_for_poll.borrow_mut();
-            for (index, session_slot) in sessions.iter_mut().enumerate() {
-                let Some(session) = session_slot.as_mut() else {
-                    continue;
-                };
-                let output = session.read_available();
-                if !output.is_empty() {
-                    if let Err(err) = session.append_output(&output) {
-                        append_text(&buffer_for_poll, &format!("\n[pty log error]\n{err:#}\n"));
-                    }
-                    append_text(&buffer_for_poll, &output);
-                }
-                match session.poll_for_exit() {
-                    Ok(true) => {
-                        if let Some(state) =
-                            terminal_tab_states_for_poll.borrow_mut().get_mut(index)
-                        {
-                            state.status = ProcessStatus::Exited;
-                            state.attached = false;
-                            if let Some(tab) = tab_buttons_for_poll.borrow().get(index) {
-                                tab.set_label(&active_terminal_tab_label(
-                                    index,
-                                    Some(state.process_id),
-                                    state.status,
-                                    false,
-                                ));
-                            }
-                        }
-                        ended_indices.push(index);
-                        continue;
-                    }
-                    Err(err) => {
-                        append_text(&buffer_for_poll, &format!("\n[pty poll error]\n{err:#}\n"));
-                    }
-                    Ok(false) => {}
-                }
-                if should_resize {
-                    if let Err(err) = session.resize(size.0, size.1) {
-                        append_text(
-                            &buffer_for_poll,
-                            &format!("\n[pty resize error]\n{err:#}\n"),
-                        );
-                    }
-                }
-            }
-        }
-        if should_resize {
-            *last_size_for_poll.borrow_mut() = Some(size);
-        }
-        if let Some(index) = active_pty_combo_for_poll
-            .active_id()
-            .and_then(|id| id.as_str().parse::<usize>().ok())
-            .filter(|index| ended_indices.contains(index))
-        {
-            let running_tabs = terminal_tab_states_for_poll
-                .borrow()
-                .iter()
-                .map(|state| state.is_running())
-                .collect::<Vec<_>>();
-            if !running_tabs.iter().any(|running| *running) {
-                active_pty_combo_for_poll.set_active(None);
-                set_terminal_tab_active(&tab_buttons_for_poll.borrow(), None);
-            } else if let Some(next_index) = next_active_terminal_tab(index, &running_tabs) {
-                active_pty_combo_for_poll.set_active(Some(next_index as u32));
-                set_terminal_tab_active(&tab_buttons_for_poll.borrow(), Some(next_index));
-            }
-        } else if !ended_indices.is_empty()
-            && !terminal_tab_states_for_poll
-                .borrow()
-                .iter()
-                .any(|state| state.is_running())
-        {
-            active_pty_combo_for_poll.set_active(None);
-            set_terminal_tab_active(&tab_buttons_for_poll.borrow(), None);
-        }
-        *reconcile_counter_for_poll_for_tick.borrow_mut() += 1;
-        if (*reconcile_counter_for_poll_for_tick.borrow()).is_multiple_of(10) {
-            if let Ok(store) = WorkspaceStore::open(database_path_for_poll.clone()) {
-                if let Ok(reconciled) = store.reconcile_terminal_processes() {
-                    if !reconciled.is_empty() {
-                        let mut should_select_none = false;
-                        let mut states = terminal_tab_states_for_poll.borrow_mut();
-                        for process in reconciled {
-                            if let Some((index, state)) = states
-                                .iter_mut()
-                                .enumerate()
-                                .find(|(_, state)| state.process_id == process.id)
-                            {
-                                state.status = process.status;
-                                if !state.is_running() {
-                                    state.attached = false;
-                                }
-                                if let Some(tab) = tab_buttons_for_poll.borrow().get(index) {
-                                    tab.set_label(&active_terminal_tab_label(
-                                        index,
-                                        Some(process.id),
-                                        state.status,
-                                        state.attached,
-                                    ));
-                                }
-                                if !state.is_running() {
-                                    if let Some(session_slot) =
-                                        ptys_for_poll.borrow_mut().get_mut(index)
-                                    {
-                                        session_slot.take();
-                                    }
-                                }
-                                should_refresh_processes = true;
-                            }
-                        }
-                        if !states.iter().any(|state| state.is_running()) {
-                            should_select_none = true;
-                        }
-                        if should_select_none {
-                            active_pty_combo_for_poll.set_active(None);
-                            set_terminal_tab_active(&tab_buttons_for_poll.borrow(), None);
-                        }
-                    }
-                }
-            }
-        }
-        for ended_index in ended_indices.iter().copied() {
-            if let Some(session_slot) = ptys_for_poll.borrow_mut().get_mut(ended_index) {
-                session_slot.take();
-            }
-        }
-        if !ended_indices.is_empty() || should_refresh_processes {
-            refresh_for_poll.refresh(terminal_process_refresh_scope());
-        }
-        glib::ControlFlow::Continue
-    });
-
     let transcript_scroll = ScrolledWindow::new();
     transcript_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     transcript_scroll.set_vexpand(true);
@@ -341,505 +195,103 @@ pub fn embedded_terminal_panel(
     transcript_scroll.set_child(Some(&transcript));
     root.append(&transcript_scroll);
 
-    let pty_controls = terminal_action_row();
-    let start_pty_btn = text_button("Start Shell");
-    start_pty_btn.add_css_class("suggested-action");
-    let stop_pty_btn = terminal_destructive_button("Stop Shell");
-    let close_pty_btn = terminal_secondary_button("Close Shell");
-    let prune_pty_btn = terminal_flat_button("Prune Inactive Tabs");
-    let terminal_tabs = GBox::new(Orientation::Horizontal, 6);
-    terminal_tabs.add_css_class("terminal-tab-strip");
-    let db_for_pty = database_path.clone();
-    let db_for_start = db_for_pty.clone();
-    let db_for_seed = db_for_pty.clone();
-    let db_for_close = db_for_pty.clone();
-    let workspace_for_pty = workspace_name.to_owned();
-    let workspace_for_start = workspace_for_pty.clone();
-    let workspace_for_seed = workspace_for_pty.clone();
-    let workspace_for_close = workspace_for_pty.clone();
-    let ptys_for_start = active_ptys.clone();
-    let terminal_tab_states_for_start = terminal_tab_states.clone();
-    let terminal_tab_states_for_seed = terminal_tab_states.clone();
+    let controls = terminal_action_row();
+    let start_btn = text_button("Start Shell");
+    start_btn.add_css_class("suggested-action");
+    let resize_btn = text_button("Resize Shell");
+    let stop_btn = terminal_destructive_button("Stop Shell");
+    controls.append(&start_btn);
+    controls.append(&resize_btn);
+    controls.append(&stop_btn);
+    root.append(&controls);
+
+    let db_for_start = database_path.clone();
+    let workspace_for_start = workspace_name.to_owned();
     let buffer_for_start = transcript.buffer();
-    let buffer_for_seed = buffer_for_start.clone();
-    let refresh_for_start = refresh_hub.clone();
-    let active_pty_combo_for_start = active_pty_combo.clone();
-    let terminal_tabs_for_start = terminal_tabs.clone();
-    let tab_buttons_for_start = tab_buttons.clone();
-    let last_size_for_start = last_pty_size.clone();
-    let active_pty_combo_for_seed = active_pty_combo.clone();
-    let terminal_tabs_for_close = terminal_tabs.clone();
-    let tab_buttons_for_close = tab_buttons.clone();
-    let active_pty_combo_for_close = active_pty_combo.clone();
-    let refresh_for_close = refresh_hub.clone();
-    let buffer_for_close = transcript.buffer();
-    let ptys_for_close = active_ptys.clone();
-    let terminal_tab_states_for_close = terminal_tab_states.clone();
-    let db_for_prune = db_for_pty.clone();
-    let workspace_for_prune = workspace_for_pty.clone();
-    let ptys_for_prune = active_ptys.clone();
-    let terminal_tab_states_for_prune = terminal_tab_states.clone();
-    let active_pty_combo_for_prune = active_pty_combo.clone();
-    let terminal_tabs_for_prune = terminal_tabs.clone();
-    let tab_buttons_for_prune = tab_buttons.clone();
-    let refresh_for_prune = refresh_hub.clone();
-    let buffer_for_prune = transcript.buffer();
-    let jump_history_pages: Rc<RefCell<HashMap<i64, usize>>> =
-        Rc::new(RefCell::new(HashMap::new()));
-    let jump_history_pages_for_close = jump_history_pages.clone();
-    let jump_history_pages_for_prune = jump_history_pages.clone();
-    let cols = if full_mode { 120 } else { 80 };
-    start_pty_btn.connect_clicked(move |_| {
-        if ptys_for_start.borrow().len() >= TERMINAL_TAB_LIMIT {
+    start_btn.connect_clicked(move |_| {
+        let request = ArchcarRequest::SpawnSession {
+            workspace: workspace_for_start.clone(),
+            kind: SessionKind::Shell,
+            harness: None,
+        };
+        crate::archcar_async::spawn_archcar_request(
+            linux_archductor_core::paths::AppPaths::from_env(),
+            request,
+        );
+        append_text(
+            &buffer_for_start,
+            "\n[terminal] shell start requested through archcar runtime\n",
+        );
+        if let Err(err) = WorkspaceStore::open(db_for_start.clone())
+            .and_then(|store| store.reconcile_session_processes())
+            .map(|_| ())
+        {
+            tracing::warn!(workspace = %workspace_for_start, error = %err, "terminal runtime reconcile failed after shell start");
+            append_text(&buffer_for_start, &terminal_runtime_error_text(&err));
+        }
+    });
+
+    let db_for_resize = database_path.clone();
+    let workspace_for_resize = workspace_name.to_owned();
+    let buffer_for_resize = transcript.buffer();
+    let transcript_for_resize = transcript.clone();
+    resize_btn.connect_clicked(move |_| {
+        let running_shell = latest_running_runtime_shell(&db_for_resize, &workspace_for_resize);
+        let Some(record) = running_shell else {
             append_text(
-                &buffer_for_start,
-                &format!(
-                    "\n[terminal error]\nAt most {TERMINAL_TAB_LIMIT} terminal tabs are supported.\n"
-                ),
+                &buffer_for_resize,
+                "\n[terminal] no running runtime shell session to resize\n",
             );
             return;
-        }
-        match WorkspaceStore::open(db_for_start.clone()).and_then(|store| {
-            let launch = store.session_launch(&workspace_for_start, SessionKind::Shell)?;
-            let command = display_command(&launch.program, &launch.args);
-            let session = PtySession::spawn(
-                launch.program,
-                launch.args,
-                &launch.cwd,
-                launch.env,
-                24,
+        };
+        let (rows, cols) = terminal_size_from_pixels(
+            transcript_for_resize.allocated_width(),
+            transcript_for_resize.allocated_height(),
+        );
+        crate::archcar_async::spawn_archcar_request(
+            linux_archductor_core::paths::AppPaths::from_env(),
+            ArchcarRequest::ResizeSession {
+                session_id: record.id,
+                rows,
                 cols,
-            )?;
-            let pid = session
-                .process_id()
-                .context("PTY shell did not report a process id")?;
-            let process = store.record_terminal_process(&workspace_for_start, &command, pid)?;
-            Ok((
-                    TerminalSession::from_live_pty(
-                        session,
-                        db_for_start.clone(),
-                        Some(process.id),
-                    ),
-                process.id,
-            ))
-        }) {
-            Ok((terminal, process_id)) => {
-                let index = {
-                    let mut sessions = ptys_for_start.borrow_mut();
-                    let mut states = terminal_tab_states_for_start.borrow_mut();
-                    let index = sessions.len();
-                    sessions.push(Some(terminal));
-                    states.push(TerminalTabState {
-                        process_id,
-                        attached: true,
-                        status: ProcessStatus::Running,
-                    });
-                    index
-                };
-                rebuild_terminal_tabs(
-                    &terminal_tabs_for_start,
-                    &active_pty_combo_for_start,
-                    &tab_buttons_for_start,
-                    &terminal_tab_states_for_start,
-                    db_for_start.clone(),
-                    workspace_for_start.clone(),
-                    buffer_for_start.clone(),
-                    Some(index),
-                );
-                *last_size_for_start.borrow_mut() = None;
-                append_text(
-                    &buffer_for_start,
-                    &format!("\n[pty shell {} started]\n", index + 1),
-                );
-                refresh_for_start.refresh(terminal_process_refresh_scope());
-            }
-            Err(err) => append_text(&buffer_for_start, &format!("\n[pty error]\n{err:#}\n")),
-        }
-    });
-    let ptys_for_stop = active_ptys.clone();
-    let ptys_for_seed = active_ptys.clone();
-    let buffer_for_stop = transcript.buffer();
-    let refresh_for_stop = refresh_hub.clone();
-    let terminal_tab_states_for_stop = terminal_tab_states.clone();
-    let active_pty_combo_for_stop = active_pty_combo.clone();
-    let tab_buttons_for_stop = tab_buttons.clone();
-    let db_for_stop = db_for_pty.clone();
-    let workspace_for_stop = workspace_name.to_owned();
-    stop_pty_btn.connect_clicked(move |_| {
-        let Some(active_id) = active_pty_combo_for_stop.active_id() else {
-            append_text(&buffer_for_stop, "\n[no pty shell selected]\n");
-            return;
-        };
-        let Ok(index) = active_id.as_str().parse::<usize>() else {
-            append_text(&buffer_for_stop, "\n[selected pty shell is invalid]\n");
-            return;
-        };
-        let mut sessions = ptys_for_stop.borrow_mut();
-        let Some(session_slot) = sessions.get_mut(index) else {
-            append_text(&buffer_for_stop, "\n[selected pty shell is missing]\n");
-            return;
-        };
-        let process_id = terminal_tab_states_for_stop
-            .borrow()
-            .get(index)
-            .map(|state| state.process_id);
-        if let Some(mut session) = session_slot.take() {
-            if let Err(err) = session.stop(&workspace_for_stop) {
-                append_text(&buffer_for_stop, &format!("\n[pty stop error]\n{err:#}\n"));
-                *session_slot = Some(session);
-                return;
-            }
-
-            append_text(
-                &buffer_for_stop,
-                &format!("\n[pty shell {} stopped]\n", index + 1),
-            );
-            if let Some(tab) = tab_buttons_for_stop.borrow().get(index) {
-                tab.set_label(&active_terminal_tab_label(
-                    index,
-                    process_id,
-                    ProcessStatus::Stopped,
-                    false,
-                ));
-            }
-            if let Some(state) = terminal_tab_states_for_stop.borrow_mut().get_mut(index) {
-                state.status = ProcessStatus::Stopped;
-                state.attached = false;
-            }
-            let running_tabs = terminal_tab_states_for_stop
-                .borrow()
-                .iter()
-                .map(|state| state.is_running())
-                .collect::<Vec<_>>();
-            let next_index = next_active_terminal_tab(index, &running_tabs);
-            if running_tabs.iter().any(|running| *running) {
-                if let Some(next_index) = next_index {
-                    active_pty_combo_for_stop.set_active(Some(next_index as u32));
-                }
-                set_terminal_tab_active(&tab_buttons_for_stop.borrow(), next_index);
-            } else {
-                active_pty_combo_for_stop.set_active(None);
-                set_terminal_tab_active(&tab_buttons_for_stop.borrow(), None);
-            }
-            refresh_for_stop.refresh(terminal_process_refresh_scope());
-            return;
-        }
-        let Some(process_id) = process_id else {
-            append_text(&buffer_for_stop, "\n[selected pty shell is missing]\n");
-            return;
-        };
-        match WorkspaceStore::open(db_for_stop.clone())
-            .and_then(|store| store.stop_terminal_process(&workspace_for_stop, process_id))
-        {
-            Ok(stopped) => {
-                if let Some(tab) = tab_buttons_for_stop.borrow().get(index) {
-                    tab.set_label(&active_terminal_tab_label(
-                        index,
-                        Some(stopped.id),
-                        stopped.status,
-                        false,
-                    ));
-                }
-                if let Some(state) = terminal_tab_states_for_stop.borrow_mut().get_mut(index) {
-                    state.status = stopped.status;
-                    state.attached = false;
-                }
-                append_text(
-                    &buffer_for_stop,
-                    &format!("\n[terminal session {process_id} stopped]\n"),
-                );
-                let running_tabs = terminal_tab_states_for_stop
-                    .borrow()
-                    .iter()
-                    .map(|state| state.is_running())
-                    .collect::<Vec<_>>();
-                let next_index = next_active_terminal_tab(index, &running_tabs);
-                if running_tabs.iter().any(|running| *running) {
-                    if let Some(next_index) = next_index {
-                        active_pty_combo_for_stop.set_active(Some(next_index as u32));
-                    }
-                    set_terminal_tab_active(&tab_buttons_for_stop.borrow(), next_index);
-                } else {
-                    active_pty_combo_for_stop.set_active(None);
-                    set_terminal_tab_active(&tab_buttons_for_stop.borrow(), None);
-                }
-                refresh_for_stop.refresh(terminal_process_refresh_scope());
-            }
-            Err(err) => append_text(
-                &buffer_for_stop,
-                &format!("\n[terminal stop error]\n{err:#}\n"),
+            },
+        );
+        append_text(
+            &buffer_for_resize,
+            &format!(
+                "\n[terminal] shell resize requested through archcar for #{}: {}x{}\n",
+                record.id, cols, rows
             ),
-        }
-    });
-    close_pty_btn.connect_clicked(move |_| {
-        let preserved_process_id = active_pty_combo_for_close
-            .active_id()
-            .and_then(|id| id.as_str().parse::<usize>().ok())
-            .and_then(|index| {
-                terminal_tab_states_for_close
-                    .borrow()
-                    .get(index)
-                    .map(|state| state.process_id)
-            });
-
-        let Some(active_id) = active_pty_combo_for_close.active_id() else {
-            append_text(&buffer_for_close, "\n[no pty shell selected]\n");
-            return;
-        };
-        let Ok(index) = active_id.as_str().parse::<usize>() else {
-            append_text(&buffer_for_close, "\n[selected pty shell is invalid]\n");
-            return;
-        };
-        let Some(state) = terminal_tab_states_for_close.borrow().get(index).cloned() else {
-            append_text(&buffer_for_close, "\n[selected pty shell is missing]\n");
-            return;
-        };
-        if state.is_running() {
-            if state.attached {
-                let mut sessions = ptys_for_close.borrow_mut();
-                let Some(session_slot) = sessions.get_mut(index) else {
-                    append_text(&buffer_for_close, "\n[selected pty shell is missing]\n");
-                    return;
-                };
-                if let Some(mut session) = session_slot.take() {
-                    if let Err(err) = session.stop(&workspace_for_close) {
-                        append_text(
-                            &buffer_for_close,
-                            &format!("\n[terminal close error]\n{err:#}\n"),
-                        );
-                        *session_slot = Some(session);
-                        return;
-                    }
-                } else {
-                    append_text(&buffer_for_close, "\n[selected pty shell is missing]\n");
-                    return;
-                }
-            } else if let Err(err) = WorkspaceStore::open(db_for_close.clone()).and_then(|store| {
-                store.stop_terminal_process(&workspace_for_close, state.process_id)
-            }) {
-                append_text(
-                    &buffer_for_close,
-                    &format!("\n[terminal close error]\n{err:#}\n"),
-                );
-                return;
-            }
-        }
-
-        {
-            let mut sessions = ptys_for_close.borrow_mut();
-            if index < sessions.len() {
-                sessions.remove(index);
-            }
-        }
-        jump_history_pages_for_close
-            .borrow_mut()
-            .remove(&state.process_id);
-        {
-            let mut states = terminal_tab_states_for_close.borrow_mut();
-            if index < states.len() {
-                states.remove(index);
-            }
-        }
-
-        let active_index = {
-            let states = terminal_tab_states_for_close.borrow();
-            if states.is_empty() {
-                None
-            } else if let Some(process_id) = preserved_process_id {
-                states
-                    .iter()
-                    .position(|state| state.process_id == process_id)
-                    .or_else(|| states.iter().position(|state| state.is_running()))
-            } else {
-                states.iter().position(|state| state.is_running())
-            }
-        };
-        rebuild_terminal_tabs(
-            &terminal_tabs_for_close,
-            &active_pty_combo_for_close,
-            &tab_buttons_for_close,
-            &terminal_tab_states_for_close,
-            db_for_close.clone(),
-            workspace_for_close.clone(),
-            buffer_for_close.clone(),
-            active_index,
         );
-        append_text(
-            &buffer_for_close,
-            &format!("\n[terminal session {} closed]\n", state.process_id),
-        );
-        refresh_for_close.refresh(terminal_process_refresh_scope());
     });
-    prune_pty_btn.connect_clicked(move |_| {
-        let preserved_process_id = active_pty_combo_for_prune
-            .active_id()
-            .and_then(|id| id.as_str().parse::<usize>().ok())
-            .and_then(|index| {
-                terminal_tab_states_for_prune
-                    .borrow()
-                    .get(index)
-                    .map(|state| state.process_id)
-            });
-        let removed_indices: Vec<usize> = terminal_tab_states_for_prune
-            .borrow()
-            .iter()
-            .enumerate()
-            .filter(|(_, state)| !state.is_running())
-            .map(|(index, _)| index)
-            .collect();
-        let removed_process_ids: Vec<i64> = removed_indices
-            .iter()
-            .filter_map(|index| {
-                terminal_tab_states_for_prune
-                    .borrow()
-                    .get(*index)
-                    .map(|state| state.process_id)
-            })
-            .collect();
-        if removed_indices.is_empty() {
+
+    let db_for_stop = database_path.clone();
+    let workspace_for_stop = workspace_name.to_owned();
+    let buffer_for_stop = transcript.buffer();
+    stop_btn.connect_clicked(move |_| {
+        let running_shell = latest_running_runtime_shell(&db_for_stop, &workspace_for_stop);
+        let Some(record) = running_shell else {
             append_text(
-                &buffer_for_prune,
-                "\n[terminal sessions]\nNo inactive shell tabs to prune.\n",
+                &buffer_for_stop,
+                "\n[terminal] no running runtime shell session\n",
             );
             return;
-        }
-
-        {
-            let mut sessions = ptys_for_prune.borrow_mut();
-            for index in removed_indices.iter().rev() {
-                if index < &sessions.len() {
-                    let _ = sessions.remove(*index);
-                }
-            }
-        }
-        {
-            let mut states = terminal_tab_states_for_prune.borrow_mut();
-            for index in removed_indices.iter().rev() {
-                if index < &states.len() {
-                    let _ = states.remove(*index);
-                }
-            }
-        }
-        {
-            let mut jump_pages = jump_history_pages_for_prune.borrow_mut();
-            for process_id in removed_process_ids {
-                jump_pages.remove(&process_id);
-            }
-        }
-
-        let active_index = {
-            let states = terminal_tab_states_for_prune.borrow();
-            if states.is_empty() {
-                None
-            } else if let Some(process_id) = preserved_process_id {
-                states
-                    .iter()
-                    .position(|state| state.process_id == process_id)
-                    .or_else(|| states.iter().position(|state| state.is_running()))
-            } else {
-                states.iter().position(|state| state.is_running())
-            }
         };
-        rebuild_terminal_tabs(
-            &terminal_tabs_for_prune,
-            &active_pty_combo_for_prune,
-            &tab_buttons_for_prune,
-            &terminal_tab_states_for_prune,
-            db_for_prune.clone(),
-            workspace_for_prune.clone(),
-            buffer_for_prune.clone(),
-            active_index,
+        let request = ArchcarRequest::KillSession {
+            session_id: record.id,
+        };
+        crate::archcar_async::spawn_archcar_request(
+            linux_archductor_core::paths::AppPaths::from_env(),
+            request,
         );
-        let removed_count = removed_indices.len();
         append_text(
-            &buffer_for_prune,
-            &format!("\n[terminal sessions] pruned {removed_count} inactive shell tab(s).\n"),
+            &buffer_for_stop,
+            &format!(
+                "\n[terminal] shell stop requested through archcar for #{}\n",
+                record.id
+            ),
         );
-        refresh_for_prune.refresh(terminal_process_refresh_scope());
     });
-    if let Ok(store) = WorkspaceStore::open(database_path.clone()) {
-        let _ = store.reconcile_terminal_processes();
-        if let Ok(processes) = store.list_terminals(workspace_name) {
-            let mut active_terminal = None;
-            let mut has_running = false;
-            let mut has_attached_running = false;
-            let mut has_detached_running = false;
-            let mut ordered_processes = processes;
-            ordered_processes.sort_by(|left, right| right.started_at.cmp(&left.started_at));
-            {
-                let mut sessions = ptys_for_seed.borrow_mut();
-                let mut states = terminal_tab_states_for_seed.borrow_mut();
-                for process in ordered_processes.into_iter().take(TERMINAL_TAB_LIMIT) {
-                    let index = sessions.len();
-                    let running = process.status == ProcessStatus::Running;
-                    let (session, attached) = if running {
-                        match TerminalSession::try_reattach_running(
-                            db_for_seed.clone(),
-                            process.id,
-                            process.pid,
-                        ) {
-                            Ok(session) => (Some(session), true),
-                            Err(_) => (None, false),
-                        }
-                    } else {
-                        (None, false)
-                    };
-                    if running {
-                        has_running = true;
-                        if attached {
-                            has_attached_running = true;
-                        } else {
-                            has_detached_running = true;
-                        }
-                    }
-                    sessions.push(session);
-                    states.push(TerminalTabState {
-                        process_id: process.id,
-                        attached,
-                        status: process.status,
-                    });
-                    if running && attached && active_terminal.is_none() {
-                        active_terminal = Some(index);
-                    }
-                }
-            }
-            rebuild_terminal_tabs(
-                &terminal_tabs,
-                &active_pty_combo_for_seed,
-                &tab_buttons,
-                &terminal_tab_states_for_seed,
-                db_for_seed.clone(),
-                workspace_for_seed.clone(),
-                buffer_for_seed.clone(),
-                active_terminal,
-            );
-            if has_running {
-                append_text(
-                    &buffer_for_seed,
-                    "\n[terminal sessions from a previous run loaded.]",
-                );
-            }
-            if has_attached_running {
-                append_text(
-                    &buffer_for_seed,
-                    "\n[terminal sessions from a previous run reattached.]",
-                );
-            }
-            if has_detached_running {
-                append_text(
-                    &buffer_for_seed,
-                    "\n[terminal sessions from a previous run are shown as detached; they are not interactive here.]",
-                );
-            }
-        }
-    }
-    root.append(&terminal_tabs);
-    pty_controls.append(&start_pty_btn);
-    pty_controls.append(&stop_pty_btn);
-    pty_controls.append(&close_pty_btn);
-    pty_controls.append(&prune_pty_btn);
-    pty_controls.append(&active_pty_combo);
-    root.append(&pty_controls);
 
     let presets = terminal_action_row();
     for preset in command_presets {
@@ -848,19 +300,13 @@ pub fn embedded_terminal_panel(
         let db = database_path.clone();
         let workspace = workspace_name.to_owned();
         let buffer = transcript.buffer();
-        let ptys = active_ptys.clone();
-        let active_pty_combo_for_command = active_pty_combo.clone();
-        let terminal_tab_states_for_command = terminal_tab_states.clone();
         let command = preset.command.clone();
         button.connect_clicked(move |_| {
-            send_or_run_terminal_command(
+            run_terminal_command(
                 db.clone(),
                 workspace.clone(),
                 command.clone(),
                 buffer.clone(),
-                ptys.clone(),
-                active_pty_combo_for_command.clone(),
-                terminal_tab_states_for_command.clone(),
             );
         });
         presets.append(&button);
@@ -873,599 +319,29 @@ pub fn embedded_terminal_panel(
     entry.set_hexpand(true);
     let run_btn = text_button("Run");
     run_btn.add_css_class("suggested-action");
-    let interrupt_btn = terminal_destructive_button("Interrupt (Ctrl+C)");
-    let buffer = transcript.buffer();
-    let workspace = workspace_name.to_owned();
-    let db = database_path.clone();
-    let ptys_for_interrupt = active_ptys.clone();
-    let ptys = active_ptys;
-    let active_pty_combo_for_interrupt = active_pty_combo.clone();
-    let active_pty_combo_for_run = active_pty_combo;
-    let terminal_tab_states_for_interrupt = terminal_tab_states.clone();
-    let terminal_tab_states_for_run = terminal_tab_states;
-    let command_history = Rc::new(RefCell::new(Vec::<String>::new()));
-    let command_history_position = Rc::new(RefCell::new(None::<usize>));
-    let command_history_draft = Rc::new(RefCell::new(String::new()));
-    let buffer_for_interrupt = buffer.clone();
-    let entry_clone = entry.clone();
-    let send_interrupt = Rc::new(move || {
-        let Some(active_id) = active_pty_combo_for_interrupt.active_id() else {
-            append_text(&buffer_for_interrupt, "\n[no pty shell selected]\n");
-            return;
-        };
-        let Ok(index) = active_id.as_str().parse::<usize>() else {
-            append_text(&buffer_for_interrupt, "\n[selected pty shell is invalid]\n");
-            return;
-        };
-        let mut sessions = ptys_for_interrupt.borrow_mut();
-        let states = terminal_tab_states_for_interrupt.borrow();
-        let Some(state) = states.get(index) else {
-            append_text(&buffer_for_interrupt, "\n[selected pty shell is missing]\n");
-            return;
-        };
-        if !(state.is_running() && state.attached) {
-            if state.status == ProcessStatus::Running {
-                append_text(
-                    &buffer_for_interrupt,
-                    "\n[selected pty shell is running but not attached to this app]\n",
-                );
-            } else if state.status == ProcessStatus::Exited {
-                append_text(&buffer_for_interrupt, "\n[selected pty shell has exited]\n");
-            } else {
-                append_text(&buffer_for_interrupt, "\n[selected pty shell is stopped]\n");
-            }
-            return;
-        }
-        let Some(session) = sessions.get_mut(index).and_then(|session| session.as_mut()) else {
-            append_text(
-                &buffer_for_interrupt,
-                "\n[selected pty shell is running but session slot is missing]\n",
-            );
-            return;
-        };
-        if let Err(err) = session.write("\u{3}") {
-            append_text(
-                &buffer_for_interrupt,
-                &format!("\n[pty interrupt error]\n{err:#}\n"),
-            );
-            return;
-        }
-        if let Err(err) = session.append_output("\n^C\n") {
-            append_text(
-                &buffer_for_interrupt,
-                &format!("\n[pty log error]\n{err:#}\n"),
-            );
-            return;
-        }
-        append_text(&buffer_for_interrupt, "\n[pty interrupt sent]\n");
-    });
-    let send_interrupt_btn = Rc::clone(&send_interrupt);
-    interrupt_btn.connect_clicked(move |_| {
-        send_interrupt_btn();
-    });
-
-    let command_history_for_run = Rc::clone(&command_history);
-    let command_history_position_for_run = Rc::clone(&command_history_position);
-    let command_history_draft_for_run = Rc::clone(&command_history_draft);
-    let run_command = Rc::new(move || {
-        let command = entry_clone.text().trim().to_owned();
-        if command.is_empty() {
-            return;
-        }
-        let mut history = command_history_for_run.borrow_mut();
-        if history.last() != Some(&command) {
-            history.push(command.clone());
-            if history.len() > 64 {
-                history.remove(0);
-            }
-        }
-        *command_history_position_for_run.borrow_mut() = None;
-        command_history_draft_for_run.borrow_mut().clear();
-        send_or_run_terminal_command(
-            db.clone(),
-            workspace.clone(),
-            command,
-            buffer.clone(),
-            ptys.clone(),
-            active_pty_combo_for_run.clone(),
-            terminal_tab_states_for_run.clone(),
-        );
-        entry_clone.set_text("");
-    });
-    let run_btn_for_click = run_command.clone();
-    run_btn.connect_clicked(move |_| {
-        run_btn_for_click();
-    });
-    let run_cmd_for_activate = run_command.clone();
-    entry.connect_activate(move |_| {
-        run_cmd_for_activate();
-    });
-    let send_interrupt_entry = Rc::clone(&send_interrupt);
-    let entry_key_controller = gtk::EventControllerKey::new();
-    let command_history_for_keys = Rc::clone(&command_history);
-    let command_history_position_for_keys = Rc::clone(&command_history_position);
-    let command_history_draft_for_keys = Rc::clone(&command_history_draft);
-    let entry_for_keys = entry.clone();
-    entry_key_controller.connect_key_pressed(move |_, keyval, _, modifiers| {
-        let is_ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-        if is_ctrl && keyval == gtk::gdk::Key::c {
-            send_interrupt_entry();
-            return gtk::glib::Propagation::Stop;
-        }
-        if is_ctrl && keyval == gtk::gdk::Key::Up {
-            let history = command_history_for_keys.borrow_mut();
-            if history.is_empty() {
-                return gtk::glib::Propagation::Proceed;
-            }
-            let mut position = command_history_position_for_keys.borrow_mut();
-            let next_position = match *position {
-                None => {
-                    *command_history_draft_for_keys.borrow_mut() =
-                        entry_for_keys.text().to_string();
-                    history.len() - 1
-                }
-                Some(position) => position.saturating_sub(1),
-            };
-            *position = Some(next_position);
-            if let Some(command) = history.get(next_position).cloned() {
-                entry_for_keys.set_text(&command);
-                entry_for_keys.set_position(command.len() as i32);
-            }
-            return gtk::glib::Propagation::Stop;
-        }
-        if is_ctrl && keyval == gtk::gdk::Key::Down {
-            let mut position = command_history_position_for_keys.borrow_mut();
-            let history = command_history_for_keys.borrow_mut();
-            match *position {
-                None => return gtk::glib::Propagation::Proceed,
-                Some(history_index) if history_index + 1 >= history.len() => {
-                    *position = None;
-                    let draft = command_history_draft_for_keys.borrow();
-                    entry_for_keys.set_text(draft.as_str());
-                    entry_for_keys.set_position(draft.len() as i32);
-                    return gtk::glib::Propagation::Stop;
-                }
-                Some(history_index) => {
-                    *position = Some(history_index + 1);
-                    if let Some(command) = history.get(history_index + 1).cloned() {
-                        entry_for_keys.set_text(&command);
-                        entry_for_keys.set_position(command.len() as i32);
-                    }
-                    return gtk::glib::Propagation::Stop;
-                }
-            }
-        }
-        gtk::glib::Propagation::Proceed
-    });
-    entry.add_controller(entry_key_controller);
-
     command_row.append(&entry);
     command_row.append(&run_btn);
-    command_row.append(&interrupt_btn);
     root.append(&command_row);
 
-    let search_entry = Entry::new();
-    search_entry.set_placeholder_text(Some("search terminal history"));
-    search_entry.set_hexpand(true);
-    let history_session_filter = Entry::new();
-    history_session_filter.set_placeholder_text(Some("filter sessions"));
-    let jump_history_status = Label::new(Some("line: unset"));
-    let history_line_entry = Entry::new();
-    history_line_entry.set_placeholder_text(Some("line"));
-    history_line_entry.set_width_chars(8);
-    let search_btn = terminal_secondary_button("Search Logs");
-    let clear_search_btn = terminal_flat_button("Clear Search");
-    let history_btn = terminal_flat_button("Show History");
-    let history_filter = ComboBoxText::new();
-    history_filter.append(Some("all"), "All");
-    history_filter.append(Some("running"), "Running");
-    history_filter.append(Some("stopped"), "Stopped");
-    history_filter.append(Some("exited"), "Exited");
-    history_filter.set_active_id(Some("all"));
-    let history_combo = ComboBoxText::new();
-    history_combo.set_hexpand(true);
-    let load_history_btn = terminal_secondary_button("Load Transcript");
-    let jump_history_btn = terminal_flat_button("Show around line");
-    let jump_history_latest_btn = terminal_flat_button("Show latest line");
-    let jump_history_prev_btn =
-        terminal_flat_button(&format!("Previous {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
-    let jump_history_next_btn =
-        terminal_flat_button(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
-    let history_records: Rc<RefCell<Vec<TerminalSessionSummary>>> =
-        Rc::new(RefCell::new(Vec::new()));
-    let history_records_all: Rc<RefCell<Vec<TerminalSessionSummary>>> =
-        Rc::new(RefCell::new(Vec::new()));
-    let history_browser_for_filter = ListBox::new();
-    let search_buffer = transcript.buffer();
-    let history_buffer = transcript.buffer();
-    let load_history_buffer = transcript.buffer();
-    let search_workspace = workspace_name.to_owned();
-    let history_workspace = workspace_name.to_owned();
-    let load_history_workspace = workspace_name.to_owned();
-    let history_db = database_path.clone();
-    let search_db = database_path;
-    let load_history_db = history_db.clone();
-    let search_entry_for_btn = search_entry.clone();
-    let search_entry_for_activate = search_entry.clone();
-    let history_browser_for_search = history_browser_for_filter.clone();
-    let search_db_for_search = search_db.clone();
-    let search_workspace_for_search = search_workspace.clone();
-    let jump_history_pages_for_search = jump_history_pages.clone();
-    let run_search = Rc::new(move || {
-        let query = search_entry_for_btn.text().trim().to_owned();
-        if query.is_empty() {
-            return;
-        }
-        run_terminal_log_search(
-            search_db.clone(),
-            search_workspace.clone(),
-            query,
-            search_buffer.clone(),
-            history_browser_for_search.clone(),
-            search_db_for_search.clone(),
-            search_workspace_for_search.clone(),
-            jump_history_pages_for_search.clone(),
-        );
-    });
-    {
-        let run_search = Rc::clone(&run_search);
-        search_btn.connect_clicked(move |_| {
-            run_search();
-        });
-    }
-    {
-        let run_search = Rc::clone(&run_search);
-        search_entry_for_activate.connect_activate(move |_| {
-            run_search();
-        });
-    }
-    let history_browser_for_clear = history_browser_for_filter.clone();
-    let search_entry_for_clear = search_entry.clone();
-    let history_buffer_for_clear = history_buffer.clone();
-    clear_search_btn.connect_clicked(move |_| {
-        clear_search_results(&history_browser_for_clear);
-        search_entry_for_clear.set_text("");
-        append_text(&history_buffer_for_clear, "\n[terminal search] cleared\n");
-    });
-    let history_combo_for_load = history_combo.clone();
-    let history_records_for_load = history_records.clone();
-    let load_history_db_for_btn = load_history_db.clone();
-    let load_history_workspace_for_btn = load_history_workspace.clone();
-    let load_history_buffer_for_btn = load_history_buffer.clone();
-    load_history_btn.connect_clicked(move |_| {
-        let Some(active_id) = history_combo_for_load.active_id() else {
-            append_text(
-                &load_history_buffer_for_btn,
-                "\n[terminal history]\nSelect a terminal session first.\n",
-            );
-            return;
-        };
-        let Ok(process_id) = active_id.as_str().parse::<i64>() else {
-            append_text(
-                &load_history_buffer_for_btn,
-                "\n[terminal history]\nSelected terminal session is invalid.\n",
-            );
-            return;
-        };
-        let Some(record) = history_records_for_load
-            .borrow()
-            .iter()
-            .find(|summary| summary.process.id == process_id)
-            .cloned()
-        else {
-            append_text(
-                &load_history_buffer_for_btn,
-                "\n[terminal history]\nSelected terminal session is no longer loaded.\n",
-            );
-            return;
-        };
-        run_terminal_transcript_load(
-            load_history_db_for_btn.clone(),
-            load_history_workspace_for_btn.clone(),
-            record.process,
-            load_history_buffer_for_btn.clone(),
-        );
-    });
-    let run_line_jump: Rc<dyn Fn(isize)> = Rc::new({
-        let jump_history_db = load_history_db.clone();
-        let jump_history_workspace = load_history_workspace.clone();
-        let jump_history_buffer = load_history_buffer.clone();
-        let jump_history_records = history_records.clone();
-        let jump_history_combo = history_combo.clone();
-        let jump_history_entry = history_line_entry.clone();
-        let jump_history_status = jump_history_status.clone();
-        let jump_history_pages = jump_history_pages.clone();
-        move |line_delta| {
-            let Some(active_id) = jump_history_combo.active_id() else {
-                append_text(
-                    &jump_history_buffer,
-                    "\n[terminal history]\nSelect a terminal session first.\n",
-                );
-                return;
-            };
-            let Ok(process_id) = active_id.as_str().parse::<i64>() else {
-                append_text(
-                    &jump_history_buffer,
-                    "\n[terminal history]\nSelected terminal session is invalid.\n",
-                );
-                return;
-            };
-            let existing_line = jump_history_pages.borrow().get(&process_id).copied();
-            let line_text = jump_history_entry.text().trim().to_owned();
-            let mut line_number = if line_text.is_empty() {
-                existing_line.unwrap_or(TERMINAL_LINE_JUMP_CONTEXT)
-            } else {
-                match terminal_positive_line_number(&line_text) {
-                    Some(parsed) => parsed,
-                    None => {
-                        jump_history_status.set_text("line: invalid");
-                        append_text(
-                            &jump_history_buffer,
-                            "\n[terminal history]\nLine number must be a positive integer.\n",
-                        );
-                        return;
-                    }
-                }
-            };
-
-            if line_text.is_empty() && existing_line.is_none() {
-                jump_history_status.set_text("line: required");
-                append_text(
-                    &jump_history_buffer,
-                    "\n[terminal history]\nLine number must be provided for the first jump in this session.\n",
-                );
+    let run_command = Rc::new({
+        let db = database_path.clone();
+        let workspace = workspace_name.to_owned();
+        let buffer = transcript.buffer();
+        let entry = entry.clone();
+        move || {
+            let command = entry.text().trim().to_owned();
+            if command.is_empty() {
                 return;
             }
-            jump_history_status.set_text(&format!("line: {line_number}"));
-
-            if line_delta != 0 {
-                line_number = terminal_line_jump_target(line_number, line_delta);
-            }
-
-            let Some(record) = jump_history_records
-                .borrow()
-                .iter()
-                .find(|summary| summary.process.id == process_id)
-                .cloned()
-            else {
-                append_text(
-                    &jump_history_buffer,
-                    "\n[terminal history]\nSelected terminal session is no longer loaded.\n",
-                );
-                return;
-            };
-            run_terminal_line_transcript(
-                jump_history_db.clone(),
-                jump_history_workspace.clone(),
-                record.process.id,
-                line_number,
-                TERMINAL_LINE_JUMP_CONTEXT,
-                jump_history_buffer.clone(),
-            );
-            jump_history_pages
-                .borrow_mut()
-                .insert(process_id, line_number);
-            jump_history_status.set_text(&format!("line: {line_number}"));
-            jump_history_entry.set_text("");
+            run_terminal_command(db.clone(), workspace.clone(), command, buffer.clone());
+            entry.set_text("");
         }
     });
-    let jump_history_btn_for_btn = jump_history_btn.clone();
-    let run_line_jump_for_click = Rc::clone(&run_line_jump);
-    jump_history_btn_for_btn.connect_clicked(move |_| {
-        run_line_jump_for_click(0);
-    });
-    let jump_history_entry_for_entry = history_line_entry.clone();
-    let run_line_jump_for_entry = Rc::clone(&run_line_jump);
-    jump_history_entry_for_entry.connect_activate(move |_| {
-        run_line_jump_for_entry(0);
-    });
-    let jump_history_prev_btn_for_click = jump_history_prev_btn.clone();
-    let run_line_jump_for_prev = Rc::clone(&run_line_jump);
-    jump_history_prev_btn_for_click.connect_clicked(move |_| {
-        run_line_jump_for_prev(-(TERMINAL_LINE_JUMP_PAGE_SIZE as isize));
-    });
-    let jump_history_next_btn_for_click = jump_history_next_btn.clone();
-    let run_line_jump_for_next = Rc::clone(&run_line_jump);
-    jump_history_next_btn_for_click.connect_clicked(move |_| {
-        run_line_jump_for_next(TERMINAL_LINE_JUMP_PAGE_SIZE as isize);
-    });
-    let jump_history_latest_for_click = jump_history_latest_btn.clone();
-    let run_line_jump_for_latest = Rc::clone(&run_line_jump);
-    let jump_history_records_for_latest = history_records.clone();
-    let jump_history_combo_for_latest = history_combo.clone();
-    let jump_history_pages_for_latest = jump_history_pages.clone();
-    let jump_history_entry_for_latest = history_line_entry.clone();
-    let jump_history_status_for_latest = jump_history_status.clone();
-    let jump_history_buffer_for_latest = load_history_buffer.clone();
-    jump_history_latest_for_click.connect_clicked(move |_| {
-        let Some(active_id) = jump_history_combo_for_latest.active_id() else {
-            append_text(
-                &jump_history_buffer_for_latest,
-                "\n[terminal history]\nSelect a terminal session first.\n",
-            );
-            return;
-        };
-        let Ok(process_id) = active_id.as_str().parse::<i64>() else {
-            append_text(
-                &jump_history_buffer_for_latest,
-                "\n[terminal history]\nSelected terminal session is invalid.\n",
-            );
-            return;
-        };
-        let Some(record) = jump_history_records_for_latest
-            .borrow()
-            .iter()
-            .find(|summary| summary.process.id == process_id)
-            .cloned()
-        else {
-            append_text(
-                &jump_history_buffer_for_latest,
-                "\n[terminal history]\nSelected terminal session is no longer loaded.\n",
-            );
-            return;
-        };
-        jump_history_pages_for_latest
-            .borrow_mut()
-            .insert(process_id, record.line_count.max(1));
-        jump_history_status_for_latest.set_text(&format!("line: {}", record.line_count.max(1)));
-        jump_history_entry_for_latest.set_text("");
-        run_line_jump_for_latest(0);
-    });
-    let history_combo_for_filter = history_combo.clone();
-    let history_records_for_filter = history_records.clone();
-    let history_filter_for_change = history_filter.clone();
-    let history_session_filter_for_filter = history_session_filter.clone();
-    let history_records_all_for_filter = history_records_all.clone();
-    let history_browser_for_filter_clone = history_browser_for_filter.clone();
-    let history_browser_for_history = history_browser_for_filter.clone();
-    let load_history_db_for_browser = load_history_db.clone();
-    let load_history_workspace_for_browser = load_history_workspace.clone();
-    let load_history_buffer_for_browser = load_history_buffer.clone();
-    let jump_history_pages_for_filter = jump_history_pages.clone();
-    history_filter.connect_changed(move |_| {
-        let filter = terminal_history_filter_status(&history_filter_for_change);
-        let all_records = history_records_all_for_filter.borrow().clone();
-        let query = history_session_filter_for_filter.text().to_string();
-        let filtered_records = terminal_history_summaries_for_filter_with_query(
-            &all_records,
-            filter,
-            Some(query.as_str()),
-        );
-        let preserved_selection = history_combo_for_filter
-            .active_id()
-            .and_then(|id| id.as_str().parse::<i64>().ok());
-        set_terminal_history_combo(
-            &history_combo_for_filter,
-            &filtered_records,
-            preserved_selection,
-        );
-        set_terminal_history_browser(
-            &history_browser_for_filter_clone,
-            &history_combo_for_filter,
-            &filtered_records,
-            load_history_db_for_browser.clone(),
-            load_history_workspace_for_browser.clone(),
-            load_history_buffer_for_browser.clone(),
-            jump_history_pages_for_filter.clone(),
-        );
-        let filtered_ids: std::collections::HashSet<_> = filtered_records
-            .iter()
-            .map(|summary| summary.process.id)
-            .collect();
-        jump_history_pages_for_filter
-            .borrow_mut()
-            .retain(|process_id, _| filtered_ids.contains(process_id));
-        *history_records_for_filter.borrow_mut() = filtered_records;
-    });
-    let history_records_for_session_filter = history_records.clone();
-    let history_records_all_for_session_filter = history_records_all.clone();
-    let history_combo_for_session_filter = history_combo.clone();
-    let history_filter_for_session_filter = history_filter.clone();
-    let history_browser_for_session_filter = history_browser_for_filter.clone();
-    let load_history_db_for_session_filter = load_history_db.clone();
-    let load_history_workspace_for_session_filter = load_history_workspace.clone();
-    let load_history_buffer_for_session_filter = load_history_buffer.clone();
-    let history_session_filter_for_session_filter = history_session_filter.clone();
-    let jump_history_pages_for_session_filter = jump_history_pages.clone();
-    history_session_filter.connect_changed(move |_| {
-        let filter = terminal_history_filter_status(&history_filter_for_session_filter);
-        let query = history_session_filter_for_session_filter.text().to_string();
-        let all_records = history_records_all_for_session_filter.borrow().clone();
-        let filtered_records = terminal_history_summaries_for_filter_with_query(
-            &all_records,
-            filter,
-            Some(query.as_str()),
-        );
-        let preserved_selection = history_combo_for_session_filter
-            .active_id()
-            .and_then(|id| id.as_str().parse::<i64>().ok());
-        set_terminal_history_combo(
-            &history_combo_for_session_filter,
-            &filtered_records,
-            preserved_selection,
-        );
-        set_terminal_history_browser(
-            &history_browser_for_session_filter,
-            &history_combo_for_session_filter,
-            &filtered_records,
-            load_history_db_for_session_filter.clone(),
-            load_history_workspace_for_session_filter.clone(),
-            load_history_buffer_for_session_filter.clone(),
-            jump_history_pages_for_session_filter.clone(),
-        );
-        let filtered_ids: std::collections::HashSet<_> = filtered_records
-            .iter()
-            .map(|summary| summary.process.id)
-            .collect();
-        jump_history_pages_for_session_filter
-            .borrow_mut()
-            .retain(|process_id, _| filtered_ids.contains(process_id));
-        *history_records_for_session_filter.borrow_mut() = filtered_records;
-    });
-    let history_combo_for_history = history_combo.clone();
-    let history_records_for_history = history_records;
-    let history_filter_for_history = history_filter.clone();
-    let history_session_filter_for_history = history_session_filter.clone();
-    let history_records_all_for_history = history_records_all;
-    let load_history_db_for_history = load_history_db;
-    let load_history_workspace_for_history = load_history_workspace;
-    let load_history_buffer_for_history = load_history_buffer.clone();
-    let jump_history_pages_for_history = jump_history_pages.clone();
-    history_btn.connect_clicked(move |_| {
-        run_terminal_history(
-            history_db.clone(),
-            history_workspace.clone(),
-            history_buffer.clone(),
-            history_combo_for_history.clone(),
-            history_records_for_history.clone(),
-            history_records_all_for_history.clone(),
-            history_filter_for_history.clone(),
-            history_session_filter_for_history.clone(),
-            history_browser_for_history.clone(),
-            load_history_db_for_history.clone(),
-            load_history_workspace_for_history.clone(),
-            load_history_buffer_for_history.clone(),
-            jump_history_pages_for_history.clone(),
-        );
-    });
-    let history_browser_scroll = ScrolledWindow::new();
-    history_browser_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    history_browser_scroll.set_hexpand(true);
-    history_browser_scroll.set_vexpand(true);
-    history_browser_scroll.set_child(Some(&history_browser_for_filter));
-    let search_stack = terminal_action_stack();
-    search_stack.append(&terminal_toolbar_label("Search transcripts"));
-    let search_row = terminal_action_row();
-    search_row.append(&search_entry);
-    search_row.append(&search_btn);
-    search_row.append(&clear_search_btn);
-    search_row.append(&history_btn);
-    search_stack.append(&search_row);
+    let run_for_click = run_command.clone();
+    run_btn.connect_clicked(move |_| run_for_click());
+    let run_for_activate = run_command.clone();
+    entry.connect_activate(move |_| run_for_activate());
 
-    let sessions_stack = terminal_action_stack();
-    sessions_stack.append(&terminal_toolbar_label("Pick session"));
-    let sessions_row = terminal_action_row();
-    sessions_row.append(&history_session_filter);
-    sessions_row.append(&history_filter);
-    sessions_row.append(&history_combo);
-    sessions_row.append(&load_history_btn);
-    sessions_stack.append(&sessions_row);
-
-    let jump_stack = terminal_action_stack();
-    jump_stack.append(&terminal_toolbar_label("Browse transcript lines"));
-    let jump_row = terminal_action_row();
-    jump_row.append(&history_line_entry);
-    jump_row.append(&jump_history_status);
-    jump_row.append(&jump_history_btn);
-    jump_row.append(&jump_history_prev_btn);
-    jump_row.append(&jump_history_next_btn);
-    jump_row.append(&jump_history_latest_btn);
-    jump_stack.append(&jump_row);
-
-    root.append(&search_stack);
-    root.append(&sessions_stack);
-    root.append(&jump_stack);
-    root.append(&history_browser_scroll);
     root
 }
 
@@ -1479,62 +355,30 @@ fn clear_search_results(history_browser: &ListBox) {
     history_browser.append(&empty);
 }
 
-fn send_or_run_terminal_command(
-    database_path: PathBuf,
-    workspace_name: String,
-    command: String,
-    buffer: TextBuffer,
-    ptys: Rc<RefCell<Vec<Option<TerminalSession>>>>,
-    active_pty_combo: ComboBoxText,
-    terminal_tab_states: Rc<RefCell<Vec<TerminalTabState>>>,
-) {
-    if let Some(active_id) = active_pty_combo.active_id() {
-        let Ok(index) = active_id.as_str().parse::<usize>() else {
-            append_text(&buffer, "\n[selected pty shell is invalid]\n");
-            return;
-        };
-        let mut sessions = ptys.borrow_mut();
-        let Some(session_slot) = sessions.get_mut(index) else {
-            append_text(&buffer, "\n[selected pty shell is missing]\n");
-            return;
-        };
-        let state_guard = terminal_tab_states.borrow();
-        let Some(state) = state_guard.get(index) else {
-            append_text(&buffer, "\n[selected pty shell is missing]\n");
-            return;
-        };
-        if !(state.is_running() && state.attached) {
-            if state.status == ProcessStatus::Running {
-                append_text(
-                    &buffer,
-                    "\n[selected pty shell is running but not attached to this app]\n",
-                );
-            } else if state.status == ProcessStatus::Exited {
-                append_text(&buffer, "\n[selected pty shell has exited]\n");
-            } else {
-                append_text(&buffer, "\n[selected pty shell is stopped]\n");
-            }
-            return;
-        }
+fn terminal_runtime_record_is_shell(record: &ProcessRecord) -> bool {
+    let command = record.command.trim();
+    !(command == "codex"
+        || command.starts_with("codex ")
+        || command == "claude"
+        || command.starts_with("claude "))
+}
 
-        let Some(session) = session_slot.as_mut() else {
-            append_text(
-                &buffer,
-                "\n[selected pty shell is running but session slot is missing]\n",
-            );
-            return;
-        };
-        let command_line = format!("\n$ {command}\n");
-        append_text(&buffer, &command_line);
-        if let Err(err) = session.append_output(&command_line) {
-            append_text(&buffer, &format!("[pty log error]\n{err:#}\n"));
-        }
-        if let Err(err) = session.write(&format!("{command}\n")) {
-            append_text(&buffer, &format!("[pty write error]\n{err:#}\n"));
-        }
-        return;
-    }
-    run_terminal_command(database_path, workspace_name, command, buffer);
+fn latest_running_runtime_shell(
+    database_path: &Path,
+    workspace_name: &str,
+) -> Option<ProcessRecord> {
+    WorkspaceStore::open(database_path)
+        .and_then(|store| store.list_sessions(workspace_name))
+        .ok()
+        .and_then(|records| {
+            records.into_iter().find(|record| {
+                record.status == ProcessStatus::Running && terminal_runtime_record_is_shell(record)
+            })
+        })
+}
+
+fn terminal_runtime_error_text(err: &anyhow::Error) -> String {
+    format!("\n[terminal runtime error]\n{err:#}\n")
 }
 
 fn load_terminal_tab_transcript(
@@ -1569,46 +413,28 @@ fn run_terminal_command(
     command: String,
     buffer: TextBuffer,
 ) {
-    append_text(&buffer, &format!("\n$ {command}\n[running]\n"));
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let message = match WorkspaceStore::open(database_path)
-            .and_then(|store| store.terminal_command(&workspace_name, &command))
-        {
-            Ok(result) => {
-                let mut text = String::new();
-                if !result.stdout.is_empty() {
-                    text.push_str(&result.stdout);
-                }
-                if !result.stderr.is_empty() {
-                    text.push_str("\n[stderr]\n");
-                    text.push_str(&result.stderr);
-                }
-                text.push_str(&format!(
-                    "\n[exit {}]\n",
-                    result
-                        .exit_code
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "signal".to_owned())
-                ));
-                text
-            }
-            Err(err) => format!("[error]\n{err:#}\n"),
-        };
-        let _ = tx.send(message);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(message) => {
-            append_text(&buffer, &message);
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+    let Some(record) = latest_running_runtime_shell(&database_path, &workspace_name) else {
+        append_text(
+            &buffer,
+            "\n[terminal] no running runtime shell session; start shell first\n",
+        );
+        return;
+    };
+    crate::archcar_async::spawn_archcar_request(
+        linux_archductor_core::paths::AppPaths::from_env(),
+        ArchcarRequest::SendInput {
+            session_id: record.id,
+            input: command.clone(),
+            kind: ArchcarInputKind::ControlCommand,
+        },
+    );
+    append_text(
+        &buffer,
+        &format!(
+            "\n$ {command}\n[terminal] sent to archcar shell #{}\n",
+            record.id
+        ),
+    );
 }
 
 fn run_terminal_log_search(
@@ -1625,47 +451,43 @@ fn run_terminal_log_search(
         &buffer,
         &format!("\n[terminal search] {query}\n[searching]\n"),
     );
-    let (tx, rx) = mpsc::channel();
     let query_for_thread = query.clone();
-    std::thread::spawn(move || {
-        let message = WorkspaceStore::open(database_path)
-            .and_then(|store| store.search_terminal_logs(&workspace_name, &query_for_thread));
-        let _ = tx.send(message);
-    });
-
     let buffer_for_ui = buffer.clone();
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(result) => {
-            match result {
-                Ok(matches) => {
-                    append_text(
-                        &buffer_for_ui,
-                        &format_terminal_search_results(&query, &matches),
-                    );
-                    set_terminal_search_results_browser(
-                        &history_browser,
-                        &matches,
-                        browser_database_path.clone(),
-                        browser_workspace_name.clone(),
-                        buffer_for_ui.clone(),
-                        jump_history_pages.clone(),
-                    );
-                }
-                Err(err) => {
-                    append_text(
-                        &buffer_for_ui,
-                        &format!("[terminal search error]\n{err:#}\n"),
-                    );
-                }
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || {
+            WorkspaceStore::open(database_path)
+                .and_then(|store| store.search_terminal_logs(&workspace_name, &query_for_thread))
+        },
+        move |result| match result {
+            Ok(matches) => {
+                append_text(
+                    &buffer_for_ui,
+                    &format_terminal_search_results(&query, &matches),
+                );
+                set_terminal_search_results_browser(
+                    &history_browser,
+                    &matches,
+                    browser_database_path.clone(),
+                    browser_workspace_name.clone(),
+                    buffer_for_ui.clone(),
+                    jump_history_pages.clone(),
+                );
             }
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal search worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+            Err(err) => {
+                append_text(
+                    &buffer_for_ui,
+                    &format!("[terminal search error]\n{err:#}\n"),
+                );
+            }
+        },
+        move || {
+            append_text(
+                &buffer_for_disconnect,
+                "[error]\nterminal search worker disconnected\n",
+            );
+        },
+    );
 }
 
 fn run_terminal_match_transcript(
@@ -1682,43 +504,44 @@ fn run_terminal_match_transcript(
             process_id, line_number
         ),
     );
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let message = WorkspaceStore::open(database_path)
-            .and_then(|store| {
-                let record = store
-                    .list_terminals(&workspace_name)?
-                    .into_iter()
-                    .find(|record| record.id == process_id)
-                    .with_context(|| {
-                        format!(
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || {
+            WorkspaceStore::open(database_path)
+                .and_then(|store| {
+                    let record = store
+                        .list_terminals(&workspace_name)?
+                        .into_iter()
+                        .find(|record| record.id == process_id)
+                        .with_context(|| {
+                            format!(
                             "terminal session {process_id} not found for workspace {workspace_name}"
                         )
-                    })?;
-                let transcript = store.read_terminal_log(&workspace_name, process_id)?;
-                let excerpt =
-                    terminal_log_excerpt(&transcript, line_number, TERMINAL_SEARCH_CONTEXT_LINES);
-                Ok(format_terminal_match_transcript(
-                    &record,
-                    line_number,
-                    &excerpt,
-                ))
-            })
-            .unwrap_or_else(|err| format!("[terminal match error]\n{err:#}\n"));
-        let _ = tx.send(message);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(message) => {
+                        })?;
+                    let transcript = store.read_terminal_log(&workspace_name, process_id)?;
+                    let excerpt = terminal_log_excerpt(
+                        &transcript,
+                        line_number,
+                        TERMINAL_SEARCH_CONTEXT_LINES,
+                    );
+                    Ok(format_terminal_match_transcript(
+                        &record,
+                        line_number,
+                        &excerpt,
+                    ))
+                })
+                .unwrap_or_else(|err| format!("[terminal match error]\n{err:#}\n"))
+        },
+        move |message| {
             buffer.set_text(&message);
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal match worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+        },
+        move || {
+            append_text(
+                &buffer_for_disconnect,
+                "[error]\nterminal match worker disconnected\n",
+            );
+        },
+    );
 }
 
 fn run_terminal_line_transcript(
@@ -1736,45 +559,43 @@ fn run_terminal_line_transcript(
             process_id, line_number
         ),
     );
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let message = WorkspaceStore::open(database_path)
-            .and_then(|store| {
-                let record = store
-                    .list_terminals(&workspace_name)?
-                    .into_iter()
-                    .find(|record| record.id == process_id)
-                    .with_context(|| {
-                        format!(
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || {
+            WorkspaceStore::open(database_path)
+                .and_then(|store| {
+                    let record = store
+                        .list_terminals(&workspace_name)?
+                        .into_iter()
+                        .find(|record| record.id == process_id)
+                        .with_context(|| {
+                            format!(
                             "terminal session {process_id} not found for workspace {workspace_name}"
                         )
-                    })?;
-                let transcript = store.read_terminal_log(&workspace_name, process_id)?;
-                let excerpt = terminal_log_excerpt(&transcript, line_number, context_lines);
-                Ok(format_terminal_line_transcript(
-                    &record,
-                    line_number,
-                    context_lines,
-                    &excerpt,
-                ))
-            })
-            .unwrap_or_else(|err| {
-                format!("[terminal line jump error for session #{process_id}]\n{err:#}\n")
-            });
-        let _ = tx.send(message);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(message) => {
+                        })?;
+                    let transcript = store.read_terminal_log(&workspace_name, process_id)?;
+                    let excerpt = terminal_log_excerpt(&transcript, line_number, context_lines);
+                    Ok(format_terminal_line_transcript(
+                        &record,
+                        line_number,
+                        context_lines,
+                        &excerpt,
+                    ))
+                })
+                .unwrap_or_else(|err| {
+                    format!("[terminal line jump error for session #{process_id}]\n{err:#}\n")
+                })
+        },
+        move |message| {
             buffer.set_text(&message);
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal line-jump worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+        },
+        move || {
+            append_text(
+                &buffer_for_disconnect,
+                "[error]\nterminal line-jump worker disconnected\n",
+            );
+        },
+    );
 }
 
 fn terminal_line_jump_target(current_line: usize, delta: isize) -> usize {
@@ -1808,11 +629,12 @@ fn run_terminal_tail_transcript(
         &buffer,
         &format!("\n[terminal session #{process_id}] loading tail output...\n"),
     );
-    let (tx, rx) = mpsc::channel();
     let database_path_for_thread = database_path.clone();
     let workspace_name_for_thread = workspace_name.clone();
-    std::thread::spawn(move || {
-        let message = WorkspaceStore::open(database_path_for_thread.clone())
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || {
+            WorkspaceStore::open(database_path_for_thread.clone())
             .and_then(|store| {
                 let record = store
                     .list_terminals(&workspace_name_for_thread)?
@@ -1832,21 +654,18 @@ fn run_terminal_tail_transcript(
             })
             .unwrap_or_else(|err| {
                 format!("[terminal tail error for session #{process_id}]\n{err:#}\n")
-            });
-        let _ = tx.send(message);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(message) => {
+            })
+        },
+        move |message| {
             buffer.set_text(&message);
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal tail worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+        },
+        move || {
+            append_text(
+                &buffer_for_disconnect,
+                "[error]\nterminal tail worker disconnected\n",
+            );
+        },
+    );
 }
 
 fn run_terminal_head_transcript(
@@ -1859,11 +678,12 @@ fn run_terminal_head_transcript(
         &buffer,
         &format!("\n[terminal session #{process_id}] loading head output...\n"),
     );
-    let (tx, rx) = mpsc::channel();
     let database_path_for_thread = database_path.clone();
     let workspace_name_for_thread = workspace_name.clone();
-    std::thread::spawn(move || {
-        let message = WorkspaceStore::open(database_path_for_thread.clone())
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || {
+            WorkspaceStore::open(database_path_for_thread.clone())
             .and_then(|store| {
                 let record = store
                     .list_terminals(&workspace_name_for_thread)?
@@ -1883,21 +703,18 @@ fn run_terminal_head_transcript(
             })
             .unwrap_or_else(|err| {
                 format!("[terminal head error for session #{process_id}]\n{err:#}\n")
-            });
-        let _ = tx.send(message);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(message) => {
+            })
+        },
+        move |message| {
             buffer.set_text(&message);
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal head worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+        },
+        move || {
+            append_text(
+                &buffer_for_disconnect,
+                "[error]\nterminal head worker disconnected\n",
+            );
+        },
+    );
 }
 
 fn terminal_log_excerpt(transcript: &str, line_number: usize, context: usize) -> String {
@@ -2043,50 +860,49 @@ fn run_terminal_history(
     let preserved_selection = history_combo
         .active_id()
         .and_then(|id| id.as_str().parse::<i64>().ok());
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = WorkspaceStore::open(database_path)
-            .and_then(|store| store.list_terminal_summaries(&workspace_name));
-        let _ = tx.send(result);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(Ok(summaries)) => {
-            let display_summaries = terminal_history_summaries_for_display(&summaries);
-            let filter = terminal_history_filter_status(&history_filter);
-            let query = history_session_filter.text().to_string();
-            let filtered = terminal_history_summaries_for_filter(&display_summaries, filter);
-            let filtered = terminal_history_summaries_for_filter_with_query(
-                &filtered,
-                filter,
-                Some(query.as_str()),
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || {
+            WorkspaceStore::open(database_path)
+                .and_then(|store| store.list_terminal_summaries(&workspace_name))
+        },
+        move |result| match result {
+            Ok(summaries) => {
+                let display_summaries = terminal_history_summaries_for_display(&summaries);
+                let filter = terminal_history_filter_status(&history_filter);
+                let query = history_session_filter.text().to_string();
+                let filtered = terminal_history_summaries_for_filter(&display_summaries, filter);
+                let filtered = terminal_history_summaries_for_filter_with_query(
+                    &filtered,
+                    filter,
+                    Some(query.as_str()),
+                );
+                set_terminal_history_combo(&history_combo, &filtered, preserved_selection);
+                set_terminal_history_browser(
+                    &history_browser,
+                    &history_combo,
+                    &filtered,
+                    browser_database_path.clone(),
+                    browser_workspace_name.clone(),
+                    browser_buffer.clone(),
+                    jump_history_pages.clone(),
+                );
+                *history_records.borrow_mut() = filtered;
+                *history_records_all.borrow_mut() = display_summaries;
+                let displayed_records = history_records.borrow();
+                append_text(&buffer, &format_terminal_history(&displayed_records));
+            }
+            Err(err) => {
+                append_text(&buffer, &format!("[terminal history error]\n{err:#}\n"));
+            }
+        },
+        move || {
+            append_text(
+                &buffer_for_disconnect,
+                "[error]\nterminal history worker disconnected\n",
             );
-            set_terminal_history_combo(&history_combo, &filtered, preserved_selection);
-            set_terminal_history_browser(
-                &history_browser,
-                &history_combo,
-                &filtered,
-                browser_database_path.clone(),
-                browser_workspace_name.clone(),
-                browser_buffer.clone(),
-                jump_history_pages.clone(),
-            );
-            *history_records.borrow_mut() = filtered;
-            *history_records_all.borrow_mut() = display_summaries;
-            let displayed_records = history_records.borrow();
-            append_text(&buffer, &format_terminal_history(&displayed_records));
-            glib::ControlFlow::Break
-        }
-        Ok(Err(err)) => {
-            append_text(&buffer, &format!("[terminal history error]\n{err:#}\n"));
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            append_text(&buffer, "[error]\nterminal history worker disconnected\n");
-            glib::ControlFlow::Break
-        }
-    });
+        },
+    );
 }
 
 fn run_terminal_transcript_load(
@@ -2099,31 +915,24 @@ fn run_terminal_transcript_load(
         &buffer,
         &format!("\n[terminal transcript #{}]\n[loading]\n", record.id),
     );
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let message = match WorkspaceStore::open(database_path)
+    let buffer_for_disconnect = buffer.clone();
+    run_terminal_worker(
+        move || match WorkspaceStore::open(database_path)
             .and_then(|store| store.read_terminal_log(&workspace_name, record.id))
         {
             Ok(transcript) => format_selected_terminal_transcript(&record, &transcript),
             Err(err) => format!("[terminal transcript error]\n{err:#}\n"),
-        };
-        let _ = tx.send(message);
-    });
-
-    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(message) => {
+        },
+        move |message| {
             buffer.set_text(&message);
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
+        },
+        move || {
             append_text(
-                &buffer,
+                &buffer_for_disconnect,
                 "[error]\nterminal transcript worker disconnected\n",
             );
-            glib::ControlFlow::Break
-        }
-    });
+        },
+    );
 }
 
 fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> String {
@@ -3965,229 +2774,6 @@ fn normalize_terminal_preset_alias(value: &str) -> String {
         .collect()
 }
 
-struct TerminalSession {
-    source: TerminalSessionSource,
-    database_path: PathBuf,
-    process_id: Option<i64>,
-    process_pid: Option<u32>,
-    owns_process: bool,
-}
-
-enum TerminalSessionSource {
-    Live {
-        session: PtySession,
-    },
-    Reattached {
-        write: std::fs::File,
-        output: Arc<Mutex<String>>,
-        read_cursor: usize,
-    },
-}
-
-impl TerminalSession {
-    fn from_live_pty(session: PtySession, database_path: PathBuf, process_id: Option<i64>) -> Self {
-        let process_pid = session.process_id();
-        Self {
-            source: TerminalSessionSource::Live { session },
-            database_path,
-            process_id,
-            process_pid,
-            owns_process: true,
-        }
-    }
-
-    fn try_reattach_running(database_path: PathBuf, process_id: i64, pid: u32) -> Result<Self> {
-        let path = terminal_device_path_for_pid(pid)?;
-        let mut reader = OpenOptions::new().read(true).open(&path).with_context(|| {
-            format!("open terminal slave for process {pid}: {}", path.display())
-        })?;
-        let write = OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .with_context(|| {
-                format!(
-                    "open terminal slave write for process {pid}: {}",
-                    path.display()
-                )
-            })?;
-        let output = Arc::new(Mutex::new(String::new()));
-        let reader_output = Arc::clone(&output);
-        std::thread::spawn(move || {
-            let mut buffer = [0u8; 4096];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Ok(mut output) = reader_output.lock() {
-                            output.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Ok(Self {
-            source: TerminalSessionSource::Reattached {
-                write,
-                output,
-                read_cursor: 0,
-            },
-            database_path,
-            process_id: Some(process_id),
-            process_pid: Some(pid),
-            owns_process: false,
-        })
-    }
-
-    fn stop(&mut self, workspace_name: &str) -> Result<()> {
-        match &mut self.source {
-            TerminalSessionSource::Live { session } => {
-                session.stop()?;
-                self.mark_stopped(Some(SIGTERM_EXIT_CODE))
-            }
-            TerminalSessionSource::Reattached { .. } => {
-                let process_id = match self.process_id {
-                    Some(process_id) => process_id,
-                    None => return Ok(()),
-                };
-                WorkspaceStore::open(self.database_path.clone())?
-                    .stop_terminal_process(workspace_name, process_id)
-                    .map(|_| ())
-            }
-        }
-    }
-
-    fn stop_and_mark(&mut self) -> Result<()> {
-        match &mut self.source {
-            TerminalSessionSource::Live { session } => {
-                session.stop()?;
-                self.mark_stopped(Some(SIGTERM_EXIT_CODE))
-            }
-            TerminalSessionSource::Reattached { .. } => Ok(()),
-        }
-    }
-
-    fn poll_for_exit(&mut self) -> Result<bool> {
-        match &mut self.source {
-            TerminalSessionSource::Live { session } => {
-                if session.has_exited()? {
-                    self.mark_exited(None)?;
-                    return Ok(true);
-                }
-            }
-            TerminalSessionSource::Reattached { .. } => {
-                if let Some(process_pid) = self.process_pid {
-                    if terminal_process_alive(process_pid) {
-                        return Ok(false);
-                    }
-                    self.mark_exited(None)?;
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        match &self.source {
-            TerminalSessionSource::Live { session } => session.resize(rows, cols),
-            TerminalSessionSource::Reattached { .. } => Ok(()),
-        }
-    }
-
-    fn read_available(&mut self) -> String {
-        match &mut self.source {
-            TerminalSessionSource::Live { session } => session.read_available(),
-            TerminalSessionSource::Reattached {
-                output,
-                read_cursor,
-                ..
-            } => {
-                let Ok(output) = output.lock() else {
-                    return String::new();
-                };
-                let next = output.get(*read_cursor..).unwrap_or_default().to_owned();
-                *read_cursor = output.len();
-                next
-            }
-        }
-    }
-
-    fn write(&mut self, input: &str) -> Result<()> {
-        match &mut self.source {
-            TerminalSessionSource::Live { session } => session.write(input),
-            TerminalSessionSource::Reattached { write, .. } => {
-                write
-                    .write_all(input.as_bytes())
-                    .context("write to terminal")?;
-                write.flush().context("flush terminal write")
-            }
-        }
-    }
-
-    fn mark_stopped(&mut self, exit_code: Option<i32>) -> Result<()> {
-        let Some(process_id) = self.process_id.take() else {
-            return Ok(());
-        };
-        WorkspaceStore::open(self.database_path.clone())?
-            .mark_terminal_process_stopped(process_id, exit_code)?;
-        Ok(())
-    }
-
-    fn mark_exited(&mut self, exit_code: Option<i32>) -> Result<()> {
-        let Some(process_id) = self.process_id.take() else {
-            return Ok(());
-        };
-        WorkspaceStore::open(self.database_path.clone())?
-            .mark_terminal_process_exited(process_id, exit_code)?;
-        Ok(())
-    }
-
-    fn append_output(&self, output: &str) -> Result<()> {
-        let Some(process_id) = self.process_id else {
-            return Ok(());
-        };
-        WorkspaceStore::open(self.database_path.clone())?
-            .append_terminal_process_output(process_id, output)
-    }
-}
-
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        if !self.owns_process {
-            return;
-        }
-        let _ = self.stop_and_mark();
-    }
-}
-
-fn terminal_process_alive(process_id: u32) -> bool {
-    let Ok(output) = std::process::Command::new("kill")
-        .arg("-0")
-        .arg(process_id.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    output.status.success()
-}
-
-fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
-    let fd = format!("/proc/{process_id}/fd/0");
-    let target = fs::read_link(&fd)
-        .with_context(|| format!("resolve terminal fd for process {process_id}"))?;
-    let path = target
-        .to_str()
-        .context("terminal fd path is not valid UTF-8")?
-        .to_owned();
-    if path.is_empty() || !path.starts_with("/dev/pts/") {
-        anyhow::bail!("process {process_id} is not attached to a PTY slave");
-    }
-    Ok(PathBuf::from(path))
-}
-
 fn display_command(program: &Path, args: &[String]) -> String {
     std::iter::once(program.display().to_string())
         .chain(args.iter().cloned())
@@ -4256,6 +2842,16 @@ mod tests {
         assert_eq!(
             format_terminal_search_results("missing", &[]),
             "\n[terminal search] missing\n0 match(es)\nNo terminal transcript matches.\n"
+        );
+    }
+
+    #[test]
+    fn terminal_runtime_error_text_is_visible_in_transcript() {
+        let err = anyhow::anyhow!("database is locked");
+
+        assert_eq!(
+            terminal_runtime_error_text(&err),
+            "\n[terminal runtime error]\ndatabase is locked\n"
         );
     }
 
