@@ -1,8 +1,8 @@
 use crate::codex_tui::{
-    detect_directory_trust_prompt, merge_message_content, merge_screen_messages,
-    parse_codex_screen_delta, parse_codex_screen_messages, CodexFileChangeAction,
-    CodexParseBenchmark, CodexParseCursor, CodexParsedItem, CodexTranscriptEvent, ScreenMessage,
-    ScreenMessageRole,
+    codex_persistent_screen_fingerprint, detect_directory_trust_prompt, merge_message_content,
+    merge_screen_messages, parse_codex_screen_delta, parse_codex_screen_messages,
+    CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor, CodexParsedItem,
+    CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
 use crate::harness;
 use crate::pty::PtySession;
@@ -4432,8 +4432,8 @@ mutation($threadId: ID!) {{
         let Some(merged) = merge_message_content(&existing.content, content) else {
             return Ok(None);
         };
-        if merged != content || existing.content == content {
-            return Ok(None);
+        if merged == existing.content {
+            return Ok(Some(existing));
         }
 
         let now = timestamp();
@@ -4442,7 +4442,7 @@ mutation($threadId: ID!) {{
              SET content = ?1,
                  updated_at = ?2
              WHERE id = ?3",
-            params![content, now, existing.id],
+            params![merged, now, existing.id],
         )?;
         self.touch_chat_thread(thread_id, &now)?;
         self.get_chat_message(existing.id).map(Some)
@@ -5601,6 +5601,7 @@ fn spawn_codex_session_monitor(db_path: PathBuf, process_id: i64, mut pty: PtySe
     thread::spawn(move || {
         let mut trust_answered = false;
         let mut last_screen = String::new();
+        let mut last_persisted_screen_fingerprint = None;
         let mut native_thread_id_resolved = false;
 
         loop {
@@ -5619,10 +5620,14 @@ fn spawn_codex_session_monitor(db_path: PathBuf, process_id: i64, mut pty: PtySe
                 }
 
                 if let Ok(store) = WorkspaceStore::open(&db_path) {
-                    let _ = store.append_session_process_output(
-                        process_id,
-                        &format_codex_screen_snapshot(&screen),
-                    );
+                    let fingerprint = codex_persistent_screen_fingerprint(&screen);
+                    if fingerprint.is_some() && fingerprint != last_persisted_screen_fingerprint {
+                        last_persisted_screen_fingerprint = fingerprint;
+                        let _ = store.append_session_process_output(
+                            process_id,
+                            &format_codex_screen_snapshot(&screen),
+                        );
+                    }
                 }
                 last_screen = screen;
             }
@@ -12262,6 +12267,7 @@ working_directory = "apps/worker"
                 &process.log_path,
                 "args:--no-alt-screen --dangerously-bypass-approvals-and-sandbox",
             );
+            wait_for_log(&process.log_path, "[codex screen]");
             let log = fs::read_to_string(&process.log_path).unwrap();
             assert!(log.contains("[codex screen]"));
             assert!(!log.contains("ARCHDUCTOR_SESSION_BOOTSTRAP="));
@@ -14823,6 +14829,46 @@ spotlight_testing = true
         assert_eq!(messages[0].content, "run tests");
         assert_eq!(messages[1].content, "Running.");
         assert_eq!(messages[2].content, "run tests");
+    }
+
+    #[test]
+    fn chat_messages_merge_scrolled_agent_repaint_fragments() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+
+        store
+            .append_chat_message(
+                thread.id,
+                "agent",
+                "Repo Status\n\nThis is Linux Archductor.\n\nCurrent Git State",
+                "agent_screen_parse",
+            )
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "agent",
+                "This is Linux Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "agent",
+                "Current Git State\n\nYou’re in worktree valencia.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].content,
+            "Repo Status\n\nThis is Linux Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia."
+        );
     }
 
     #[test]

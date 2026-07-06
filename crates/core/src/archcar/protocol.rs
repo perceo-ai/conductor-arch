@@ -353,6 +353,33 @@ mod tests {
     }
 
     #[test]
+    fn response_summaries_omit_screen_and_message_bodies() {
+        let screen_response = ArchcarResponse::SessionScreen {
+            session_id: 7,
+            screen: "prompt with OPENAI_API_KEY=sk-secret".to_owned(),
+        };
+        let messages_response = ArchcarResponse::SessionMessages {
+            thread_id: 3,
+            messages: vec![ArchcarMessage {
+                id: 1,
+                role: "assistant".to_owned(),
+                content: "staged review prompt: keep this private".to_owned(),
+                source: "agent_screen_parse".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            }],
+        };
+
+        let screen_summary = archcar_response_summary(&screen_response);
+        let messages_summary = archcar_response_summary(&messages_response);
+
+        assert_eq!(screen_summary, "session_screen session_id=7 chars=36");
+        assert_eq!(messages_summary, "session_messages thread_id=3 count=1");
+        assert!(!screen_summary.contains("sk-secret"));
+        assert!(!messages_summary.contains("staged review prompt"));
+    }
+
+    #[test]
     fn event_summary_describes_ready_session() {
         let event = ArchcarEvent::SessionReady {
             session_id: 11,

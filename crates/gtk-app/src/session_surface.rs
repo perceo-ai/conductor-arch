@@ -792,7 +792,7 @@ pub fn agent_session_panel(
                     );
                 }
                 AsyncArchcarMessage::Response(response) => {
-                    handle_archcar_response(
+                    should_refresh_view |= handle_archcar_response(
                         response,
                         &db_for_refresh,
                         &workspace_for_refresh,
@@ -2980,6 +2980,9 @@ fn apply_thread_selection<F, U>(
     F: FnOnce(Option<i64>),
     U: FnOnce(),
 {
+    if *selected_thread.borrow() == next_thread {
+        return;
+    }
     *selected_thread.borrow_mut() = next_thread;
     set_selected_chat_thread(next_thread);
     update_composer_state();
@@ -5785,14 +5788,15 @@ fn handle_archcar_response(
     codex_ready: &RefCell<bool>,
     update_composer_state: &dyn Fn(),
     app_state: &AppState,
-) {
+) -> bool {
+    let mut changed = false;
     let Some(action) = inflight_actions
         .borrow_mut()
         .remove(&response.token)
         .or_else(|| fallback_action_from_archcar_response(&response))
     else {
         debug!(token = response.token, ?response.request, "archcar response had no tracked GTK action");
-        return;
+        return false;
     };
 
     match action {
@@ -5812,6 +5816,7 @@ fn handle_archcar_response(
                     &mut session_threads.borrow_mut(),
                     thread_id,
                 );
+                changed = true;
                 if let Some(session_id) = followup_session {
                     request_archcar_status_probe(
                         &bridge,
@@ -5832,6 +5837,7 @@ fn handle_archcar_response(
                         },
                     );
                 }
+                changed = true;
             }
             Err(err) => {
                 warn!(%workspace, token = response.token, error = %err, "archcar ensure failed");
@@ -5844,13 +5850,18 @@ fn handle_archcar_response(
                         },
                     );
                 }
+                changed = true;
             }
         },
         PendingArchcarAction::StatusProbe { session_id } => {
             pending_status.borrow_mut().remove(&session_id);
             match response.result {
                 Ok(ArchcarResponse::SessionStatus { ready, .. }) => {
+                    let previous_ready = ready_cache.borrow().get(&session_id).copied();
                     note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, ready);
+                    if previous_ready != Some(ready) {
+                        changed = true;
+                    }
                     if ready {
                         if let Some(thread_id) =
                             codex_thread_id_for_session(session_id, session_threads, records)
@@ -5867,13 +5878,18 @@ fn handle_archcar_response(
                             "reconciled codex ready state from async status probe"
                         );
                         set_codex_ready_state(codex_ready, update_composer_state, true);
+                        changed = true;
                     }
                 }
                 Ok(other) => {
                     warn!(session_id, ?other, "unexpected archcar status response");
                 }
                 Err(err) => {
+                    let previous_ready = ready_cache.borrow().get(&session_id).copied();
                     note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                    if previous_ready != Some(false) {
+                        changed = true;
+                    }
                     warn!(session_id, error = %err, "archcar status probe failed");
                     if let Some(thread_id) =
                         codex_thread_id_for_session(session_id, session_threads, records)
@@ -5885,6 +5901,7 @@ fn handle_archcar_response(
                                 message: err,
                             },
                         );
+                        changed = true;
                     }
                 }
             }
@@ -5909,6 +5926,7 @@ fn handle_archcar_response(
                     },
                 );
                 set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
                 request_archcar_ensure(
                     bridge,
                     inflight_actions,
@@ -5928,6 +5946,7 @@ fn handle_archcar_response(
                     },
                 );
                 set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
                 request_archcar_ensure(
                     bridge,
                     inflight_actions,
@@ -5963,6 +5982,7 @@ fn handle_archcar_response(
                     },
                 );
                 set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
                 request_archcar_ensure(
                     bridge,
                     inflight_actions,
@@ -5982,6 +6002,7 @@ fn handle_archcar_response(
                     },
                 );
                 set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
                 request_archcar_ensure(
                     bridge,
                     inflight_actions,
@@ -5994,6 +6015,7 @@ fn handle_archcar_response(
 
     let _ = app_state;
     let _ = database_path;
+    changed
 }
 
 fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) {
@@ -6007,7 +6029,7 @@ fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) 
             | ArchcarEvent::SessionScreenUpdated { .. }
             | ArchcarEvent::SessionMessagesUpdated { .. } => (true, false),
         },
-        AsyncArchcarMessage::Response(_) => (true, false),
+        AsyncArchcarMessage::Response(_) => (false, false),
         AsyncArchcarMessage::BridgeError { .. } => (true, false),
     }
 }
@@ -6396,6 +6418,7 @@ fn terminal_device_path_for_pid(process_id: u32) -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::archcar_async::AsyncArchcarRequestKind;
+    use linux_archductor_core::paths::AppPaths;
     use linux_archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -7615,6 +7638,65 @@ I summarized the result.
     }
 
     #[test]
+    fn repeated_ready_status_probe_does_not_force_view_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = session_record(61, "codex", ProcessStatus::Running, None);
+        record.chat_thread_id = Some(4);
+        let ready_cache = RefCell::new(HashMap::from([(61, true)]));
+        let pending_status = RefCell::new(HashMap::from([(61, 7)]));
+        let inflight_actions = RefCell::new(HashMap::from([(
+            7,
+            PendingArchcarAction::StatusProbe { session_id: 61 },
+        )]));
+        let pending_commands = RefCell::new(HashMap::new());
+        let pending_inputs = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let session_threads = RefCell::new(HashMap::from([(61, 4)]));
+        let codex_ready = RefCell::new(true);
+        let composer_updates = RefCell::new(0);
+        let app_state = AppState::new(
+            AppPaths::from_env(),
+            Some("valencia".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            crate::state::AppPage::Workspace,
+        );
+
+        let changed = handle_archcar_response(
+            AsyncArchcarResponse {
+                token: 7,
+                request: AsyncArchcarRequestKind::GetSessionStatus { session_id: 61 },
+                result: Ok(ArchcarResponse::SessionStatus {
+                    session_id: 61,
+                    status: "running".to_owned(),
+                    ready: true,
+                }),
+            },
+            temp.path(),
+            "valencia",
+            AsyncArchcarBridge::new(AppPaths::from_env()),
+            &[record],
+            &ready_cache,
+            &pending_status,
+            &inflight_actions,
+            &pending_commands,
+            &pending_inputs,
+            &startup_states,
+            &session_threads,
+            &codex_ready,
+            &|| *composer_updates.borrow_mut() += 1,
+            &app_state,
+        );
+
+        assert!(!changed);
+        assert_eq!(*composer_updates.borrow(), 0);
+        assert!(pending_status.borrow().is_empty());
+        assert_eq!(
+            startup_states.borrow().get(&4),
+            Some(&CodexStartupState::Ready)
+        );
+    }
+
+    #[test]
     fn routine_archcar_updates_do_not_force_outer_refresh() {
         let ready_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
             ArchcarEvent::SessionReady {
@@ -7643,7 +7725,7 @@ I summarized the result.
         ));
 
         assert_eq!(ready_scope, (true, false));
-        assert_eq!(status_scope, (true, false));
+        assert_eq!(status_scope, (false, false));
         assert_eq!(started_scope, (true, true));
     }
 
@@ -7695,6 +7777,24 @@ I summarized the result.
         assert_eq!(*selected_thread.borrow(), Some(8));
         assert_eq!(*app_state.borrow(), Some(8));
         assert_eq!(*composer_updates.borrow(), 1);
+    }
+
+    #[test]
+    fn selecting_same_thread_does_not_recompute_composer_state() {
+        let selected_thread = RefCell::new(Some(7));
+        let app_state = Rc::new(RefCell::new(None));
+        let composer_updates = Rc::new(RefCell::new(0));
+
+        apply_thread_selection(
+            &selected_thread,
+            Some(7),
+            |thread_id| *app_state.borrow_mut() = thread_id,
+            || *composer_updates.borrow_mut() += 1,
+        );
+
+        assert_eq!(*selected_thread.borrow(), Some(7));
+        assert_eq!(*app_state.borrow(), None);
+        assert_eq!(*composer_updates.borrow(), 0);
     }
 
     #[test]

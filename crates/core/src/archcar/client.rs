@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -35,14 +35,13 @@ impl ArchcarClient {
             payload: request,
         };
         let line = serde_json::to_string(&envelope)?;
-        info!(
-            socket_path = %self.socket_path.display(),
-            rpc_id = %envelope.id,
-            direction = "send",
-            message_type = "request",
-            summary = %request_summary,
-            payload = %line,
-            "archcar unix rpc"
+        log_archcar_rpc(
+            &self.socket_path,
+            &envelope.id,
+            "send",
+            "request",
+            request_summary,
+            &line,
         );
         stream.write_all(line.as_bytes())?;
         stream.write_all(b"\n")?;
@@ -52,14 +51,13 @@ impl ArchcarClient {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let response: RpcEnvelope<ArchcarResponse> = serde_json::from_str(&line)?;
-        info!(
-            socket_path = %self.socket_path.display(),
-            rpc_id = %response.id,
-            direction = "recv",
-            message_type = "response",
-            summary = %archcar_response_summary(&response.payload),
-            payload = %line.trim_end(),
-            "archcar unix rpc"
+        log_archcar_rpc(
+            &self.socket_path,
+            &response.id,
+            "recv",
+            "response",
+            archcar_response_summary(&response.payload),
+            line.trim_end(),
         );
         Ok(response.payload)
     }
@@ -71,14 +69,13 @@ impl ArchcarClient {
             payload: ArchcarRequest::Subscribe,
         };
         let line = serde_json::to_string(&envelope)?;
-        info!(
-            socket_path = %self.socket_path.display(),
-            rpc_id = %envelope.id,
-            direction = "send",
-            message_type = "request",
-            summary = %archcar_request_summary(&ArchcarRequest::Subscribe),
-            payload = %line,
-            "archcar unix rpc"
+        log_archcar_rpc(
+            &self.socket_path,
+            &envelope.id,
+            "send",
+            "request",
+            archcar_request_summary(&ArchcarRequest::Subscribe),
+            &line,
         );
         stream.write_all(line.as_bytes())?;
         stream.write_all(b"\n")?;
@@ -93,14 +90,13 @@ impl ArchcarClient {
                     Ok(0) => break,
                     Ok(_) => match serde_json::from_str::<RpcEnvelope<ArchcarEvent>>(&line) {
                         Ok(event) => {
-                            info!(
-                                socket_path = %socket_path.display(),
-                                rpc_id = %event.id,
-                                direction = "recv",
-                                message_type = "event",
-                                summary = %archcar_event_summary(&event.payload),
-                                payload = %line.trim_end(),
-                                "archcar unix rpc"
+                            log_archcar_rpc(
+                                &socket_path,
+                                &event.id,
+                                "recv",
+                                "event",
+                                archcar_event_summary(&event.payload),
+                                line.trim_end(),
                             );
                             let _ = tx.send(event.payload);
                         }
@@ -108,7 +104,7 @@ impl ArchcarClient {
                             warn!(
                                 socket_path = %socket_path.display(),
                                 error = %err,
-                                payload = %line.trim_end(),
+                                bytes = line.len(),
                                 "archcar unix rpc event decode failed"
                             );
                         }
@@ -173,4 +169,46 @@ impl ArchcarClient {
         let (candidate, err) = last_err.context("no archcar binary candidate available")?;
         Err(err).with_context(|| format!("spawn archcar binary {}", candidate.display()))
     }
+}
+
+fn log_archcar_rpc(
+    socket_path: &Path,
+    rpc_id: &str,
+    direction: &str,
+    message_type: &str,
+    summary: String,
+    raw_payload: &str,
+) {
+    if let Some(payload) = archcar_rpc_log_payload(raw_payload) {
+        info!(
+            socket_path = %socket_path.display(),
+            %rpc_id,
+            direction,
+            message_type,
+            summary = %summary,
+            payload,
+            "archcar unix rpc"
+        );
+    } else {
+        info!(
+            socket_path = %socket_path.display(),
+            %rpc_id,
+            direction,
+            message_type,
+            summary = %summary,
+            "archcar unix rpc"
+        );
+    }
+}
+
+fn archcar_rpc_log_payload(raw_payload: &str) -> Option<&str> {
+    std::env::var("ARCHDUCTOR_LOG_ARCHCAR_PAYLOADS")
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+        .then_some(raw_payload)
 }

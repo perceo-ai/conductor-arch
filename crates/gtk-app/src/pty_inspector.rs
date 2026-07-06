@@ -1,7 +1,7 @@
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, CheckButton, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Stack,
+    ScrolledWindow, SelectionMode, Stack,
 };
 use linux_archductor_core::session_event::{SessionEvent, SessionEventPayload};
 use linux_archductor_core::workspace::{ProcessRecord, ProcessStatus, WorkspaceStore};
@@ -367,24 +367,67 @@ fn signal_label(exit_code: Option<i32>) -> String {
 }
 
 fn redact_sensitive_text(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|part| {
-            let lower = part.to_ascii_lowercase();
-            if lower.contains("token=")
-                || lower.contains("secret=")
-                || lower.contains("password=")
-                || lower.contains("key=")
-            {
-                part.split_once('=')
-                    .map(|(key, _)| format!("{key}=[redacted]"))
-                    .unwrap_or_else(|| "[redacted]".to_owned())
-            } else {
-                part.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut redact_next = false;
+    let mut parts = Vec::new();
+    for part in value.split_whitespace() {
+        if redact_next {
+            parts.push("[redacted]".to_owned());
+            redact_next = false;
+            continue;
+        }
+
+        if is_bearer_marker(part) {
+            parts.push(part.to_owned());
+            redact_next = true;
+            continue;
+        }
+
+        if let Some(redacted) = redact_assignment_secret(part) {
+            parts.push(redacted);
+            continue;
+        }
+
+        if is_flag_secret(part) {
+            parts.push(part.to_owned());
+            redact_next = true;
+            continue;
+        }
+
+        parts.push(part.to_owned());
+    }
+    parts.join(" ")
+}
+
+fn redact_assignment_secret(part: &str) -> Option<String> {
+    let (key, _) = part.split_once('=')?;
+    is_sensitive_key_or_flag(key).then(|| format!("{key}=[redacted]"))
+}
+
+fn is_flag_secret(part: &str) -> bool {
+    part.starts_with("--") && is_sensitive_key_or_flag(part.trim_start_matches('-'))
+}
+
+fn is_bearer_marker(part: &str) -> bool {
+    part.trim_matches(|ch: char| ch == '\'' || ch == '"' || ch == ':')
+        .eq_ignore_ascii_case("bearer")
+}
+
+fn is_sensitive_key_or_flag(key: &str) -> bool {
+    let normalized = key
+        .trim_matches(|ch: char| ch == '\'' || ch == '"' || ch == ':')
+        .trim_start_matches('-')
+        .replace('-', "_")
+        .to_ascii_lowercase();
+    normalized == "token"
+        || normalized.ends_with("_token")
+        || normalized == "api_key"
+        || normalized.ends_with("_api_key")
+        || normalized == "key"
+        || normalized.ends_with("_key")
+        || normalized == "password"
+        || normalized.ends_with("_password")
+        || normalized == "secret"
+        || normalized.ends_with("_secret")
 }
 
 fn pluralize(count: usize, noun: &str) -> String {
@@ -407,6 +450,9 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     title.add_css_class("section-title");
     title.set_xalign(0.0);
     root.append(&title);
+    root.append(&small_label(
+        "Local storage only. Routine logs omit raw PTY screens by default.",
+    ));
 
     let layout = GBox::new(Orientation::Horizontal, 12);
     layout.set_hexpand(true);
@@ -415,11 +461,15 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
 
     let session_list = ListBox::new();
     session_list.add_css_class("workspace-list");
+    session_list.set_selection_mode(SelectionMode::Single);
     if model.sessions.is_empty() {
         session_list.append(&label_row("No active or recent PTY sessions."));
     } else {
         for session in &model.sessions {
             session_list.append(&session_row_widget(session));
+        }
+        if let Some(row) = session_list.row_at_index(0) {
+            session_list.select_row(Some(&row));
         }
     }
     let session_scroll = scroller(&session_list);
@@ -433,8 +483,12 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     render_raw_chunks_into(&raw_container, &model.selected);
     let normalized_container = GBox::new(Orientation::Vertical, 6);
     render_normalized_into(&normalized_container, &model.selected);
-    center_stack.add_named(&raw_container, Some("raw"));
-    center_stack.add_named(&normalized_container, Some("normalized"));
+    let raw_scroll = scroller(&raw_container);
+    raw_scroll.set_min_content_height(480);
+    let normalized_scroll = scroller(&normalized_container);
+    normalized_scroll.set_min_content_height(480);
+    center_stack.add_named(&raw_scroll, Some("raw"));
+    center_stack.add_named(&normalized_scroll, Some("normalized"));
     center_stack.set_visible_child_name("raw");
     let center = GBox::new(Orientation::Vertical, 8);
     let toolbar = GBox::new(Orientation::Horizontal, 6);
@@ -827,5 +881,34 @@ mod tests {
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].rendered_text, "failed");
+    }
+
+    #[test]
+    fn command_redaction_handles_env_bearer_and_flag_style_secrets() {
+        let redacted = redact_sensitive_text(
+            "OPENAI_API_KEY=sk-openai ANTHROPIC_API_KEY=sk-ant \
+             TOKEN=abc API_KEY=def password=hunter2 secret=sauce \
+             curl -H 'Authorization: Bearer bearer-secret' \
+             codex --token cli-token --password=cli-pass --api-key cli-key",
+        );
+
+        for leaked in [
+            "sk-openai",
+            "sk-ant",
+            "abc",
+            "def",
+            "hunter2",
+            "sauce",
+            "bearer-secret",
+            "cli-token",
+            "cli-pass",
+            "cli-key",
+        ] {
+            assert!(!redacted.contains(leaked), "{leaked} leaked in {redacted}");
+        }
+        assert!(redacted.contains("OPENAI_API_KEY=[redacted]"));
+        assert!(redacted.contains("ANTHROPIC_API_KEY=[redacted]"));
+        assert!(redacted.contains("--token [redacted]"));
+        assert!(redacted.contains("--password=[redacted]"));
     }
 }
