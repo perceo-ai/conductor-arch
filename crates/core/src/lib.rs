@@ -1,8 +1,11 @@
 pub mod archcar;
 pub mod codex_tui;
 pub mod doctor;
+pub mod github_pr;
 pub mod harness;
 pub mod import;
+pub mod linear;
+pub mod local_chat;
 pub mod mcp;
 pub mod paths;
 pub mod pty;
@@ -11,6 +14,8 @@ pub mod session_event;
 pub mod session_pipeline;
 pub mod session_state;
 pub mod settings;
+pub mod terminal_logs;
+pub mod todos;
 pub mod workspace;
 
 #[cfg(test)]

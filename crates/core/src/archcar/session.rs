@@ -231,30 +231,50 @@ fn adopt_running_session(
     workspace: &str,
     kind: SessionKind,
 ) -> Result<Option<(ManagedSessionConnection, SessionSnapshot)>> {
-    let Some(process) = store.list_sessions(workspace)?.into_iter().find(|record| {
-        record.status == ProcessStatus::Running
-            && record.chat_thread_id.is_some()
-            && record.command.starts_with("codex ")
-            && kind == SessionKind::Codex
-    }) else {
-        return Ok(None);
-    };
-    let thread_id = process
-        .chat_thread_id
-        .context("running managed session missing chat_thread_id")?;
-    let connection = ManagedSessionConnection::try_reattach_running(process.pid)?;
-    let snapshot = SessionSnapshot {
-        session_id: process.id,
-        thread_id,
-        workspace: workspace.to_owned(),
-        kind,
-        pid: process.pid,
-        status: ProcessStatus::Running,
-        runtime_state: AgentSessionState::Running,
-        ready: true,
-        screen: String::new(),
-    };
-    Ok(Some((connection, snapshot)))
+    for process in store
+        .list_sessions(workspace)?
+        .into_iter()
+        .filter(|record| {
+            record.status == ProcessStatus::Running
+                && record.chat_thread_id.is_some()
+                && session_kind_from_command(&record.command) == Some(kind)
+                && kind == SessionKind::Codex
+                && store.owns_process_log_path(&record.log_path)
+        })
+    {
+        if !terminal_process_alive(process.pid) {
+            let _ = store.mark_session_process_exited(process.id, None);
+            continue;
+        }
+        let thread_id = process
+            .chat_thread_id
+            .context("running managed session missing chat_thread_id")?;
+        let connection = match ManagedSessionConnection::try_reattach_running(process.pid) {
+            Ok(connection) => connection,
+            Err(err) => {
+                warn!(
+                    session_id = process.id,
+                    pid = process.pid,
+                    error = %format!("{err:#}"),
+                    "archcar could not adopt running session"
+                );
+                continue;
+            }
+        };
+        let snapshot = SessionSnapshot {
+            session_id: process.id,
+            thread_id,
+            workspace: workspace.to_owned(),
+            kind,
+            pid: process.pid,
+            status: ProcessStatus::Running,
+            runtime_state: AgentSessionState::Running,
+            ready: true,
+            screen: String::new(),
+        };
+        return Ok(Some((connection, snapshot)));
+    }
+    Ok(None)
 }
 
 fn session_kind_from_command(command: &str) -> Option<SessionKind> {
@@ -272,16 +292,19 @@ fn session_kind_from_command(command: &str) -> Option<SessionKind> {
 
 pub fn restore_managed_session(
     db_path: std::path::PathBuf,
-    _logs_dir: std::path::PathBuf,
+    logs_dir: std::path::PathBuf,
     process_id: i64,
     event_tx: Sender<ArchcarEvent>,
 ) -> Result<Option<SessionHandle>> {
-    let store = WorkspaceStore::open(&db_path)?;
+    let store = WorkspaceStore::open_with_logs(&db_path, &logs_dir)?;
     let process = match store.get_process_record(process_id) {
         Ok(process) => process,
         Err(_) => return Ok(None),
     };
     if process.status != ProcessStatus::Running {
+        return Ok(None);
+    }
+    if !store.owns_process_log_path(&process.log_path) {
         return Ok(None);
     }
     if !terminal_process_alive(process.pid) {
@@ -313,7 +336,7 @@ pub fn restore_managed_session(
     thread::spawn(move || {
         run_session_loop(
             db_path,
-            _logs_dir,
+            logs_dir,
             snapshot_for_thread,
             controller,
             connection,
@@ -710,6 +733,10 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::archcar::harness::{CodexHarnessController, ShellHarnessController};
+    use crate::repository::{AddRepository, RepositoryStore};
+    use crate::workspace::CreateWorkspace;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
 
     #[test]
     fn user_and_review_inputs_write_auditable_logs() {
@@ -851,6 +878,7 @@ mod tests {
             session_kind_from_command("codex --no-alt-screen"),
             Some(SessionKind::Codex)
         );
+        assert_eq!(session_kind_from_command("codex"), Some(SessionKind::Codex));
         assert_eq!(
             session_kind_from_command("claude --print"),
             Some(SessionKind::Claude)
@@ -860,6 +888,84 @@ mod tests {
             Some(SessionKind::Shell)
         );
         assert_eq!(session_kind_from_command(""), None);
+    }
+
+    #[test]
+    fn adopt_running_session_marks_dead_codex_record_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+
+        let adopted = adopt_running_session(&store, "berlin", SessionKind::Codex).unwrap();
+
+        assert!(adopted.is_none());
+        let reconciled = store.get_process_record(process.id).unwrap();
+        assert_eq!(reconciled.status, ProcessStatus::Exited);
+        assert!(reconciled.ended_at.is_some());
+    }
+
+    #[test]
+    fn adopt_running_session_ignores_non_archcar_owned_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_logs_dir = temp.path().join("data-logs");
+        let archcar_logs_dir = temp.path().join("state-logs");
+        let data_store = seeded_workspace_store_with_logs(temp.path(), &data_logs_dir);
+        let thread = data_store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = data_store
+            .session_launch("berlin", SessionKind::Codex)
+            .unwrap();
+        let process = data_store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        assert!(process.log_path.starts_with(&data_logs_dir));
+
+        let archcar_store =
+            WorkspaceStore::open_with_logs(temp.path().join("state.db"), &archcar_logs_dir)
+                .unwrap();
+        let adopted = adopt_running_session(&archcar_store, "berlin", SessionKind::Codex).unwrap();
+
+        assert!(adopted.is_none());
+        let unchanged = data_store.get_process_record(process.id).unwrap();
+        assert_eq!(unchanged.status, ProcessStatus::Running);
+        assert!(unchanged.ended_at.is_none());
+    }
+
+    #[test]
+    fn restore_managed_session_ignores_non_archcar_owned_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_logs_dir = temp.path().join("data-logs");
+        let archcar_logs_dir = temp.path().join("state-logs");
+        let store = seeded_workspace_store_with_logs(temp.path(), &data_logs_dir);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, std::process::id())
+            .unwrap();
+        assert!(process.log_path.starts_with(&data_logs_dir));
+
+        let (event_tx, _event_rx) = mpsc::channel();
+        let restored = restore_managed_session(
+            temp.path().join("state.db"),
+            archcar_logs_dir,
+            process.id,
+            event_tx,
+        )
+        .unwrap();
+
+        assert!(restored.is_none());
+        let unchanged = store.get_process_record(process.id).unwrap();
+        assert_eq!(unchanged.status, ProcessStatus::Running);
+        assert!(unchanged.ended_at.is_none());
     }
 
     #[test]
@@ -874,5 +980,81 @@ mod tests {
         let controller = ShellHarnessController;
         let parsed = should_emit_message_update(&controller, &[], "plain shell output");
         assert!(parsed.is_none());
+    }
+
+    fn seeded_workspace_store(root: &Path) -> WorkspaceStore {
+        seeded_workspace_store_with_logs(root, &root.join("logs"))
+    }
+
+    fn seeded_workspace_store_with_logs(root: &Path, logs_dir: &Path) -> WorkspaceStore {
+        let repo_path = init_repo(root.join("demo"));
+        let db_path = root.join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(root.join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, logs_dir).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+    }
+
+    fn init_repo(path: PathBuf) -> PathBuf {
+        fs::create_dir(&path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        fs::write(path.join("README.md"), "demo\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .status()
+            .unwrap();
+        path
+    }
+
+    fn exited_child_pid() -> u32 {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
     }
 }

@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -39,10 +40,24 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
             if !is_archcar_managed_persisted_session(&record, &paths.logs_dir) {
                 continue;
             }
+            if archcar_process_alive(record.pid) {
+                continue;
+            }
             let _ = store.mark_session_process_exited(record.id, None)?;
         }
     }
     Ok(())
+}
+
+fn archcar_process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 impl ArchcarServer {
@@ -909,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_startup_marks_stale_codex_sessions_exited() {
+    fn reconcile_startup_leaves_live_managed_codex_sessions_running() {
         let temp = tempfile::tempdir().unwrap();
         let paths = app_paths(temp.path());
         let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
@@ -933,11 +948,32 @@ mod tests {
             "startup reconciliation should not signal live pids"
         );
         let reconciled = store.get_process_record(process.id).unwrap();
-        assert_eq!(reconciled.status, ProcessStatus::Exited);
-        assert!(reconciled.ended_at.is_some());
+        assert_eq!(reconciled.status, ProcessStatus::Running);
+        assert!(reconciled.ended_at.is_none());
         assert!(reconciled.log_path.starts_with(&paths.logs_dir));
 
         terminate_test_child(&mut child);
+    }
+
+    #[test]
+    fn reconcile_startup_marks_dead_managed_codex_sessions_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+
+        let reconciled = store.get_process_record(process.id).unwrap();
+        assert_eq!(reconciled.status, ProcessStatus::Exited);
+        assert!(reconciled.ended_at.is_some());
+        assert!(reconciled.log_path.starts_with(&paths.logs_dir));
     }
 
     #[test]
@@ -1099,5 +1135,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         false
+    }
+
+    fn exited_child_pid() -> u32 {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
     }
 }
