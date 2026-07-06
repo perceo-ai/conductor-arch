@@ -5,19 +5,17 @@ use gtk::{
     Orientation, Paned, PolicyType, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag,
     TextView, WrapMode,
 };
-use linux_archductor_core::pty::PtySession;
+use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use linux_archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment,
-    SessionKind, Workspace, WorkspaceStore,
+    ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
+    PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use tracing::error;
 
 const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
@@ -179,29 +177,6 @@ fn simple_workspace_shell(
     );
     split.set_end_child(Some(&right));
 
-    let split_for_resize = split.clone();
-    let last_width = Rc::new(RefCell::new(0));
-    let last_width_for_resize = last_width.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        if split_for_resize.root().is_none() {
-            return glib::ControlFlow::Break;
-        }
-
-        let width = split_for_resize.allocated_width();
-        if width > 0 && *last_width_for_resize.borrow() != width {
-            split_for_resize.set_position(split_position_for_ratio(
-                width,
-                WORKSPACE_SPLIT_START_WEIGHT,
-                WORKSPACE_SPLIT_END_WEIGHT,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END,
-            ));
-            *last_width_for_resize.borrow_mut() = width;
-        }
-
-        glib::ControlFlow::Continue
-    });
-
     shell.append(&split);
     shell
 }
@@ -285,80 +260,63 @@ impl WorkspaceRunConsoleTerminalState {
     }
 }
 
-enum WorkspaceRunConsoleTerminalConnection {
-    Live(PtySession),
-    Reattached {
-        write: std::fs::File,
-        output: Arc<Mutex<String>>,
-        read_cursor: usize,
-        pid: u32,
-    },
+#[derive(Debug, Clone)]
+struct WorkspaceRunConsoleTerminalConnection {
+    database_path: PathBuf,
+    workspace_name: String,
 }
 
 impl WorkspaceRunConsoleTerminalConnection {
-    fn try_reattach_running(pid: u32) -> anyhow::Result<Self> {
-        let path = workspace_terminal_device_path_for_pid(pid)?;
-        let mut reader = OpenOptions::new().read(true).open(&path)?;
-        let write = OpenOptions::new().write(true).open(&path)?;
-        let output = Arc::new(Mutex::new(String::new()));
-        let reader_output = Arc::clone(&output);
-        std::thread::spawn(move || {
-            let mut buffer = [0u8; 4096];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Ok(mut output) = reader_output.lock() {
-                            output.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Ok(Self::Reattached {
-            write,
-            output,
-            read_cursor: 0,
-            pid,
-        })
+    fn runtime(database_path: PathBuf, workspace_name: String) -> Self {
+        Self {
+            database_path,
+            workspace_name,
+        }
     }
 
     fn write(&mut self, input: &str) -> anyhow::Result<()> {
-        match self {
-            Self::Live(session) => session.write(input),
-            Self::Reattached { write, .. } => {
-                write.write_all(input.as_bytes())?;
-                write.flush()?;
-                Ok(())
-            }
+        let input = input.trim_end_matches(['\r', '\n']).trim();
+        if input.is_empty() {
+            return Ok(());
         }
+        let Some(record) = latest_running_runtime_shell(&self.database_path, &self.workspace_name)
+        else {
+            return Err(anyhow::anyhow!(
+                "no running runtime shell session; start shell first"
+            ));
+        };
+        crate::archcar_async::spawn_archcar_request(
+            linux_archductor_core::paths::AppPaths::from_env(),
+            ArchcarRequest::SendInput {
+                session_id: record.id,
+                input: input.to_owned(),
+                kind: ArchcarInputKind::ControlCommand,
+            },
+        );
+        Ok(())
     }
+}
 
-    fn has_exited(&mut self) -> anyhow::Result<bool> {
-        match self {
-            Self::Live(session) => session.has_exited(),
-            Self::Reattached { pid, .. } => Ok(!workspace_terminal_process_alive(*pid)),
-        }
-    }
+fn runtime_record_is_shell(record: &ProcessRecord) -> bool {
+    let command = record.command.trim();
+    !(command == "codex"
+        || command.starts_with("codex ")
+        || command == "claude"
+        || command.starts_with("claude "))
+}
 
-    fn read_available(&mut self) -> String {
-        match self {
-            Self::Live(session) => session.read_available(),
-            Self::Reattached {
-                output,
-                read_cursor,
-                ..
-            } => {
-                let Ok(output) = output.lock() else {
-                    return String::new();
-                };
-                let next = output.get(*read_cursor..).unwrap_or_default().to_owned();
-                *read_cursor = output.len();
-                next
-            }
-        }
-    }
+fn latest_running_runtime_shell(
+    database_path: &Path,
+    workspace_name: &str,
+) -> Option<ProcessRecord> {
+    WorkspaceStore::open(database_path)
+        .and_then(|store| store.list_sessions(workspace_name))
+        .ok()
+        .and_then(|records| {
+            records.into_iter().find(|record| {
+                record.status == ProcessStatus::Running && runtime_record_is_shell(record)
+            })
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1360,63 +1318,6 @@ fn workspace_terminal_tab_view(
     panel.append(&output_scroll);
 
     let buffer = output_view.buffer();
-    let panel_for_poll = panel.clone();
-    let state_for_poll = run_console_states.clone();
-    let terminals_for_poll = run_console_terminals.clone();
-    let workspace_for_poll = workspace_name.to_owned();
-    let tab_for_poll = tab_name.to_owned();
-    let buffer_for_poll = buffer.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        if panel_for_poll.root().is_none() {
-            return glib::ControlFlow::Break;
-        }
-        let key = run_console_terminal_key(&workspace_for_poll, &tab_for_poll);
-        let mut remove_connection = false;
-        let output = {
-            let mut terminals = terminals_for_poll.borrow_mut();
-            let Some(connection) = terminals.get_mut(&key) else {
-                return glib::ControlFlow::Continue;
-            };
-            match connection.has_exited() {
-                Ok(true) => {
-                    remove_connection = true;
-                    connection.read_available()
-                }
-                Ok(false) => connection.read_available(),
-                Err(_) => String::new(),
-            }
-        };
-        if !output.is_empty() {
-            let transcript = {
-                let mut states = state_for_poll.borrow_mut();
-                let Some(state) = states.get_mut(&workspace_for_poll) else {
-                    return glib::ControlFlow::Continue;
-                };
-                let Some(terminal) = state.terminal_by_name_mut(&tab_for_poll) else {
-                    return glib::ControlFlow::Continue;
-                };
-                terminal.append_result(&output);
-                terminal.display_text().to_owned()
-            };
-            buffer_for_poll.set_text(&transcript);
-        }
-        if remove_connection {
-            terminals_for_poll.borrow_mut().remove(&key);
-            let transcript = {
-                let mut states = state_for_poll.borrow_mut();
-                let Some(state) = states.get_mut(&workspace_for_poll) else {
-                    return glib::ControlFlow::Break;
-                };
-                let Some(terminal) = state.terminal_by_name_mut(&tab_for_poll) else {
-                    return glib::ControlFlow::Break;
-                };
-                terminal.append_result("\n[terminal exited]\n");
-                terminal.display_text().to_owned()
-            };
-            buffer_for_poll.set_text(&transcript);
-        }
-        glib::ControlFlow::Continue
-    });
     let state_for_change = run_console_states.clone();
     let workspace_for_change = workspace_name.to_owned();
     let tab_for_change = tab_name.to_owned();
@@ -1465,8 +1366,24 @@ fn workspace_terminal_tab_view(
         let Some(connection) = terminals.get_mut(&key) else {
             return;
         };
-        let _ = connection.write(&(command + "\n"));
-        buffer_for_run.set_text(&transcript);
+        let write_result = connection.write(&(command + "\n"));
+        let updated_transcript =
+            if let Some(state) = state_for_run.borrow_mut().get_mut(&workspace_for_run) {
+                if let Some(terminal) = state.terminal_by_name_mut(&tab_for_run) {
+                    match write_result {
+                        Ok(()) => terminal.append_result("[sent to runtime shell]\n"),
+                        Err(err) => {
+                            terminal.append_result(&format!("[terminal send paused]\n{err:#}\n"))
+                        }
+                    }
+                    terminal.display_text().to_owned()
+                } else {
+                    transcript
+                }
+            } else {
+                transcript
+            };
+        buffer_for_run.set_text(&updated_transcript);
     });
     let run_btn_handler = run_command.clone();
     run_btn.connect_clicked(move |_| {
@@ -1509,32 +1426,16 @@ fn ensure_workspace_terminal_session(
         return;
     }
 
-    let existing_pid = run_console_states
-        .borrow()
-        .get(workspace_name)
-        .and_then(|state| state.terminal_by_name(tab_name))
-        .and_then(|terminal| terminal.pid);
-    if let Some(pid) = existing_pid {
-        if let Ok(connection) = WorkspaceRunConsoleTerminalConnection::try_reattach_running(pid) {
-            run_console_terminals.borrow_mut().insert(key, connection);
-            return;
-        }
-    }
-
-    let Ok((process_id, pid, connection)) =
-        spawn_workspace_terminal_session(db_path, workspace_name)
-    else {
+    let Ok(connection) = spawn_workspace_terminal_session(db_path, workspace_name) else {
         return;
     };
     run_console_terminals.borrow_mut().insert(key, connection);
     if let Some(state) = run_console_states.borrow_mut().get_mut(workspace_name) {
         if let Some(terminal) = state.terminal_by_name_mut(tab_name) {
-            terminal.process_id = Some(process_id);
-            terminal.pid = Some(pid);
             if terminal.transcript.is_empty() {
                 terminal
                     .transcript
-                    .push_str(&format!("[terminal started #{process_id} pid={pid}]\n"));
+                    .push_str("[terminal start requested through archcar]\n");
             }
         }
     }
@@ -1543,45 +1444,21 @@ fn ensure_workspace_terminal_session(
 fn spawn_workspace_terminal_session(
     db_path: &Path,
     workspace_name: &str,
-) -> anyhow::Result<(i64, u32, WorkspaceRunConsoleTerminalConnection)> {
+) -> anyhow::Result<WorkspaceRunConsoleTerminalConnection> {
     let store = WorkspaceStore::open(db_path)?;
-    let launch = store.session_launch(workspace_name, SessionKind::Shell)?;
-    let command = format!("{}", launch.program.display());
-    let session = PtySession::spawn(launch.program, launch.args, &launch.cwd, launch.env, 24, 80)?;
-    let pid = session
-        .process_id()
-        .ok_or_else(|| anyhow::anyhow!("terminal PTY did not report a process id"))?;
-    let process = store.record_terminal_process(workspace_name, &command, pid)?;
-    Ok((
-        process.id,
-        pid,
-        WorkspaceRunConsoleTerminalConnection::Live(session),
-    ))
-}
-
-fn workspace_terminal_process_alive(process_id: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(process_id.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn workspace_terminal_device_path_for_pid(process_id: u32) -> anyhow::Result<PathBuf> {
-    let fd = format!("/proc/{process_id}/fd/0");
-    let target = fs::read_link(&fd)?;
-    let path = target
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("terminal fd path is not valid UTF-8"))?
-        .to_owned();
-    anyhow::ensure!(
-        !path.is_empty() && path.starts_with("/dev/pts/"),
-        "process {process_id} is not attached to a PTY slave"
+    let _ = store.session_launch(workspace_name, SessionKind::Shell)?;
+    crate::archcar_async::spawn_archcar_request(
+        linux_archductor_core::paths::AppPaths::from_env(),
+        ArchcarRequest::SpawnSession {
+            workspace: workspace_name.to_owned(),
+            kind: SessionKind::Shell,
+            harness: None,
+        },
     );
-    Ok(PathBuf::from(path))
+    Ok(WorkspaceRunConsoleTerminalConnection::runtime(
+        db_path.to_path_buf(),
+        workspace_name.to_owned(),
+    ))
 }
 
 fn append_terminal_buffer_text(buffer: &gtk::TextBuffer, text: &str) {
@@ -2066,33 +1943,6 @@ fn runtime_panel(
     status.add_css_class("card-meta");
     status.set_xalign(0.0);
     status.set_wrap(true);
-
-    let autosync_workspace = ws.name.clone();
-    let autosync_db_path = db_path.to_path_buf();
-    let autosync_status = status.clone();
-    let autosync_refresh = refresh_hub.clone();
-    let autosync_panel = panel.clone();
-    glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
-        if autosync_panel.root().is_none() {
-            return glib::ControlFlow::Break;
-        }
-        match WorkspaceStore::open(autosync_db_path.clone())
-            .and_then(|store| store.spotlight_sync_if_changed(&autosync_workspace))
-        {
-            Ok(Some(session)) => {
-                autosync_status.set_text(&format!(
-                    "Spotlight auto-synced for {}",
-                    session.workspace_name
-                ));
-                autosync_refresh.refresh(RefreshScope::All);
-            }
-            Ok(None) => {}
-            Err(err) => {
-                autosync_status.set_text(&format!("Spotlight auto-sync paused: {err:#}"));
-            }
-        }
-        glib::ControlFlow::Continue
-    });
 
     let setup_workspace = ws.name.clone();
     let db_path_setup = db_path.to_path_buf();

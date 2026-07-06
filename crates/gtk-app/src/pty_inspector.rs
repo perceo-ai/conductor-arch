@@ -4,7 +4,9 @@ use gtk::{
     ScrolledWindow, SelectionMode, Stack,
 };
 use linux_archductor_core::session_event::{SessionEvent, SessionEventPayload};
-use linux_archductor_core::workspace::{ProcessRecord, ProcessStatus, WorkspaceStore};
+use linux_archductor_core::workspace::{
+    ProcessRecord, ProcessStatus, PtyChunkRecord, WorkspaceStore,
+};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -20,6 +22,7 @@ struct InspectorSessionInput {
     ended_at: Option<String>,
     exit_code: Option<i32>,
     raw_output: String,
+    raw_chunks: Vec<RawChunk>,
     events: Vec<SessionEvent>,
 }
 
@@ -121,11 +124,13 @@ fn load_session_inputs(db_path: PathBuf) -> anyhow::Result<Vec<InspectorSessionI
     for status in store.list_status()? {
         for process in store.list_sessions(&status.workspace.name)? {
             let raw_output = std::fs::read_to_string(&process.log_path).unwrap_or_default();
+            let chunk_rows = store.list_pty_chunks(process.id).unwrap_or_default();
             let events = store.list_session_events(process.id).unwrap_or_default();
             sessions.push(session_input_from_process(
                 &status.workspace.name,
                 process,
                 raw_output,
+                chunk_rows,
                 events,
             ));
         }
@@ -142,8 +147,14 @@ fn session_input_from_process(
     workspace: &str,
     process: ProcessRecord,
     raw_output: String,
+    chunk_rows: Vec<PtyChunkRecord>,
     events: Vec<SessionEvent>,
 ) -> InspectorSessionInput {
+    let raw_chunks = if chunk_rows.is_empty() {
+        raw_chunks_from_log(&raw_output)
+    } else {
+        raw_chunks_from_records(&chunk_rows)
+    };
     InspectorSessionInput {
         id: process.id,
         workspace: workspace.to_owned(),
@@ -154,6 +165,7 @@ fn session_input_from_process(
         ended_at: process.ended_at,
         exit_code: process.exit_code,
         raw_output,
+        raw_chunks,
         events,
     }
 }
@@ -173,7 +185,6 @@ fn build_inspector_model(sessions: Vec<InspectorSessionInput>) -> PtyInspectorMo
 }
 
 fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
-    let chunks = raw_chunks(&session.raw_output);
     InspectorSessionRow {
         session_id: session.id,
         workspace: session.workspace.clone(),
@@ -191,14 +202,21 @@ fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
             .pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "n/a".to_owned()),
-        chunk_count: chunks.len(),
-        output_rate_label: pluralize(chunks.len(), "chunk"),
+        chunk_count: session.raw_chunks.len(),
+        output_rate_label: pluralize(session.raw_chunks.len(), "chunk"),
     }
 }
 
 fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
-    let raw_chunks = raw_chunks(&session.raw_output);
-    let normalized_text = normalize_pty_text(&session.raw_output);
+    let raw_chunks = session.raw_chunks.clone();
+    let normalized_text = if raw_chunks.is_empty() {
+        normalize_pty_text(&session.raw_output)
+    } else {
+        raw_chunks
+            .iter()
+            .map(|chunk| chunk.normalized_text.as_str())
+            .collect::<String>()
+    };
     let events = session
         .events
         .iter()
@@ -234,7 +252,7 @@ fn empty_session_detail() -> InspectorSessionDetail {
     }
 }
 
-fn raw_chunks(raw: &str) -> Vec<RawChunk> {
+fn raw_chunks_from_log(raw: &str) -> Vec<RawChunk> {
     if raw.is_empty() {
         return Vec::new();
     }
@@ -254,6 +272,26 @@ fn raw_chunks(raw: &str) -> Vec<RawChunk> {
                 duplicate,
                 delayed: false,
                 partial: !chunk.ends_with('\n'),
+            }
+        })
+        .collect()
+}
+
+fn raw_chunks_from_records(records: &[PtyChunkRecord]) -> Vec<RawChunk> {
+    let mut previous = String::new();
+    records
+        .iter()
+        .map(|record| {
+            let normalized_text = normalize_pty_text(&record.text);
+            let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
+            previous = normalized_text.clone();
+            RawChunk {
+                index: record.sequence as usize,
+                text: record.text.clone(),
+                normalized_text,
+                duplicate,
+                delayed: false,
+                partial: !record.text.ends_with('\n'),
             }
         })
         .collect()
@@ -808,6 +846,7 @@ mod tests {
             ended_at: None,
             exit_code: None,
             raw_output: "hello\r\nhello\r\npartial".to_owned(),
+            raw_chunks: raw_chunks_from_log("hello\r\nhello\r\npartial"),
             events: vec![
                 SessionEvent::new(
                     SessionEventSource::Assistant,
@@ -854,6 +893,47 @@ mod tests {
         assert!(model.selected.diagnostics.command.contains("[redacted]"));
         assert!(!model.selected.diagnostics.command.contains("secret"));
         assert_eq!(model.selected.diagnostics.last_lifecycle_action, "running");
+    }
+
+    #[test]
+    fn inspector_model_prefers_persisted_pty_chunks_over_formatted_log_text() {
+        let session = InspectorSessionInput {
+            id: 9,
+            workspace: "oslo".to_owned(),
+            command: "codex".to_owned(),
+            pid: Some(2222),
+            status: ProcessStatus::Running,
+            started_at: "2026-07-06T12:00:00Z".to_owned(),
+            ended_at: None,
+            exit_code: None,
+            raw_output: "[codex raw]\nformatted\n[/codex raw]\n".to_owned(),
+            raw_chunks: vec![
+                RawChunk {
+                    index: 1,
+                    text: "\u{1b}[2Jreal".to_owned(),
+                    normalized_text: "\u{1b}[2Jreal".to_owned(),
+                    duplicate: false,
+                    delayed: false,
+                    partial: true,
+                },
+                RawChunk {
+                    index: 2,
+                    text: " chunk\n".to_owned(),
+                    normalized_text: " chunk\n".to_owned(),
+                    duplicate: false,
+                    delayed: false,
+                    partial: false,
+                },
+            ],
+            events: Vec::new(),
+        };
+
+        let model = build_inspector_model(vec![session]);
+
+        assert_eq!(model.sessions[0].chunk_count, 2);
+        assert_eq!(model.selected.normalized_text, "\u{1b}[2Jreal chunk\n");
+        assert_eq!(model.selected.raw_chunks[0].text, "\u{1b}[2Jreal");
+        assert!(!model.selected.normalized_text.contains("[codex raw]"));
     }
 
     #[test]

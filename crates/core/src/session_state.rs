@@ -68,6 +68,13 @@ impl SessionStateMachine {
         }
     }
 
+    pub fn from_state(state: AgentSessionState) -> Self {
+        Self {
+            state,
+            invalid_transitions: Vec::new(),
+        }
+    }
+
     pub fn state(&self) -> AgentSessionState {
         self.state
     }
@@ -106,6 +113,12 @@ impl SessionStateMachine {
             SessionEventPayload::Metadata { .. } => self.state,
         };
         self.transition(next, event.raw_text.as_deref().unwrap_or("session event"));
+    }
+
+    pub fn apply_events<'a>(&mut self, events: impl IntoIterator<Item = &'a SessionEvent>) {
+        for event in events {
+            self.apply_event(event);
+        }
     }
 
     pub fn mark_interrupted(&mut self, reason: impl Into<String>) {
