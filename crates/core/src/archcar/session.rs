@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::archcar::harness::{controller_for_kind, ensure_thread_for_kind, HarnessController};
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputKind};
-use crate::codex_tui::ScreenMessage;
+use crate::codex_tui::{codex_persistent_screen_fingerprint, ScreenMessage};
 use crate::pty::PtySession;
 use crate::workspace::{
     format_codex_raw_output, format_codex_screen_snapshot, ProcessStatus, SessionHarnessOptions,
@@ -341,12 +341,31 @@ fn format_session_screen_output(kind: SessionKind, screen: &str) -> String {
     }
 }
 
+fn should_persist_screen_output(
+    kind: SessionKind,
+    last_fingerprint: &mut Option<String>,
+    screen: &str,
+) -> bool {
+    let fingerprint = match kind {
+        SessionKind::Codex => codex_persistent_screen_fingerprint(screen),
+        _ => Some(screen.to_owned()),
+    };
+    if fingerprint.is_none() || fingerprint == *last_fingerprint {
+        return false;
+    }
+    *last_fingerprint = fingerprint;
+    true
+}
+
 fn write_pty_screen_snapshot(
     logs_dir: &std::path::Path,
     source: &str,
     process_id: i64,
     screen: &str,
 ) {
+    if !pty_screen_snapshot_logging_enabled() {
+        return;
+    }
     let path = logs_dir.join("pty-screens.log");
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
         return;
@@ -360,6 +379,17 @@ fn write_pty_screen_snapshot(
         "=== [unix_ms={ts}] source={source} process_id={process_id} ===\n{}\n===",
         screen.trim_end_matches('\n')
     );
+}
+
+fn pty_screen_snapshot_logging_enabled() -> bool {
+    std::env::var("ARCHDUCTOR_LOG_PTY_SCREENS")
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn should_emit_message_update(
@@ -394,6 +424,7 @@ fn run_session_loop(
     });
     let mut trust_answered = false;
     let mut last_screen = String::new();
+    let mut last_persisted_screen_fingerprint = None;
     let mut last_messages = Vec::new();
     let mut native_thread_id_resolved = false;
     loop {
@@ -484,23 +515,30 @@ fn run_session_loop(
                 }
             }
             let current = snapshot.lock().unwrap().clone();
-            if let Ok(store) = WorkspaceStore::open(&db_path) {
-                let formatted = format_session_screen_output(current.kind, &screen);
-                let _ = store.append_session_process_output(current.session_id, &formatted);
-                if current.kind == SessionKind::Codex {
-                    let _ = store.persist_codex_screen_delta(
-                        current.thread_id,
-                        current.session_id,
-                        &screen,
-                    );
-                }
-            }
-            write_pty_screen_snapshot(
-                &logs_dir,
-                "archcar-session-loop",
-                current.session_id,
+            let persist_screen = should_persist_screen_output(
+                current.kind,
+                &mut last_persisted_screen_fingerprint,
                 &screen,
             );
+            if persist_screen {
+                if let Ok(store) = WorkspaceStore::open(&db_path) {
+                    let formatted = format_session_screen_output(current.kind, &screen);
+                    let _ = store.append_session_process_output(current.session_id, &formatted);
+                    if current.kind == SessionKind::Codex {
+                        let _ = store.persist_codex_screen_delta(
+                            current.thread_id,
+                            current.session_id,
+                            &screen,
+                        );
+                    }
+                }
+                write_pty_screen_snapshot(
+                    &logs_dir,
+                    "archcar-session-loop",
+                    current.session_id,
+                    &screen,
+                );
+            }
             let parsed_messages =
                 should_emit_message_update(controller.as_ref(), &last_messages, &screen);
             {
@@ -657,6 +695,52 @@ mod tests {
     }
 
     #[test]
+    fn codex_timer_only_screen_repaints_are_not_persisted_as_transcript_output() {
+        let first_screen = "\
+› Explain this codebase
+
+• Explored
+  └ Read main.rs, server.rs
+
+• Working (2m 05s • esc to interrupt) · 1 background terminal running · /ps to …";
+        let timer_repaint = "\
+› Explain this codebase
+
+• Explored
+  └ Read main.rs, server.rs
+
+◦ Working (2m 06s • esc to interrupt) · 1 background terminal running · /ps to …";
+        let real_update = "\
+› Explain this codebase
+
+• Explored
+  └ Read main.rs, server.rs
+
+• Found a real issue in session.rs.
+
+• Working (2m 07s • esc to interrupt) · 1 background terminal running · /ps to …";
+
+        let mut last_persisted = None;
+        assert!(should_persist_screen_output(
+            SessionKind::Codex,
+            &mut last_persisted,
+            first_screen
+        ));
+        assert!(!should_persist_screen_output(
+            SessionKind::Codex,
+            &mut last_persisted,
+            timer_repaint
+        ));
+        assert!(should_persist_screen_output(
+            SessionKind::Codex,
+            &mut last_persisted,
+            real_update
+        ));
+
+        assert!(timer_repaint.contains("Working (2m 06s"));
+    }
+
+    #[test]
     fn native_thread_resolution_stays_codex_only() {
         assert!(should_attempt_native_thread_resolution(
             SessionKind::Codex,
@@ -686,12 +770,10 @@ mod tests {
     }
 
     #[test]
-    fn pty_screen_snapshot_writer_appends_expected_marker() {
+    fn pty_screen_snapshot_writer_is_disabled_without_explicit_flag() {
         let temp = tempfile::tempdir().unwrap();
         write_pty_screen_snapshot(temp.path(), "archcar", 7, "hello\nworld\n");
-        let body = std::fs::read_to_string(temp.path().join("pty-screens.log")).unwrap();
-        assert!(body.contains("source=archcar process_id=7"));
-        assert!(body.contains("hello\nworld"));
+        assert!(!temp.path().join("pty-screens.log").exists());
     }
 
     #[test]

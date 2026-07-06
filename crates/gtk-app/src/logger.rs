@@ -159,6 +159,9 @@ fn open_log_file(path: PathBuf) -> Result<std::fs::File> {
 }
 
 pub(crate) fn write_pty_screen_snapshot(source: &str, process_id: i64, screen: &str) {
+    if !pty_screen_snapshot_logging_enabled() {
+        return;
+    }
     let Some(path) = PTY_SCREEN_LOG.get() else {
         return;
     };
@@ -174,4 +177,15 @@ pub(crate) fn write_pty_screen_snapshot(source: &str, process_id: i64, screen: &
         "=== [unix_ms={ts}] source={source} process_id={process_id} ===\n{}\n===",
         screen.trim_end_matches('\n')
     );
+}
+
+fn pty_screen_snapshot_logging_enabled() -> bool {
+    std::env::var("ARCHDUCTOR_LOG_PTY_SCREENS")
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
 }

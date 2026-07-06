@@ -20,8 +20,9 @@ The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
 and render structured app-native transcript events, terminal rendering is not a
 full emulator, and several app controls remain unfinished.
 
-July 6 core planning slice is in progress on 2026-07-04: the V1 PTY/runtime
-model now has an explicit session state machine for starting, running,
+July 6 core planning slice completed its debugging verification pass on
+2026-07-05: the V1 PTY/runtime model now has an explicit session state machine
+for starting, running,
 streaming, waiting-for-input, tool-running, interrupted, failed, exited, and
 archived states. Codex screen deltas now persist typed `SessionEvent` rows
 beside raw PTY logs and structured chat messages/events, and local history
@@ -36,9 +37,19 @@ and `cargo test -p linux-archductor-core --test pty_parser_fixture_corpus -- --n
 Linux VM verification also passed for the same core lib/event/corpus tests, and
 the GTK app was built and launched on the Lima `ubuntu` VM VNC display `:1`
 from `target/lima-debug/debug/linux-archductor-gtk`.
-`cargo test --workspace` is not yet green on the macOS host because
-`linux-archductor session attach --print-pty-path` expects Linux `/proc/<pid>/fd/0`;
-that path must be verified inside the Linux VM.
+Follow-up verification on 2026-07-05 passed:
+`cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`,
+`cargo test --workspace`,
+`cargo test -p linux-archductor-core codex_tui -- --nocapture`,
+`cargo test -p linux-archductor-core chat_messages -- --nocapture`,
+`cargo test -p linux-archductor-gtk session_surface -- --nocapture`,
+and, inside the Lima `ubuntu` VM,
+`cargo test -p linux-archductor-core --lib`,
+`cargo test -p linux-archductor-core --test session_event_model -- --nocapture`,
+`cargo test -p linux-archductor-core --test pty_parser_fixture_corpus -- --nocapture`,
+and
+`cargo test -p linux-archductor --test cli_sessions cli_starts_logs_and_stops_real_shell_session -- --nocapture`.
 
 Latest verification on 2026-06-20: `cargo fmt --all -- --check`,
 `cargo test -p linux-archductor-core --lib` (96 tests), and

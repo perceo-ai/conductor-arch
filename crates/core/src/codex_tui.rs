@@ -239,6 +239,30 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
         .collect()
 }
 
+pub fn codex_persistent_screen_fingerprint(screen: &str) -> Option<String> {
+    let normalized_screen = normalize_screen(screen);
+    let lines = normalized_screen.lines().collect::<Vec<_>>();
+    let mut kept = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        if is_event_body_chrome_line(line) {
+            index += 1;
+            while index < lines.len() && is_ignorable_transcript_continuation(lines[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        kept.push(line.trim_end().to_owned());
+        index += 1;
+    }
+    while kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    let normalized = kept.join("\n");
+    (!normalized.trim().is_empty()).then_some(normalized)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScreenMessageSpan {
     message: ScreenMessage,
@@ -609,6 +633,7 @@ fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
             || line.starts_with("Ran ")
             || line.starts_with("Read SKILL.md ")
             || is_raw_file_change_event_line(line)
+            || is_separator_rule_line(line)
         {
             break;
         }
@@ -618,8 +643,7 @@ fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
 }
 
 fn screen_fingerprint(screen: &str) -> Option<String> {
-    let normalized = normalize_screen(screen);
-    (!normalized.is_empty()).then_some(normalized)
+    codex_persistent_screen_fingerprint(screen)
 }
 
 fn normalize_screen(screen: &str) -> String {
@@ -791,6 +815,13 @@ fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
 
     while index < lines.len() {
         let line = lines[index].trim_end();
+        if is_event_body_chrome_line(line) {
+            index += 1;
+            while index < lines.len() && is_ignorable_transcript_continuation(lines[index]) {
+                index += 1;
+            }
+            continue;
+        }
         if line.starts_with("Ran ")
             || line.starts_with("Read SKILL.md ")
             || is_raw_file_change_event_line(line)
@@ -1245,16 +1276,27 @@ fn parse_live_continuation(line: &str) -> Option<String> {
 }
 
 fn is_transient_bullet_line(line: &str) -> bool {
-    line.trim_start()
-        .strip_prefix('•')
-        .map(|content| is_transient_status_bullet(content.trim_start()))
-        .unwrap_or(false)
+    transient_bullet_content(line).is_some_and(is_transient_status_bullet)
 }
 
 fn is_transient_status_bullet(content: &str) -> bool {
     content.starts_with("Starting MCP servers")
         || content.starts_with("Working (")
         || content.starts_with("Thinking (")
+}
+
+fn transient_bullet_content(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.char_indices();
+    let (_, first) = chars.next()?;
+    if !matches!(first, '•' | '◦') {
+        return None;
+    }
+    let next = chars
+        .next()
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+    Some(trimmed[next..].trim_start())
 }
 
 fn relevant_codex_screen_lines(screen: &str) -> Vec<String> {
@@ -1341,10 +1383,25 @@ fn is_ignorable_transcript_line(line: &str) -> bool {
         || trimmed.starts_with("status:")
         || trimmed.starts_with("• You have ")
         || trimmed.starts_with("• Booting MCP server")
-        || trimmed.starts_with("• Starting MCP servers")
-        || trimmed.starts_with("• Working (")
-        || trimmed.starts_with("• Thinking (")
+        || is_transient_transcript_status_line(trimmed)
+        || is_separator_rule_line(trimmed)
         || trimmed.starts_with("─ Worked for ")
+}
+
+fn is_event_body_chrome_line(line: &str) -> bool {
+    is_transient_transcript_status_line(line) || is_separator_rule_line(line)
+}
+
+fn is_separator_rule_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.chars().count() >= 8
+        && trimmed
+            .chars()
+            .all(|ch| matches!(ch, '─' | '━' | '═' | '-' | '—'))
+}
+
+fn is_transient_transcript_status_line(line: &str) -> bool {
+    transient_bullet_content(line).is_some_and(is_transient_status_bullet)
 }
 
 fn is_ignorable_transcript_continuation(line: &str) -> bool {
@@ -1727,6 +1784,26 @@ Edited crates/core/src/codex_tui.rs (+2 -1)
     }
 
     #[test]
+    fn parse_codex_screen_messages_ignores_hollow_working_spinner_status() {
+        let screen = "\
+› Explain this codebase
+
+◦ Working (2m 06s • esc to interrupt) · 1 background terminal running · /ps to …";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::User,
+                content: "Explain this codebase".to_owned(),
+            }]
+        );
+        assert!(parse_codex_screen_messages(
+            "◦ Working (2m 06s • esc to interrupt) · 1 background terminal running · /ps to …"
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn screen_delta_starts_after_latest_known_user_message() {
         let screen = "\
 › old question
@@ -1858,6 +1935,186 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
     }
 
     #[test]
+    fn screen_delta_omits_bottom_working_status_from_tool_and_file_events() {
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+        let tool_screen = "\
+› latest question
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
+
+◦ Working (2m 06s • esc to interrupt) · 1 background terminal running · /ps to …";
+        let file_screen = "\
+› latest question
+Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line
+
+• Working (2m 07s • esc to interrupt) · 1 background terminal running · /ps to …";
+
+        let tool_delta = parse_codex_screen_delta(tool_screen, &benchmark, None);
+        assert_eq!(
+            tool_delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+                body: "running 24 tests\n\
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
+                    .to_owned(),
+            })]
+        );
+
+        let file_delta = parse_codex_screen_delta(file_screen, &benchmark, None);
+        assert_eq!(
+            file_delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::FileChange(
+                CodexFileChange {
+                    action: CodexFileChangeAction::Edited,
+                    path: "crates/core/src/codex_tui.rs".to_owned(),
+                    additions: Some(2),
+                    deletions: Some(1),
+                    lines: vec![
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Context,
+                            old_line: Some(10),
+                            new_line: Some(10),
+                            content: "old context".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Deleted,
+                            old_line: Some(11),
+                            new_line: None,
+                            content: "old line".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Added,
+                            old_line: None,
+                            new_line: Some(12),
+                            content: "new line".to_owned(),
+                        },
+                    ],
+                }
+            ))]
+        );
+    }
+
+    #[test]
+    fn screen_delta_omits_separator_rules_from_tool_file_and_message_events() {
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+        let separator =
+            "────────────────────────────────────────────────────────────────────────────────";
+        let tool_screen = format!(
+            "\
+› latest question
+Ran cargo test
+ok
+{separator}
+"
+        );
+        let file_screen = format!(
+            "\
+› latest question
+Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line
+{separator}
+"
+        );
+        let message_screen = format!(
+            "\
+› latest question
+{separator}
+"
+        );
+
+        let tool_delta = parse_codex_screen_delta(&tool_screen, &benchmark, None);
+        assert_eq!(
+            tool_delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "cargo test".to_owned(),
+                body: "ok".to_owned(),
+            })]
+        );
+
+        let file_delta = parse_codex_screen_delta(&file_screen, &benchmark, None);
+        assert_eq!(
+            file_delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::FileChange(
+                CodexFileChange {
+                    action: CodexFileChangeAction::Edited,
+                    path: "crates/core/src/codex_tui.rs".to_owned(),
+                    additions: Some(2),
+                    deletions: Some(1),
+                    lines: vec![
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Context,
+                            old_line: Some(10),
+                            new_line: Some(10),
+                            content: "old context".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Deleted,
+                            old_line: Some(11),
+                            new_line: None,
+                            content: "old line".to_owned(),
+                        },
+                        CodexFileChangeLine {
+                            kind: CodexFileChangeLineKind::Added,
+                            old_line: None,
+                            new_line: Some(12),
+                            content: "new line".to_owned(),
+                        },
+                    ],
+                }
+            ))]
+        );
+
+        let message_delta = parse_codex_screen_delta(&message_screen, &benchmark, None);
+        assert!(message_delta.items.is_empty());
+    }
+
+    #[test]
+    fn screen_delta_suppresses_timer_only_repaint_with_previous_cursor() {
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+        let first_screen = "\
+› latest question
+Ran cargo test
+ok
+
+• Working (2m 05s • esc to interrupt) · 1 background terminal running · /ps to …";
+        let repaint_screen = "\
+› latest question
+Ran cargo test
+ok
+
+◦ Working (2m 06s • esc to interrupt) · 1 background terminal running · /ps to …";
+
+        let first_delta = parse_codex_screen_delta(first_screen, &benchmark, None);
+        let repaint_delta =
+            parse_codex_screen_delta(repaint_screen, &benchmark, Some(&first_delta.cursor));
+
+        assert_eq!(
+            first_delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "cargo test".to_owned(),
+                body: "ok".to_owned(),
+            })]
+        );
+        assert!(repaint_delta.items.is_empty());
+        assert_eq!(repaint_delta.cursor, first_delta.cursor);
+    }
+
+    #[test]
     fn screen_delta_keeps_messages_and_events_in_screen_order() {
         let screen = "\
 › latest question
@@ -1950,7 +2207,12 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
         let first = parse_codex_screen_delta(screen, &benchmark, None);
         let second = parse_codex_screen_delta(screen, &benchmark, Some(&first.cursor));
 
-        assert_eq!(first.cursor.fingerprint.as_deref(), Some(screen));
+        assert_eq!(
+            first.cursor.fingerprint.as_deref(),
+            Some(
+                "› latest question\nRan cargo test -p linux-archductor-core codex_tui\nrunning 24 tests\ntest codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
+            )
+        );
         assert!(second.items.is_empty());
     }
 

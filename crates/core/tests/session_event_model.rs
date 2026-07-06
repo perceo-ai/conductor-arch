@@ -217,7 +217,10 @@ fn codex_screen_event_delta_returns_appendable_session_events_with_cursor() {
         None,
     );
 
-    assert_eq!(delta.cursor.fingerprint.as_deref(), Some(screen));
+    assert_eq!(
+        delta.cursor.fingerprint.as_deref(),
+        Some("› latest question\n• first answer")
+    );
     assert_eq!(
         delta.events,
         vec![SessionEvent::new(

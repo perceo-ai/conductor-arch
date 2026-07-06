@@ -85,13 +85,12 @@ fn handle_connection(stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Resu
         return Ok(());
     }
     let envelope: RpcEnvelope<ArchcarRequest> = serde_json::from_str(&line)?;
-    info!(
-        rpc_id = %envelope.id,
-        direction = "recv",
-        message_type = "request",
-        summary = %archcar_request_summary(&envelope.payload),
-        payload = %line.trim_end(),
-        "archcar unix rpc"
+    log_archcar_rpc(
+        &envelope.id,
+        "recv",
+        "request",
+        archcar_request_summary(&envelope.payload),
+        line.trim_end(),
     );
     match envelope.payload {
         ArchcarRequest::Subscribe => {
@@ -103,13 +102,12 @@ fn handle_connection(stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Resu
                     payload: event,
                 };
                 let line = serde_json::to_string(&envelope)?;
-                info!(
-                    rpc_id = %envelope.id,
-                    direction = "send",
-                    message_type = "event",
-                    summary = %archcar_event_summary(&envelope.payload),
-                    payload = %line,
-                    "archcar unix rpc"
+                log_archcar_rpc(
+                    &envelope.id,
+                    "send",
+                    "event",
+                    archcar_event_summary(&envelope.payload),
+                    &line,
                 );
                 writer.write_all(line.as_bytes())?;
                 writer.write_all(b"\n")?;
@@ -123,13 +121,12 @@ fn handle_connection(stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Resu
                 payload: response,
             };
             let line = serde_json::to_string(&envelope)?;
-            info!(
-                rpc_id = %envelope.id,
-                direction = "send",
-                message_type = "response",
-                summary = %archcar_response_summary(&envelope.payload),
-                payload = %line,
-                "archcar unix rpc"
+            log_archcar_rpc(
+                &envelope.id,
+                "send",
+                "response",
+                archcar_response_summary(&envelope.payload),
+                &line,
             );
             writer.write_all(line.as_bytes())?;
             writer.write_all(b"\n")?;
@@ -137,6 +134,48 @@ fn handle_connection(stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Resu
         }
     }
     Ok(())
+}
+
+fn log_archcar_rpc(
+    rpc_id: &str,
+    direction: &str,
+    message_type: &str,
+    summary: String,
+    raw_payload: &str,
+) {
+    if let Some(payload) = archcar_rpc_log_payload(raw_payload) {
+        info!(
+            %rpc_id,
+            direction,
+            message_type,
+            summary = %summary,
+            payload,
+            "archcar unix rpc"
+        );
+    } else {
+        info!(
+            %rpc_id,
+            direction,
+            message_type,
+            summary = %summary,
+            "archcar unix rpc"
+        );
+    }
+}
+
+fn archcar_rpc_log_payload(raw_payload: &str) -> Option<&str> {
+    explicit_log_flag_enabled("ARCHDUCTOR_LOG_ARCHCAR_PAYLOADS").then_some(raw_payload)
+}
+
+fn explicit_log_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
@@ -560,6 +599,7 @@ fn broadcast(state: &mut ServerState, event: ArchcarEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archcar::protocol::ArchcarInputKind;
     use std::fs;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -604,6 +644,25 @@ mod tests {
                 workspace: "berlin".to_owned(),
                 kind: SessionKind::Codex,
             }
+        );
+    }
+
+    #[test]
+    fn archcar_rpc_log_payload_is_omitted_by_default_for_send_input() {
+        let envelope = RpcEnvelope {
+            id: "abc".to_owned(),
+            payload: ArchcarRequest::SendInput {
+                session_id: 42,
+                input: "paste OPENAI_API_KEY=sk-secret into session".to_owned(),
+                kind: ArchcarInputKind::User,
+            },
+        };
+        let line = serde_json::to_string(&envelope).unwrap();
+
+        assert_eq!(archcar_rpc_log_payload(&line), None);
+        assert_eq!(
+            archcar_request_summary(&envelope.payload),
+            "send_input session_id=42 kind=user chars=43"
         );
     }
 
