@@ -253,7 +253,7 @@ pub fn codex_screen_ready_for_input(screen: &str) -> bool {
     if trimmed.is_empty()
         || !trimmed.contains('›')
         || detect_directory_trust_prompt(screen)
-        || screen.contains("model:       loading")
+        || has_loading_model_status(screen)
     {
         return false;
     }
@@ -1046,7 +1046,42 @@ fn is_probable_read_file_path(path: &str) -> bool {
             || path.starts_with("../")
             || path.contains('/')
             || path.contains('\\')
-            || path.contains('.'))
+            || path.contains('.')
+            || is_probable_extensionless_root_file(path))
+}
+
+fn is_probable_extensionless_root_file(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with('-')
+        || path.len() > 128
+        || path.chars().any(char::is_whitespace)
+        || !path
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return false;
+    }
+    if path.chars().any(|ch| ch.is_ascii_uppercase()) {
+        return true;
+    }
+    matches!(
+        path,
+        "makefile"
+            | "dockerfile"
+            | "containerfile"
+            | "procfile"
+            | "rakefile"
+            | "gemfile"
+            | "brewfile"
+            | "justfile"
+            | "license"
+            | "readme"
+            | "agents"
+            | "claude"
+            | "contributing"
+            | "changelog"
+            | "todo"
+    )
 }
 
 fn is_raw_file_change_event_line(line: &str) -> bool {
@@ -1591,10 +1626,21 @@ fn has_loaded_live_footer(screen: &str) -> bool {
     })
 }
 
+fn has_loading_model_status(screen: &str) -> bool {
+    screen.lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|words| words == ["model:", "loading"])
+    })
+}
+
 fn has_live_working_status(screen: &str) -> bool {
     screen.lines().rev().take(8).any(|line| {
         transient_bullet_content(line).is_some_and(|content| {
-            content.starts_with("Working (") || content.starts_with("Thinking (")
+            content.starts_with("Starting MCP servers")
+                || content.starts_with("Working (")
+                || content.starts_with("Thinking (")
         })
     })
 }
@@ -1809,6 +1855,18 @@ mod tests {
         ));
 
         assert!(parse_codex_event_blocks("Read README.md before changing the parser").is_empty());
+    }
+
+    #[test]
+    fn read_file_event_accepts_extensionless_root_files() {
+        let events = parse_codex_event_blocks("Read LICENSE, Makefile\nbody");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            CodexTranscriptEvent::Tool { title, .. } if title == "Read LICENSE, Makefile"
+        ));
+
+        assert!(parse_codex_event_blocks("Read more before editing").is_empty());
     }
 
     #[test]
@@ -2782,6 +2840,30 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 • Working (12s • esc to interrupt)
 
   gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert!(!codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_for_loading_model_with_variable_spacing() {
+        let screen = "\
+│ model: loading   /model to change │
+
+› Fix this bug
+
+  gpt-5.4 medium · ~/archductor/workspaces/demo";
+
+        assert!(!codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_when_loaded_footer_still_starts_mcp_servers() {
+        let screen = "\
+› Fix this bug
+
+• Starting MCP servers (2s • esc to interrupt)
+
+  gpt-5.4 medium · ~/archductor/workspaces/demo";
 
         assert!(!codex_screen_ready_for_input(screen));
     }

@@ -478,6 +478,8 @@ fn ensure_chat_thread_session(
         };
     }
     let mut guard = state.lock().unwrap();
+    let db_path = guard.db_path.clone();
+    let logs_dir = guard.logs_dir.clone();
     if let Some((session_id, pid, ready)) = guard
         .sessions
         .values()
@@ -508,25 +510,11 @@ fn ensure_chat_thread_session(
             pid,
         };
     }
-    if !guard.queued_threads.insert(thread_id) {
-        return ArchcarResponse::SessionSpawnQueued { workspace, kind };
-    }
-    let db_path = guard.db_path.clone();
-    let logs_dir = guard.logs_dir.clone();
-    let state_for_spawn = state.clone();
     drop(guard);
-
-    if let Some(response) = restore_thread_session_from_store(state, &workspace, thread_id, kind) {
-        if let Ok(mut guard) = state.lock() {
-            guard.queued_threads.remove(&thread_id);
-        }
-        return response;
-    }
 
     if let Err(err) = validate_chat_thread_workspace(&db_path, &workspace, thread_id, kind) {
         let message = format!("{err:#}");
         let mut guard = state.lock().unwrap();
-        guard.queued_threads.remove(&thread_id);
         broadcast(
             &mut guard,
             ArchcarEvent::SessionError {
@@ -538,7 +526,18 @@ fn ensure_chat_thread_session(
         return ArchcarResponse::Error { message };
     }
 
+    if let Some(response) = restore_thread_session_from_store(state, &workspace, thread_id, kind) {
+        if let Ok(mut guard) = state.lock() {
+            guard.queued_threads.remove(&thread_id);
+        }
+        return response;
+    }
+
     let mut guard = state.lock().unwrap();
+    if !guard.queued_threads.insert(thread_id) {
+        return ArchcarResponse::SessionSpawnQueued { workspace, kind };
+    }
+    let state_for_spawn = state.clone();
     broadcast(
         &mut guard,
         ArchcarEvent::SessionSpawnQueued {
@@ -1198,11 +1197,62 @@ mod tests {
                 kind: SessionKind::Codex,
             }
         );
-        assert!(state
-            .lock()
+    }
+
+    #[test]
+    fn ensure_chat_thread_session_validates_workspace_before_queue_dedupe() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+        RepositoryStore::open(&db_path)
             .unwrap()
-            .queued_threads
-            .contains(&requested_thread.id));
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let requested_thread = store
+            .create_chat_thread("berlin", "codex", "Codex Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir: temp.path().join("logs"),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::from([requested_thread.id]),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let response = ensure_chat_thread_session(
+            &state,
+            "tokyo".to_owned(),
+            requested_thread.id,
+            SessionKind::Codex,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+
+        assert!(matches!(response, ArchcarResponse::Error { .. }));
     }
 
     #[test]

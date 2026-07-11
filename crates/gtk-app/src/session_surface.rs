@@ -118,7 +118,7 @@ struct ContextUsageDisplayState {
 
 type ChatRenderRecordSignature = (i64, Option<i64>, ProcessStatus, Option<i32>, Option<String>);
 type ChatRenderThreadSignature = (i64, String, String, String, String);
-type ChatRenderMessageSignature = (i64, String, Option<i64>, String, usize);
+type ChatRenderMessageSignature = (i64, String, Option<i64>, String, String);
 type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1193,15 +1193,21 @@ pub fn agent_session_panel(
                     } else {
                         ArchcarInputKind::User
                     };
-                    mark_thread_working(working_threads_for_send.as_ref(), thread_id);
-                    queue_archcar_user_send(
+                    if !queue_archcar_user_send(
                         &archcar_bridge_for_send,
                         inflight_archcar_actions_for_send.as_ref(),
                         thread_id,
                         record.id,
                         command.clone(),
                         kind.clone(),
-                    );
+                    ) {
+                        append_session_status_message(
+                            &messages_for_send,
+                            "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
+                        );
+                        return;
+                    }
+                    mark_thread_working(working_threads_for_send.as_ref(), thread_id);
                     if staged_review {
                         app_state_for_send.set_staged_review_prompt(None);
                     }
@@ -1223,7 +1229,6 @@ pub fn agent_session_panel(
                 }
             }
 
-            mark_thread_working(working_threads_for_send.as_ref(), thread_id);
             queue_archcar_input(
                 &pending_archcar_inputs_for_send,
                 thread_id,
@@ -1243,6 +1248,20 @@ pub fn agent_session_panel(
                 update_composer_for_send.as_ref(),
                 false,
             );
+            if request_archcar_ensure(
+                &archcar_bridge_for_send,
+                inflight_archcar_actions_for_send.as_ref(),
+                workspace_for_send.clone(),
+                Some(thread_id),
+            ) {
+                mark_thread_working(working_threads_for_send.as_ref(), thread_id);
+            } else {
+                append_session_status_message(
+                    &messages_for_send,
+                    "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
+                );
+                return;
+            }
             info!(
                 workspace = %workspace_for_send,
                 thread_id,
@@ -1250,12 +1269,6 @@ pub fn agent_session_panel(
                 staged_review,
                 chars = command.len(),
                 "queued archcar input while codex session is starting or absent"
-            );
-            request_archcar_ensure(
-                &archcar_bridge_for_send,
-                inflight_archcar_actions_for_send.as_ref(),
-                workspace_for_send.clone(),
-                Some(thread_id),
             );
             if staged_review {
                 app_state_for_send.set_staged_review_prompt(None);
@@ -1905,7 +1918,7 @@ fn chat_render_signature(
                     message.role.clone(),
                     message.timeline_seq,
                     message.updated_at.clone(),
-                    message.content.len(),
+                    message.content.clone(),
                 )
             })
             .collect(),
@@ -4121,6 +4134,15 @@ fn mark_thread_working(working_threads: &RefCell<HashMap<i64, Instant>>, thread_
         .insert(thread_id, Instant::now());
 }
 
+fn append_session_status_message(messages: &GBox, text: &str) {
+    let error = Label::new(Some(text));
+    error.add_css_class("chat-agent-text");
+    error.set_selectable(true);
+    error.set_wrap(true);
+    error.set_xalign(0.0);
+    append_revealed(messages, &error);
+}
+
 fn clear_thread_working(working_threads: &RefCell<HashMap<i64, Instant>>, thread_id: i64) -> bool {
     working_threads.borrow_mut().remove(&thread_id).is_some()
 }
@@ -4704,7 +4726,7 @@ fn queue_archcar_user_send(
     session_id: i64,
     input: String,
     kind: ArchcarInputKind,
-) {
+) -> bool {
     let token = bridge.send_input(session_id, input.clone(), kind.clone());
     if let Some(token) = token {
         inflight_actions.borrow_mut().insert(
@@ -4716,6 +4738,9 @@ fn queue_archcar_user_send(
                 kind,
             },
         );
+        true
+    } else {
+        false
     }
 }
 
@@ -5063,7 +5088,7 @@ fn request_archcar_ensure(
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     workspace: String,
     thread_id: Option<i64>,
-) {
+) -> bool {
     let token = if let Some(thread_id) = thread_id {
         bridge.ensure_thread_session(workspace.clone(), thread_id, SessionKind::Codex)
     } else {
@@ -5077,6 +5102,9 @@ fn request_archcar_ensure(
                 thread_id,
             },
         );
+        true
+    } else {
+        false
     }
 }
 

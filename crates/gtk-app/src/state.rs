@@ -261,14 +261,31 @@ impl AppState {
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
             state.pending_chat_prompt = None;
-            state.active_page = fallback_page;
+            if matches!(state.active_page, AppPage::Workspace | AppPage::Review) {
+                state.active_page = fallback_page;
+            }
         }
-        state
-            .navigation_back
-            .retain(|entry| entry.selected_workspace.as_deref() != Some(workspace));
-        state
-            .navigation_forward
-            .retain(|entry| entry.selected_workspace.as_deref() != Some(workspace));
+        state.navigation_back =
+            sanitize_removed_workspace_navigation(&state.navigation_back, workspace);
+        state.navigation_forward =
+            sanitize_removed_workspace_navigation(&state.navigation_forward, workspace);
+    }
+
+    pub fn rename_workspace_in_navigation(&self, old_name: &str, new_name: &str) {
+        let mut state = self.inner.borrow_mut();
+        if state.selected_workspace.as_deref() == Some(old_name) {
+            state.selected_workspace = Some(new_name.to_owned());
+        }
+        for entry in state.navigation_back.iter_mut() {
+            if entry.selected_workspace.as_deref() == Some(old_name) {
+                entry.selected_workspace = Some(new_name.to_owned());
+            }
+        }
+        for entry in state.navigation_forward.iter_mut() {
+            if entry.selected_workspace.as_deref() == Some(old_name) {
+                entry.selected_workspace = Some(new_name.to_owned());
+            }
+        }
     }
 
     pub fn navigate_to_workspace_tab(&self, tab: WorkspaceTab) {
@@ -338,6 +355,26 @@ fn push_navigation_entry(state: &mut AppStateSnapshot) {
         state.navigation_back.push(entry);
     }
     state.navigation_forward.clear();
+}
+
+fn sanitize_removed_workspace_navigation(
+    entries: &[NavigationEntry],
+    workspace: &str,
+) -> Vec<NavigationEntry> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.selected_workspace.as_deref() != Some(workspace) {
+                return Some(entry.clone());
+            }
+            if matches!(entry.active_page, AppPage::Workspace | AppPage::Review) {
+                return None;
+            }
+            let mut entry = entry.clone();
+            entry.selected_workspace = None;
+            Some(entry)
+        })
+        .collect()
 }
 
 fn apply_navigation_entry(state: &mut AppStateSnapshot, entry: NavigationEntry) {
@@ -486,6 +523,66 @@ mod tests {
                 Some("berlin")
             );
         }
+    }
+
+    #[test]
+    fn removing_selected_workspace_does_not_redirect_global_pages() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.navigate_to_page(AppPage::History);
+
+        state.remove_workspace_from_navigation("berlin", AppPage::Dashboard);
+        let snapshot = state.snapshot();
+
+        assert_eq!(snapshot.selected_workspace, None);
+        assert_eq!(snapshot.active_page, AppPage::History);
+    }
+
+    #[test]
+    fn removed_workspace_preserves_global_navigation_entries() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.navigate_to_page(AppPage::History);
+        state.navigate_to_page(AppPage::Settings);
+        state.remove_workspace_from_navigation("berlin", AppPage::Dashboard);
+
+        assert!(state.navigate_back());
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.active_page, AppPage::History);
+        assert_eq!(snapshot.selected_workspace, None);
+    }
+
+    #[test]
+    fn renamed_workspace_updates_active_state_and_history() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.navigate_to_page(AppPage::History);
+        state.navigate_to_workspace(Some("berlin".to_owned()));
+        state.rename_workspace_in_navigation("berlin", "tokyo");
+
+        assert_eq!(
+            state.snapshot().selected_workspace.as_deref(),
+            Some("tokyo")
+        );
+        assert!(state.navigate_back());
+        assert_ne!(
+            state.snapshot().selected_workspace.as_deref(),
+            Some("berlin")
+        );
     }
 
     #[test]

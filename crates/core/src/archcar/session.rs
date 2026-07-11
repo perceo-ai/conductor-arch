@@ -307,16 +307,14 @@ pub fn spawn_managed_session_for_thread(
         kind
     );
     let controller = controller_for_kind(kind);
-    let launch = if kind == SessionKind::Codex {
-        store.session_launch_with_options_and_resume(
-            &workspace,
-            SessionKind::Codex,
-            harness,
-            thread_record.native_thread_id.as_deref(),
-        )?
-    } else {
-        controller.build_launch(&store, &workspace, harness)?
-    };
+    let launch = build_thread_session_launch(
+        &store,
+        &workspace,
+        kind,
+        harness,
+        thread_record.native_thread_id.as_deref(),
+        controller.as_ref(),
+    )?;
     spawn_live_managed_session(LiveSessionStart {
         db_path,
         logs_dir,
@@ -328,6 +326,27 @@ pub fn spawn_managed_session_for_thread(
         controller,
         event_tx,
     })
+}
+
+fn build_thread_session_launch(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    harness: SessionHarnessOptions,
+    native_thread_id: Option<&str>,
+    controller: &dyn HarnessController,
+) -> Result<crate::workspace::SessionLaunch> {
+    if kind == SessionKind::Codex {
+        if let Some(native_thread_id) = native_thread_id {
+            return store.session_launch_with_options_and_resume(
+                workspace,
+                SessionKind::Codex,
+                harness,
+                Some(native_thread_id),
+            );
+        }
+    }
+    controller.build_launch(store, workspace, harness)
 }
 
 fn adopt_running_session(
@@ -963,6 +982,51 @@ mod tests {
             SessionKind::Shell,
             false
         ));
+    }
+
+    #[test]
+    fn codex_thread_launch_without_native_id_starts_clean_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let controller = controller_for_kind(SessionKind::Codex);
+
+        let launch = build_thread_session_launch(
+            &store,
+            "berlin",
+            SessionKind::Codex,
+            SessionHarnessOptions::default(),
+            None,
+            controller.as_ref(),
+        )
+        .unwrap();
+
+        assert!(!launch.args.iter().any(|arg| arg == "resume"));
+        assert!(!launch.args.iter().any(|arg| arg == "--last"));
+        assert!(launch.session_resume_id.is_none());
+    }
+
+    #[test]
+    fn codex_thread_launch_with_native_id_resumes_that_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let controller = controller_for_kind(SessionKind::Codex);
+
+        let launch = build_thread_session_launch(
+            &store,
+            "berlin",
+            SessionKind::Codex,
+            SessionHarnessOptions::default(),
+            Some("codex-native-thread"),
+            controller.as_ref(),
+        )
+        .unwrap();
+
+        assert!(launch.args.iter().any(|arg| arg == "resume"));
+        assert!(launch.args.iter().any(|arg| arg == "codex-native-thread"));
+        assert_eq!(
+            launch.session_resume_id.as_deref(),
+            Some("codex-native-thread")
+        );
     }
 
     #[test]

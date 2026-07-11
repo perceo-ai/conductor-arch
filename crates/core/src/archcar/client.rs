@@ -192,9 +192,11 @@ impl ArchcarClient {
 }
 
 fn response_decode_or_eof_error(err: &anyhow::Error) -> bool {
-    let text = err.to_string();
-    text.contains("empty response from archcar sidecar")
-        || text.contains("EOF while parsing a value")
+    err.to_string()
+        .contains("empty response from archcar sidecar")
+        || err
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(serde_json::Error::is_eof)
 }
 
 fn request_retry_safe_after_response_loss(request: &ArchcarRequest) -> bool {
@@ -250,7 +252,10 @@ fn archcar_rpc_log_payload_for_flag(raw_payload: &str, enabled: bool) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{archcar_rpc_log_payload_for_flag, request_retry_safe_after_response_loss};
+    use super::{
+        archcar_rpc_log_payload_for_flag, request_retry_safe_after_response_loss,
+        response_decode_or_eof_error,
+    };
     use crate::archcar::protocol::{ArchcarInputKind, ArchcarRequest, RpcEnvelope};
 
     #[test]
@@ -299,5 +304,14 @@ mod tests {
                 harness: None,
             }
         ));
+    }
+
+    #[test]
+    fn response_loss_detects_any_json_eof_decode_error() {
+        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>(r#"{"payload":["#)
+            .unwrap_err()
+            .into();
+
+        assert!(response_decode_or_eof_error(&err));
     }
 }

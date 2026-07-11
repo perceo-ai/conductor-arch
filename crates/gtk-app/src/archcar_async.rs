@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -76,12 +76,24 @@ pub struct AsyncArchcarBridge {
     message_rx: Arc<Mutex<Receiver<AsyncArchcarMessage>>>,
     next_token: Arc<AtomicU64>,
     wake: BridgeWakeSlot,
+    _shutdown: Arc<BridgeShutdown>,
+}
+
+struct BridgeShutdown {
+    tx: Sender<()>,
+}
+
+impl Drop for BridgeShutdown {
+    fn drop(&mut self) {
+        let _ = self.tx.send(());
+    }
 }
 
 impl AsyncArchcarBridge {
     pub fn new(paths: AppPaths) -> Self {
         let (request_tx, request_rx) = mpsc::channel();
         let (message_tx, message_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let wake = Arc::new(Mutex::new(None));
         let connect_lock = Arc::new(Mutex::new(()));
         thread::spawn({
@@ -93,13 +105,14 @@ impl AsyncArchcarBridge {
         });
         thread::spawn({
             let wake = wake.clone();
-            move || run_archcar_event_bridge(paths, message_tx, wake, connect_lock)
+            move || run_archcar_event_bridge(paths, message_tx, wake, connect_lock, shutdown_rx)
         });
         Self {
             request_tx,
             message_rx: Arc::new(Mutex::new(message_rx)),
             next_token: Arc::new(AtomicU64::new(1)),
             wake,
+            _shutdown: Arc::new(BridgeShutdown { tx: shutdown_tx }),
         }
     }
 
@@ -237,12 +250,14 @@ fn run_archcar_event_bridge(
     message_tx: Sender<AsyncArchcarMessage>,
     wake: BridgeWakeSlot,
     connect_lock: BridgeConnectLock,
+    shutdown_rx: Receiver<()>,
 ) {
     let client = ArchcarClient::from_paths(&paths);
     run_archcar_event_loop(
         message_tx,
         wake,
         connect_lock,
+        shutdown_rx,
         || client.subscribe(),
         Duration::from_millis(500),
     );
@@ -252,6 +267,7 @@ fn run_archcar_event_loop<F, E>(
     message_tx: Sender<AsyncArchcarMessage>,
     wake: BridgeWakeSlot,
     connect_lock: BridgeConnectLock,
+    shutdown_rx: Receiver<()>,
     mut subscribe: F,
     reconnect_delay: Duration,
 ) where
@@ -259,6 +275,9 @@ fn run_archcar_event_loop<F, E>(
     E: std::fmt::Display,
 {
     loop {
+        if shutdown_rx.try_recv().is_ok() {
+            return;
+        }
         let subscribe_result = match connect_lock.lock() {
             Ok(_guard) => subscribe(),
             Err(_) => {
@@ -276,9 +295,22 @@ fn run_archcar_event_loop<F, E>(
         match subscribe_result {
             Ok(rx) => {
                 info!("async archcar bridge subscribed to sidecar events");
-                for event in rx {
-                    if !send_bridge_message(&message_tx, &wake, AsyncArchcarMessage::Event(event)) {
+                loop {
+                    if shutdown_rx.try_recv().is_ok() {
                         return;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(event) => {
+                            if !send_bridge_message(
+                                &message_tx,
+                                &wake,
+                                AsyncArchcarMessage::Event(event),
+                            ) {
+                                return;
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
                 warn!("async archcar event subscription closed; reconnecting");
@@ -296,7 +328,9 @@ fn run_archcar_event_loop<F, E>(
                 warn!(error = %err, "async archcar event subscribe failed; retrying");
             }
         }
-        thread::sleep(reconnect_delay);
+        if shutdown_rx.recv_timeout(reconnect_delay).is_ok() {
+            return;
+        }
     }
 }
 
@@ -451,6 +485,7 @@ mod tests {
         let (message_tx, message_rx) = mpsc::channel();
         let wake = Arc::new(Mutex::new(None));
         let connect_lock = Arc::new(Mutex::new(()));
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel();
         let subscribe_count = Arc::new(AtomicU64::new(0));
         let count_for_subscribe = Arc::clone(&subscribe_count);
         let mut next_rx = Some(event_rx);
@@ -460,6 +495,7 @@ mod tests {
                 message_tx,
                 wake,
                 connect_lock,
+                shutdown_rx,
                 move || {
                     count_for_subscribe.fetch_add(1, Ordering::SeqCst);
                     next_rx

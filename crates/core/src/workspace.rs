@@ -5926,6 +5926,25 @@ fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> R
                 workspace_path.display(),
                 top_level.display()
             );
+            let repository_common_dir = git_common_dir(repository_root).with_context(|| {
+                format!(
+                    "confirm repository git common dir {} after git worktree remove failed: {err:#}",
+                    repository_root.display()
+                )
+            })?;
+            let workspace_common_dir = git_common_dir(workspace_path).with_context(|| {
+                format!(
+                    "confirm workspace git common dir {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            anyhow::ensure!(
+                workspace_common_dir == repository_common_dir,
+                "refusing fallback delete for {} because git common dir {} does not match repository common dir {} after git worktree remove failed: {err:#}",
+                workspace_path.display(),
+                workspace_common_dir.display(),
+                repository_common_dir.display()
+            );
             fs::remove_dir_all(workspace_path).with_context(|| {
                 format!(
                     "remove moved worktree directory {} after git worktree remove failed: {err:#}",
@@ -5936,6 +5955,19 @@ fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> R
             Ok(())
         }
     }
+}
+
+fn git_common_dir(path: &Path) -> Result<PathBuf> {
+    let raw = git_output_dynamic(path, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = PathBuf::from(raw.trim());
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        path.join(common_dir)
+    };
+    common_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalize git common dir {}", common_dir.display()))
 }
 
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
