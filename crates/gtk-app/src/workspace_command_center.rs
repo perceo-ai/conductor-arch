@@ -7,6 +7,7 @@ use gtk::{
     WrapMode,
 };
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
+use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
@@ -506,9 +507,11 @@ fn ws_center_panel(
     let chat_tab_buttons = Rc::new(RefCell::new(HashMap::<i64, GBox>::new()));
     let file_tab_buttons = Rc::new(RefCell::new(HashMap::<String, GBox>::new()));
 
+    let setup_readiness = Rc::new(RefCell::new(SetupReadiness::from_host()));
+
     let add_tab_btn = text_button("+");
     add_tab_btn.add_css_class("ws-tab-add-btn");
-    sync_workspace_chat_add_button(
+    sync_workspace_chat_add_button_with_readiness(
         &add_tab_btn,
         &known_threads
             .borrow()
@@ -516,6 +519,7 @@ fn ws_center_panel(
             .filter(|thread| workspace_chat_thread_is_visible(thread))
             .cloned()
             .collect::<Vec<_>>(),
+        setup_readiness.as_ref(),
     );
     let refresh_sessions = refresh_hub.clone();
     let on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)> = {
@@ -529,6 +533,7 @@ fn ws_center_panel(
         let reopen_menu = reopen_menu.clone();
         let reopen_popover = reopen_popover.clone();
         let add_tab_btn = add_tab_btn.clone();
+        let setup_readiness = setup_readiness.clone();
         let db_path = db_path.to_path_buf();
         let workspace_name = ws.name.clone();
         let archcar_paths = state.paths.clone();
@@ -547,7 +552,11 @@ fn ws_center_panel(
                 .take(WS_CHAT_TAB_LIMIT)
                 .cloned()
                 .collect::<Vec<_>>();
-            sync_workspace_chat_add_button(&add_tab_btn, &visible_threads);
+            sync_workspace_chat_add_button_with_readiness(
+                &add_tab_btn,
+                &visible_threads,
+                setup_readiness.as_ref(),
+            );
             let closed_threads = threads
                 .iter()
                 .filter(|thread| workspace_chat_thread_is_reopenable(thread))
@@ -637,6 +646,7 @@ fn ws_center_panel(
                     let file_tab_buttons = file_tab_buttons.clone();
                     let content = content.clone();
                     let add_tab_btn = add_tab_btn.clone();
+                    let setup_readiness = setup_readiness.clone();
                     move || {
                         close_workspace_chat_thread(
                             &db_path,
@@ -653,7 +663,11 @@ fn ws_center_panel(
                             .filter(|thread| !closed_chat_tabs.borrow().contains(&thread.id))
                             .cloned()
                             .collect::<Vec<_>>();
-                        sync_workspace_chat_add_button(&add_tab_btn, &visible_threads);
+                        sync_workspace_chat_add_button_with_readiness(
+                            &add_tab_btn,
+                            &visible_threads,
+                            setup_readiness.as_ref(),
+                        );
                         let next = known_threads
                             .borrow()
                             .iter()
@@ -704,6 +718,7 @@ fn ws_center_panel(
             refresh_sessions.refresh(RefreshScope::History);
         },
         false,
+        Some(setup_readiness.clone()),
         Some(session_surface::ExternalChatTabs {
             on_threads_changed: on_threads_changed.clone(),
             selection_controller: external_thread_selection.clone(),
@@ -719,6 +734,8 @@ fn ws_center_panel(
         let external_thread_selection = external_thread_selection.clone();
         let on_threads_changed = on_threads_changed.clone();
         let content = content.clone();
+        let setup_readiness = setup_readiness.clone();
+        let add_tab_btn_for_feedback = add_tab_btn.clone();
         add_tab_btn.connect_clicked(move |_| {
             let existing = { known_threads.borrow().clone() };
             let visible_existing = existing
@@ -730,11 +747,23 @@ fn ws_center_panel(
                 return;
             }
             let active_thread = *selected_thread.borrow();
-            let provider = visible_existing
-                .iter()
-                .find(|thread| Some(thread.id) == active_thread)
-                .map(|thread| thread.provider.clone())
-                .unwrap_or_else(|| "codex".to_owned());
+            *setup_readiness.borrow_mut() = SetupReadiness::from_host();
+            sync_workspace_chat_add_button_with_readiness(
+                &add_tab_btn_for_feedback,
+                &visible_existing,
+                setup_readiness.as_ref(),
+            );
+            let provider = ready_chat_provider_for_new_thread(
+                &db_path,
+                &workspace_name,
+                active_thread,
+                &visible_existing,
+                setup_readiness.as_ref(),
+            );
+            let Some(provider) = provider else {
+                error!(workspace = %workspace_name, "refusing to create chat without a ready launchable provider");
+                return;
+            };
             let title = workspace_chat_default_title(&visible_existing);
             let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
                 return;
@@ -1027,14 +1056,34 @@ fn workspace_chat_can_add_tab(visible_threads: &[ChatThreadRecord]) -> bool {
     visible_threads.len() < WS_CHAT_TAB_LIMIT
 }
 
-fn sync_workspace_chat_add_button(button: &Button, visible_threads: &[ChatThreadRecord]) {
+fn sync_workspace_chat_add_button_with_readiness(
+    button: &Button,
+    visible_threads: &[ChatThreadRecord],
+    readiness: &RefCell<SetupReadiness>,
+) {
+    let readiness = readiness.borrow();
+    sync_workspace_chat_add_button(button, visible_threads, &readiness);
+}
+
+fn sync_workspace_chat_add_button(
+    button: &Button,
+    visible_threads: &[ChatThreadRecord],
+    readiness: &SetupReadiness,
+) {
     let can_add = workspace_chat_can_add_tab(visible_threads);
     button.set_sensitive(can_add);
-    button.set_tooltip_text(Some(if can_add {
-        "Add chat"
+    if !can_add {
+        button.set_label("+");
+        button.set_tooltip_text(Some("Chat limit reached"));
+    } else if readiness.first_ready_launchable_provider().is_some() {
+        button.set_label("+");
+        button.set_tooltip_text(Some("Add chat"));
     } else {
-        "Chat limit reached"
-    }));
+        button.set_label("Setup required");
+        button.set_tooltip_text(Some(
+            "Install and sign in to Codex or Claude before adding a chat.",
+        ));
+    }
 }
 
 fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
@@ -1056,6 +1105,49 @@ fn workspace_chat_thread_is_reopenable(thread: &ChatThreadRecord) -> bool {
 
 fn workspace_chat_thread_is_supported(thread: &ChatThreadRecord) -> bool {
     matches!(thread.provider.as_str(), "codex" | "claude")
+}
+
+fn ready_chat_provider_for_new_thread(
+    db_path: &Path,
+    workspace_name: &str,
+    active_thread: Option<i64>,
+    visible_existing: &[ChatThreadRecord],
+    readiness: &RefCell<SetupReadiness>,
+) -> Option<String> {
+    let readiness = readiness.borrow();
+    visible_existing
+        .iter()
+        .find(|thread| Some(thread.id) == active_thread)
+        .filter(|thread| provider_is_ready_launchable(&thread.provider, &readiness))
+        .map(|thread| thread.provider.clone())
+        .or_else(|| {
+            default_launchable_chat_provider_for_workspace(db_path, workspace_name, &readiness)
+        })
+}
+
+fn default_launchable_chat_provider_for_workspace(
+    db_path: &Path,
+    workspace_name: &str,
+    readiness: &SetupReadiness,
+) -> Option<String> {
+    let provider = readiness.first_ready_launchable_provider()?.to_owned();
+    persist_default_chat_provider(db_path, workspace_name, &provider);
+    Some(provider)
+}
+
+fn provider_is_ready_launchable(provider: &str, readiness: &SetupReadiness) -> bool {
+    readiness.launchable_provider_ready(provider) && matches!(provider, "codex" | "claude")
+}
+
+fn persist_default_chat_provider(db_path: &Path, workspace_name: &str, provider: &str) {
+    let result = WorkspaceStore::save_local_default_agent_provider_for_database(
+        db_path,
+        workspace_name,
+        provider,
+    );
+    if let Err(err) = result {
+        error!("failed to persist chat provider {provider} for {workspace_name}: {err:#}");
+    }
 }
 
 fn close_workspace_chat_thread(
@@ -2265,6 +2357,7 @@ fn agents_panel(
         },
         false,
         None,
+        None,
     ));
     panel.append(&session_box);
     panel
@@ -3253,6 +3346,7 @@ fn chat_terminal_split(
         },
         false,
         None,
+        None,
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -3319,6 +3413,7 @@ fn parallel_agents_panel(
             refresh_chat.refresh(RefreshScope::History);
         },
         false,
+        None,
         None,
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)

@@ -12,6 +12,7 @@ use linux_archductor_core::codex_tui::{
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
     CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
+use linux_archductor_core::doctor::SetupReadiness;
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
 use linux_archductor_core::workspace::{
@@ -182,6 +183,7 @@ pub fn agent_session_panel(
     app_state: AppState,
     refresh: impl Fn() + Clone + 'static,
     include_header: bool,
+    setup_readiness: Option<Rc<RefCell<SetupReadiness>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -197,7 +199,13 @@ pub fn agent_session_panel(
         ));
     }
 
-    let selected_harness = Rc::new(RefCell::new(SessionKind::Codex));
+    let setup_readiness =
+        setup_readiness.unwrap_or_else(|| Rc::new(RefCell::new(SetupReadiness::from_host())));
+    let initial_harness = {
+        let readiness = setup_readiness.borrow();
+        initial_chat_harness_from_setup(&database_path, _workspace_name, &readiness)
+    };
+    let selected_harness = Rc::new(RefCell::new(initial_harness));
     let selected_model = Rc::new(RefCell::new(None::<String>));
     let reasoning_mode = Rc::new(RefCell::new(Some("high".to_owned())));
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
@@ -309,36 +317,49 @@ pub fn agent_session_panel(
     let left_group = GBox::new(Orientation::Horizontal, 8);
     left_group.set_hexpand(true);
 
-    let interface_btn = mode_menu_button("Codex", "code-symbolic", &["Codex", "Claude"], 0, {
-        let selected_harness = selected_harness.clone();
-        let reasoning_mode = reasoning_mode.clone();
-        let refresh_chat_surface = refresh_chat_surface.clone();
-        let switch_chat_harness = switch_chat_harness.clone();
-        let selected_model = selected_model.clone();
-        let pending_commands = pending_commands.clone();
-        let selected_thread = selected_thread.clone();
-        let sync_live_controls = sync_live_controls.clone();
-        Rc::new(move |index| {
-            let kind = session_kind_from_index(index);
-            select_harness_and_dispatch(
-                selected_harness.as_ref(),
-                reasoning_mode.as_ref(),
-                kind,
-                switch_chat_harness.borrow().as_ref(),
-                refresh_chat_surface.borrow().as_ref(),
-                None,
-            );
-            *selected_model.borrow_mut() = None;
-            if kind != SessionKind::Codex {
-                if let Some(thread_id) = *selected_thread.borrow() {
-                    pending_commands.borrow_mut().remove(&thread_id);
+    let interface_btn = mode_menu_button(
+        session_kind_name(initial_harness),
+        "code-symbolic",
+        &["Codex", "Claude"],
+        session_kind_index(initial_harness),
+        {
+            let database_path = database_path.to_path_buf();
+            let workspace_name = _workspace_name.to_owned();
+            let selected_harness = selected_harness.clone();
+            let reasoning_mode = reasoning_mode.clone();
+            let refresh_chat_surface = refresh_chat_surface.clone();
+            let switch_chat_harness = switch_chat_harness.clone();
+            let selected_model = selected_model.clone();
+            let pending_commands = pending_commands.clone();
+            let selected_thread = selected_thread.clone();
+            let sync_live_controls = sync_live_controls.clone();
+            Rc::new(move |index| {
+                let kind = session_kind_from_index(index);
+                persist_selected_provider(
+                    &database_path,
+                    &workspace_name,
+                    session_kind_provider(kind),
+                );
+                select_harness_and_dispatch(
+                    selected_harness.as_ref(),
+                    reasoning_mode.as_ref(),
+                    kind,
+                    switch_chat_harness.borrow().as_ref(),
+                    refresh_chat_surface.borrow().as_ref(),
+                    None,
+                );
+                *selected_model.borrow_mut() = None;
+                if kind != SessionKind::Codex {
+                    if let Some(thread_id) = *selected_thread.borrow() {
+                        pending_commands.borrow_mut().remove(&thread_id);
+                    }
                 }
-            }
-            if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
-                sync();
-            }
-        })
-    });
+                if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
+                    sync();
+                }
+            })
+        },
+    );
     let model_btn = mode_menu_button("Default", "M", &["Default", "gpt-5", "gpt-5-mini"], 0, {
         let selected_model = selected_model.clone();
         let selected_harness = selected_harness.clone();
@@ -1013,6 +1034,7 @@ pub fn agent_session_panel(
     let codex_ready_for_send = codex_ready.clone();
     let codex_startup_states_for_send = codex_startup_states.clone();
     let update_composer_for_send = update_composer_state.clone();
+    let setup_readiness_for_send = setup_readiness.clone();
     let send_text = Rc::new(move |text: String, staged_review: bool| {
         let command = text.trim().to_owned();
         if command.is_empty() {
@@ -1047,6 +1069,17 @@ pub fn agent_session_panel(
             }
         }
         let selected_kind = *selected_harness_for_send.borrow();
+        if let Some(message) =
+            selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
+        {
+            let error = Label::new(Some(&message));
+            error.add_css_class("chat-agent-text");
+            error.set_selectable(true);
+            error.set_wrap(true);
+            error.set_xalign(0.0);
+            append_revealed(&messages_for_send, &error);
+            return;
+        }
         info!(
             workspace = %workspace_for_send,
             harness = ?selected_kind,
@@ -1557,8 +1590,13 @@ pub fn agent_session_panel(
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
+        let setup_readiness = setup_readiness.clone();
         move |_| {
             let kind = *selected_harness.borrow();
+            if selected_provider_blocker_after_refresh(kind, &setup_readiness).is_some() {
+                error!(workspace = %workspace_name, harness = ?kind, "refusing to create chat for unready provider");
+                return;
+            }
             let title = default_chat_thread_title(kind, &thread_state.borrow());
             match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                 store.create_chat_thread(
@@ -2852,6 +2890,104 @@ fn session_kind_from_index(index: usize) -> SessionKind {
     match index {
         1 => SessionKind::Claude,
         _ => SessionKind::Codex,
+    }
+}
+
+fn session_kind_index(kind: SessionKind) -> usize {
+    match kind {
+        SessionKind::Claude => 1,
+        _ => 0,
+    }
+}
+
+fn initial_chat_harness_from_setup(
+    database_path: &Path,
+    workspace_name: &str,
+    readiness: &SetupReadiness,
+) -> SessionKind {
+    if let Some(provider) = configured_ready_provider(database_path, workspace_name, readiness) {
+        return session_kind_from_provider(provider);
+    }
+    let provider = readiness
+        .first_ready_launchable_provider()
+        .unwrap_or("codex");
+    persist_selected_provider(database_path, workspace_name, provider);
+    session_kind_from_provider(provider)
+}
+
+fn selected_provider_blocker_message(
+    kind: SessionKind,
+    readiness: &SetupReadiness,
+) -> Option<String> {
+    if matches!(kind, SessionKind::Shell) {
+        return None;
+    }
+    let provider = session_kind_provider(kind);
+    (!readiness.launchable_provider_ready(provider)).then(|| {
+        format!(
+            "{} is not ready. Sign in or install it, then recheck setup before starting a chat.",
+            session_kind_name(kind)
+        )
+    })
+}
+
+fn selected_provider_blocker_after_refresh(
+    kind: SessionKind,
+    readiness: &Rc<RefCell<SetupReadiness>>,
+) -> Option<String> {
+    *readiness.borrow_mut() = SetupReadiness::from_host();
+    let current = readiness.borrow();
+    selected_provider_blocker_message(kind, &current)
+}
+
+fn configured_ready_provider(
+    database_path: &Path,
+    workspace_name: &str,
+    readiness: &SetupReadiness,
+) -> Option<&'static str> {
+    let configured = WorkspaceStore::open(database_path)
+        .ok()
+        .and_then(|store| store.workspace_repo_settings(workspace_name).ok())
+        .and_then(|settings| settings.customization.automation.auto_start_agent);
+    let provider = configured.as_deref()?;
+    let provider = launchable_provider_name(provider)?;
+    readiness
+        .launchable_provider_ready(provider)
+        .then_some(provider)
+}
+
+fn launchable_provider_name(provider: &str) -> Option<&'static str> {
+    match provider
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .as_str()
+    {
+        "codex" => Some("codex"),
+        "claude" | "claudecode" => Some("claude"),
+        _ => None,
+    }
+}
+
+fn session_kind_from_provider(provider: &str) -> SessionKind {
+    match launchable_provider_name(provider) {
+        Some("claude") => SessionKind::Claude,
+        _ => SessionKind::Codex,
+    }
+}
+
+fn persist_selected_provider(database_path: &Path, workspace_name: &str, provider: &str) {
+    let Some(provider) = launchable_provider_name(provider) else {
+        return;
+    };
+    let result = WorkspaceStore::save_local_default_agent_provider_for_database(
+        database_path,
+        workspace_name,
+        provider,
+    );
+    if let Err(err) = result {
+        warn!(workspace = %workspace_name, provider, error = %err, "failed to persist selected provider");
     }
 }
 

@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepositorySettings {
@@ -229,6 +234,23 @@ pub fn save_repository_settings(
     let raw = RawRepositorySettings::from_settings(settings);
     let contents = toml::to_string_pretty(&raw).context("serialize repository settings")?;
     std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))
+}
+
+pub fn save_local_default_agent_provider(repo_path: &Path, provider: &str) -> Result<()> {
+    validate_agent_provider(provider)?;
+    let conductor_dir = ensure_local_settings_dir(repo_path)?;
+    let path = conductor_dir.join("settings.local.toml");
+    reject_symlink_file(&path)?;
+    let mut value = match fs::read_to_string(&path) {
+        Ok(contents) if contents.trim().is_empty() => toml::Value::Table(toml::map::Map::new()),
+        Ok(contents) => toml::from_str::<toml::Value>(&contents)
+            .with_context(|| format!("parse {}", path.display()))?,
+        Err(err) if err.kind() == ErrorKind::NotFound => toml::Value::Table(toml::map::Map::new()),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    set_local_default_agent_provider(&mut value, provider)?;
+    let contents = toml::to_string_pretty(&value).context("serialize local settings")?;
+    atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
 pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Result<String> {
@@ -1235,6 +1257,138 @@ fn is_valid_workspace_tab(value: &str) -> bool {
     )
 }
 
+fn validate_agent_provider(provider: &str) -> Result<()> {
+    anyhow::ensure!(
+        matches!(provider, "codex" | "claude" | "opencode"),
+        "default agent provider must be codex, claude, or opencode"
+    );
+    Ok(())
+}
+
+fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+    let conductor_dir = repo_path.join(".archductor");
+    match fs::symlink_metadata(&conductor_dir) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            anyhow::ensure!(
+                !file_type.is_symlink() && file_type.is_dir(),
+                "{} must be a real directory",
+                conductor_dir.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            fs::create_dir(&conductor_dir)
+                .with_context(|| format!("create {}", conductor_dir.display()))?;
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspect {}", conductor_dir.display()))
+        }
+    }
+    let metadata = fs::symlink_metadata(&conductor_dir)
+        .with_context(|| format!("inspect {}", conductor_dir.display()))?;
+    let file_type = metadata.file_type();
+    anyhow::ensure!(
+        !file_type.is_symlink() && file_type.is_dir(),
+        "{} must be a real directory",
+        conductor_dir.display()
+    );
+    Ok(conductor_dir)
+}
+
+fn reject_symlink_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "{} must not be a symlink",
+                path.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+    Ok(())
+}
+
+fn set_local_default_agent_provider(value: &mut toml::Value, provider: &str) -> Result<()> {
+    let root = value
+        .as_table_mut()
+        .context("local settings root must be a TOML table")?;
+    let customization = root
+        .entry("customization".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let customization = customization
+        .as_table_mut()
+        .context("customization settings must be a TOML table")?;
+    let automation = customization
+        .entry("automation".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let automation = automation
+        .as_table_mut()
+        .context("customization.automation settings must be a TOML table")?;
+    automation.insert(
+        "auto_start_agent".to_owned(),
+        toml::Value::String(provider.to_owned()),
+    );
+    Ok(())
+}
+
+fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("resolve parent for {}", path.display()))?;
+    let tmp_path = parent.join(format!(".{}.{}.tmp", "settings.local.toml", Uuid::new_v4()));
+    let write_result = (|| -> Result<()> {
+        let permissions = local_settings_write_permissions(path)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        set_permissions_if_supported(&tmp_path, permissions)?;
+        file.write_all(contents)
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp_path.display()))?;
+        reject_symlink_file(path)?;
+        fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
+        fs::File::open(parent)
+            .with_context(|| format!("open {}", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("sync {}", parent.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+#[cfg(unix)]
+fn local_settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.permissions()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(fs::Permissions::from_mode(0o600)),
+        Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+#[cfg(not(unix))]
+fn local_settings_write_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_permissions_if_supported(path: &Path, permissions: fs::Permissions) -> Result<()> {
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("set permissions {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_permissions_if_supported(_path: &Path, _permissions: ()) -> Result<()> {
+    Ok(())
+}
+
 fn normalize_workspace_tab(value: &str) -> String {
     value
         .chars()
@@ -1403,6 +1557,78 @@ LOCAL_ONLY = "1"
         assert_eq!(loaded, settings);
         assert!(temp.path().join(".archductor/settings.toml").exists());
         assert!(!temp.path().join(".archductor/settings.local.toml").exists());
+    }
+
+    #[test]
+    fn save_local_default_agent_provider_updates_only_local_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts]
+setup = "pnpm install"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            conductor_dir.join("settings.local.toml"),
+            r#"
+unknown_root = "keep"
+
+[future.provider]
+experimental = true
+
+[customization.view]
+theme = "dark"
+"#,
+        )
+        .unwrap();
+
+        save_local_default_agent_provider(temp.path(), "claude").unwrap();
+
+        let local = fs::read_to_string(conductor_dir.join("settings.local.toml")).unwrap();
+        assert!(local.contains("auto_start_agent = \"claude\""));
+        assert!(local.contains("theme = \"dark\""));
+        assert!(local.contains("unknown_root = \"keep\""));
+        assert!(local.contains("[future.provider]"));
+        assert!(local.contains("experimental = true"));
+        assert!(!local.contains("pnpm install"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_local_default_agent_provider_rejects_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "outside = true\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.local.toml")).unwrap();
+
+        let err = save_local_default_agent_provider(temp.path(), "codex").unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+        assert_eq!(fs::read_to_string(external).unwrap(), "outside = true\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_local_default_agent_provider_preserves_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let path = conductor_dir.join("settings.local.toml");
+        fs::write(&path, "[customization.view]\ntheme = \"dark\"\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        save_local_default_agent_provider(temp.path(), "claude").unwrap();
+
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
