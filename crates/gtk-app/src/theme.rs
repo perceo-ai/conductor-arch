@@ -22,6 +22,9 @@ textview,
 .history-row,
 .nav-button,
 .nav-row,
+.ws-tab-shell,
+.ws-tab-label,
+.ws-tab-close-icon,
 .chat-menu-item,
 .chat-composer-box,
 .chat-inline-event-chip,
@@ -545,6 +548,9 @@ checkbutton {
 }
 .card-meta.ws-pr-status-ready {
     color: #84e0a0;
+}
+.card-meta.ws-pr-status-pending {
+    color: #a8a8a8;
 }
 .card-meta.ws-pr-status-failed {
     color: #ff8a8a;
@@ -1358,6 +1364,10 @@ window.lc-theme-dark,
     background-color: #163522;
     color: #84e0a0;
 }
+.workspace-badge.ws-pr-status-pending {
+    background-color: #262626;
+    color: #a8a8a8;
+}
 .workspace-badge.ws-pr-status-failed {
     background-color: #3a1a1a;
     color: #ff8a8a;
@@ -1484,36 +1494,66 @@ window.lc-theme-dark,
     padding: 0 18px;
     background-color: #191919;
 }
+.ws-chat-tabs-scroll {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    min-height: 46px;
+}
+.ws-chat-tabs-scroll scrollbar {
+    min-height: 0;
+    min-width: 0;
+}
+.ws-chat-tabs {
+    background-color: transparent;
+}
 .ws-tab-sep {
     min-height: 1px;
     background-color: #282828;
 }
-.ws-tab-btn {
-    background: transparent;
-    border: none;
-    border-radius: 0;
+.ws-tab-shell {
+    min-width: 132px;
+    min-height: 46px;
+    padding: 0 6px;
     border-bottom: 2px solid transparent;
-    padding: 0 4px;
-    margin: 0;
+    background-color: transparent;
+}
+.ws-tab-label {
+    min-width: 84px;
     font-size: 14px;
     font-weight: 400;
     color: #8a8a8a;
-    min-height: 46px;
 }
-.ws-tab-btn:hover {
+.ws-tab-close-button {
     background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    border-radius: 5px;
+    padding: 0;
+    min-width: 24px;
+    min-height: 24px;
+}
+.ws-tab-close-button:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+.ws-tab-close-icon {
+    color: #747474;
+    min-width: 14px;
+    min-height: 14px;
+}
+.ws-tab-shell:hover .ws-tab-label,
+.ws-tab-shell:hover .ws-tab-close-icon {
     color: #c6c6c6;
 }
-.ws-tab-btn.ws-tab-active,
-button.ws-tab-btn.ws-tab-active {
+.ws-tab-shell.ws-tab-active {
     background-color: #242424;
-    color: #e8e8e8;
     border-bottom-color: #f0c36a;
-    font-weight: 600;
 }
-.ws-tab-btn.ws-tab-active label,
-button.ws-tab-btn.ws-tab-active label {
-    color: #f4f4f4;
+.ws-tab-shell.ws-tab-active .ws-tab-label,
+.ws-tab-shell.ws-tab-active .ws-tab-close-icon {
+    color: #e8e8e8;
+    font-weight: 600;
 }
 .ws-mode-switcher button {
     font-size: 12px;
@@ -1579,11 +1619,60 @@ button.ws-tab-btn.ws-tab-active label {
     background-color: #163522;
     color: #84e0a0;
 }
+.ws-pr-status-pending {
+    background-color: #262626;
+    color: #a8a8a8;
+}
 .ws-pr-status-failed {
     background-color: #3a1a1a;
     color: #ff8a8a;
 }
 .ws-pr-status-merged {
+    background-color: #311d46;
+    color: #c6a3ff;
+}
+.ws-pr-status-missing {
+    background-color: #1b1b1b;
+    color: #a8a8a8;
+}
+.ws-pr-compact-panel {
+    padding: 10px 12px;
+    border-bottom: 1px solid #232323;
+    background-color: #181818;
+}
+.ws-pr-compact-panel.ws-pr-status-missing {
+    border-left: 3px solid #3a3a3a;
+}
+.ws-pr-compact-panel.ws-pr-status-pending {
+    border-left: 3px solid #3a3a3a;
+}
+.ws-pr-compact-panel.ws-pr-status-ready {
+    border-left: 3px solid #84e0a0;
+}
+.ws-pr-compact-panel.ws-pr-status-failed {
+    border-left: 3px solid #ff8a8a;
+}
+.ws-pr-compact-panel.ws-pr-status-merged {
+    border-left: 3px solid #c6a3ff;
+}
+.ws-pr-compact-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e6e6e6;
+}
+.ws-pr-action-button.ws-pr-status-pending {
+    background-color: #262626;
+    color: #a8a8a8;
+}
+.ws-pr-action-button.ws-pr-status-ready {
+    background-color: #163522;
+    color: #84e0a0;
+}
+.ws-pr-action-button.ws-pr-status-failed {
+    background-color: #3a1a1a;
+    color: #ff8a8a;
+}
+.ws-pr-action-button.ws-pr-status-merged {
     background-color: #311d46;
     color: #c6a3ff;
 }
@@ -1881,6 +1970,21 @@ row:hover .ws-folder-name {
     background-color: #1e1e1e;
     border: 1px solid #313131;
     border-radius: 14px;
+}
+.context-menu-popover {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+}
+popover.context-menu-popover contents {
+    background-color: #1e1e1e;
+    border: none;
+    border-radius: 10px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
+popover.context-menu-popover arrow {
+    background-color: #1e1e1e;
+    border: none;
 }
 .chat-menu-list {
     padding: 8px;

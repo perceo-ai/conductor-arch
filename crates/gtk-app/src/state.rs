@@ -67,6 +67,7 @@ pub struct AppStateSnapshot {
     pub selected_chat_thread: Option<i64>,
     pub selected_agent_session: Option<i64>,
     pub staged_review_prompt: Option<String>,
+    pub pending_chat_prompt: Option<String>,
     pub running_processes: Vec<i64>,
     pub attention_state: AttentionState,
     pub settings_layer: SettingsLayer,
@@ -118,6 +119,7 @@ impl AppState {
                 selected_chat_thread: None,
                 selected_agent_session: None,
                 staged_review_prompt: None,
+                pending_chat_prompt: None,
                 running_processes: Vec::new(),
                 attention_state: AttentionState::default(),
                 settings_layer: SettingsLayer::BuiltInDefaults,
@@ -138,6 +140,7 @@ impl AppState {
             state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
+            state.pending_chat_prompt = None;
         }
         state.selected_workspace = workspace;
         state.active_page = AppPage::Workspace;
@@ -162,6 +165,7 @@ impl AppState {
             state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
+            state.pending_chat_prompt = None;
         }
         state.selected_workspace = workspace;
         state.active_page = AppPage::Workspace;
@@ -177,6 +181,7 @@ impl AppState {
             state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
+            state.pending_chat_prompt = None;
             if let Some(tab) = default_tab {
                 state.active_workspace_tab = tab;
             }
@@ -199,6 +204,7 @@ impl AppState {
             state.selected_chat_thread = None;
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
+            state.pending_chat_prompt = None;
             if let Some(tab) = default_tab {
                 state.active_workspace_tab = tab;
             }
@@ -231,8 +237,38 @@ impl AppState {
         self.inner.borrow_mut().staged_review_prompt = prompt;
     }
 
+    pub fn queue_pending_chat_prompt(&self, prompt: String) {
+        let prompt = prompt.trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+        self.inner.borrow_mut().pending_chat_prompt = Some(prompt);
+    }
+
+    pub fn take_pending_chat_prompt(&self) -> Option<String> {
+        self.inner.borrow_mut().pending_chat_prompt.take()
+    }
+
     pub fn set_active_page(&self, page: AppPage) {
         self.inner.borrow_mut().active_page = page;
+    }
+
+    pub fn remove_workspace_from_navigation(&self, workspace: &str, fallback_page: AppPage) {
+        let mut state = self.inner.borrow_mut();
+        if state.selected_workspace.as_deref() == Some(workspace) {
+            state.selected_workspace = None;
+            state.selected_chat_thread = None;
+            state.selected_agent_session = None;
+            state.staged_review_prompt = None;
+            state.pending_chat_prompt = None;
+            state.active_page = fallback_page;
+        }
+        state
+            .navigation_back
+            .retain(|entry| entry.selected_workspace.as_deref() != Some(workspace));
+        state
+            .navigation_forward
+            .retain(|entry| entry.selected_workspace.as_deref() != Some(workspace));
     }
 
     pub fn navigate_to_workspace_tab(&self, tab: WorkspaceTab) {
@@ -310,6 +346,7 @@ fn apply_navigation_entry(state: &mut AppStateSnapshot, entry: NavigationEntry) 
         state.selected_chat_thread = None;
         state.selected_agent_session = None;
         state.staged_review_prompt = None;
+        state.pending_chat_prompt = None;
     }
     state.selected_workspace = entry.selected_workspace;
     state.active_page = entry.active_page;
@@ -401,5 +438,53 @@ mod tests {
         state.navigate_to_workspace(Some("tokyo".to_owned()));
 
         assert_eq!(state.selected_chat_thread(), None);
+    }
+
+    #[test]
+    fn pending_chat_prompt_is_one_shot() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.queue_pending_chat_prompt("  Create a PR  ".to_owned());
+
+        assert_eq!(
+            state.take_pending_chat_prompt().as_deref(),
+            Some("Create a PR")
+        );
+        assert_eq!(state.take_pending_chat_prompt(), None);
+    }
+
+    #[test]
+    fn removed_workspace_is_cleared_from_active_state_and_history() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            None,
+            WorkspaceTab::Chats,
+            AppPage::Dashboard,
+        );
+
+        state.navigate_to_workspace(Some("berlin".to_owned()));
+        state.navigate_to_page(AppPage::History);
+        state.navigate_to_workspace(Some("tokyo".to_owned()));
+        state.navigate_to_page(AppPage::Dashboard);
+
+        state.remove_workspace_from_navigation("berlin", AppPage::Dashboard);
+
+        while state.navigate_back() {
+            assert_ne!(
+                state.snapshot().selected_workspace.as_deref(),
+                Some("berlin")
+            );
+        }
+        while state.navigate_forward() {
+            assert_ne!(
+                state.snapshot().selected_workspace.as_deref(),
+                Some("berlin")
+            );
+        }
     }
 }

@@ -26,6 +26,12 @@ pub enum ArchcarRequest {
         kind: SessionKind,
         harness: Option<SessionHarnessOptions>,
     },
+    EnsureChatThreadSession {
+        workspace: String,
+        thread_id: i64,
+        kind: SessionKind,
+        harness: Option<SessionHarnessOptions>,
+    },
     SpawnSession {
         workspace: String,
         kind: SessionKind,
@@ -109,6 +115,17 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         } => {
             format!(
                 "ensure_workspace_default_session workspace={workspace} kind={}",
+                session_kind_label(*kind)
+            )
+        }
+        ArchcarRequest::EnsureChatThreadSession {
+            workspace,
+            thread_id,
+            kind,
+            ..
+        } => {
+            format!(
+                "ensure_chat_thread_session workspace={workspace} thread_id={thread_id} kind={}",
                 session_kind_label(*kind)
             )
         }

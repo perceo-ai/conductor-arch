@@ -18,6 +18,11 @@ pub enum AsyncArchcarRequestKind {
         workspace: String,
         kind: SessionKind,
     },
+    EnsureChatThreadSession {
+        workspace: String,
+        thread_id: i64,
+        kind: SessionKind,
+    },
     SpawnSession {
         workspace: String,
         kind: SessionKind,
@@ -103,6 +108,20 @@ impl AsyncArchcarBridge {
     pub fn ensure_default_session(&self, workspace: String, kind: SessionKind) -> Option<u64> {
         self.submit(ArchcarRequest::EnsureWorkspaceDefaultSession {
             workspace,
+            kind,
+            harness: None,
+        })
+    }
+
+    pub fn ensure_thread_session(
+        &self,
+        workspace: String,
+        thread_id: i64,
+        kind: SessionKind,
+    ) -> Option<u64> {
+        self.submit(ArchcarRequest::EnsureChatThreadSession {
+            workspace,
+            thread_id,
             kind,
             harness: None,
         })
@@ -253,6 +272,16 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             workspace, kind, ..
         } => AsyncArchcarRequestKind::EnsureWorkspaceDefaultSession {
             workspace: workspace.clone(),
+            kind: *kind,
+        },
+        ArchcarRequest::EnsureChatThreadSession {
+            workspace,
+            thread_id,
+            kind,
+            ..
+        } => AsyncArchcarRequestKind::EnsureChatThreadSession {
+            workspace: workspace.clone(),
+            thread_id: *thread_id,
             kind: *kind,
         },
         ArchcarRequest::SpawnSession {

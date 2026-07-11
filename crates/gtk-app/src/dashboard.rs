@@ -44,12 +44,7 @@ pub(crate) fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clon
     let db_path = paths.database_path.clone();
     let selected_project = Rc::new(RefCell::new(None::<String>));
     let refresh = move || {
-        render_dashboard(
-            &db_path,
-            &project_tabs,
-            &board,
-            selected_project.clone(),
-        );
+        render_dashboard(&db_path, &project_tabs, &board, selected_project.clone());
     };
 
     refresh();
@@ -65,7 +60,7 @@ fn render_dashboard(
     clear_box(project_tabs);
     clear_box(board);
 
-    let Ok(store) = WorkspaceStore::open(db_path.to_path_buf()) else {
+    let Ok(store) = WorkspaceStore::open(db_path) else {
         append_empty_dashboard(project_tabs, board, "No workspace database yet.");
         return;
     };
@@ -301,7 +296,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
 
 #[cfg(test)]
 mod tests {
-    use super::{dashboard_project_matches, dashboard_pr_meta};
+    use super::{dashboard_pr_meta, dashboard_project_matches};
 
     #[test]
     fn dashboard_meta_includes_pr_attention_state() {

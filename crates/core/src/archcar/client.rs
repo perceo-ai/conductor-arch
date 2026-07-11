@@ -28,6 +28,23 @@ impl ArchcarClient {
     }
 
     pub fn send(&self, request: ArchcarRequest) -> Result<ArchcarResponse> {
+        match self.send_once(request.clone()) {
+            Ok(response) => Ok(response),
+            Err(err) if response_decode_or_eof_error(&err) => {
+                warn!(
+                    socket_path = %self.socket_path.display(),
+                    error = %err,
+                    "archcar response decode failed; restarting sidecar and retrying request"
+                );
+                let _ = std::fs::remove_file(&self.socket_path);
+                self.spawn_sidecar()?;
+                self.send_once(request)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn send_once(&self, request: ArchcarRequest) -> Result<ArchcarResponse> {
         let mut stream = self.connect_or_spawn()?;
         let request_summary = archcar_request_summary(&request);
         let envelope = RpcEnvelope {
@@ -50,6 +67,10 @@ impl ArchcarClient {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
+        anyhow::ensure!(
+            !line.trim().is_empty(),
+            "empty response from archcar sidecar"
+        );
         let response: RpcEnvelope<ArchcarResponse> = serde_json::from_str(&line)?;
         log_archcar_rpc(
             &self.socket_path,
@@ -169,6 +190,12 @@ impl ArchcarClient {
         let (candidate, err) = last_err.context("no archcar binary candidate available")?;
         Err(err).with_context(|| format!("spawn archcar binary {}", candidate.display()))
     }
+}
+
+fn response_decode_or_eof_error(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains("empty response from archcar sidecar")
+        || text.contains("EOF while parsing a value")
 }
 
 fn log_archcar_rpc(

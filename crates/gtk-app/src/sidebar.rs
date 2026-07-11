@@ -1,8 +1,8 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Stack,
+    Box as GBox, Button, Entry, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
+    PolicyType, Popover, ScrolledWindow, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
@@ -383,6 +383,16 @@ pub(crate) fn build_app_sidebar(
                                 .unwrap_or(0),
                             &ws.updated_at,
                         );
+                        attach_workspace_row_context_menu(
+                            &row,
+                            ws.name.clone(),
+                            app_state.clone(),
+                            stack.clone(),
+                            window.clone(),
+                            refresh_hub.clone(),
+                            refresh_workspace.clone(),
+                            refresh_view_preferences.clone(),
+                        );
                         list.append(&row);
                         names.borrow_mut().insert(row_idx, ws.name.clone());
                         row_idx += 1;
@@ -716,6 +726,300 @@ fn build_workspace_row(
     ListBoxRow::builder().child(&row_box).build()
 }
 
+fn attach_workspace_row_context_menu(
+    row: &ListBoxRow,
+    workspace_name: String,
+    state: AppState,
+    stack: Stack,
+    window: ApplicationWindow,
+    refresh_hub: RefreshHub,
+    refresh_workspace: impl Fn() + Clone + 'static,
+    refresh_view_preferences: Rc<dyn Fn()>,
+) {
+    let popover = Popover::new();
+    popover.add_css_class("context-menu-popover");
+    popover.set_parent(row);
+    let menu = GBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("chat-menu-list");
+
+    let rename_btn = text_button("Rename");
+    rename_btn.add_css_class("chat-menu-item");
+    {
+        let workspace_name = workspace_name.clone();
+        let state = state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let popover_for_item = popover.clone();
+        let window = window.clone();
+        rename_btn.connect_clicked(move |_| {
+            popover_for_item.popdown();
+            show_workspace_text_dialog(
+                &window,
+                "Rename workspace",
+                "Workspace name",
+                &workspace_name,
+                "Rename",
+                Rc::new({
+                    let workspace_name = workspace_name.clone();
+                    let state = state.clone();
+                    let refresh_hub = refresh_hub.clone();
+                    let refresh_workspace = refresh_workspace.clone();
+                    let refresh_view_preferences = refresh_view_preferences.clone();
+                    move |new_name| {
+                        if new_name.is_empty() || new_name == workspace_name {
+                            return;
+                        }
+                        if let Ok(workspace) = WorkspaceStore::open(state.workspace_database_path())
+                            .and_then(|store| store.rename(&workspace_name, &new_name))
+                        {
+                            state.set_selected_workspace(Some(workspace.name));
+                            refresh_view_preferences();
+                            refresh_workspace();
+                            refresh_hub.refresh(RefreshScope::All);
+                        }
+                    }
+                }),
+            );
+        });
+    }
+    menu.append(&rename_btn);
+
+    let duplicate_btn = text_button("Duplicate");
+    duplicate_btn.add_css_class("chat-menu-item");
+    {
+        let workspace_name = workspace_name.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let state = state.clone();
+        let popover_for_item = popover.clone();
+        let window = window.clone();
+        duplicate_btn.connect_clicked(move |_| {
+            popover_for_item.popdown();
+            show_workspace_text_dialog(
+                &window,
+                "Duplicate workspace",
+                "New workspace name",
+                "",
+                "Duplicate",
+                Rc::new({
+                    let workspace_name = workspace_name.clone();
+                    let refresh_hub = refresh_hub.clone();
+                    let refresh_workspace = refresh_workspace.clone();
+                    let refresh_view_preferences = refresh_view_preferences.clone();
+                    let state = state.clone();
+                    move |new_name| {
+                        if new_name.is_empty() {
+                            return;
+                        }
+                        if let Ok(workspace) = WorkspaceStore::open(state.workspace_database_path())
+                            .and_then(|store| store.duplicate(&workspace_name, &new_name, None))
+                        {
+                            state.set_selected_workspace(Some(workspace.name));
+                            refresh_view_preferences();
+                            refresh_workspace();
+                            refresh_hub.refresh(RefreshScope::All);
+                        }
+                    }
+                }),
+            );
+        });
+    }
+    menu.append(&duplicate_btn);
+
+    for (label, destructive, action) in [("Archive", false, "archive"), ("Delete", true, "delete")]
+    {
+        let item = text_button(label);
+        item.add_css_class("chat-menu-item");
+        if destructive {
+            item.add_css_class("destructive-action");
+        }
+        let workspace_name = workspace_name.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let state = state.clone();
+        let stack = stack.clone();
+        let row = row.clone();
+        let popover_for_item = popover.clone();
+        let window = window.clone();
+        item.connect_clicked(move |_| {
+            popover_for_item.popdown();
+            let title = if action == "archive" {
+                "Archive workspace"
+            } else {
+                "Delete workspace"
+            };
+            let message = if action == "archive" {
+                format!("Archive {workspace_name}?")
+            } else {
+                format!("Delete {workspace_name}? This removes the worktree.")
+            };
+            show_workspace_confirm_dialog(
+                &window,
+                title,
+                &message,
+                label,
+                destructive,
+                Rc::new({
+                    let workspace_name = workspace_name.clone();
+                    let refresh_hub = refresh_hub.clone();
+                    let refresh_workspace = refresh_workspace.clone();
+                    let refresh_view_preferences = refresh_view_preferences.clone();
+                    let state = state.clone();
+                    let stack = stack.clone();
+                    let row = row.clone();
+                    move || {
+                        let result = WorkspaceStore::open(state.workspace_database_path())
+                            .and_then(|store| match action {
+                                "archive" => store.archive(&workspace_name, false),
+                                "delete" => store.delete(&workspace_name, true, true),
+                                _ => unreachable!(),
+                            });
+                        if result.is_ok() {
+                            if action == "delete" {
+                                state.remove_workspace_from_navigation(
+                                    &workspace_name,
+                                    AppPage::Dashboard,
+                                );
+                                stack.set_visible_child_name("dashboard");
+                                if let Some(list) = row.parent().and_downcast::<ListBox>() {
+                                    list.remove(&row);
+                                }
+                            }
+                            refresh_view_preferences();
+                            refresh_workspace();
+                            refresh_hub.refresh(RefreshScope::All);
+                        }
+                    }
+                }),
+            );
+        });
+        menu.append(&item);
+    }
+
+    popover.set_child(Some(&menu));
+    let gesture = GestureClick::new();
+    gesture.set_button(3);
+    let popover_for_click = popover.clone();
+    gesture.connect_pressed(move |_, _, x, y| {
+        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        popover_for_click.set_pointing_to(Some(&rect));
+        popover_for_click.popup();
+    });
+    row.add_controller(gesture);
+}
+
+fn show_workspace_text_dialog(
+    window: &ApplicationWindow,
+    title: &str,
+    placeholder: &str,
+    initial: &str,
+    action_label: &str,
+    on_submit: Rc<dyn Fn(String)>,
+) {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.set_transient_for(Some(window));
+
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some(placeholder));
+    entry.set_text(initial);
+    entry.set_hexpand(true);
+    body.append(&entry);
+
+    let buttons = GBox::new(Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let cancel_btn = text_button("Cancel");
+    let action_btn = text_button(action_label);
+    action_btn.add_css_class("suggested-action");
+    {
+        let dialog = dialog.clone();
+        cancel_btn.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let dialog = dialog.clone();
+        let entry = entry.clone();
+        action_btn.connect_clicked(move |_| {
+            on_submit(entry.text().trim().to_owned());
+            dialog.close();
+        });
+    }
+    buttons.append(&cancel_btn);
+    buttons.append(&action_btn);
+    body.append(&buttons);
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+    entry.grab_focus();
+}
+
+fn show_workspace_confirm_dialog(
+    window: &ApplicationWindow,
+    title: &str,
+    message: &str,
+    action_label: &str,
+    destructive: bool,
+    on_confirm: Rc<dyn Fn()>,
+) {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.set_transient_for(Some(window));
+
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+
+    let label = Label::new(Some(message));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    body.append(&label);
+
+    let buttons = GBox::new(Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let cancel_btn = text_button("Cancel");
+    let action_btn = text_button(action_label);
+    action_btn.add_css_class(if destructive {
+        "destructive-action"
+    } else {
+        "suggested-action"
+    });
+    {
+        let dialog = dialog.clone();
+        cancel_btn.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let dialog = dialog.clone();
+        action_btn.connect_clicked(move |_| {
+            on_confirm();
+            dialog.close();
+        });
+    }
+    buttons.append(&cancel_btn);
+    buttons.append(&action_btn);
+    body.append(&buttons);
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
 fn workspace_badge_text(
     pr_number: Option<i64>,
     pr_attention: Option<&str>,
@@ -903,10 +1207,16 @@ mod tests {
 
     #[test]
     fn sidebar_restores_workspace_selection_only_on_workspace_pages() {
-        assert!(sidebar_should_restore_workspace_selection(&AppPage::Workspace));
+        assert!(sidebar_should_restore_workspace_selection(
+            &AppPage::Workspace
+        ));
         assert!(sidebar_should_restore_workspace_selection(&AppPage::Review));
-        assert!(!sidebar_should_restore_workspace_selection(&AppPage::Dashboard));
-        assert!(!sidebar_should_restore_workspace_selection(&AppPage::History));
+        assert!(!sidebar_should_restore_workspace_selection(
+            &AppPage::Dashboard
+        ));
+        assert!(!sidebar_should_restore_workspace_selection(
+            &AppPage::History
+        ));
     }
 
     #[test]

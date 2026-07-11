@@ -1,8 +1,8 @@
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey,
-    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
-    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey, GestureClick,
+    Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow,
+    Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
@@ -127,6 +127,7 @@ struct ChatRenderSignature {
     selected_thread_id: Option<i64>,
     active_record: Option<i64>,
     startup_state: CodexStartupState,
+    working_elapsed_seconds: Option<u64>,
     records: Vec<ChatRenderRecordSignature>,
     threads: Vec<ChatRenderThreadSignature>,
     messages: Vec<ChatRenderMessageSignature>,
@@ -212,6 +213,7 @@ pub fn agent_session_panel(
     let archcar_session_threads = Rc::new(RefCell::new(HashMap::<i64, i64>::new()));
     let inflight_archcar_actions =
         Rc::new(RefCell::new(HashMap::<u64, PendingArchcarAction>::new()));
+    let working_threads = Rc::new(RefCell::new(HashMap::<i64, Instant>::new()));
     let bridge_error_state = Rc::new(RefCell::new(BridgeErrorUiState::default()));
     let refresh_chat_surface: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
     let switch_chat_harness: SwitchChatHarnessController = Rc::new(RefCell::new(None));
@@ -496,6 +498,7 @@ pub fn agent_session_panel(
         let inflight_archcar_actions = inflight_archcar_actions.clone();
         let pending_commands = pending_commands.clone();
         let pending_archcar_inputs = pending_archcar_inputs.clone();
+        let working_threads = working_threads.clone();
         let archcar_bridge = archcar_bridge.clone();
         let bridge_error_state = bridge_error_state.clone();
         let codex_ready = codex_ready.clone();
@@ -549,6 +552,15 @@ pub fn agent_session_panel(
             while let Some(message) = archcar_bridge.try_recv() {
                 match message {
                     AsyncArchcarMessage::Event(event) => {
+                        let _ = update_working_indicator_for_archcar_event(
+                            &event,
+                            &record_state.borrow(),
+                            archcar_session_threads.as_ref(),
+                            current_kind,
+                            selected_thread_id,
+                            pending_archcar_inputs.as_ref(),
+                            working_threads.as_ref(),
+                        );
                         handle_archcar_event(
                             &event,
                             &record_state.borrow(),
@@ -572,6 +584,7 @@ pub fn agent_session_panel(
                             pending_commands.as_ref(),
                             pending_archcar_inputs.as_ref(),
                             codex_startup_states.as_ref(),
+                            working_threads.as_ref(),
                             codex_ready.as_ref(),
                             update_composer_for_view.as_ref(),
                         );
@@ -590,6 +603,7 @@ pub fn agent_session_panel(
                                             message: visible_message,
                                         },
                                     );
+                                    clear_thread_working(working_threads.as_ref(), thread_id);
                                     set_codex_ready_state(
                                         codex_ready.as_ref(),
                                         update_composer_for_view.as_ref(),
@@ -641,7 +655,7 @@ pub fn agent_session_panel(
                 let provider = session_kind_provider(current_kind);
                 let mut visible_threads = current
                     .iter()
-                    .filter(|thread| provider == thread.provider)
+                    .filter(|thread| provider == thread.provider && thread.status == "active")
                     .cloned()
                     .collect::<Vec<_>>();
                 if visible_threads.is_empty() {
@@ -711,6 +725,7 @@ pub fn agent_session_panel(
                             Some(thread_id),
                             active_record,
                             CodexStartupState::Idle,
+                            None,
                             &current,
                             &thread_state.borrow(),
                             &[],
@@ -755,6 +770,29 @@ pub fn agent_session_panel(
                     } else {
                         CodexStartupState::Idle
                     };
+                    let working_elapsed =
+                        working_elapsed_for_thread(working_threads.as_ref(), thread_id);
+                    if current_kind == SessionKind::Codex
+                        && thread_has_live_codex_session(&current, thread_id)
+                        && !matches!(startup_state, CodexStartupState::Error { .. })
+                        && !codex_thread_ready_for_ui(
+                            thread_id,
+                            &current,
+                            archcar_ready_cache.as_ref(),
+                            codex_startup_states.borrow().get(&thread_id),
+                        )
+                        && !has_pending_archcar_ensure_for_thread(
+                            inflight_archcar_actions.as_ref(),
+                            thread_id,
+                        )
+                    {
+                        request_archcar_ensure(
+                            &archcar_bridge,
+                            inflight_archcar_actions.as_ref(),
+                            workspace.clone(),
+                            Some(thread_id),
+                        );
+                    }
                     let runtime_summary = record.as_ref().map(|record| {
                         let attached_sessions = active_sessions
                             .borrow()
@@ -822,6 +860,7 @@ pub fn agent_session_panel(
                                     Some(thread_id),
                                     active_record,
                                     startup_state.clone(),
+                                    working_elapsed_seconds_for_signature(working_elapsed),
                                     &current,
                                     &thread_state.borrow(),
                                     &thread_messages,
@@ -840,8 +879,11 @@ pub fn agent_session_panel(
                                     &context_usage,
                                     latest_context_usage_from_messages(&thread_messages),
                                 );
-                                if let Some(widget) = codex_startup_status_widget(&startup_state) {
-                                    append_chat_refresh_row(&messages, &widget);
+                                if let Some(elapsed) = working_elapsed {
+                                    append_chat_refresh_row(
+                                        &messages,
+                                        &codex_working_indicator_widget(elapsed),
+                                    );
                                 }
                                 let timeline = merge_chat_timeline_for_render(
                                     thread_messages.clone(),
@@ -850,13 +892,12 @@ pub fn agent_session_panel(
                                 for item in timeline {
                                     match item {
                                         ChatTimelineItem::Message(message) => {
-                                            append_chat_refresh_row(
-                                                &messages,
-                                                &chat_message_widget(
-                                                    &message,
-                                                    render_legacy_inline_events,
-                                                ),
-                                            )
+                                            if let Some(widget) = chat_message_widget(
+                                                &message,
+                                                render_legacy_inline_events,
+                                            ) {
+                                                append_chat_refresh_row(&messages, &widget);
+                                            }
                                         }
                                         ChatTimelineItem::Event(event) => {
                                             append_chat_refresh_row(
@@ -876,6 +917,7 @@ pub fn agent_session_panel(
                         Some(thread_id),
                         active_record,
                         startup_state.clone(),
+                        working_elapsed_seconds_for_signature(working_elapsed),
                         &current,
                         &thread_state.borrow(),
                         &[],
@@ -888,12 +930,7 @@ pub fn agent_session_panel(
                     }
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
-                    if let Some(widget) = codex_startup_status_widget(&startup_state) {
-                        append_chat_refresh_row(&messages, &widget);
-                    }
-                    let empty = Label::new(Some(&runtime_summary.unwrap_or_else(|| {
-                        "No messages yet. Send a message to start.".to_owned()
-                    })));
+                    let empty = Label::new(Some("No messages yet."));
                     empty.add_css_class("chat-agent-text");
                     empty.set_selectable(true);
                     empty.set_wrap(true);
@@ -906,6 +943,7 @@ pub fn agent_session_panel(
                         None,
                         active_record,
                         CodexStartupState::Idle,
+                        None,
                         &current,
                         &thread_state.borrow(),
                         &[],
@@ -930,6 +968,7 @@ pub fn agent_session_panel(
     };
     *refresh_chat_surface.borrow_mut() = Some(refresh_view.clone());
     install_archcar_wake(&root, &archcar_bridge, refresh_view.clone());
+    install_working_indicator_tick(&root, working_threads.clone(), refresh_view.clone());
 
     seed_chat_running_sessions(
         &database_path,
@@ -957,6 +996,7 @@ pub fn agent_session_panel(
     let archcar_bridge_for_send = archcar_bridge.clone();
     let archcar_ready_cache_for_send = archcar_ready_cache.clone();
     let inflight_archcar_actions_for_send = inflight_archcar_actions.clone();
+    let working_threads_for_send = working_threads.clone();
     let codex_ready_for_send = codex_ready.clone();
     let codex_startup_states_for_send = codex_startup_states.clone();
     let update_composer_for_send = update_composer_state.clone();
@@ -964,6 +1004,34 @@ pub fn agent_session_panel(
         let command = text.trim().to_owned();
         if command.is_empty() {
             return;
+        }
+        let mut workspace_for_send = workspace_for_send.clone();
+        let mut auto_renamed_workspace = false;
+        if !staged_review {
+            match WorkspaceStore::open(db_for_send.clone()).and_then(|store| {
+                store.apply_first_message_workspace_naming(&workspace_for_send, &command)
+            }) {
+                Ok(Some(workspace)) => {
+                    auto_renamed_workspace = workspace.name != workspace_for_send;
+                    let workspace_name = workspace.name.clone();
+                    let branch = workspace.branch.clone();
+                    workspace_for_send = workspace_name.clone();
+                    app_state_for_send.set_selected_workspace(Some(workspace_name));
+                    info!(
+                        workspace = %workspace_for_send,
+                        branch = %branch,
+                        "applied first-message workspace naming"
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(
+                        workspace = %workspace_for_send,
+                        error = %err,
+                        "failed to apply first-message workspace naming"
+                    );
+                }
+            }
         }
         let selected_kind = *selected_harness_for_send.borrow();
         info!(
@@ -1112,6 +1180,7 @@ pub fn agent_session_panel(
                     } else {
                         ArchcarInputKind::User
                     };
+                    mark_thread_working(working_threads_for_send.as_ref(), thread_id);
                     queue_archcar_user_send(
                         &archcar_bridge_for_send,
                         inflight_archcar_actions_for_send.as_ref(),
@@ -1131,12 +1200,17 @@ pub fn agent_session_panel(
                         chars = command.len(),
                         "archcar send queued"
                     );
-                    refresh_view_for_send();
-                    refresh_for_send();
+                    if auto_renamed_workspace {
+                        refresh_for_send();
+                    } else {
+                        refresh_view_for_send();
+                        refresh_for_send();
+                    }
                     return;
                 }
             }
 
+            mark_thread_working(working_threads_for_send.as_ref(), thread_id);
             queue_archcar_input(
                 &pending_archcar_inputs_for_send,
                 thread_id,
@@ -1164,22 +1238,21 @@ pub fn agent_session_panel(
                 chars = command.len(),
                 "queued archcar input while codex session is starting or absent"
             );
-            let token = archcar_bridge_for_send
-                .ensure_default_session(workspace_for_send.clone(), SessionKind::Codex);
-            if let Some(token) = token {
-                inflight_archcar_actions_for_send.borrow_mut().insert(
-                    token,
-                    PendingArchcarAction::EnsureWorkspace {
-                        workspace: workspace_for_send.clone(),
-                        thread_id: Some(thread_id),
-                    },
-                );
-            }
+            request_archcar_ensure(
+                &archcar_bridge_for_send,
+                inflight_archcar_actions_for_send.as_ref(),
+                workspace_for_send.clone(),
+                Some(thread_id),
+            );
             if staged_review {
                 app_state_for_send.set_staged_review_prompt(None);
             }
-            refresh_view_for_send();
-            refresh_for_send();
+            if auto_renamed_workspace {
+                refresh_for_send();
+            } else {
+                refresh_view_for_send();
+                refresh_for_send();
+            }
             return;
         }
         let running_record = thread_records
@@ -1214,8 +1287,12 @@ pub fn agent_session_panel(
             queued.set_wrap(true);
             queued.set_xalign(0.0);
             append_revealed(&messages_for_send, &queued);
-            refresh_view_for_send();
-            refresh_for_send();
+            if auto_renamed_workspace {
+                refresh_for_send();
+            } else {
+                refresh_view_for_send();
+                refresh_for_send();
+            }
             return;
         };
 
@@ -1249,7 +1326,11 @@ pub fn agent_session_panel(
         if staged_review {
             app_state_for_send.set_staged_review_prompt(None);
         }
-        refresh_view_for_send();
+        if auto_renamed_workspace {
+            refresh_for_send();
+        } else {
+            refresh_view_for_send();
+        }
     });
 
     {
@@ -1355,6 +1436,13 @@ pub fn agent_session_panel(
                 refresh_view();
             }
         }));
+    }
+
+    if let Some(prompt) = app_state.take_pending_chat_prompt() {
+        let send_text = send_text.clone();
+        gtk::glib::idle_add_local_once(move || {
+            (send_text)(prompt, false);
+        });
     }
 
     let send_text_for_button = send_text.clone();
@@ -1483,9 +1571,10 @@ pub(crate) fn session_header_row(
     let repo_label = Label::new(Some(repository_name));
     repo_label.add_css_class("chat-repo-label");
     repo_label.set_xalign(0.0);
-    repo_label.set_hexpand(true);
+    repo_label.set_hexpand(false);
     repo_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     repo_label.set_width_chars(1);
+    repo_label.set_max_width_chars(34);
     breadcrumb.append(&repo_label);
 
     let branch_sep = Label::new(Some(">"));
@@ -1567,6 +1656,25 @@ fn install_archcar_wake(root: &GBox, bridge: &AsyncArchcarBridge, refresh_view: 
                 refresh();
             }
         });
+    });
+}
+
+fn install_working_indicator_tick(
+    root: &GBox,
+    working_threads: Rc<RefCell<HashMap<i64, Instant>>>,
+    refresh_view: Rc<dyn Fn()>,
+) {
+    let root_ref = root.downgrade();
+    // PER-190: User-visible elapsed-time UI for active Codex generation.
+    // The timer exits when the owning chat surface is destroyed.
+    gtk::glib::timeout_add_seconds_local(1, move || {
+        if root_ref.upgrade().is_none() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        if !working_threads.borrow().is_empty() {
+            refresh_view();
+        }
+        gtk::glib::ControlFlow::Continue
     });
 }
 
@@ -1738,6 +1846,7 @@ fn chat_render_signature(
     selected_thread_id: Option<i64>,
     active_record: Option<i64>,
     startup_state: CodexStartupState,
+    working_elapsed_seconds: Option<u64>,
     records: &[ProcessRecord],
     threads: &[ChatThreadRecord],
     messages: &[ChatMessageRecord],
@@ -1750,6 +1859,7 @@ fn chat_render_signature(
         selected_thread_id,
         active_record,
         startup_state,
+        working_elapsed_seconds,
         records: records
             .iter()
             .map(|record| {
@@ -1804,9 +1914,12 @@ fn chat_render_signature(
     }
 }
 
-fn chat_message_widget(message: &ChatMessageRecord, render_legacy_inline_events: bool) -> Widget {
+fn chat_message_widget(
+    message: &ChatMessageRecord,
+    render_legacy_inline_events: bool,
+) -> Option<Widget> {
     match message.role.as_str() {
-        "user" => chat_user_bubble(&message.content).upcast(),
+        "user" => Some(chat_user_bubble(&message.content).upcast()),
         "system" => {
             let label = Label::new(Some(&message.content));
             label.add_css_class("card-meta");
@@ -1814,24 +1927,80 @@ fn chat_message_widget(message: &ChatMessageRecord, render_legacy_inline_events:
             label.set_wrap(true);
             label.set_xalign(0.0);
             label.set_margin_bottom(12);
-            label.upcast()
+            Some(label.upcast())
         }
         _ => {
             let inline_events =
                 legacy_inline_events_for_message(message, render_legacy_inline_events);
             if !inline_events.is_empty() {
-                return inline_events_widget(&inline_events);
+                return Some(inline_events_widget(&inline_events));
             }
-            let label = Label::new(Some(&message.content));
+            let content = chat_agent_message_display_content(message, render_legacy_inline_events);
+            if content.trim().is_empty() {
+                return None;
+            }
+            let label = Label::new(Some(&content));
             label.add_css_class("chat-agent-text");
             label.set_selectable(true);
             label.set_wrap(true);
             label.set_xalign(0.0);
             label.set_hexpand(true);
             label.set_margin_bottom(18);
-            label.upcast()
+            Some(label.upcast())
         }
     }
+}
+
+fn chat_agent_message_display_content(
+    message: &ChatMessageRecord,
+    render_legacy_inline_events: bool,
+) -> String {
+    if render_legacy_inline_events {
+        message.content.clone()
+    } else {
+        strip_codex_status_blocks(&message.content)
+    }
+}
+
+fn strip_codex_status_blocks(content: &str) -> String {
+    let mut kept = Vec::new();
+    let mut skipping_status_block = false;
+
+    for line in content.lines() {
+        if is_codex_status_block_header(line) {
+            skipping_status_block = true;
+            continue;
+        }
+
+        if skipping_status_block && is_codex_status_block_continuation(line) {
+            continue;
+        }
+
+        skipping_status_block = false;
+        kept.push(line.to_owned());
+    }
+
+    kept.join("\n").trim().to_owned()
+}
+
+fn is_codex_status_block_header(line: &str) -> bool {
+    normalize_chat_status_line(line).starts_with("Explored")
+}
+
+fn is_codex_status_block_continuation(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.is_empty()
+        || line.starts_with(' ')
+        || line.starts_with('\t')
+        || trimmed.starts_with('└')
+        || trimmed.starts_with('↳')
+}
+
+fn normalize_chat_status_line(line: &str) -> &str {
+    line.trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| line.trim())
 }
 
 fn legacy_inline_events_for_message(
@@ -2520,14 +2689,14 @@ fn preferred_thread_for_kind(
     let provider = session_kind_provider(kind);
     preferred
         .filter(|id| {
-            threads
-                .iter()
-                .any(|thread| thread.id == *id && thread.provider == provider)
+            threads.iter().any(|thread| {
+                thread.id == *id && thread.provider == provider && thread.status == "active"
+            })
         })
         .or_else(|| {
             threads
                 .iter()
-                .find(|thread| thread.provider == provider)
+                .find(|thread| thread.provider == provider && thread.status == "active")
                 .map(|thread| thread.id)
         })
 }
@@ -2536,7 +2705,7 @@ fn default_chat_thread_title(kind: SessionKind, threads: &[ChatThreadRecord]) ->
     let provider = session_kind_provider(kind);
     let next = threads
         .iter()
-        .filter(|thread| thread.provider == provider)
+        .filter(|thread| thread.provider == provider && thread.status == "active")
         .count()
         + 1;
     if next == 1 {
@@ -3929,53 +4098,63 @@ fn codex_thread_id_for_startup_error(
     }
 }
 
-fn should_render_codex_startup_card(state: &CodexStartupState) -> bool {
-    matches!(
-        state,
-        CodexStartupState::Loading { .. } | CodexStartupState::Error { .. }
-    )
+fn mark_thread_working(working_threads: &RefCell<HashMap<i64, Instant>>, thread_id: i64) {
+    working_threads
+        .borrow_mut()
+        .insert(thread_id, Instant::now());
 }
 
-fn codex_startup_status_widget(state: &CodexStartupState) -> Option<Widget> {
-    if !should_render_codex_startup_card(state) {
-        return None;
-    }
+fn clear_thread_working(working_threads: &RefCell<HashMap<i64, Instant>>, thread_id: i64) -> bool {
+    working_threads.borrow_mut().remove(&thread_id).is_some()
+}
 
-    let row = GBox::new(Orientation::Horizontal, 10);
+fn working_elapsed_for_thread(
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    thread_id: i64,
+) -> Option<Duration> {
+    working_threads
+        .borrow()
+        .get(&thread_id)
+        .map(Instant::elapsed)
+}
+
+fn working_elapsed_seconds_for_signature(elapsed: Option<Duration>) -> Option<u64> {
+    elapsed.map(|elapsed| elapsed.as_secs())
+}
+
+fn format_working_elapsed(elapsed: Duration) -> String {
+    let total_seconds = elapsed.as_secs();
+    let seconds = total_seconds % 60;
+    let minutes = (total_seconds / 60) % 60;
+    let hours = total_seconds / 3600;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn codex_working_indicator_widget(elapsed: Duration) -> Widget {
+    let row = GBox::new(Orientation::Horizontal, 8);
     row.set_hexpand(true);
     row.set_halign(Align::Fill);
-    row.set_margin_bottom(12);
+    row.set_margin_bottom(10);
+    row.add_css_class("chat-working-indicator");
 
-    match state {
-        CodexStartupState::Loading { message } => {
-            let spinner = Spinner::new();
-            spinner.start();
-            row.append(&spinner);
+    let spinner = Spinner::new();
+    spinner.start();
+    row.append(&spinner);
 
-            let label = Label::new(Some(message));
-            label.add_css_class("card-meta");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            row.append(&label);
-        }
-        CodexStartupState::Error { message } => {
-            let icon = Image::from_icon_name(resolve_icon_name("dialog-error-symbolic"));
-            row.append(&icon);
+    let label = Label::new(Some(&format!(
+        "Working {}",
+        format_working_elapsed(elapsed)
+    )));
+    label.add_css_class("card-meta");
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&label);
 
-            let label = Label::new(Some(&format!("Codex failed to start. {message}")));
-            label.add_css_class("chat-agent-text");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            row.append(&label);
-        }
-        CodexStartupState::Idle | CodexStartupState::Ready => return None,
-    }
-
-    Some(row.upcast())
+    row.upcast()
 }
 
 fn session_event_role_for_line(line: &str) -> Option<SessionTranscriptRole> {
@@ -4507,6 +4686,49 @@ fn queue_archcar_user_send(
     }
 }
 
+fn update_working_indicator_for_archcar_event(
+    event: &ArchcarEvent,
+    records: &[ProcessRecord],
+    session_threads: &RefCell<HashMap<i64, i64>>,
+    selected_harness: SessionKind,
+    selected_thread_id: Option<i64>,
+    pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+) -> bool {
+    match event {
+        ArchcarEvent::SessionReady { thread_id, .. } => {
+            if pending_inputs.borrow().contains_key(thread_id) {
+                return false;
+            }
+            clear_thread_working(working_threads, *thread_id)
+        }
+        ArchcarEvent::SessionExited { session_id, .. } => {
+            let Some(thread_id) =
+                codex_thread_id_for_session(*session_id, session_threads, records)
+            else {
+                return false;
+            };
+            clear_thread_working(working_threads, thread_id)
+        }
+        ArchcarEvent::SessionError { session_id, .. } => {
+            let Some(thread_id) = codex_thread_id_for_startup_error(
+                *session_id,
+                session_threads,
+                records,
+                selected_harness,
+                selected_thread_id,
+            ) else {
+                return false;
+            };
+            clear_thread_working(working_threads, thread_id)
+        }
+        ArchcarEvent::SessionSpawnQueued { .. }
+        | ArchcarEvent::SessionStarted { .. }
+        | ArchcarEvent::SessionScreenUpdated { .. }
+        | ArchcarEvent::SessionMessagesUpdated { .. } => false,
+    }
+}
+
 fn handle_archcar_event(
     event: &ArchcarEvent,
     records: &[ProcessRecord],
@@ -4616,6 +4838,7 @@ fn handle_archcar_response(
     pending_commands: &RefCell<HashMap<i64, Vec<String>>>,
     pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
     codex_ready: &RefCell<bool>,
     update_composer_state: &dyn Fn(),
 ) -> bool {
@@ -4649,6 +4872,7 @@ fn handle_archcar_response(
                             message: format!("Unexpected archcar ensure response: {other:?}"),
                         },
                     );
+                    clear_thread_working(working_threads, thread_id);
                 }
                 changed = true;
             }
@@ -4662,6 +4886,7 @@ fn handle_archcar_response(
                             message: err,
                         },
                     );
+                    clear_thread_working(working_threads, thread_id);
                 }
                 changed = true;
             }
@@ -4688,7 +4913,7 @@ fn handle_archcar_response(
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
                 request_archcar_ensure(
-                    bridge,
+                    &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
@@ -4708,7 +4933,7 @@ fn handle_archcar_response(
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
                 request_archcar_ensure(
-                    bridge,
+                    &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
@@ -4741,10 +4966,11 @@ fn handle_archcar_response(
                         message: format!("Unexpected archcar input response: {other:?}"),
                     },
                 );
+                clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
                 request_archcar_ensure(
-                    bridge,
+                    &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
@@ -4761,10 +4987,11 @@ fn handle_archcar_response(
                         message: err,
                     },
                 );
+                clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
                 request_archcar_ensure(
-                    bridge,
+                    &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
@@ -4792,12 +5019,17 @@ fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) 
 }
 
 fn request_archcar_ensure(
-    bridge: AsyncArchcarBridge,
+    bridge: &AsyncArchcarBridge,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     workspace: String,
     thread_id: Option<i64>,
 ) {
-    if let Some(token) = bridge.ensure_default_session(workspace.clone(), SessionKind::Codex) {
+    let token = if let Some(thread_id) = thread_id {
+        bridge.ensure_thread_session(workspace.clone(), thread_id, SessionKind::Codex)
+    } else {
+        bridge.ensure_default_session(workspace.clone(), SessionKind::Codex)
+    };
+    if let Some(token) = token {
         inflight_actions.borrow_mut().insert(
             token,
             PendingArchcarAction::EnsureWorkspace {
@@ -4806,6 +5038,21 @@ fn request_archcar_ensure(
             },
         );
     }
+}
+
+fn has_pending_archcar_ensure_for_thread(
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+) -> bool {
+    inflight_actions.borrow().values().any(|action| {
+        matches!(
+            action,
+            PendingArchcarAction::EnsureWorkspace {
+                thread_id: Some(pending_thread_id),
+                ..
+            } if *pending_thread_id == thread_id
+        )
+    })
 }
 
 fn apply_archcar_ensure_success(
@@ -5450,6 +5697,29 @@ fix it
     }
 
     #[test]
+    fn pending_archcar_ensure_is_scoped_to_thread() {
+        let pending = RefCell::new(HashMap::from([
+            (
+                1,
+                PendingArchcarAction::EnsureWorkspace {
+                    workspace: "berlin".to_owned(),
+                    thread_id: Some(7),
+                },
+            ),
+            (
+                2,
+                PendingArchcarAction::EnsureWorkspace {
+                    workspace: "berlin".to_owned(),
+                    thread_id: None,
+                },
+            ),
+        ]));
+
+        assert!(has_pending_archcar_ensure_for_thread(&pending, 7));
+        assert!(!has_pending_archcar_ensure_for_thread(&pending, 8));
+    }
+
+    #[test]
     fn agent_switch_prefers_resume_record_over_handoff() {
         let mut codex_record = session_record(2, "/opt/bin/codex", ProcessStatus::Exited, None);
         codex_record.session_resume_id = Some("resume-1".to_owned());
@@ -6047,6 +6317,25 @@ I summarized the result.
     }
 
     #[test]
+    fn persisted_event_rendering_strips_duplicate_codex_status_blocks() {
+        let content = "\
+• Explored
+  └ Read package.json, README.md
+
+Config says Next.js 16.2.9.
+
+Explored
+  └ Read page.tsx, globals.css
+
+Schema confirms the app moved CRM around businesses.";
+
+        assert_eq!(
+            strip_codex_status_blocks(content),
+            "Config says Next.js 16.2.9.\n\nSchema confirms the app moved CRM around businesses."
+        );
+    }
+
+    #[test]
     fn composer_enter_key_sends_without_shift() {
         assert!(should_send_composer_message(
             gtk::gdk::Key::Return,
@@ -6180,6 +6469,71 @@ I summarized the result.
             })
         );
         assert_eq!(states.get(&8), Some(&CodexStartupState::Ready));
+    }
+
+    #[test]
+    fn working_indicator_formats_elapsed_timer() {
+        assert_eq!(format_working_elapsed(Duration::from_secs(4)), "0:04");
+        assert_eq!(format_working_elapsed(Duration::from_secs(65)), "1:05");
+        assert_eq!(format_working_elapsed(Duration::from_secs(3661)), "1:01:01");
+    }
+
+    #[test]
+    fn working_indicator_waits_for_pending_input_after_startup_ready() {
+        let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
+        selected.chat_thread_id = Some(7);
+        let session_threads = RefCell::new(HashMap::from([(11, 7)]));
+        let pending_inputs = RefCell::new(HashMap::from([(
+            7,
+            vec![QueuedArchcarInput {
+                input: "run tests".to_owned(),
+                kind: ArchcarInputKind::User,
+            }],
+        )]));
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+
+        let changed = update_working_indicator_for_archcar_event(
+            &ArchcarEvent::SessionReady {
+                session_id: 11,
+                thread_id: 7,
+            },
+            &[selected],
+            &session_threads,
+            SessionKind::Codex,
+            Some(7),
+            &pending_inputs,
+            &working_threads,
+        );
+
+        assert!(!changed);
+        assert!(working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn working_indicator_clears_when_generation_is_ready() {
+        let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
+        selected.chat_thread_id = Some(7);
+        let session_threads = RefCell::new(HashMap::from([(11, 7)]));
+        let pending_inputs = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+
+        let changed = update_working_indicator_for_archcar_event(
+            &ArchcarEvent::SessionReady {
+                session_id: 11,
+                thread_id: 7,
+            },
+            &[selected],
+            &session_threads,
+            SessionKind::Codex,
+            Some(7),
+            &pending_inputs,
+            &working_threads,
+        );
+
+        assert!(changed);
+        assert!(!working_threads.borrow().contains_key(&7));
     }
 
     #[test]
@@ -6402,29 +6756,6 @@ I summarized the result.
         );
 
         assert_eq!(thread_id, Some(7));
-    }
-
-    #[test]
-    fn startup_card_is_rendered_for_loading_state() {
-        assert!(should_render_codex_startup_card(
-            &CodexStartupState::Loading {
-                message: "Starting Codex...".to_owned(),
-            }
-        ));
-    }
-
-    #[test]
-    fn startup_card_is_not_rendered_for_ready_state() {
-        assert!(!should_render_codex_startup_card(&CodexStartupState::Ready));
-    }
-
-    #[test]
-    fn startup_error_state_requires_status_card() {
-        assert!(should_render_codex_startup_card(
-            &CodexStartupState::Error {
-                message: "spawn failed".to_owned(),
-            }
-        ));
     }
 
     #[test]

@@ -1197,6 +1197,11 @@ impl WorkspaceStore {
     pub fn rename(&self, name: &str, new_name: &str) -> Result<Workspace> {
         validate_workspace_name(new_name)?;
         let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        anyhow::ensure!(
+            self.workspace_name_available_for_rename(&repository, workspace.id, new_name)?,
+            "workspace {new_name} already exists"
+        );
         let new_path = workspace
             .path
             .parent()
@@ -1240,6 +1245,46 @@ impl WorkspaceStore {
         Ok(renamed)
     }
 
+    pub fn apply_first_message_workspace_naming(
+        &self,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<Workspace>> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Ok(None);
+        }
+
+        let workspace = self.get_by_name(name)?;
+        if self.workspace_has_chat_messages(workspace.id)? {
+            return Ok(None);
+        }
+
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let base = slugify(message);
+        let workspace_name =
+            self.unique_message_workspace_name(&repository, workspace.id, &base)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
+        let branch_base = format!("{prefix}/{base}");
+        let branch =
+            unique_message_branch_name(&repository.root_path, &branch_base, &workspace.branch)?;
+
+        let mut updated = workspace;
+        if updated.branch != branch {
+            updated = self.rename_branch(&updated.name, &branch)?;
+        }
+        if updated.name != workspace_name {
+            updated = self.rename(&updated.name, &workspace_name)?;
+        }
+        Ok(Some(updated))
+    }
+
     pub fn discard(&self, name: &str) -> Result<Workspace> {
         let workspace = self.archive(name, true)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -1262,16 +1307,8 @@ impl WorkspaceStore {
 
         self.stop_workspace_processes(workspace.id)?;
 
-        if remove_worktree && workspace.path.exists() {
-            git_dynamic(
-                &repository.root_path,
-                &[
-                    "worktree",
-                    "remove",
-                    "--force",
-                    workspace.path.to_string_lossy().as_ref(),
-                ],
-            )?;
+        if remove_worktree {
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
         }
 
         if delete_branch {
@@ -4840,6 +4877,31 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
+    pub fn close_chat_thread(&self, thread_id: i64) -> Result<()> {
+        self.update_chat_thread_status(thread_id, "closed", true)
+    }
+
+    pub fn reopen_chat_thread(&self, thread_id: i64) -> Result<()> {
+        self.update_chat_thread_status(thread_id, "active", false)
+    }
+
+    fn update_chat_thread_status(
+        &self,
+        thread_id: i64,
+        status: &str,
+        archived: bool,
+    ) -> Result<()> {
+        let now = timestamp();
+        let archived_at = archived.then_some(now.as_str());
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET status = ?1, updated_at = ?2, archived_at = ?3
+             WHERE id = ?4",
+            params![status, now, archived_at, thread_id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_chat_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
@@ -5248,6 +5310,64 @@ mutation($threadId: ID!) {{
             |row| row.get(0),
         )?;
         Ok(count == 0 && !repository.workspace_parent_path.join(name).exists())
+    }
+
+    fn workspace_name_available_for_rename(
+        &self,
+        repository: &RepositoryRecord,
+        workspace_id: i64,
+        name: &str,
+    ) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM workspaces WHERE name = ?1 AND id != ?2",
+            params![name, workspace_id],
+            |row| row.get(0),
+        )?;
+        if count > 0 {
+            return Ok(false);
+        }
+        let candidate_path = repository.workspace_parent_path.join(name);
+        if !candidate_path.exists() {
+            return Ok(true);
+        }
+        let current_path: String = self.conn.query_row(
+            "SELECT path FROM workspaces WHERE id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        Ok(Path::new(&current_path) == candidate_path)
+    }
+
+    fn workspace_has_chat_messages(&self, workspace_id: i64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM chat_messages
+             WHERE thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    fn unique_message_workspace_name(
+        &self,
+        repository: &RepositoryRecord,
+        workspace_id: i64,
+        base: &str,
+    ) -> Result<String> {
+        for suffix in 0.. {
+            let candidate = if suffix == 0 {
+                base.to_owned()
+            } else {
+                format!("{base}-{suffix}")
+            };
+            validate_workspace_name(&candidate)?;
+            if self.workspace_name_available_for_rename(repository, workspace_id, &candidate)? {
+                return Ok(candidate);
+            }
+        }
+
+        unreachable!("workspace name generation should always return")
     }
 
     fn active_workspace_names(&self) -> Result<HashSet<String>> {
@@ -5766,6 +5886,45 @@ fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMet
         cwd: PathBuf::from(cwd),
         session_id: session_id.to_owned(),
     }))
+}
+
+fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<()> {
+    if !workspace_path.exists() {
+        let _ = git_dynamic(repository_root, &["worktree", "prune"]);
+        return Ok(());
+    }
+
+    let workspace_path_arg = workspace_path.to_string_lossy();
+    match git_dynamic(
+        repository_root,
+        &["worktree", "remove", "--force", workspace_path_arg.as_ref()],
+    ) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let top_level = git_output_dynamic(workspace_path, &["rev-parse", "--show-toplevel"])
+                .with_context(|| {
+                format!(
+                    "confirm fallback worktree path {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            let top_level = PathBuf::from(top_level.trim());
+            anyhow::ensure!(
+                top_level == workspace_path,
+                "refusing fallback delete for {} because git top-level is {} after git worktree remove failed: {err:#}",
+                workspace_path.display(),
+                top_level.display()
+            );
+            fs::remove_dir_all(workspace_path).with_context(|| {
+                format!(
+                    "remove moved worktree directory {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            let _ = git_dynamic(repository_root, &["worktree", "prune"]);
+            Ok(())
+        }
+    }
 }
 
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
@@ -6321,6 +6480,40 @@ fn validate_branch_name(branch: &str) -> Result<()> {
         "branch name contains unsupported characters"
     );
     Ok(())
+}
+
+fn unique_message_branch_name(
+    repository_root: &Path,
+    base: &str,
+    current_branch: &str,
+) -> Result<String> {
+    for suffix in 0.. {
+        let candidate = if suffix == 0 {
+            base.to_owned()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        validate_branch_name(&candidate)?;
+        if candidate == current_branch {
+            return Ok(candidate);
+        }
+        if !local_branch_exists(repository_root, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("branch name generation should always return")
+}
+
+fn local_branch_exists(repository_root: &Path, branch: &str) -> Result<bool> {
+    let ref_name = format!("refs/heads/{branch}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["show-ref", "--verify", "--quiet", &ref_name])
+        .output()
+        .with_context(|| format!("check branch {branch} in {}", repository_root.display()))?;
+    Ok(output.status.success())
 }
 
 fn initialize_context_files(
@@ -7159,6 +7352,79 @@ branch_prefix = "team"
             .unwrap();
 
         assert_eq!(workspace.branch, "team/build-source-defaults");
+    }
+
+    #[test]
+    fn first_message_workspace_naming_renames_workspace_and_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create_chat_thread(&workspace.name, "codex", "New Chat", None)
+            .unwrap();
+
+        let renamed = store
+            .apply_first_message_workspace_naming(
+                &workspace.name,
+                "Fix the customer billing webhook failure",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(renamed.name, "fix-the-customer-billing-webhook-failure");
+        assert_eq!(
+            renamed.branch,
+            "lc/fix-the-customer-billing-webhook-failure"
+        );
+        assert_eq!(
+            renamed.path,
+            workspace_parent.join("fix-the-customer-billing-webhook-failure")
+        );
+        assert!(renamed.path.is_dir());
+        assert!(!workspace.path.exists());
+        let branch = git_output(&renamed.path, ["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "lc/fix-the-customer-billing-webhook-failure");
+    }
+
+    #[test]
+    fn first_message_workspace_naming_skips_after_existing_message() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "existing message", "user_send")
+            .unwrap();
+
+        let renamed = store
+            .apply_first_message_workspace_naming("berlin", "Rename from later message")
+            .unwrap();
+
+        assert!(renamed.is_none());
+        assert_eq!(store.get_by_name("berlin").unwrap(), workspace);
     }
 
     #[test]
@@ -8301,6 +8567,55 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+
+    #[test]
+    fn delete_workspace_can_remove_moved_worktree_with_stale_git_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let moved_path = workspace.path.parent().unwrap().join("moved-berlin");
+        fs::rename(&workspace.path, &moved_path).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET name = ?1, path = ?2 WHERE id = ?3",
+                params!["moved-berlin", moved_path.to_string_lossy(), workspace.id],
+            )
+            .unwrap();
+
+        store.delete("moved-berlin", true, true).unwrap();
+
+        assert!(!moved_path.exists());
+        assert!(store.get_by_name("moved-berlin").is_err());
+        let worktrees = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&worktrees.stdout).contains("berlin"));
     }
 
     #[test]
@@ -14664,6 +14979,34 @@ spotlight_testing = true
         let updated = store.get_chat_thread_record(thread.id).unwrap();
         assert_eq!(updated.title, "Fix parser failure");
         assert!(store.list_chat_messages(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_thread_close_and_reopen_preserves_history_and_resume_id() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .update_chat_thread_native_id(thread.id, "codex-thread-1")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "keep this", "user_send")
+            .unwrap();
+
+        store.close_chat_thread(thread.id).unwrap();
+        let closed = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(closed.status, "closed");
+        assert_eq!(closed.native_thread_id.as_deref(), Some("codex-thread-1"));
+        assert!(closed.archived_at.is_some());
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 1);
+
+        store.reopen_chat_thread(thread.id).unwrap();
+        let reopened = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(reopened.status, "active");
+        assert_eq!(reopened.native_thread_id.as_deref(), Some("codex-thread-1"));
+        assert_eq!(reopened.archived_at, None);
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 1);
     }
 
     #[test]

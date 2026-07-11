@@ -176,10 +176,12 @@ pub fn parse_codex_event_blocks(text: &str) -> Vec<CodexTranscriptEvent> {
             continue;
         }
 
-        if let Some(command) = header.strip_prefix("Ran ") {
-            let (body, next) = collect_event_body(&lines, index + 1);
+        if let Some((command, body_start, body_prefix)) =
+            parse_run_command_event_header(&lines, index)
+        {
+            let (body, next) = collect_event_body_with_prefix(&lines, body_start, body_prefix);
             events.push(CodexTranscriptEvent::Tool {
-                title: command.trim().to_owned(),
+                title: command,
                 body,
             });
             index = next;
@@ -350,6 +352,10 @@ fn parse_codex_screen_message_spans(lines: &[String]) -> Vec<ScreenMessageSpan> 
                 {
                     break;
                 }
+                if let Some(next_index) = skip_codex_event_block(&lines, index) {
+                    index = next_index;
+                    continue;
+                }
                 let agent_start = index;
                 if let Some(first_line) = parse_live_agent_bullet(lines[index]) {
                     let mut body = vec![first_line];
@@ -401,6 +407,10 @@ fn parse_codex_screen_message_spans(lines: &[String]) -> Vec<ScreenMessageSpan> 
                     || is_box_header_line(lines[index])
                 {
                     break;
+                }
+                if let Some(next_index) = skip_codex_event_block(&lines, index) {
+                    index = next_index;
+                    continue;
                 }
                 let agent_start = index;
                 if let Some(first_line) = parse_live_agent_prompt(lines[index]) {
@@ -573,11 +583,13 @@ fn parse_codex_event_spans(lines: &[String], start: usize) -> Vec<CodexEventSpan
             continue;
         }
 
-        if let Some(command) = header.strip_prefix("Ran ") {
-            let (body, next) = collect_event_body(&line_refs, index + 1);
+        if let Some((command, body_start, body_prefix)) =
+            parse_run_command_event_header(&line_refs, index)
+        {
+            let (body, next) = collect_event_body_with_prefix(&line_refs, body_start, body_prefix);
             spans.push(CodexEventSpan {
                 event: CodexTranscriptEvent::Tool {
-                    title: command.trim().to_owned(),
+                    title: command,
                     body,
                 },
                 start_index: index,
@@ -646,11 +658,14 @@ fn latest_message_span_end_index(
 fn skip_codex_event_block(lines: &[&str], index: usize) -> Option<usize> {
     let line = lines[index].trim_end();
 
-    if line.starts_with("Ran ")
+    if is_run_command_event_line(line)
         || is_skill_read_event_line(line)
         || read_file_event_title(line).is_some()
     {
-        return Some(skip_codex_event_body(lines, index + 1));
+        let start = parse_run_command_event_header(lines, index)
+            .map(|(_, body_start, _)| body_start)
+            .unwrap_or(index + 1);
+        return Some(skip_codex_event_body(lines, start));
     }
 
     if is_raw_file_change_event_line(line) {
@@ -668,7 +683,7 @@ fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
             || is_live_agent_prompt_line(line)
             || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
             || parse_live_agent_bullet(line).is_some()
-            || line.starts_with("Ran ")
+            || is_run_command_event_line(line)
             || is_skill_read_event_line(line)
             || is_raw_file_change_event_line(line)
             || is_separator_rule_line(line)
@@ -860,7 +875,7 @@ fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
             }
             continue;
         }
-        if line.starts_with("Ran ")
+        if is_run_command_event_line(line)
             || line.starts_with("Read SKILL.md ")
             || read_file_event_title(line).is_some()
             || is_raw_file_change_event_line(line)
@@ -872,11 +887,25 @@ fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
         {
             break;
         }
-        body.push(line);
+        if let Some(line) = normalize_event_body_line(line) {
+            body.push(line);
+        }
         index += 1;
     }
 
     (body.join("\n").trim().to_owned(), index)
+}
+
+fn collect_event_body_with_prefix(
+    lines: &[&str],
+    start: usize,
+    mut prefix: Vec<String>,
+) -> (String, usize) {
+    let (body, next) = collect_event_body(lines, start);
+    if !body.is_empty() {
+        prefix.push(body);
+    }
+    (prefix.join("\n").trim().to_owned(), next)
 }
 
 fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String, usize) {
@@ -887,6 +916,70 @@ fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String,
         block.push_str(&tail);
     }
     (block, next)
+}
+
+fn parse_run_command_event_header(
+    lines: &[&str],
+    index: usize,
+) -> Option<(String, usize, Vec<String>)> {
+    let header = lines.get(index)?.trim_end();
+    let command = normalize_codex_bullet_line(header)
+        .strip_prefix("Ran ")?
+        .trim()
+        .to_owned();
+    let mut command_parts = vec![command];
+    let mut body_prefix = Vec::new();
+    let mut next = index + 1;
+
+    if header.trim_start().starts_with('•') {
+        while next < lines.len() {
+            if let Some(content) = parse_box_content(lines[next]) {
+                if !content.is_empty() {
+                    command_parts.push(content);
+                }
+                next += 1;
+                continue;
+            }
+            if let Some(content) = parse_box_bottom_content(lines[next]) {
+                if let Some(content) = normalize_event_body_line(&content) {
+                    if !content.is_empty() {
+                        body_prefix.push(content);
+                    }
+                }
+                next += 1;
+            }
+            break;
+        }
+    }
+
+    Some((command_parts.join(" "), next, body_prefix))
+}
+
+fn is_run_command_event_line(line: &str) -> bool {
+    normalize_codex_bullet_line(line).starts_with("Ran ")
+}
+
+fn parse_box_bottom_content(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let border = trimmed.chars().next()?;
+    if !matches!(border, '└' | '╰') {
+        return None;
+    }
+    let content = trimmed[border.len_utf8()..].trim_start();
+    if content.is_empty() || is_separator_rule_line(content) {
+        Some(String::new())
+    } else {
+        Some(content.to_owned())
+    }
+}
+
+fn normalize_event_body_line(line: &str) -> Option<String> {
+    (!is_codex_transcript_hint_line(line)).then(|| line.to_owned())
+}
+
+fn is_codex_transcript_hint_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains("ctrl + t to view transcript") || trimmed.contains("ctrl+t to view transcript")
 }
 
 fn skill_titles_from_read_header(header: &str) -> String {
@@ -1243,7 +1336,28 @@ fn is_box_header_line(line: &str) -> bool {
 
 fn is_box_bottom(line: &str) -> bool {
     let trimmed = line.trim_start();
-    trimmed.starts_with('╰') || trimmed.starts_with('└')
+    let Some(border) = trimmed.chars().next() else {
+        return false;
+    };
+    if !matches!(border, '╰' | '└') {
+        return false;
+    }
+    if border == '└' && !line.starts_with('└') {
+        return false;
+    }
+    let rest = trimmed[border.len_utf8()..]
+        .trim_start()
+        .strip_suffix('╯')
+        .unwrap_or_else(|| trimmed[border.len_utf8()..].trim_start())
+        .trim_end();
+    rest.is_empty() || is_box_rule_content(rest)
+}
+
+fn is_box_rule_content(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| matches!(ch, '─' | '━' | '═' | '-' | '—'))
 }
 
 fn parse_box_content(line: &str) -> Option<String> {
@@ -1273,6 +1387,9 @@ fn is_live_agent_prompt_line(line: &str) -> bool {
 fn is_live_bullet_user_prompt(line: &str, next_line: Option<&str>) -> bool {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('•') {
+        return false;
+    }
+    if transient_bullet_content(trimmed).is_some_and(is_transient_status_bullet) {
         return false;
     }
     next_line
@@ -1349,6 +1466,7 @@ fn is_transient_status_bullet(content: &str) -> bool {
     content.starts_with("Starting MCP servers")
         || content.starts_with("Working (")
         || content.starts_with("Thinking (")
+        || content.starts_with("Explored")
 }
 
 fn transient_bullet_content(line: &str) -> Option<&str> {
@@ -2043,6 +2161,34 @@ This is the read body.
     }
 
     #[test]
+    fn screen_delta_parses_bulleted_wrapped_ran_tool_events() {
+        let screen = "\
+› latest question
+• Ran npm pkg get scripts dependencies.next dependencies.react
+│ dependencies.stripe dependencies.\"@supabase/supabase-js\"
+└ {
+\"scripts\": {
+… +9 lines (ctrl + t to view transcript)
+\"dependencies.@supabase/supabase-js\": \"^2.108.1\"
+}
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "npm pkg get scripts dependencies.next dependencies.react dependencies.stripe dependencies.\"@supabase/supabase-js\"".to_owned(),
+                body: "{\n\"scripts\": {\n\"dependencies.@supabase/supabase-js\": \"^2.108.1\"\n}".to_owned(),
+            })]
+        );
+    }
+
+    #[test]
     fn screen_delta_omits_bottom_working_status_from_tool_and_file_events() {
         let benchmark = CodexParseBenchmark {
             last_user_message: Some("latest question".to_owned()),
@@ -2427,6 +2573,8 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 › User prompt
 • Starting MCP servers
 • Working (4s)
+• Explored
+  └ Read package.json, README.md
 • Search complete";
 
         assert_eq!(
