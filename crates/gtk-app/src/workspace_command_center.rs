@@ -151,6 +151,15 @@ fn simple_workspace_shell(
         WORKSPACE_SPLIT_MIN_END,
     ));
     split.set_vexpand(true);
+    let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
+    let collapse_right_panel: Rc<dyn Fn()> = {
+        let right_panel_handle = right_panel_handle.clone();
+        Rc::new(move || {
+            if let Some(panel) = right_panel_handle.borrow().as_ref() {
+                panel.set_visible(false);
+            }
+        })
+    };
 
     // Center: custom tab bar + chat/terminal/file content
     let (center, open_file) = ws_center_panel(
@@ -159,7 +168,7 @@ fn simple_workspace_shell(
         ws,
         state,
         refresh_hub.clone(),
-        collapse_sidebar.clone(),
+        collapse_right_panel,
     );
     split.set_start_child(Some(&center));
 
@@ -176,6 +185,7 @@ fn simple_workspace_shell(
         open_file,
         collapse_sidebar,
     );
+    *right_panel_handle.borrow_mut() = Some(right.clone());
     split.set_end_child(Some(&right));
 
     shell.append(&split);
