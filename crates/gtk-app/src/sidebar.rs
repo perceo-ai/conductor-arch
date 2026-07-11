@@ -3,7 +3,7 @@ use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
     Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Stack,
+    RevealerTransitionType, ScrolledWindow, Spinner, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
@@ -340,7 +340,11 @@ pub(crate) fn build_app_sidebar(
                                         }
                                         glib::ControlFlow::Break
                                     }
-                                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                    Err(mpsc::TryRecvError::Empty) => {
+                                        refresh_hub.refresh(RefreshScope::Projects);
+                                        refresh_hub.refresh(RefreshScope::Sidebar);
+                                        glib::ControlFlow::Continue
+                                    }
                                     Err(mpsc::TryRecvError::Disconnected) => {
                                         add_btn.set_sensitive(true);
                                         add_btn.set_tooltip_text(Some("Create workspace"));
@@ -370,18 +374,20 @@ pub(crate) fn build_app_sidebar(
                             line.diff_deletions,
                             &ws.updated_at,
                         );
-                        attach_workspace_row_context_menu(
-                            &row,
-                            ws.name.clone(),
-                            app_state.clone(),
-                            stack.clone(),
-                            window.clone(),
-                            refresh_hub.clone(),
-                            refresh_workspace.clone(),
-                            refresh_view_preferences.clone(),
-                        );
+                        if ws.status == "active" {
+                            attach_workspace_row_context_menu(
+                                &row,
+                                ws.name.clone(),
+                                app_state.clone(),
+                                stack.clone(),
+                                window.clone(),
+                                refresh_hub.clone(),
+                                refresh_workspace.clone(),
+                                refresh_view_preferences.clone(),
+                            );
+                            names.borrow_mut().insert(row_idx, ws.name.clone());
+                        }
                         list.append(&row);
-                        names.borrow_mut().insert(row_idx, ws.name.clone());
                         row_idx += 1;
                     }
                 }
@@ -622,7 +628,7 @@ where
 fn build_workspace_row(
     name: &str,
     branch: &str,
-    _status: &str,
+    status: &str,
     diff_additions: usize,
     diff_deletions: usize,
     updated_at: &str,
@@ -657,6 +663,11 @@ fn build_workspace_row(
     if !branch.is_empty() {
         meta_parts.push(branch.to_string());
     }
+    if status == "creating" {
+        meta_parts.push("Creating workspace...".to_owned());
+    } else if status == "failed" {
+        meta_parts.push("Creation failed".to_owned());
+    }
     let ts = relative_time(updated_at);
     if !ts.is_empty() {
         meta_parts.push(ts);
@@ -674,10 +685,25 @@ fn build_workspace_row(
     let trailing_box = GBox::new(Orientation::Horizontal, 0);
     trailing_box.add_css_class("workspace-row-trailing");
     trailing_box.set_halign(Align::End);
-    trailing_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
+    if status == "creating" {
+        let spinner = Spinner::new();
+        spinner.start();
+        trailing_box.append(&spinner);
+    } else if status == "failed" {
+        let failed = Label::new(Some("Failed"));
+        failed.add_css_class("status-error");
+        trailing_box.append(&failed);
+    } else {
+        trailing_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
+    }
     row_box.append(&trailing_box);
 
-    ListBoxRow::builder().child(&row_box).build()
+    let row = ListBoxRow::builder().child(&row_box).build();
+    if status != "active" {
+        row.set_selectable(false);
+        row.set_activatable(false);
+    }
+    row
 }
 
 fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {

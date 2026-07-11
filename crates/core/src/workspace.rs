@@ -45,6 +45,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -1027,65 +1028,49 @@ impl WorkspaceStore {
         let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
-        let base_ref = input.base_ref.unwrap_or_else(|| {
-            if let Some(base_branch) = settings
-                .customization
-                .workspace_defaults
-                .base_branch
-                .as_deref()
-            {
-                base_branch.to_owned()
-            } else if remote_exists(&repository.root_path, &repository.remote_name) {
-                format!("{}/{}", repository.remote_name, repository.default_branch)
-            } else {
-                repository.default_branch.clone()
+        let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
+        let default_base_branch = settings
+            .customization
+            .workspace_defaults
+            .base_branch
+            .as_deref()
+            .unwrap_or(&repository.default_branch)
+            .to_owned();
+        let base_ref = if let Some(base_ref) = input.base_ref {
+            if remote_available {
+                sync_repository_default_branch(
+                    &repository.root_path,
+                    &repository.remote_name,
+                    &repository.default_branch,
+                )?;
             }
-        });
-        if remote_exists(&repository.root_path, &repository.remote_name) {
-            git(
+            base_ref
+        } else if remote_available {
+            sync_repository_default_branch(
                 &repository.root_path,
-                ["fetch", repository.remote_name.as_str(), "--prune"],
-            )?;
-        }
+                &repository.remote_name,
+                &default_base_branch,
+            )?
+        } else {
+            default_base_branch
+        };
 
         let path = repository.workspace_parent_path.join(&name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create workspace parent {}", parent.display()))?;
         }
-
-        git_dynamic(
-            &repository.root_path,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                branch.as_str(),
-                path.to_string_lossy().as_ref(),
-                base_ref.as_str(),
-            ],
-        )?;
-        std::fs::create_dir_all(path.join(".context"))
-            .with_context(|| format!("create workspace context directory {}", path.display()))?;
-        initialize_context_files(&path, &settings)?;
-        copy_included_ignored_files(&repository.root_path, &path)?;
-
         let port_block_size = settings
             .customization
             .workspace_defaults
             .port_block_size
             .unwrap_or(10);
         let port_base = self.next_port_base(port_block_size)?;
-        let auto_setup = settings
-            .customization
-            .automation
-            .auto_setup
-            .unwrap_or(false);
         let now = timestamp();
         self.conn.execute(
             "INSERT INTO workspaces (
                 repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'creating', NULL, ?7, ?8)",
             params![
                 repository.id,
                 name,
@@ -1101,13 +1086,71 @@ impl WorkspaceStore {
         self.record_workspace_event(
             workspace.id,
             &workspace.name,
+            "workspace.creating",
+            &format!("Creating workspace on branch {}", workspace.branch),
+        )?;
+
+        let create_result = (|| -> Result<()> {
+            git_dynamic(
+                &repository.root_path,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    workspace.branch.as_str(),
+                    workspace.path.to_string_lossy().as_ref(),
+                    workspace.base_ref.as_str(),
+                ],
+            )?;
+            std::fs::create_dir_all(workspace.path.join(".context")).with_context(|| {
+                format!(
+                    "create workspace context directory {}",
+                    workspace.path.display()
+                )
+            })?;
+            initialize_context_files(&workspace.path, &settings)?;
+            copy_included_ignored_files(&repository.root_path, &workspace.path)?;
+
+            let auto_setup = settings
+                .customization
+                .automation
+                .auto_setup
+                .unwrap_or(false);
+            if auto_setup {
+                self.setup_workspace(&workspace.name)?;
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = create_result {
+            let _ = self.mark_workspace_status(workspace.id, "failed");
+            let _ = self.record_workspace_event(
+                workspace.id,
+                &workspace.name,
+                "workspace.create_failed",
+                &format!("Workspace creation failed: {err:#}"),
+            );
+            return Err(err);
+        }
+
+        self.mark_workspace_status(workspace.id, "active")?;
+        let workspace = self.get_by_id(workspace.id)?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
             "workspace.created",
             &format!("Created workspace on branch {}", workspace.branch),
         )?;
-        if auto_setup {
-            self.setup_workspace(&workspace.name)?;
-        }
         Ok(workspace)
+    }
+
+    fn mark_workspace_status(&self, workspace_id: i64, status: &str) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now, workspace_id],
+        )?;
+        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<Workspace>> {
@@ -6741,6 +6784,44 @@ fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn sync_repository_default_branch(
+    root_path: &Path,
+    remote_name: &str,
+    default_branch: &str,
+) -> Result<String> {
+    git_dynamic(
+        root_path,
+        &["fetch", remote_name, default_branch, "--prune"],
+    )?;
+    let remote_ref = format!("refs/remotes/{remote_name}/{default_branch}");
+    git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref])?;
+    let current_branch = git_output_dynamic(root_path, &["branch", "--show-current"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if current_branch == default_branch {
+        git_dynamic(
+            root_path,
+            &["pull", "--ff-only", remote_name, default_branch],
+        )?;
+        return Ok(default_branch.to_owned());
+    }
+    let local_ref = format!("refs/heads/{default_branch}");
+    match git_dynamic(root_path, &["update-ref", &local_ref, &remote_ref]) {
+        Ok(()) => Ok(default_branch.to_owned()),
+        Err(err) => {
+            warn!(
+                repository = %root_path.display(),
+                branch = default_branch,
+                error = %err,
+                "failed to fast-forward local default branch; using remote branch as workspace base"
+            );
+            Ok(format!("{remote_name}/{default_branch}"))
+        }
+    }
+}
+
+#[cfg(test)]
 fn git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
     git_dynamic(cwd, &args)
 }
@@ -7578,6 +7659,133 @@ mod tests {
             .unwrap();
 
         assert!(repo_path.join(".archductor/settings.toml").exists());
+    }
+
+    #[test]
+    fn create_workspace_records_failed_row_when_git_setup_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let err = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "broken".to_owned(),
+                branch: "lc/broken".to_owned(),
+                base_ref: Some("missing-base-ref".to_owned()),
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("git command failed"));
+        let workspace = store.get_by_name("broken").unwrap();
+        assert_eq!(workspace.status, "failed");
+        assert_eq!(workspace.branch, "lc/broken");
+    }
+
+    #[test]
+    fn create_workspace_syncs_default_branch_before_worktree_add() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed_path = init_repo(temp.path().join("seed"));
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&seed_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&seed_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+
+        let repo_path = temp.path().join("demo");
+        Command::new("git")
+            .args(["clone"])
+            .arg(&remote_path)
+            .arg(&repo_path)
+            .status()
+            .unwrap();
+
+        fs::write(seed_path.join("REMOTE.md"), "new on main\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&seed_path)
+            .args(["add", "REMOTE.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&seed_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "advance main",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&seed_path)
+            .args(["push", "origin", "main"])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: None,
+            })
+            .unwrap();
+
+        assert_eq!(workspace.status, "active");
+        assert_eq!(workspace.base_ref, "main");
+        assert!(workspace.path.join("REMOTE.md").exists());
+        assert_eq!(
+            git_output(&repo_path, ["rev-parse", "main"]),
+            git_output(&seed_path, ["rev-parse", "main"])
+        );
     }
 
     #[test]

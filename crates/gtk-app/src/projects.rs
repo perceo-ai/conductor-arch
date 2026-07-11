@@ -18,6 +18,8 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
@@ -556,6 +558,8 @@ pub(crate) fn build_projects_page(
     let refresh_after_settings_save = refresh.clone();
     let refresh_dashboard_inline = refresh_dashboard.clone();
     let refresh_workspace_inline = refresh_workspace.clone();
+    let create_btn_inline = create_btn.clone();
+    let result_inline = result.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
         let typed_name = name_entry.text().trim().to_owned();
@@ -571,6 +575,7 @@ pub(crate) fn build_projects_page(
             return;
         }
         result.set_text("Creating workspace...");
+        create_btn_inline.set_sensitive(false);
         let request = workspace_source_request_from_form(
             &source,
             &source_value,
@@ -578,17 +583,51 @@ pub(crate) fn build_projects_page(
             (!typed_name.is_empty()).then_some(typed_name),
             (!typed_branch.is_empty()).then_some(typed_branch),
         );
-        let create_result = request.and_then(|request| {
-            WorkspaceStore::open(db_path_create.clone())
-                .and_then(|store| request.create_workspace(&store, &repo))
+        let rx = request.map(|request| {
+            spawn_background_job({
+                let db_path_create = db_path_create.clone();
+                let repo = repo.clone();
+                move || {
+                    WorkspaceStore::open(db_path_create)
+                        .and_then(|store| request.create_workspace(&store, &repo))
+                }
+            })
         });
-        let created = create_result.is_ok();
-        result.set_text(&workspace_source_create_feedback(&source, create_result));
-        if created {
-            refresh_after_create();
-            refresh_dashboard_inline();
-            refresh_workspace_inline();
-        }
+        let rx = match rx {
+            Ok(rx) => rx,
+            Err(err) => {
+                create_btn_inline.set_sensitive(true);
+                result.set_text(&format!("Create failed: {err:#}"));
+                return;
+            }
+        };
+        let source = source.clone();
+        let result = result_inline.clone();
+        let create_btn = create_btn_inline.clone();
+        let refresh_after_create = refresh_after_create.clone();
+        let refresh_dashboard_inline = refresh_dashboard_inline.clone();
+        let refresh_workspace_inline = refresh_workspace_inline.clone();
+        glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+            Ok(create_result) => {
+                result.set_text(&workspace_source_create_feedback(&source, create_result));
+                create_btn.set_sensitive(true);
+                refresh_after_create();
+                refresh_dashboard_inline();
+                refresh_workspace_inline();
+                glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                refresh_after_create();
+                refresh_dashboard_inline();
+                refresh_workspace_inline();
+                glib::ControlFlow::Continue
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                create_btn.set_sensitive(true);
+                result.set_text("Create failed: worker disconnected.");
+                glib::ControlFlow::Break
+            }
+        });
     });
 
     let db_path_modal_workspace = paths.database_path.clone();
@@ -1197,6 +1236,7 @@ pub(crate) fn show_create_workspace_dialog(
             }
         }
     });
+    let confirm_for_create = confirm.clone();
     confirm.connect_clicked(move |_| {
         let Some(repo) = repo_select_for_create.active_id().map(|id| id.to_string()) else {
             feedback_for_create.set_text("Add a repository first.");
@@ -1244,6 +1284,7 @@ pub(crate) fn show_create_workspace_dialog(
             _ => String::new(),
         };
         feedback_for_create.set_text("Creating workspace...");
+        confirm_for_create.set_sensitive(false);
         let request = workspace_source_request_from_form(
             &source,
             &source_value,
@@ -1251,19 +1292,54 @@ pub(crate) fn show_create_workspace_dialog(
             (!typed_name.is_empty()).then_some(typed_name),
             (!typed_branch.is_empty()).then_some(typed_branch),
         );
-        let create_result = request.and_then(|request| {
-            WorkspaceStore::open(db_path_for_create.clone())
-                .and_then(|store| request.create_workspace(&store, &repo))
+        let rx = request.map(|request| {
+            spawn_background_job({
+                let db_path_for_create = db_path_for_create.clone();
+                let repo = repo.clone();
+                move || {
+                    WorkspaceStore::open(db_path_for_create)
+                        .and_then(|store| request.create_workspace(&store, &repo))
+                }
+            })
         });
-        match create_result {
-            Ok(_) => {
+        let rx = match rx {
+            Ok(rx) => rx,
+            Err(err) => {
+                confirm_for_create.set_sensitive(true);
+                feedback_for_create.set_text(&format!("Create failed: {err:#}"));
+                return;
+            }
+        };
+        let create_btn = confirm_for_create.clone();
+        let feedback = feedback_for_create.clone();
+        let refresh_for_create = refresh_for_create.clone();
+        let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
+        let refresh_workspace_for_create = refresh_workspace_for_create.clone();
+        let dialog_for_create = dialog_for_create.clone();
+        glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+            Ok(create_result) => {
+                create_btn.set_sensitive(true);
                 refresh_for_create();
                 refresh_dashboard_for_create();
                 refresh_workspace_for_create();
-                dialog_for_create.close();
+                match create_result {
+                    Ok(_) => dialog_for_create.close(),
+                    Err(err) => feedback.set_text(&format!("Create failed: {err:#}")),
+                }
+                glib::ControlFlow::Break
             }
-            Err(err) => feedback_for_create.set_text(&format!("Create failed: {err:#}")),
-        }
+            Err(mpsc::TryRecvError::Empty) => {
+                refresh_for_create();
+                refresh_dashboard_for_create();
+                refresh_workspace_for_create();
+                glib::ControlFlow::Continue
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                create_btn.set_sensitive(true);
+                feedback.set_text("Create failed: worker disconnected.");
+                glib::ControlFlow::Break
+            }
+        });
     });
     body.append(&feedback);
     body.append(&actions.0);
@@ -1278,6 +1354,18 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
+}
+
+fn spawn_background_job<F, T>(job: F) -> mpsc::Receiver<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    rx
 }
 
 fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {

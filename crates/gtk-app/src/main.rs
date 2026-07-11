@@ -513,11 +513,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
-    let (projects_page, refresh_projects) = projects::build_projects_page(
-        &app_state.paths,
-        refresh_dashboard.clone(),
-        refresh_workspace_detail.clone(),
-    );
+    let (projects_page, refresh_projects) =
+        projects::build_projects_page(&app_state.paths, refresh_dashboard.clone(), {
+            let refresh_workspace_detail = refresh_workspace_detail.clone();
+            let refresh_hub = refresh_hub.clone();
+            move || {
+                refresh_workspace_detail();
+                refresh_hub.refresh(RefreshScope::Sidebar);
+            }
+        });
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: projects page built"
