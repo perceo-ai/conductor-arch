@@ -1,0 +1,33 @@
+.gitignore
+  s_d9f3c0e3134115::t_80f1a4eea382dd 5
+docs/deploy-and-local-test.md
+  s_d9f3c0e3134115::t_7872cd9991d8af 115-118
+crates/core/src/workspace.rs
+  s_d9f3c0e3134115::t_a04a9da1975b07 6871-6872
+  s_d9f3c0e3134115::t_663a84086b250c 6780-6782,6860-6863,6870,6873-6877,6889-6961
+  s_d9f3c0e3134115::t_b5305a4c4806cc 6962
+crates/core/src/settings.rs
+  s_d9f3c0e3134115::t_1f1f7f4572c1cd 1676-1716
+  s_d9f3c0e3134115::t_35924bf9e2a6b0 33,241,265
+  s_d9f3c0e3134115::t_bf65e8ed834974 2112,2115-2117,2142,2150,2154-2157
+README.md
+  s_d9f3c0e3134115::t_b7f7dcc93d0438 179-181
+crates/gtk-app/src/settings.rs
+  s_d9f3c0e3134115::t_63989d9f2698f0 584-588,590
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "59db4fba8bacbbecfb594eaa01358771849fd69d",
+  "prompts": {},
+  "sessions": {
+    "s_d9f3c0e3134115": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f533e-857e-7f00-81b0-e84a9a77f1cc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
