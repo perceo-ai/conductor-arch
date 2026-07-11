@@ -1229,33 +1229,47 @@ pub fn agent_session_panel(
                 }
             }
 
-            queue_archcar_input(
-                &pending_archcar_inputs_for_send,
-                thread_id,
-                command.clone(),
-                if staged_review {
-                    ArchcarInputKind::ReviewPrompt
-                } else {
-                    ArchcarInputKind::User
-                },
-            );
-            apply_codex_startup_signal(
-                &mut codex_startup_states_for_send.borrow_mut(),
-                CodexStartupSignal::Loading { thread_id },
-            );
-            set_codex_ready_state(
-                codex_ready_for_send.as_ref(),
-                update_composer_for_send.as_ref(),
-                false,
-            );
             if request_archcar_ensure(
                 &archcar_bridge_for_send,
                 inflight_archcar_actions_for_send.as_ref(),
                 workspace_for_send.clone(),
                 Some(thread_id),
             ) {
+                queue_archcar_input(
+                    &pending_archcar_inputs_for_send,
+                    thread_id,
+                    command.clone(),
+                    if staged_review {
+                        ArchcarInputKind::ReviewPrompt
+                    } else {
+                        ArchcarInputKind::User
+                    },
+                );
+                apply_codex_startup_signal(
+                    &mut codex_startup_states_for_send.borrow_mut(),
+                    CodexStartupSignal::Loading { thread_id },
+                );
+                set_codex_ready_state(
+                    codex_ready_for_send.as_ref(),
+                    update_composer_for_send.as_ref(),
+                    false,
+                );
                 mark_thread_working(working_threads_for_send.as_ref(), thread_id);
             } else {
+                apply_codex_startup_signal(
+                    &mut codex_startup_states_for_send.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message:
+                            "Request channel is closed. Reopen the workspace or restart the app."
+                                .to_owned(),
+                    },
+                );
+                set_codex_ready_state(
+                    codex_ready_for_send.as_ref(),
+                    update_composer_for_send.as_ref(),
+                    false,
+                );
                 append_session_status_message(
                     &messages_for_send,
                     "[archcar] Request channel is closed. Reopen the workspace or restart the app.",

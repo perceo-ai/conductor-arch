@@ -1061,11 +1061,9 @@ fn is_probable_extensionless_root_file(path: &str) -> bool {
     {
         return false;
     }
-    if path.chars().any(|ch| ch.is_ascii_uppercase()) {
-        return true;
-    }
+    let normalized = path.to_ascii_lowercase();
     matches!(
-        path,
+        normalized.as_str(),
         "makefile"
             | "dockerfile"
             | "containerfile"
@@ -1867,6 +1865,8 @@ mod tests {
         ));
 
         assert!(parse_codex_event_blocks("Read more before editing").is_empty());
+        assert!(parse_codex_event_blocks("Read More\nbody").is_empty());
+        assert!(parse_codex_event_blocks("Read Carefully\nbody").is_empty());
     }
 
     #[test]

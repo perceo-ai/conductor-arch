@@ -84,11 +84,6 @@ Cubic:
 - Use the Cubic wiki freely.
 - Pull project context from Cubic because it is current and useful.
 
-Superpowers and communication:
-
-- Use relevant Superpowers skills before work when available.
-- Use caveman mode by default: short plan, short updates, short summary.
-
 ## Current Project State
 
 Current state as of the latest progress log:

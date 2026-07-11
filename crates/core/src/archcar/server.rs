@@ -526,6 +526,12 @@ fn ensure_chat_thread_session(
         return ArchcarResponse::Error { message };
     }
 
+    let mut guard = state.lock().unwrap();
+    if !guard.queued_threads.insert(thread_id) {
+        return ArchcarResponse::SessionSpawnQueued { workspace, kind };
+    }
+    drop(guard);
+
     if let Some(response) = restore_thread_session_from_store(state, &workspace, thread_id, kind) {
         if let Ok(mut guard) = state.lock() {
             guard.queued_threads.remove(&thread_id);
@@ -534,9 +540,6 @@ fn ensure_chat_thread_session(
     }
 
     let mut guard = state.lock().unwrap();
-    if !guard.queued_threads.insert(thread_id) {
-        return ArchcarResponse::SessionSpawnQueued { workspace, kind };
-    }
     let state_for_spawn = state.clone();
     broadcast(
         &mut guard,

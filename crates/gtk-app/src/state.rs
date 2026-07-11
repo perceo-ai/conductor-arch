@@ -361,20 +361,33 @@ fn sanitize_removed_workspace_navigation(
     entries: &[NavigationEntry],
     workspace: &str,
 ) -> Vec<NavigationEntry> {
+    compact_adjacent_navigation_entries(
+        entries
+            .iter()
+            .filter_map(|entry| {
+                if entry.selected_workspace.as_deref() != Some(workspace) {
+                    return Some(entry.clone());
+                }
+                if matches!(entry.active_page, AppPage::Workspace | AppPage::Review) {
+                    return None;
+                }
+                let mut entry = entry.clone();
+                entry.selected_workspace = None;
+                Some(entry)
+            })
+            .collect(),
+    )
+}
+
+fn compact_adjacent_navigation_entries(entries: Vec<NavigationEntry>) -> Vec<NavigationEntry> {
     entries
-        .iter()
-        .filter_map(|entry| {
-            if entry.selected_workspace.as_deref() != Some(workspace) {
-                return Some(entry.clone());
+        .into_iter()
+        .fold(Vec::new(), |mut compacted, entry| {
+            if compacted.last() != Some(&entry) {
+                compacted.push(entry);
             }
-            if matches!(entry.active_page, AppPage::Workspace | AppPage::Review) {
-                return None;
-            }
-            let mut entry = entry.clone();
-            entry.selected_workspace = None;
-            Some(entry)
+            compacted
         })
-        .collect()
 }
 
 fn apply_navigation_entry(state: &mut AppStateSnapshot, entry: NavigationEntry) {
@@ -562,6 +575,41 @@ mod tests {
     }
 
     #[test]
+    fn removed_workspace_compacts_adjacent_global_navigation_entries() {
+        let history = NavigationEntry {
+            selected_workspace: None,
+            active_page: AppPage::History,
+            active_workspace_tab: WorkspaceTab::Chats,
+        };
+        let settings = NavigationEntry {
+            selected_workspace: None,
+            active_page: AppPage::Settings,
+            active_workspace_tab: WorkspaceTab::Chats,
+        };
+        let berlin_history = NavigationEntry {
+            selected_workspace: Some("berlin".to_owned()),
+            ..history.clone()
+        };
+        let berlin_settings = NavigationEntry {
+            selected_workspace: Some("berlin".to_owned()),
+            ..settings.clone()
+        };
+
+        assert_eq!(
+            sanitize_removed_workspace_navigation(
+                &[
+                    history.clone(),
+                    berlin_history,
+                    settings.clone(),
+                    berlin_settings
+                ],
+                "berlin",
+            ),
+            vec![history, settings]
+        );
+    }
+
+    #[test]
     fn renamed_workspace_updates_active_state_and_history() {
         let state = AppState::new(
             AppPaths::from_env(),
@@ -579,9 +627,9 @@ mod tests {
             Some("tokyo")
         );
         assert!(state.navigate_back());
-        assert_ne!(
+        assert_eq!(
             state.snapshot().selected_workspace.as_deref(),
-            Some("berlin")
+            Some("tokyo")
         );
     }
 
