@@ -587,6 +587,13 @@ pub fn agent_session_panel(
             if archcar_changed {
                 update_composer_for_view();
             }
+            request_codex_status_probes(
+                &archcar_bridge,
+                &record_state.borrow(),
+                archcar_ready_cache.as_ref(),
+                pending_archcar_status.as_ref(),
+                inflight_archcar_actions.as_ref(),
+            );
 
             let preferred_thread = *selected_thread.borrow();
             let active_thread = {
@@ -4873,15 +4880,32 @@ fn request_archcar_status_probe(
 fn request_codex_status_probes(
     bridge: &AsyncArchcarBridge,
     records: &[ProcessRecord],
+    ready_cache: &RefCell<HashMap<i64, bool>>,
     pending_status: &RefCell<HashMap<i64, u64>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
 ) {
-    for record in records.iter().filter(|record| {
-        record.status == ProcessStatus::Running
-            && session_kind_matches_record(record, SessionKind::Codex)
-    }) {
-        request_archcar_status_probe(bridge, pending_status, inflight_actions, record.id);
+    for session_id in codex_sessions_needing_status_probe(records, ready_cache) {
+        request_archcar_status_probe(bridge, pending_status, inflight_actions, session_id);
     }
+}
+
+fn codex_sessions_needing_status_probe(
+    records: &[ProcessRecord],
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+) -> Vec<i64> {
+    records
+        .iter()
+        .filter(|record| {
+            record.status == ProcessStatus::Running
+                && session_kind_matches_record(record, SessionKind::Codex)
+                && !ready_cache
+                    .borrow()
+                    .get(&record.id)
+                    .copied()
+                    .unwrap_or(false)
+        })
+        .map(|record| record.id)
+        .collect()
 }
 
 fn apply_archcar_ensure_success(
@@ -6277,6 +6301,31 @@ I summarized the result.
             }
             other => panic!("expected status probe fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn running_codex_without_ready_cache_requests_status_probe() {
+        let mut codex_record = session_record(61, "codex", ProcessStatus::Running, None);
+        codex_record.chat_thread_id = Some(4);
+        let mut claude_record = session_record(62, "claude", ProcessStatus::Running, None);
+        claude_record.chat_thread_id = Some(4);
+        let ready_cache = RefCell::new(HashMap::new());
+
+        let probes =
+            codex_sessions_needing_status_probe(&[codex_record, claude_record], &ready_cache);
+
+        assert_eq!(probes, vec![61]);
+    }
+
+    #[test]
+    fn ready_codex_session_does_not_keep_requesting_status_probes() {
+        let mut record = session_record(61, "codex", ProcessStatus::Running, None);
+        record.chat_thread_id = Some(4);
+        let ready_cache = RefCell::new(HashMap::from([(61, true)]));
+
+        let probes = codex_sessions_needing_status_probe(&[record], &ready_cache);
+
+        assert!(probes.is_empty());
     }
 
     #[test]
