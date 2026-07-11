@@ -257,6 +257,11 @@ textview:disabled {
     background-color: #2c2c2c;
 }
 
+.workspace-list row:hover .workspace-row-shell {
+    background-color: #242424;
+    border-color: #3a3a3a;
+}
+
 .workspace-row-shell,
 .project-row,
 .history-row {
