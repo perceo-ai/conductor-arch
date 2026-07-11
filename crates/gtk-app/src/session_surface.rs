@@ -110,6 +110,20 @@ struct ContextUsageDisplayState {
     tooltip: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatRenderSignature {
+    current_kind: SessionKind,
+    selected_thread_id: Option<i64>,
+    active_record: Option<i64>,
+    startup_state: CodexStartupState,
+    records: Vec<(i64, Option<i64>, ProcessStatus, Option<i32>, Option<String>)>,
+    threads: Vec<(i64, String, String, String, String)>,
+    messages: Vec<(i64, String, Option<i64>, String, usize)>,
+    events: Vec<(i64, String, i64, String, String, usize)>,
+    render_state: &'static str,
+    runtime_summary: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ExternalChatTabs {
     pub on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
@@ -381,6 +395,7 @@ pub fn agent_session_panel(
     root.append(&composer_wrap);
 
     let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
+    let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
     let buffer = input_view.buffer();
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
@@ -445,6 +460,7 @@ pub fn agent_session_panel(
         let thread_state = thread_state.clone();
         let selected_session = selected_session.clone();
         let selected_thread = selected_thread.clone();
+        let last_render_signature = last_render_signature.clone();
         let selected_harness = selected_harness.clone();
         let active_sessions = active_sessions.clone();
         let last_output = last_output.clone();
@@ -480,6 +496,7 @@ pub fn agent_session_panel(
                     let label =
                         Label::new(Some(&session_refresh_error_text("load sessions", &err)));
                     label.add_css_class("chat-agent-text");
+                    label.set_selectable(true);
                     label.set_wrap(true);
                     label.set_xalign(0.0);
                     append_chat_refresh_row(&messages, &label);
@@ -652,9 +669,6 @@ pub fn agent_session_panel(
             *selected_session.borrow_mut() = active_record;
             app_state.set_selected_agent_session(active_record);
 
-            clear_box(&messages);
-            apply_context_usage_state(&context_usage, None);
-
             let current = record_state.borrow();
             let selected_thread_id = *selected_thread.borrow();
             match (selected_thread_id, active_record) {
@@ -665,8 +679,26 @@ pub fn agent_session_panel(
                         .find(|thread| thread.id == thread_id)
                         .is_some();
                     if !thread_exists {
+                        let signature = chat_render_signature(
+                            current_kind,
+                            Some(thread_id),
+                            active_record,
+                            CodexStartupState::Idle,
+                            &current,
+                            &thread_state.borrow(),
+                            &[],
+                            &[],
+                            "missing_thread",
+                            None,
+                        );
+                        if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
+                            return;
+                        }
+                        clear_box(&messages);
+                        apply_context_usage_state(&context_usage, None);
                         let label = Label::new(Some("No chat selected."));
                         label.add_css_class("chat-agent-text");
+                        label.set_selectable(true);
                         label.set_wrap(true);
                         label.set_xalign(0.0);
                         append_chat_refresh_row(&messages, &label);
@@ -720,10 +752,6 @@ pub fn agent_session_panel(
                             runtime_state,
                         )
                     });
-                    if let Some(widget) = codex_startup_status_widget(&startup_state) {
-                        append_chat_refresh_row(&messages, &widget);
-                    }
-
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
                             let (thread_messages, thread_events) = match WorkspaceStore::open(
@@ -742,30 +770,55 @@ pub fn agent_session_panel(
                                         &err,
                                     )));
                                     label.add_css_class("chat-agent-text");
+                                    label.set_selectable(true);
                                     label.set_wrap(true);
                                     label.set_xalign(0.0);
+                                    clear_box(&messages);
+                                    apply_context_usage_state(&context_usage, None);
                                     append_chat_refresh_row(&messages, &label);
                                     return;
                                 }
                             };
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(&thread_events);
-                            let timeline = merge_chat_timeline_for_render(
-                                thread_messages.clone(),
-                                thread_events,
-                            );
                             debug!(
                                 workspace = %workspace,
                                 thread_id,
                                 thread_message_count = thread_messages.len(),
-                                thread_timeline_count = timeline.len(),
+                                thread_timeline_count = thread_messages.len() + thread_events.len(),
                                 render_legacy_inline_events,
                                 "chat refresh_view loaded persisted chat timeline"
                             );
-                            if !timeline.is_empty() {
+                            if !thread_messages.is_empty() || !thread_events.is_empty() {
+                                let signature = chat_render_signature(
+                                    current_kind,
+                                    Some(thread_id),
+                                    active_record,
+                                    startup_state.clone(),
+                                    &current,
+                                    &thread_state.borrow(),
+                                    &thread_messages,
+                                    &thread_events,
+                                    "timeline",
+                                    runtime_summary.clone(),
+                                );
+                                if chat_render_is_unchanged(
+                                    last_render_signature.as_ref(),
+                                    signature,
+                                ) {
+                                    return;
+                                }
+                                clear_box(&messages);
                                 apply_context_usage_state(
                                     &context_usage,
                                     latest_context_usage_from_messages(&thread_messages),
+                                );
+                                if let Some(widget) = codex_startup_status_widget(&startup_state) {
+                                    append_chat_refresh_row(&messages, &widget);
+                                }
+                                let timeline = merge_chat_timeline_for_render(
+                                    thread_messages.clone(),
+                                    thread_events,
                                 );
                                 for item in timeline {
                                     match item {
@@ -791,15 +844,53 @@ pub fn agent_session_panel(
                         }
                     }
 
+                    let signature = chat_render_signature(
+                        current_kind,
+                        Some(thread_id),
+                        active_record,
+                        startup_state.clone(),
+                        &current,
+                        &thread_state.borrow(),
+                        &[],
+                        &[],
+                        "empty",
+                        runtime_summary.clone(),
+                    );
+                    if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
+                        return;
+                    }
+                    clear_box(&messages);
+                    apply_context_usage_state(&context_usage, None);
+                    if let Some(widget) = codex_startup_status_widget(&startup_state) {
+                        append_chat_refresh_row(&messages, &widget);
+                    }
                     let empty = Label::new(Some(&runtime_summary.unwrap_or_else(|| {
                         "No messages yet. Send a message to start.".to_owned()
                     })));
                     empty.add_css_class("chat-agent-text");
+                    empty.set_selectable(true);
                     empty.set_wrap(true);
                     empty.set_xalign(0.0);
                     append_chat_refresh_row(&messages, &empty);
                 }
                 (None, _) => {
+                    let signature = chat_render_signature(
+                        current_kind,
+                        None,
+                        active_record,
+                        CodexStartupState::Idle,
+                        &current,
+                        &thread_state.borrow(),
+                        &[],
+                        &[],
+                        "no_thread",
+                        None,
+                    );
+                    if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
+                        return;
+                    }
+                    clear_box(&messages);
+                    apply_context_usage_state(&context_usage, None);
                     let prompt = format!(
                         "No {} chat yet. Create one or send a message to start one.",
                         session_kind_name(current_kind)
@@ -895,6 +986,7 @@ pub fn agent_session_panel(
             Err(err) => {
                 let error = Label::new(Some(&format!("[chat thread] {err:#}")));
                 error.add_css_class("chat-agent-text");
+                error.set_selectable(true);
                 error.set_wrap(true);
                 error.set_xalign(0.0);
                 append_revealed(&messages_for_send, &error);
@@ -914,6 +1006,7 @@ pub fn agent_session_panel(
             Err(err) => {
                 let error = Label::new(Some(&format!("[chat thread] {err:#}")));
                 error.add_css_class("chat-agent-text");
+                error.set_selectable(true);
                 error.set_wrap(true);
                 error.set_xalign(0.0);
                 append_revealed(&messages_for_send, &error);
@@ -1090,6 +1183,7 @@ pub fn agent_session_panel(
                 "[session start] Runtime session requested through archcar. Send again once the session is ready.",
             ));
             queued.add_css_class("chat-agent-text");
+            queued.set_selectable(true);
             queued.set_wrap(true);
             queued.set_xalign(0.0);
             append_revealed(&messages_for_send, &queued);
@@ -1161,6 +1255,7 @@ pub fn agent_session_panel(
                     Err(err) => {
                         let error = Label::new(Some(&format!("[session switch] {err:#}")));
                         error.add_css_class("chat-agent-text");
+                        error.set_selectable(true);
                         error.set_wrap(true);
                         error.set_xalign(0.0);
                         append_revealed(&messages_for_switch, &error);
@@ -1580,6 +1675,88 @@ fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
             (message.timeline_seq.unwrap_or(message.id), 0, message.id)
         }
         ChatTimelineItem::Event(event) => (event.timeline_seq, 1, event.id),
+    }
+}
+
+fn chat_render_is_unchanged(
+    last: &RefCell<Option<ChatRenderSignature>>,
+    next: ChatRenderSignature,
+) -> bool {
+    if last.borrow().as_ref() == Some(&next) {
+        return true;
+    }
+    *last.borrow_mut() = Some(next);
+    false
+}
+
+fn chat_render_signature(
+    current_kind: SessionKind,
+    selected_thread_id: Option<i64>,
+    active_record: Option<i64>,
+    startup_state: CodexStartupState,
+    records: &[ProcessRecord],
+    threads: &[ChatThreadRecord],
+    messages: &[ChatMessageRecord],
+    events: &[ChatEventRecord],
+    render_state: &'static str,
+    runtime_summary: Option<String>,
+) -> ChatRenderSignature {
+    ChatRenderSignature {
+        current_kind,
+        selected_thread_id,
+        active_record,
+        startup_state,
+        records: records
+            .iter()
+            .map(|record| {
+                (
+                    record.id,
+                    record.chat_thread_id,
+                    record.status,
+                    record.exit_code,
+                    record.ended_at.clone(),
+                )
+            })
+            .collect(),
+        threads: threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.id,
+                    thread.provider.clone(),
+                    thread.title.clone(),
+                    thread.status.clone(),
+                    thread.updated_at.clone(),
+                )
+            })
+            .collect(),
+        messages: messages
+            .iter()
+            .map(|message| {
+                (
+                    message.id,
+                    message.role.clone(),
+                    message.timeline_seq,
+                    message.updated_at.clone(),
+                    message.content.len(),
+                )
+            })
+            .collect(),
+        events: events
+            .iter()
+            .map(|event| {
+                (
+                    event.id,
+                    event.kind.clone(),
+                    event.timeline_seq,
+                    event.title.clone(),
+                    event.updated_at.clone(),
+                    event.body.len() + event.payload_json.len(),
+                )
+            })
+            .collect(),
+        render_state,
+        runtime_summary,
     }
 }
 
@@ -3729,6 +3906,7 @@ fn codex_startup_status_widget(state: &CodexStartupState) -> Option<Widget> {
 
             let label = Label::new(Some(message));
             label.add_css_class("card-meta");
+            label.set_selectable(true);
             label.set_wrap(true);
             label.set_xalign(0.0);
             label.set_hexpand(true);
@@ -3740,6 +3918,7 @@ fn codex_startup_status_widget(state: &CodexStartupState) -> Option<Widget> {
 
             let label = Label::new(Some(&format!("Codex failed to start. {message}")));
             label.add_css_class("chat-agent-text");
+            label.set_selectable(true);
             label.set_wrap(true);
             label.set_xalign(0.0);
             label.set_hexpand(true);
