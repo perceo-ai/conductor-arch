@@ -747,6 +747,12 @@ fn ws_center_panel(
                 return;
             }
             let active_thread = *selected_thread.borrow();
+            *setup_readiness.borrow_mut() = SetupReadiness::from_host();
+            sync_workspace_chat_add_button_with_readiness(
+                &add_tab_btn_for_feedback,
+                &visible_existing,
+                setup_readiness.as_ref(),
+            );
             let provider = ready_chat_provider_for_new_thread(
                 &db_path,
                 &workspace_name,
@@ -754,21 +760,6 @@ fn ws_center_panel(
                 &visible_existing,
                 setup_readiness.as_ref(),
             );
-            let provider = provider.or_else(|| {
-                *setup_readiness.borrow_mut() = SetupReadiness::from_host();
-                sync_workspace_chat_add_button_with_readiness(
-                    &add_tab_btn_for_feedback,
-                    &visible_existing,
-                    setup_readiness.as_ref(),
-                );
-                ready_chat_provider_for_new_thread(
-                    &db_path,
-                    &workspace_name,
-                    active_thread,
-                    &visible_existing,
-                    setup_readiness.as_ref(),
-                )
-            });
             let Some(provider) = provider else {
                 error!(workspace = %workspace_name, "refusing to create chat without a ready launchable provider");
                 return;

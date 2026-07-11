@@ -2935,11 +2935,6 @@ fn selected_provider_blocker_after_refresh(
     kind: SessionKind,
     readiness: &Rc<RefCell<SetupReadiness>>,
 ) -> Option<String> {
-    let blocked = {
-        let current = readiness.borrow();
-        selected_provider_blocker_message(kind, &current)
-    };
-    blocked.as_ref()?;
     *readiness.borrow_mut() = SetupReadiness::from_host();
     let current = readiness.borrow();
     selected_provider_blocker_message(kind, &current)
