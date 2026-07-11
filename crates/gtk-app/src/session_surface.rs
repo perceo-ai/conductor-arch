@@ -4,6 +4,7 @@ use gtk::{
     Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow,
     Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
+use linux_archductor_core::agent_tools::launchable_provider_key;
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
     merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
@@ -2957,17 +2958,7 @@ fn configured_ready_provider(
 }
 
 fn launchable_provider_name(provider: &str) -> Option<&'static str> {
-    match provider
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>()
-        .as_str()
-    {
-        "codex" => Some("codex"),
-        "claude" | "claudecode" => Some("claude"),
-        _ => None,
-    }
+    launchable_provider_key(provider)
 }
 
 fn session_kind_from_provider(provider: &str) -> SessionKind {

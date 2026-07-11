@@ -6,6 +6,7 @@ use gtk::{
     Paned, PolicyType, Popover, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag, TextView,
     WrapMode,
 };
+use linux_archductor_core::agent_tools::launchable_provider_key;
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
@@ -1102,7 +1103,7 @@ fn workspace_chat_thread_is_reopenable(thread: &ChatThreadRecord) -> bool {
 }
 
 fn workspace_chat_thread_is_supported(thread: &ChatThreadRecord) -> bool {
-    matches!(thread.provider.as_str(), "codex" | "claude")
+    launchable_provider_key(&thread.provider).is_some()
 }
 
 fn ready_chat_provider_for_new_thread(
@@ -1134,7 +1135,7 @@ fn default_launchable_chat_provider_for_workspace(
 }
 
 fn provider_is_ready_launchable(provider: &str, readiness: &SetupReadiness) -> bool {
-    readiness.launchable_provider_ready(provider) && matches!(provider, "codex" | "claude")
+    launchable_provider_key(provider).is_some() && readiness.launchable_provider_ready(provider)
 }
 
 fn persist_default_chat_provider(db_path: &Path, workspace_name: &str, provider: &str) {

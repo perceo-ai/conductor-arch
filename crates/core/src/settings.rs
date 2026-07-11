@@ -1401,7 +1401,7 @@ fn is_valid_workspace_tab(value: &str) -> bool {
 
 fn validate_agent_provider(provider: &str) -> Result<()> {
     anyhow::ensure!(
-        matches!(provider, "codex" | "claude" | "opencode"),
+        crate::agent_tools::supported_agent_provider_key(provider).is_some(),
         "default agent provider must be codex, claude, or opencode"
     );
     Ok(())

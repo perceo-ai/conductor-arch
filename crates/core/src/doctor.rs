@@ -1,3 +1,6 @@
+use crate::agent_tools::{
+    all_tools, launchable_agent_tools, launchable_provider_key, tool_by_provider,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -107,29 +110,32 @@ impl SetupReadiness {
     }
 
     pub fn first_ready_launchable_provider(&self) -> Option<&'static str> {
-        if self.codex.ready {
-            Some("codex")
-        } else if self.claude.ready {
-            Some("claude")
-        } else {
-            None
-        }
+        launchable_agent_tools()
+            .find(|tool| {
+                self.check_for_provider(tool.provider_key)
+                    .is_some_and(|check| check.ready)
+            })
+            .map(|tool| tool.provider_key)
     }
 
     pub fn provider_ready(&self, provider: &str) -> bool {
-        match normalize_provider(provider).as_str() {
-            "codex" => self.codex.ready,
-            "claude" | "claudecode" => self.claude.ready,
-            "opencode" => self.opencode.ready,
-            _ => false,
-        }
+        tool_by_provider(provider)
+            .and_then(|tool| self.check_for_provider(tool.provider_key))
+            .is_some_and(|check| check.ready)
     }
 
     pub fn launchable_provider_ready(&self, provider: &str) -> bool {
-        match normalize_provider(provider).as_str() {
-            "codex" => self.codex.ready,
-            "claude" | "claudecode" => self.claude.ready,
-            _ => false,
+        launchable_provider_key(provider)
+            .and_then(|provider| self.check_for_provider(provider))
+            .is_some_and(|check| check.ready)
+    }
+
+    fn check_for_provider(&self, provider: &str) -> Option<&SetupCheck> {
+        match provider {
+            "codex" => Some(&self.codex),
+            "claude" => Some(&self.claude),
+            "opencode" => Some(&self.opencode),
+            _ => None,
         }
     }
 }
@@ -204,16 +210,11 @@ fn install_command(id: Option<&str>, like: &[String]) -> Option<&'static str> {
 }
 
 fn dependency_checks() -> Vec<DependencyCheck> {
-    [
+    let mut checks = [
         ("git", true),
         ("gh", true),
         ("sqlite3", true),
         ("ssh", true),
-        ("codex", false),
-        ("claude", false),
-        ("opencode", false),
-        ("code", false),
-        ("cursor", false),
     ]
     .into_iter()
     .map(|(name, required)| DependencyCheck {
@@ -221,7 +222,13 @@ fn dependency_checks() -> Vec<DependencyCheck> {
         required,
         installed: command_exists(name),
     })
-    .collect()
+    .collect::<Vec<_>>();
+    checks.extend(all_tools().iter().map(|tool| DependencyCheck {
+        name: tool.default_command,
+        required: false,
+        installed: command_exists(tool.default_command),
+    }));
+    checks
 }
 
 fn gh_readiness() -> SetupCheck {
@@ -378,14 +385,6 @@ fn command_exists(name: &str) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-fn normalize_provider(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 #[cfg(unix)]
