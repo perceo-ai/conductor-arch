@@ -6777,6 +6777,9 @@ fn ensure_clean_git_tree(cwd: &Path, label: &str) -> Result<()> {
         .map(|line| line.get(3..).unwrap_or(line).trim())
         .filter(|path| !path.is_empty())
         .filter(|path| !is_conductor_context_path(path))
+        .filter(|path| {
+            !(path == &".gitignore" && gitignore_has_only_managed_changes(cwd).unwrap_or(false))
+        })
         .collect::<Vec<_>>();
     anyhow::ensure!(
         dirty.is_empty(),
@@ -6854,23 +6857,24 @@ fn spotlight_conflict_paths(current_patch: &str, expected_patch: &str) -> BTreeS
 }
 
 fn patch_changed_paths(patch: &str) -> BTreeSet<String> {
-    patch
-        .lines()
-        .filter_map(patch_path_from_diff_line)
+    patch_file_chunks(patch)
+        .into_iter()
+        .filter(|(path, chunk)| !(path == ".gitignore" && gitignore_patch_is_managed(chunk)))
+        .map(|(path, _)| path)
         .filter(|path| !is_conductor_context_path(path))
         .collect()
 }
 
 fn spotlight_meaningful_patch(patch: &str) -> String {
     let mut filtered = String::new();
-    let mut include = true;
-    for line in patch.lines() {
-        if let Some(path) = patch_path_from_diff_line(line) {
-            include = !is_conductor_context_path(&path);
-        }
-        if include {
-            filtered.push_str(line);
-            filtered.push('\n');
+    for (path, chunk) in patch_file_chunks(patch) {
+        if !(is_conductor_context_path(&path)
+            || path == ".gitignore" && gitignore_patch_is_managed(&chunk))
+        {
+            filtered.push_str(&chunk);
+            if !chunk.ends_with('\n') {
+                filtered.push('\n');
+            }
         }
     }
     filtered
@@ -6880,6 +6884,80 @@ fn patch_path_from_diff_line(line: &str) -> Option<String> {
     let rest = line.strip_prefix("diff --git a/")?;
     let (_, path) = rest.split_once(" b/")?;
     Some(path.to_owned())
+}
+
+fn patch_file_chunks(patch: &str) -> Vec<(String, String)> {
+    let mut chunks = Vec::new();
+    let mut current_path = None::<String>;
+    let mut current_chunk = String::new();
+    for line in patch.lines() {
+        if let Some(path) = patch_path_from_diff_line(line) {
+            if let Some(previous_path) = current_path.replace(path) {
+                chunks.push((previous_path, std::mem::take(&mut current_chunk)));
+            }
+        }
+        if current_path.is_some() {
+            current_chunk.push_str(line);
+            current_chunk.push('\n');
+        }
+    }
+    if let Some(path) = current_path {
+        chunks.push((path, current_chunk));
+    }
+    chunks
+}
+
+fn gitignore_patch_is_managed(chunk: &str) -> bool {
+    let mut changed = false;
+    for line in chunk.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        let Some(prefix) = line.chars().next() else {
+            continue;
+        };
+        if prefix != '+' && prefix != '-' {
+            continue;
+        }
+        let pattern = line[1..].trim();
+        match (prefix, gitignore_managed_pattern_key(pattern).as_deref()) {
+            ('+', Some(".context")) | ('-', Some(".archductor")) => changed = true,
+            _ => return false,
+        }
+    }
+    changed
+}
+
+fn gitignore_has_only_managed_changes(repo_path: &Path) -> Result<bool> {
+    let current = fs::read_to_string(repo_path.join(".gitignore")).unwrap_or_default();
+    let base = git_output_dynamic(repo_path, &["show", "HEAD:.gitignore"]).unwrap_or_default();
+    Ok(gitignore_without_managed_patterns(&current) == gitignore_without_managed_patterns(&base))
+}
+
+fn gitignore_without_managed_patterns(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .filter(|line| {
+            !matches!(
+                gitignore_managed_pattern_key(line).as_deref(),
+                Some(".context" | ".archductor")
+            )
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn gitignore_managed_pattern_key(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+        return None;
+    }
+    Some(
+        trimmed
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .to_owned(),
+    )
 }
 
 fn apply_git_patch(cwd: &Path, patch: &str) -> Result<()> {

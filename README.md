@@ -176,8 +176,9 @@ existing local CLI authentication.
 
 Shared project settings live at `.archductor/settings.toml` in the repository
 root. In product terms, these are project-level settings because one Archductor
-project wraps one repository. Commit this file when teammates should get the
-same setup.
+project wraps one repository. Commit shared `.archductor` files when teammates
+or another PC should get the same setup. Workspace `.context/` files are local
+scratch context and should stay gitignored.
 
 ```toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"

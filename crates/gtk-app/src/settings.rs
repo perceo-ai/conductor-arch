@@ -581,8 +581,13 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     } else {
                         ""
                     };
+                let gitignore_status = if report.context_gitignore_updated {
+                    " Updated .gitignore for .context/."
+                } else {
+                    ""
+                };
                 settings_result_init.set_text(&format!(
-                    "{status}{prompt_pack_status} {}",
+                    "{status}{prompt_pack_status}{gitignore_status} {}",
                     repo_path.display()
                 ));
             }

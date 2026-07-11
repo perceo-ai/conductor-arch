@@ -112,8 +112,10 @@ build = "true"
 run_mode = "concurrent"
 ```
 
-Replace `true` with real project commands. Commit shared settings. Put
-machine-local overrides and secrets in `.archductor/settings.local.toml`.
+Replace `true` with real project commands. Commit shared `.archductor` files
+that should travel across workspaces or PCs. Keep workspace `.context/` files
+gitignored because they are per-workspace scratch context. Put machine-local
+overrides and secrets in `.archductor/settings.local.toml`.
 If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
 Check scripts are exposed as workspace terminal command presets today. A
 first-class local check runner is still a TODO.

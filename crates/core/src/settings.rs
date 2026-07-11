@@ -30,6 +30,7 @@ pub struct RepositoryConfigBootstrap {
     pub prompt_pack_dir_created: bool,
     pub default_prompt_pack_created: bool,
     pub active_prompt_pack_created: bool,
+    pub context_gitignore_updated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +238,7 @@ pub fn ensure_repository_config(repo_path: &Path) -> Result<RepositoryConfigBoot
         prompt_pack_dir_created: false,
         default_prompt_pack_created: false,
         active_prompt_pack_created: false,
+        context_gitignore_updated: false,
     };
 
     let settings = match fs::read_to_string(&shared_path) {
@@ -260,6 +262,7 @@ pub fn ensure_repository_config(repo_path: &Path) -> Result<RepositoryConfigBoot
     report.prompt_pack_dir_created = prompt_pack_report.prompt_pack_dir_created;
     report.default_prompt_pack_created = prompt_pack_report.default_prompt_pack_created;
     report.active_prompt_pack_created = prompt_pack_report.active_prompt_pack_created;
+    report.context_gitignore_updated = ensure_context_gitignored(repo_path)?;
 
     Ok(report)
 }
@@ -1670,6 +1673,47 @@ fn ensure_default_prompt_pack_files(
     })
 }
 
+fn ensure_context_gitignored(repo_path: &Path) -> Result<bool> {
+    let gitignore_path = repo_path.join(".gitignore");
+    let existing = match fs::read_to_string(&gitignore_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("read {}", gitignore_path.display())),
+    };
+
+    let mut lines = existing.lines().map(str::to_owned).collect::<Vec<_>>();
+    let had_context = lines
+        .iter()
+        .any(|line| gitignore_pattern_key(line).as_deref() == Some(".context"));
+    let original_len = lines.len();
+    lines.retain(|line| gitignore_pattern_key(line).as_deref() != Some(".archductor"));
+    let mut changed = lines.len() != original_len;
+
+    if !had_context {
+        lines.push(".context/".to_owned());
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    fs::write(&gitignore_path, contents)
+        .with_context(|| format!("write {}", gitignore_path.display()))?;
+    Ok(true)
+}
+
+fn gitignore_pattern_key(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+        return None;
+    }
+    let trimmed = trimmed.trim_start_matches('/');
+    Some(trimmed.trim_end_matches('/').to_owned())
+}
+
 fn active_prompt_pack_path(path: &str) -> Option<&Path> {
     let path = Path::new(path);
     let prefix = Path::new(".archductor").join("prompt-packs");
@@ -2065,8 +2109,12 @@ LOCAL_ONLY = "1"
         assert!(report.shared_settings_created);
         assert!(report.prompt_pack_dir_created);
         assert!(report.default_prompt_pack_created);
+        assert!(report.context_gitignore_updated);
         let shared_path = temp.path().join(".archductor/settings.toml");
         assert!(shared_path.exists());
+        let gitignore = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".context/"));
+        assert!(!gitignore.contains(".archductor/"));
         let prompt_pack_path = temp.path().join(".archductor/prompt-packs/default.toml");
         assert!(prompt_pack_path.exists());
         assert!(fs::read_to_string(prompt_pack_path)
@@ -2091,6 +2139,7 @@ LOCAL_ONLY = "1"
             "[scripts]\nrun = \"cargo run\"\n",
         )
         .unwrap();
+        fs::write(temp.path().join(".gitignore"), "target/\n.archductor/\n").unwrap();
 
         let report = ensure_repository_config(temp.path()).unwrap();
 
@@ -2098,9 +2147,14 @@ LOCAL_ONLY = "1"
         assert!(!report.shared_settings_created);
         assert!(report.prompt_pack_dir_created);
         assert!(report.default_prompt_pack_created);
+        assert!(report.context_gitignore_updated);
         let contents = fs::read_to_string(conductor_dir.join("settings.toml")).unwrap();
         assert!(contents.contains("cargo run"));
         assert!(conductor_dir.join("prompt-packs/default.toml").exists());
+        let gitignore = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("target/"));
+        assert!(gitignore.contains(".context/"));
+        assert!(!gitignore.contains(".archductor/"));
     }
 
     #[test]
