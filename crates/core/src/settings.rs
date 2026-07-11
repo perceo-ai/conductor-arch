@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -1337,23 +1339,54 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
         .with_context(|| format!("resolve parent for {}", path.display()))?;
     let tmp_path = parent.join(format!(".{}.{}.tmp", "settings.local.toml", Uuid::new_v4()));
     let write_result = (|| -> Result<()> {
+        let permissions = local_settings_write_permissions(path)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp_path)
             .with_context(|| format!("create {}", tmp_path.display()))?;
+        set_permissions_if_supported(&tmp_path, permissions)?;
         file.write_all(contents)
             .with_context(|| format!("write {}", tmp_path.display()))?;
         file.sync_all()
             .with_context(|| format!("sync {}", tmp_path.display()))?;
         reject_symlink_file(path)?;
         fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
+        fs::File::open(parent)
+            .with_context(|| format!("open {}", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("sync {}", parent.display()))?;
         Ok(())
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&tmp_path);
     }
     write_result
+}
+
+#[cfg(unix)]
+fn local_settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.permissions()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(fs::Permissions::from_mode(0o600)),
+        Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+#[cfg(not(unix))]
+fn local_settings_write_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_permissions_if_supported(path: &Path, permissions: fs::Permissions) -> Result<()> {
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("set permissions {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_permissions_if_supported(_path: &Path, _permissions: ()) -> Result<()> {
+    Ok(())
 }
 
 fn normalize_workspace_tab(value: &str) -> String {
@@ -1578,6 +1611,24 @@ theme = "dark"
 
         assert!(err.to_string().contains("must not be a symlink"));
         assert_eq!(fs::read_to_string(external).unwrap(), "outside = true\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_local_default_agent_provider_preserves_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let path = conductor_dir.join("settings.local.toml");
+        fs::write(&path, "[customization.view]\ntheme = \"dark\"\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        save_local_default_agent_provider(temp.path(), "claude").unwrap();
+
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

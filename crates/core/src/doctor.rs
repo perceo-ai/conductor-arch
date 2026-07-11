@@ -316,6 +316,8 @@ fn run_command_with_timeout(program: &str, args: &[&str], discard_output: bool) 
     command.args(args);
     if discard_output {
         command.stdout(Stdio::null()).stderr(Stdio::null());
+    } else {
+        command.stdout(Stdio::piped()).stderr(Stdio::null());
     }
     let mut child = command.spawn().ok()?;
     let started = Instant::now();

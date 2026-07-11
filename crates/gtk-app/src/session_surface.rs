@@ -183,6 +183,7 @@ pub fn agent_session_panel(
     app_state: AppState,
     refresh: impl Fn() + Clone + 'static,
     include_header: bool,
+    setup_readiness: Option<Rc<RefCell<SetupReadiness>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -198,7 +199,8 @@ pub fn agent_session_panel(
         ));
     }
 
-    let setup_readiness = Rc::new(RefCell::new(SetupReadiness::from_host()));
+    let setup_readiness =
+        setup_readiness.unwrap_or_else(|| Rc::new(RefCell::new(SetupReadiness::from_host())));
     let initial_harness = {
         let readiness = setup_readiness.borrow();
         initial_chat_harness_from_setup(&database_path, _workspace_name, &readiness)
@@ -1068,7 +1070,7 @@ pub fn agent_session_panel(
         }
         let selected_kind = *selected_harness_for_send.borrow();
         if let Some(message) =
-            selected_provider_blocker_message(selected_kind, &setup_readiness_for_send.borrow())
+            selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
         {
             let error = Label::new(Some(&message));
             error.add_css_class("chat-agent-text");
@@ -1591,7 +1593,7 @@ pub fn agent_session_panel(
         let setup_readiness = setup_readiness.clone();
         move |_| {
             let kind = *selected_harness.borrow();
-            if selected_provider_blocker_message(kind, &setup_readiness.borrow()).is_some() {
+            if selected_provider_blocker_after_refresh(kind, &setup_readiness).is_some() {
                 error!(workspace = %workspace_name, harness = ?kind, "refusing to create chat for unready provider");
                 return;
             }
@@ -2927,6 +2929,20 @@ fn selected_provider_blocker_message(
             session_kind_name(kind)
         )
     })
+}
+
+fn selected_provider_blocker_after_refresh(
+    kind: SessionKind,
+    readiness: &Rc<RefCell<SetupReadiness>>,
+) -> Option<String> {
+    let blocked = {
+        let current = readiness.borrow();
+        selected_provider_blocker_message(kind, &current)
+    };
+    blocked.as_ref()?;
+    *readiness.borrow_mut() = SetupReadiness::from_host();
+    let current = readiness.borrow();
+    selected_provider_blocker_message(kind, &current)
 }
 
 fn configured_ready_provider(
