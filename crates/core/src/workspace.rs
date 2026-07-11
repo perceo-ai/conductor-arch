@@ -8433,7 +8433,7 @@ CUSTOM_VALUE = "from-settings"
             repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-run = "printf 'started\n'; while true; do sleep 1; done"
+run = "printf 'started\n'; trap 'exit 0' TERM INT; while true; do sleep 1 & wait $!; done"
 "#,
         )
         .unwrap();
@@ -8814,7 +8814,7 @@ run = "printf 'started\n'; while true; do sleep 1; done"
 
         assert_eq!(stopped.id, run.id);
         assert_eq!(stopped.status, ProcessStatus::Stopped);
-        assert_eq!(stopped.exit_code, Some(143));
+        assert_eq!(stopped.exit_code, Some(SIGTERM_EXIT_CODE));
         assert!(stopped.ended_at.is_some());
     }
 
