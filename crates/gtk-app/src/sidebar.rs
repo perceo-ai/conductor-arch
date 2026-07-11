@@ -1,9 +1,8 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
-    Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Stack,
+    Align, Box as GBox, Button, Entry, EventControllerKey, GestureClick, Image, Label, ListBox,
+    ListBoxRow, Orientation, PolicyType, Popover, ScrolledWindow, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
@@ -671,30 +670,12 @@ fn build_workspace_row(
 
     row_box.append(&text_box);
 
-    let diff_revealer = workspace_diff_revealer(diff_additions, diff_deletions);
-    let diff_revealer_for_enter = diff_revealer.clone();
-    let diff_revealer_for_leave = diff_revealer.clone();
-    let hover_controller = EventControllerMotion::new();
-    hover_controller.connect_enter(move |_, _, _| {
-        diff_revealer_for_enter.set_reveal_child(true);
-    });
-    hover_controller.connect_leave(move |_| {
-        diff_revealer_for_leave.set_reveal_child(false);
-    });
-    row_box.add_controller(hover_controller);
-    row_box.append(&diff_revealer);
+    row_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
 
     ListBoxRow::builder().child(&row_box).build()
 }
 
-fn workspace_diff_revealer(additions: usize, deletions: usize) -> Revealer {
-    let revealer = Revealer::new();
-    revealer.add_css_class("workspace-row-diff-revealer");
-    revealer.set_transition_type(RevealerTransitionType::SlideLeft);
-    revealer.set_transition_duration(140);
-    revealer.set_reveal_child(false);
-    revealer.set_halign(Align::End);
-
+fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
     let stats = GBox::new(Orientation::Horizontal, 5);
     stats.add_css_class("workspace-row-diff-stats");
     stats.set_halign(Align::End);
@@ -709,8 +690,7 @@ fn workspace_diff_revealer(additions: usize, deletions: usize) -> Revealer {
     deletions_label.set_xalign(1.0);
     stats.append(&deletions_label);
 
-    revealer.set_child(Some(&stats));
-    revealer
+    stats
 }
 
 fn attach_workspace_row_context_menu(
