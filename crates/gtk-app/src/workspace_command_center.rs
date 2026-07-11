@@ -734,6 +734,7 @@ fn ws_center_panel(
             let provider = visible_existing
                 .iter()
                 .find(|thread| Some(thread.id) == active_thread)
+                .filter(|thread| provider_is_ready_launchable(&thread.provider))
                 .map(|thread| thread.provider.clone())
                 .unwrap_or_else(default_launchable_chat_provider);
             let title = workspace_chat_default_title(&visible_existing);
@@ -1064,6 +1065,10 @@ fn default_launchable_chat_provider() -> String {
         .first_ready_launchable_provider()
         .unwrap_or("codex")
         .to_owned()
+}
+
+fn provider_is_ready_launchable(provider: &str) -> bool {
+    SetupReadiness::from_host().provider_ready(provider) && matches!(provider, "codex" | "claude")
 }
 
 fn close_workspace_chat_thread(
