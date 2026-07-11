@@ -4,7 +4,9 @@ use gtk::{
     Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow,
     Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
-use linux_archductor_core::agent_tools::launchable_provider_key;
+use linux_archductor_core::agent_tools::{
+    launchable_agent_tools, launchable_provider_key, tool_by_provider,
+};
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
     merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
@@ -318,11 +320,17 @@ pub fn agent_session_panel(
     let left_group = GBox::new(Orientation::Horizontal, 8);
     left_group.set_hexpand(true);
 
-    let interface_btn = mode_menu_button(
-        session_kind_name(initial_harness),
-        "code-symbolic",
-        &["Codex", "Claude"],
-        session_kind_index(initial_harness),
+    let provider_model_choices = {
+        let readiness = setup_readiness.borrow();
+        Rc::new(provider_model_choices(&readiness, initial_harness))
+    };
+    let provider_model_btn = provider_model_menu_button(
+        provider_model_choices.clone(),
+        selected_provider_model_choice_index(
+            provider_model_choices.as_ref(),
+            initial_harness,
+            selected_model.borrow().as_deref(),
+        ),
         {
             let database_path = database_path.to_path_buf();
             let workspace_name = _workspace_name.to_owned();
@@ -335,12 +343,11 @@ pub fn agent_session_panel(
             let selected_thread = selected_thread.clone();
             let sync_live_controls = sync_live_controls.clone();
             Rc::new(move |index| {
-                let kind = session_kind_from_index(index);
-                persist_selected_provider(
-                    &database_path,
-                    &workspace_name,
-                    session_kind_provider(kind),
-                );
+                let Some(choice) = provider_model_choices.get(index).cloned() else {
+                    return;
+                };
+                let kind = session_kind_from_provider(&choice.provider);
+                persist_selected_provider(&database_path, &workspace_name, &choice.provider);
                 select_harness_and_dispatch(
                     selected_harness.as_ref(),
                     reasoning_mode.as_ref(),
@@ -349,9 +356,15 @@ pub fn agent_session_panel(
                     refresh_chat_surface.borrow().as_ref(),
                     None,
                 );
-                *selected_model.borrow_mut() = None;
-                if kind != SessionKind::Codex {
-                    if let Some(thread_id) = *selected_thread.borrow() {
+                *selected_model.borrow_mut() = choice.model.clone();
+                if let Some(thread_id) = *selected_thread.borrow() {
+                    if kind == SessionKind::Codex {
+                        replace_pending_model_command(
+                            &pending_commands,
+                            thread_id,
+                            choice.model.as_deref(),
+                        );
+                    } else {
                         pending_commands.borrow_mut().remove(&thread_id);
                     }
                 }
@@ -361,24 +374,6 @@ pub fn agent_session_panel(
             })
         },
     );
-    let model_btn = mode_menu_button("Default", "M", &["Default", "gpt-5", "gpt-5-mini"], 0, {
-        let selected_model = selected_model.clone();
-        let selected_harness = selected_harness.clone();
-        let selected_thread = selected_thread.clone();
-        let pending_commands = pending_commands.clone();
-        Rc::new(move |index| {
-            let model = session_model_from_index(index);
-            *selected_model.borrow_mut() = model.clone();
-            if *selected_harness.borrow() == SessionKind::Codex {
-                if let (Some(thread_id), Some(command)) = (
-                    *selected_thread.borrow(),
-                    codex_model_command(model.as_deref()),
-                ) {
-                    queue_thread_command(&pending_commands, thread_id, command);
-                }
-            }
-        })
-    });
     let thinking_btn =
         mode_menu_button("High", "◔", &["Low", "Medium", "High", "Extra high"], 2, {
             let reasoning_mode = reasoning_mode.clone();
@@ -399,8 +394,7 @@ pub fn agent_session_panel(
         });
     thinking_btn.add_css_class("chat-thinking-menu");
 
-    left_group.append(&interface_btn);
-    left_group.append(&model_btn);
+    left_group.append(&provider_model_btn);
     left_group.append(&thinking_btn);
 
     let right_group = GBox::new(Orientation::Horizontal, 8);
@@ -423,13 +417,11 @@ pub fn agent_session_panel(
 
     let sync_live_controls_fn: Rc<dyn Fn()> = Rc::new({
         let selected_harness = selected_harness.clone();
-        let model_btn = model_btn.clone();
         let thinking_btn = thinking_btn.clone();
         move || {
             let controls = visible_live_controls_for_provider(session_kind_provider(
                 *selected_harness.borrow(),
             ));
-            model_btn.set_visible(controls.iter().any(|control| control == "model"));
             thinking_btn.set_visible(controls.iter().any(|control| control == "thinking"));
         }
     });
@@ -2843,6 +2835,90 @@ fn supported_chat_session_kinds() -> &'static [SessionKind] {
     &[SessionKind::Codex, SessionKind::Claude]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderModelChoice {
+    provider: String,
+    model: Option<String>,
+}
+
+impl ProviderModelChoice {
+    fn provider_label(&self) -> &'static str {
+        provider_display_name(&self.provider)
+    }
+
+    fn model_label(&self) -> &str {
+        self.model.as_deref().unwrap_or("Default")
+    }
+
+    fn button_label(&self) -> String {
+        format!("{} · {}", self.provider_label(), self.model_label())
+    }
+
+    fn icon_name(&self) -> &'static str {
+        provider_icon_name(&self.provider)
+    }
+}
+
+fn provider_model_choices(
+    readiness: &SetupReadiness,
+    fallback_kind: SessionKind,
+) -> Vec<ProviderModelChoice> {
+    let mut choices = launchable_agent_tools()
+        .filter(|tool| readiness.launchable_provider_ready(tool.provider_key))
+        .flat_map(|tool| provider_model_choices_for_provider(tool.provider_key))
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        choices = provider_model_choices_for_provider(session_kind_provider(fallback_kind));
+    }
+    choices
+}
+
+fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoice> {
+    match launchable_provider_name(provider) {
+        Some("codex") => [None, Some("gpt-5"), Some("gpt-5-mini")]
+            .into_iter()
+            .map(|model| ProviderModelChoice {
+                provider: "codex".to_owned(),
+                model: model.map(str::to_owned),
+            })
+            .collect(),
+        Some("claude") => vec![ProviderModelChoice {
+            provider: "claude".to_owned(),
+            model: None,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn selected_provider_model_choice_index(
+    choices: &[ProviderModelChoice],
+    kind: SessionKind,
+    model: Option<&str>,
+) -> usize {
+    let provider = session_kind_provider(kind);
+    choices
+        .iter()
+        .position(|choice| {
+            choice.provider == provider
+                && choice.model.as_deref().unwrap_or("") == model.unwrap_or("")
+        })
+        .unwrap_or(0)
+}
+
+fn provider_display_name(provider: &str) -> &'static str {
+    tool_by_provider(provider)
+        .map(|tool| tool.display_name)
+        .unwrap_or("Agent")
+}
+
+fn provider_icon_name(provider: &str) -> &'static str {
+    match launchable_provider_name(provider) {
+        Some("codex") => "code-symbolic",
+        Some("claude") => "application-x-executable-symbolic",
+        _ => "application-x-executable-symbolic",
+    }
+}
+
 fn select_harness_and_dispatch(
     selected_harness: &RefCell<SessionKind>,
     reasoning_mode: &RefCell<Option<String>>,
@@ -2885,20 +2961,6 @@ fn apply_thread_selection<F, U>(
     *selected_thread.borrow_mut() = next_thread;
     set_selected_chat_thread(next_thread);
     update_composer_state();
-}
-
-fn session_kind_from_index(index: usize) -> SessionKind {
-    match index {
-        1 => SessionKind::Claude,
-        _ => SessionKind::Codex,
-    }
-}
-
-fn session_kind_index(kind: SessionKind) -> usize {
-    match kind {
-        SessionKind::Claude => 1,
-        _ => 0,
-    }
 }
 
 fn initial_chat_harness_from_setup(
@@ -2992,17 +3054,24 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
     }
 }
 
-fn session_model_from_index(index: usize) -> Option<String> {
-    match index {
-        1 => Some("gpt-5".to_owned()),
-        2 => Some("gpt-5-mini".to_owned()),
-        _ => None,
-    }
-}
-
 fn codex_model_command(model: Option<&str>) -> Option<String> {
     let model = model?.trim();
     (!model.is_empty()).then(|| format!("/model {model}"))
+}
+
+fn replace_pending_model_command(
+    pending: &RefCell<HashMap<i64, Vec<String>>>,
+    thread_id: i64,
+    model: Option<&str>,
+) {
+    pending
+        .borrow_mut()
+        .entry(thread_id)
+        .or_default()
+        .retain(|existing| !existing.starts_with("/model "));
+    if let Some(command) = codex_model_command(model) {
+        queue_thread_command(pending, thread_id, command);
+    }
 }
 
 fn codex_reasoning_command(level: &str) -> Option<String> {
@@ -3369,6 +3438,89 @@ fn mode_menu_child(icon_name: &str, text_label: &str) -> GBox {
     shell.append(&text);
     shell.append(&arrow);
     shell
+}
+
+fn provider_model_menu_button(
+    choices: Rc<Vec<ProviderModelChoice>>,
+    selected_index: usize,
+    on_selected: Rc<dyn Fn(usize)>,
+) -> Button {
+    let selected = choices
+        .get(selected_index)
+        .or_else(|| choices.first())
+        .cloned()
+        .unwrap_or_else(|| ProviderModelChoice {
+            provider: "codex".to_owned(),
+            model: None,
+        });
+    let button = Button::new();
+    button.add_css_class("chat-mode-menu");
+    style_text_button(&button);
+    button.set_tooltip_text(Some(&selected.button_label()));
+    provider_model_menu_set_child(&button, &selected);
+    let popover = provider_model_menu_popover(button.clone(), choices, selected_index, on_selected);
+    popover.set_parent(&button);
+    button.connect_clicked(move |_| {
+        popover.popup();
+    });
+    button
+}
+
+fn provider_model_menu_set_child(button: &Button, choice: &ProviderModelChoice) {
+    let shell = mode_menu_child(choice.icon_name(), &choice.button_label());
+    button.set_child(Some(&shell));
+}
+
+fn provider_model_menu_popover(
+    button: Button,
+    choices: Rc<Vec<ProviderModelChoice>>,
+    selected_index: usize,
+    on_selected: Rc<dyn Fn(usize)>,
+) -> Popover {
+    let popover = Popover::new();
+    popover.add_css_class("chat-menu-popover");
+    let list = GBox::new(Orientation::Vertical, 4);
+    list.add_css_class("chat-menu-list");
+
+    let mut last_provider = None::<String>;
+    for (index, choice) in choices.iter().enumerate() {
+        if last_provider.as_deref() != Some(choice.provider.as_str()) {
+            let header = Label::new(Some(choice.provider_label()));
+            header.add_css_class("chat-menu-group-label");
+            header.set_xalign(0.0);
+            list.append(&header);
+            last_provider = Some(choice.provider.clone());
+        }
+
+        let row = Button::new();
+        row.add_css_class("chat-menu-item");
+        let row_box = GBox::new(Orientation::Horizontal, 10);
+        let icon = Image::from_icon_name(resolve_icon_name(choice.icon_name()));
+        icon.add_css_class("chat-menu-item-icon");
+        let name = Label::new(Some(choice.model_label()));
+        name.add_css_class("chat-menu-item-label");
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        row_box.append(&icon);
+        row_box.append(&name);
+        row.set_child(Some(&row_box));
+        if index == selected_index {
+            row.add_css_class("chat-menu-item-selected");
+        }
+        let button_for_row = button.clone();
+        let choice_for_row = choice.clone();
+        let popover_for_row = popover.clone();
+        let on_selected = on_selected.clone();
+        row.connect_clicked(move |_| {
+            provider_model_menu_set_child(&button_for_row, &choice_for_row);
+            button_for_row.set_tooltip_text(Some(&choice_for_row.button_label()));
+            on_selected(index);
+            popover_for_row.popdown();
+        });
+        list.append(&row);
+    }
+    popover.set_child(Some(&list));
+    popover
 }
 
 fn mode_menu_popover(
@@ -5370,6 +5522,7 @@ Do not answer this message. Use it only for continuity and wait for the next rea
 mod tests {
     use super::*;
     use crate::archcar_async::AsyncArchcarRequestKind;
+    use linux_archductor_core::doctor::SetupCheck;
     use linux_archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -5395,13 +5548,6 @@ mod tests {
             session_harness_metadata: metadata.map(str::to_owned),
             session_resume_id: None,
         }
-    }
-
-    #[test]
-    fn session_kind_from_index_maps_harness_menu_order() {
-        assert_eq!(session_kind_from_index(0), SessionKind::Codex);
-        assert_eq!(session_kind_from_index(1), SessionKind::Claude);
-        assert_eq!(session_kind_from_index(2), SessionKind::Codex);
     }
 
     #[test]
@@ -5433,6 +5579,75 @@ mod tests {
         assert_eq!(
             supported_chat_session_kinds(),
             &[SessionKind::Codex, SessionKind::Claude]
+        );
+    }
+
+    #[test]
+    fn provider_model_choices_show_only_ready_launchable_code_providers() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        let choices = provider_model_choices(&readiness, SessionKind::Codex);
+
+        assert_eq!(
+            choices,
+            vec![
+                ProviderModelChoice {
+                    provider: "codex".to_owned(),
+                    model: None,
+                },
+                ProviderModelChoice {
+                    provider: "codex".to_owned(),
+                    model: Some("gpt-5".to_owned()),
+                },
+                ProviderModelChoice {
+                    provider: "codex".to_owned(),
+                    model: Some("gpt-5-mini".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_model_choices_group_ready_launchable_providers() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        let choices = provider_model_choices(&readiness, SessionKind::Codex);
+
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.provider.as_str(), choice.model.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("codex", None),
+                ("codex", Some("gpt-5")),
+                ("codex", Some("gpt-5-mini")),
+                ("claude", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_model_choice_clears_pending_codex_model_command() {
+        let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
+        queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 7, "/thinking high".to_owned());
+
+        replace_pending_model_command(&pending, 7, None);
+
+        assert_eq!(
+            pending.borrow().get(&7).cloned().unwrap_or_default(),
+            vec!["/thinking high".to_owned()]
         );
     }
 

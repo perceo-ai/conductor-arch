@@ -1970,6 +1970,12 @@ popover.context-menu-popover arrow {
 .chat-menu-list {
     padding: 4px;
 }
+.chat-menu-group-label {
+    color: #8f8f8f;
+    font-size: 11px;
+    font-weight: 700;
+    margin: 6px 8px 2px;
+}
 .chat-menu-item {
     background: transparent;
     border: none;
