@@ -156,7 +156,7 @@ fn simple_workspace_shell(
         let right_panel_handle = right_panel_handle.clone();
         Rc::new(move || {
             if let Some(panel) = right_panel_handle.borrow().as_ref() {
-                panel.set_visible(false);
+                panel.set_visible(!panel.is_visible());
             }
         })
     };
