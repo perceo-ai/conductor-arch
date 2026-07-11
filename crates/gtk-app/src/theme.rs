@@ -253,10 +253,6 @@ textview:disabled {
     padding: 0;
 }
 
-.workspace-list row:selected {
-    background-color: #2e2e2e;
-}
-
 .workspace-list row:hover {
     background-color: #2c2c2c;
 }
@@ -265,12 +261,6 @@ textview:disabled {
 .project-row,
 .history-row {
     padding: 8px 10px;
-}
-
-.workspace-row-active {
-    background-color: #2e2e2e;
-    border: 1px solid transparent;
-    border-radius: 7px;
 }
 
 .workspace-row-menu-button {
@@ -283,14 +273,28 @@ textview:disabled {
     opacity: 1;
 }
 
-.workspace-row-branch-icon,
-.workspace-row-branch-icon-active {
-    min-width: 14px;
-    color: #7e7e7e;
+.workspace-row-diff-stats {
+    min-width: 64px;
 }
 
-.workspace-row-branch-icon-active {
-    color: #aaaaaa;
+.workspace-row-diff-added,
+.workspace-row-diff-removed {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.workspace-row-diff-added {
+    color: #84e0a0;
+}
+
+.workspace-row-diff-removed {
+    color: #ff8a8a;
+}
+
+.workspace-row-branch-icon {
+    min-width: 14px;
+    color: #7e7e7e;
 }
 
 .workspace-name {
@@ -1356,37 +1360,6 @@ window.lc-theme-dark,
     color: #8a8a8a;
 }
 
-/* ── Workspace ahead-commits badge ── */
-.workspace-badge {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 11px;
-    font-weight: 600;
-    color: #aaaaaa;
-    background-color: rgba(255, 255, 255, 0.08);
-    border-radius: 7px;
-    padding: 1px 6px;
-}
-.workspace-badge-muted {
-    color: #b4b4b4;
-    background-color: transparent;
-}
-.workspace-badge.ws-pr-status-ready {
-    background-color: #163522;
-    color: #84e0a0;
-}
-.workspace-badge.ws-pr-status-pending {
-    background-color: #262626;
-    color: #a8a8a8;
-}
-.workspace-badge.ws-pr-status-failed {
-    background-color: #3a1a1a;
-    color: #ff8a8a;
-}
-.workspace-badge.ws-pr-status-merged {
-    background-color: #311d46;
-    color: #c6a3ff;
-}
-
 /* ── Sidebar bottom bar ── */
 .sidebar-bottom-bar {
     background-color: #1e1e1e;
@@ -2442,7 +2415,6 @@ window,
 
 .nav-row-active,
 .nav-button-active,
-.workspace-row-active,
 .workspace-list row:selected,
 .chat-mode-selected,
 .chat-menu-item-selected,
@@ -2637,8 +2609,7 @@ textview:focus,
 .chat-focus-btn image,
 .chat-toolbar-btn image,
 .sidebar-nav-icon,
-.workspace-row-branch-icon,
-.workspace-row-branch-icon-active {
+.workspace-row-branch-icon {
     color: #93c5fd;
 }
 

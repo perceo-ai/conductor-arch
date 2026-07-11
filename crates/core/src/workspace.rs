@@ -870,6 +870,8 @@ pub struct WorkspaceStatusLine {
     pub run_running: bool,
     pub active_sessions: usize,
     pub branch_push_state: Option<BranchPushState>,
+    pub diff_additions: usize,
+    pub diff_deletions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1176,6 +1178,11 @@ impl WorkspaceStore {
             } else {
                 None
             };
+            let (diff_additions, diff_deletions) = if workspace.status == "active" {
+                workspace_diff_stats_against_base(&workspace).unwrap_or_default()
+            } else {
+                (0, 0)
+            };
             let repository_name: String = self
                 .conn
                 .query_row(
@@ -1192,6 +1199,8 @@ impl WorkspaceStore {
                 run_running: run_running > 0,
                 active_sessions,
                 branch_push_state,
+                diff_additions,
+                diff_deletions,
             });
         }
         Ok(lines)
@@ -2541,6 +2550,11 @@ impl WorkspaceStore {
         }
         summaries.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(summaries)
+    }
+
+    pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
+        let workspace = self.get_by_name(name)?;
+        workspace_diff_stats_against_base(&workspace)
     }
 
     pub fn untracked_files(&self, name: &str) -> Result<Vec<String>> {
@@ -6340,6 +6354,42 @@ fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
             })
         })
         .collect()
+}
+
+fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, usize)> {
+    let base_ref = if workspace.base_ref.trim().is_empty() {
+        "main"
+    } else {
+        workspace.base_ref.as_str()
+    };
+    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])
+        .or_else(|err| {
+            if base_ref == "main" {
+                Err(err)
+            } else {
+                git_output(&workspace.path, ["diff", "--numstat", "main", "--"])
+            }
+        })?;
+    let mut additions = 0;
+    let mut deletions = 0;
+    for summary in parse_diff_numstat(&diff) {
+        additions += summary.additions.unwrap_or_default();
+        deletions += summary.deletions.unwrap_or_default();
+    }
+
+    let status = git_output(
+        &workspace.path,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    for path in parse_untracked_status_paths(&status) {
+        if is_conductor_context_path(&path) {
+            continue;
+        }
+        let counts = untracked_file_counts(&workspace.path.join(&path))?;
+        additions += counts.0;
+    }
+
+    Ok((additions, deletions))
 }
 
 fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary> {
@@ -12189,6 +12239,67 @@ general = "Keep changes focused."
                 },
             ]
         );
+    }
+
+    #[test]
+    fn diff_stats_against_base_include_committed_and_untracked_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "changed\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "change readme",
+            ])
+            .status()
+            .unwrap();
+        fs::write(workspace.path.join("notes.txt"), "new\nnotes\n").unwrap();
+
+        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (3, 1));
+        let line = store
+            .list_status()
+            .unwrap()
+            .into_iter()
+            .find(|line| line.workspace.name == "berlin")
+            .unwrap();
+        assert_eq!((line.diff_additions, line.diff_deletions), (3, 1));
     }
 
     #[test]

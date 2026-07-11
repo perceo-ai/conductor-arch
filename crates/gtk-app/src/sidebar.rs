@@ -1,8 +1,9 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, Entry, EventControllerKey, GestureClick, Image, Label, ListBox,
-    ListBoxRow, Orientation, PolicyType, Popover, ScrolledWindow, Stack,
+    Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
+    Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
+    RevealerTransitionType, ScrolledWindow, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
@@ -21,7 +22,6 @@ use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
-use crate::workspace_command_center::workspace_pull_request_status_summary;
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
@@ -366,21 +366,8 @@ pub(crate) fn build_app_sidebar(
                             &ws.name,
                             &ws.branch,
                             &ws.status,
-                            line.run_running,
-                            line.active_sessions,
-                            line.open_todos,
-                            line.pull_request.as_ref().map(|p| p.number),
-                            line.pull_request.as_ref().map(|pr| {
-                                workspace_pull_request_status_summary(
-                                    &workspace_store,
-                                    &ws.name,
-                                    pr,
-                                )
-                            }),
-                            line.branch_push_state
-                                .as_ref()
-                                .map(|s| s.ahead)
-                                .unwrap_or(0),
+                            line.diff_additions,
+                            line.diff_deletions,
                             &ws.updated_at,
                         );
                         attach_workspace_row_context_menu(
@@ -635,35 +622,24 @@ where
 fn build_workspace_row(
     name: &str,
     branch: &str,
-    status: &str,
-    run_active: bool,
-    active_sessions: usize,
-    open_todos: usize,
-    pr_number: Option<i64>,
-    github_badge: Option<crate::workspace_command_center::PullRequestStatusSummary>,
-    ahead: usize,
+    _status: &str,
+    diff_additions: usize,
+    diff_deletions: usize,
     updated_at: &str,
 ) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Horizontal, 10);
     row_box.add_css_class("project-row");
     row_box.add_css_class("workspace-row-shell");
-    let is_active = run_active || active_sessions > 0;
-    if is_active {
-        row_box.add_css_class("workspace-row-active");
-    }
 
     let branch_icon = Image::from_icon_name(resolve_icon_name("list-drag-handle-symbolic"));
     branch_icon.add_css_class("workspace-row-branch-icon");
-    if is_active {
-        branch_icon.add_css_class("workspace-row-branch-icon-active");
-    }
     row_box.append(&branch_icon);
 
     // Text column
     let text_box = GBox::new(Orientation::Vertical, 2);
     text_box.set_hexpand(true);
 
-    // Top row: name + badge
+    // Top row: name
     let top_row = GBox::new(Orientation::Horizontal, 6);
     top_row.set_hexpand(true);
 
@@ -673,33 +649,6 @@ fn build_workspace_row(
     name_label.set_hexpand(true);
     name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     top_row.append(&name_label);
-
-    // Badge priority: PR > preview > active > ahead commits > todos
-    let badge_text = workspace_badge_text(
-        pr_number,
-        github_badge
-            .as_ref()
-            .and_then(|state| state.attention_label()),
-        run_active,
-        active_sessions,
-        ahead,
-        open_todos,
-    );
-
-    if let Some(badge) = badge_text {
-        let badge_label = Label::new(Some(&badge));
-        badge_label.add_css_class("workspace-badge");
-        if let Some(state) = github_badge.as_ref() {
-            if let Some(css_class) = state.attention_css_class() {
-                badge_label.add_css_class(css_class);
-            }
-        }
-        if !is_active && ahead == 0 && pr_number.is_none() {
-            badge_label.add_css_class("workspace-badge-muted");
-        }
-        badge_label.set_xalign(1.0);
-        top_row.append(&badge_label);
-    }
 
     text_box.append(&top_row);
 
@@ -720,10 +669,48 @@ fn build_workspace_row(
     meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     text_box.append(&meta_label);
 
-    let _ = status;
     row_box.append(&text_box);
 
+    let diff_revealer = workspace_diff_revealer(diff_additions, diff_deletions);
+    let diff_revealer_for_enter = diff_revealer.clone();
+    let diff_revealer_for_leave = diff_revealer.clone();
+    let hover_controller = EventControllerMotion::new();
+    hover_controller.connect_enter(move |_, _, _| {
+        diff_revealer_for_enter.set_reveal_child(true);
+    });
+    hover_controller.connect_leave(move |_| {
+        diff_revealer_for_leave.set_reveal_child(false);
+    });
+    row_box.add_controller(hover_controller);
+    row_box.append(&diff_revealer);
+
     ListBoxRow::builder().child(&row_box).build()
+}
+
+fn workspace_diff_revealer(additions: usize, deletions: usize) -> Revealer {
+    let revealer = Revealer::new();
+    revealer.add_css_class("workspace-row-diff-revealer");
+    revealer.set_transition_type(RevealerTransitionType::SlideLeft);
+    revealer.set_transition_duration(140);
+    revealer.set_reveal_child(false);
+    revealer.set_halign(Align::End);
+
+    let stats = GBox::new(Orientation::Horizontal, 5);
+    stats.add_css_class("workspace-row-diff-stats");
+    stats.set_halign(Align::End);
+
+    let additions_label = Label::new(Some(&format!("+ {additions}")));
+    additions_label.add_css_class("workspace-row-diff-added");
+    additions_label.set_xalign(1.0);
+    stats.append(&additions_label);
+
+    let deletions_label = Label::new(Some(&format!("- {deletions}")));
+    deletions_label.add_css_class("workspace-row-diff-removed");
+    deletions_label.set_xalign(1.0);
+    stats.append(&deletions_label);
+
+    revealer.set_child(Some(&stats));
+    revealer
 }
 
 fn attach_workspace_row_context_menu(
@@ -1229,35 +1216,6 @@ fn show_workspace_error_dialog(window: &ApplicationWindow, title: &str, message:
     dialog.present();
 }
 
-fn workspace_badge_text(
-    pr_number: Option<i64>,
-    pr_attention: Option<&str>,
-    run_active: bool,
-    active_sessions: usize,
-    ahead: usize,
-    open_todos: usize,
-) -> Option<String> {
-    if let Some(attention) = pr_attention.filter(|value| !value.is_empty()) {
-        return Some(attention.to_owned());
-    }
-    if let Some(pr) = pr_number {
-        return Some(format!("PR #{pr}"));
-    }
-    if run_active {
-        return Some("preview".to_owned());
-    }
-    if active_sessions > 0 {
-        return Some("active".to_owned());
-    }
-    if ahead > 0 {
-        return Some(format!("+{ahead}"));
-    }
-    if open_todos > 0 {
-        return Some(format!("{open_todos} todo"));
-    }
-    None
-}
-
 fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
     let mut labels = vec!["Dashboard", "History"];
     if debug_mode {
@@ -1385,22 +1343,10 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        spawn_background_job, workspace_badge_text,
+        spawn_background_job,
     };
     use crate::state::AppPage;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn workspace_badge_prefers_failed_github_state_over_pr_number() {
-        let badge = workspace_badge_text(Some(42), Some("checks failed"), false, 0, 0, 0);
-        assert_eq!(badge.as_deref(), Some("checks failed"));
-    }
-
-    #[test]
-    fn workspace_badge_falls_back_to_pr_number_without_github_state() {
-        let badge = workspace_badge_text(Some(42), None, false, 0, 0, 0);
-        assert_eq!(badge.as_deref(), Some("PR #42"));
-    }
 
     #[test]
     fn primary_sidebar_nav_labels_gate_pty_inspector_under_history() {
