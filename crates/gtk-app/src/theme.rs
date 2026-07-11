@@ -1910,8 +1910,11 @@ row:hover .ws-folder-name {
     font-size: 11px;
     font-weight: 700;
 }
+.chat-content-overlay {
+    background-color: #151515;
+}
 .chat-messages {
-    padding: 22px 24px 8px;
+    padding: 22px 24px 180px;
 }
 .chat-user-row {
     margin-bottom: 22px;
@@ -1969,7 +1972,7 @@ row:hover .ws-folder-name {
 }
 .chat-composer {
     padding: 0 16px 16px;
-    background-color: #151515;
+    background-color: transparent;
 }
 .chat-composer-box {
     border: 1px solid #2a2a2a;
@@ -2188,7 +2191,6 @@ window,
 .page-header,
 .dashboard-header,
 .sidebar,
-.chat-composer,
 .chat-composer-box,
 .settings-toolbar,
 .settings-rail,
@@ -2384,12 +2386,22 @@ combobox box,
 .workspace-modal-field,
 .settings-machine-entry,
 .settings-editor,
-.settings-editor text,
-.chat-input-scroll,
-.chat-input-view,
-.chat-input-view text {
+.settings-editor text {
     background-color: #0d0d0d;
     border-color: #343434;
+    color: #f8fafc;
+}
+
+.chat-composer {
+    background-color: transparent;
+}
+
+.chat-composer-box .chat-input-scroll,
+.chat-composer-box .chat-input-view,
+.chat-composer-box .chat-input-view text {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
     color: #f8fafc;
 }
 
@@ -2427,14 +2439,19 @@ entry:focus,
 combobox:focus,
 combobox button:focus,
 textview:focus,
-.chat-input-view:focus,
-.chat-input-view text:focus,
-.chat-input-scroll:focus-within,
 .chat-composer-box:focus-within {
     border-color: #8a8a8a;
     box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
     outline: 1px solid transparent;
     outline-offset: 2px;
+}
+
+.chat-composer-box .chat-input-scroll:focus-within,
+.chat-composer-box .chat-input-view:focus,
+.chat-composer-box .chat-input-view text:focus {
+    border: none;
+    box-shadow: none;
+    outline: none;
 }
 
 .workspace-modal-field:focus,

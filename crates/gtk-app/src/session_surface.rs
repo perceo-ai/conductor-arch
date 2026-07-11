@@ -1,8 +1,8 @@
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey, Image, Label,
-    Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow, Spinner,
-    TextBuffer, TextView, ToggleButton, Widget,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey,
+    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
+    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
@@ -235,11 +235,20 @@ pub fn agent_session_panel(
     scroll.set_vexpand(true);
     scroll.set_propagate_natural_width(false);
     scroll.set_child(Some(&messages));
-    root.append(&scroll);
+
+    let chat_overlay = Overlay::new();
+    chat_overlay.add_css_class("chat-content-overlay");
+    chat_overlay.set_vexpand(true);
+    chat_overlay.set_hexpand(true);
+    chat_overlay.set_child(Some(&scroll));
+    root.append(&chat_overlay);
 
     // ── Composer ─────────────────────────────────────────────────────
     let composer_wrap = GBox::new(Orientation::Vertical, 0);
     composer_wrap.add_css_class("chat-composer");
+    composer_wrap.set_halign(Align::Fill);
+    composer_wrap.set_valign(Align::End);
+    composer_wrap.set_hexpand(true);
 
     let composer_box = GBox::new(Orientation::Vertical, 0);
     composer_box.add_css_class("chat-composer-box");
@@ -257,6 +266,7 @@ pub fn agent_session_panel(
     input_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     input_scroll.set_min_content_height(54);
     input_scroll.set_max_content_height(120);
+    input_scroll.set_propagate_natural_height(true);
     input_scroll.set_propagate_natural_width(false);
     input_scroll.add_css_class("chat-input-scroll");
     input_scroll.set_child(Some(&input_view));
@@ -265,6 +275,14 @@ pub fn agent_session_panel(
     let input_overlay = Overlay::new();
     input_overlay.set_hexpand(true);
     input_overlay.set_child(Some(&input_scroll));
+    let input_focus_click = GestureClick::new();
+    input_focus_click.connect_pressed({
+        let input_view = input_view.clone();
+        move |_, _, _, _| {
+            input_view.grab_focus();
+        }
+    });
+    input_overlay.add_controller(input_focus_click);
     let placeholder = Label::new(Some(
         "Ask to make changes, @mention files, or run /commands",
     ));
@@ -273,6 +291,7 @@ pub fn agent_session_panel(
     placeholder.set_valign(Align::Start);
     placeholder.set_margin_start(18);
     placeholder.set_margin_top(18);
+    placeholder.set_can_target(false);
     input_overlay.add_overlay(&placeholder);
     input_shell.append(&input_overlay);
 
@@ -396,7 +415,8 @@ pub fn agent_session_panel(
     composer_box.append(&input_shell);
     composer_box.append(&toolbar);
     composer_wrap.append(&composer_box);
-    root.append(&composer_wrap);
+    chat_overlay.add_overlay(&composer_wrap);
+    chat_overlay.set_measure_overlay(&composer_wrap, false);
 
     let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
