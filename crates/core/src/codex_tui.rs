@@ -246,6 +246,23 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
         .collect()
 }
 
+pub fn codex_screen_ready_for_input(screen: &str) -> bool {
+    let trimmed = screen.trim();
+    if trimmed.is_empty()
+        || !trimmed.contains('›')
+        || detect_directory_trust_prompt(screen)
+        || screen.contains("model:       loading")
+    {
+        return false;
+    }
+
+    if has_loaded_live_footer(screen) {
+        return true;
+    }
+
+    !screen.contains("Booting MCP server") && !screen.contains("Starting MCP servers")
+}
+
 pub fn codex_persistent_screen_fingerprint(screen: &str) -> Option<String> {
     let normalized_screen = normalize_screen(screen);
     let lines = normalized_screen.lines().collect::<Vec<_>>();
@@ -1424,6 +1441,13 @@ fn live_footer_start_index(lines: &[&str]) -> Option<usize> {
     has_transcript_before_prompt.then_some(prompt_index)
 }
 
+fn has_loaded_live_footer(screen: &str) -> bool {
+    screen.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.contains(" · ") && trimmed.contains("gpt-")
+    })
+}
+
 fn is_ignorable_transcript_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty()
@@ -1493,14 +1517,14 @@ fn trim_blank_edges(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
-        merge_screen_messages, parse_codex_context_usage, parse_codex_event_blocks,
-        parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_delta,
-        parse_codex_screen_messages, parse_codex_structured_lines, CodexContextUsage,
-        CodexFileChange, CodexFileChangeAction, CodexFileChangeLine, CodexFileChangeLineKind,
-        CodexFileReference, CodexInlineEvent, CodexParseBenchmark, CodexParsedItem,
-        CodexParsedLine, CodexSkillAnnouncement, CodexToolCall, CodexTranscriptEvent,
-        ScreenMessage, ScreenMessageRole,
+        codex_screen_ready_for_input, detect_directory_trust_prompt, encode_send_line,
+        is_trust_prompt_visible, merge_screen_messages, parse_codex_context_usage,
+        parse_codex_event_blocks, parse_codex_file_change_block, parse_codex_inline_event,
+        parse_codex_screen_delta, parse_codex_screen_messages, parse_codex_structured_lines,
+        CodexContextUsage, CodexFileChange, CodexFileChangeAction, CodexFileChangeLine,
+        CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent, CodexParseBenchmark,
+        CodexParsedItem, CodexParsedLine, CodexSkillAnnouncement, CodexToolCall,
+        CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
@@ -2533,6 +2557,34 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
                 content: "Improve documentation in @filename".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn ready_detection_ignores_stale_boot_noise_with_loaded_footer() {
+        let screen = "\
+╭──────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.142.3)                       │
+│                                                  │
+│ model:       gpt-5.4 medium   /model to change   │
+│ directory:   ~/archductor/…/chandelier/islamabad │
+│ permissions: YOLO mode                           │
+╰──────────────────────────────────────────────────╯
+
+• Booting MCP server: codex_apps (0s • esc to interrupt)
+
+
+› Improve documentation in @filename
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert!(codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_when_boot_noise_has_no_loaded_footer() {
+        assert!(!codex_screen_ready_for_input(
+            "• Booting MCP server\n\n› Improve documentation"
+        ));
     }
 
     #[test]

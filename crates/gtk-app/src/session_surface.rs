@@ -116,16 +116,21 @@ struct ContextUsageDisplayState {
     tooltip: String,
 }
 
+type ChatRenderRecordSignature = (i64, Option<i64>, ProcessStatus, Option<i32>, Option<String>);
+type ChatRenderThreadSignature = (i64, String, String, String, String);
+type ChatRenderMessageSignature = (i64, String, Option<i64>, String, usize);
+type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChatRenderSignature {
     current_kind: SessionKind,
     selected_thread_id: Option<i64>,
     active_record: Option<i64>,
     startup_state: CodexStartupState,
-    records: Vec<(i64, Option<i64>, ProcessStatus, Option<i32>, Option<String>)>,
-    threads: Vec<(i64, String, String, String, String)>,
-    messages: Vec<(i64, String, Option<i64>, String, usize)>,
-    events: Vec<(i64, String, i64, String, String, usize)>,
+    records: Vec<ChatRenderRecordSignature>,
+    threads: Vec<ChatRenderThreadSignature>,
+    messages: Vec<ChatRenderMessageSignature>,
+    events: Vec<ChatRenderEventSignature>,
     render_state: &'static str,
     runtime_summary: Option<String>,
 }
@@ -578,6 +583,15 @@ pub fn agent_session_panel(
                 }
             }
             if archcar_changed {
+                let _ = flush_pending_archcar_inputs(
+                    &archcar_bridge,
+                    &database_path,
+                    pending_commands.as_ref(),
+                    pending_archcar_inputs.as_ref(),
+                    archcar_ready_cache.as_ref(),
+                    inflight_archcar_actions.as_ref(),
+                    &app_state,
+                );
                 update_composer_for_view();
             }
 
@@ -5400,6 +5414,19 @@ fix it
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].input, "review this diff");
         assert_eq!(items[0].kind, ArchcarInputKind::ReviewPrompt);
+    }
+
+    #[test]
+    fn refresh_path_flushes_pending_archcar_inputs() {
+        let source = include_str!("session_surface.rs");
+        let calls = source
+            .match_indices("flush_pending_archcar_inputs(")
+            .count();
+
+        assert!(
+            calls > 1,
+            "queued archcar inputs must be flushed from the refresh/event path"
+        );
     }
 
     #[test]
