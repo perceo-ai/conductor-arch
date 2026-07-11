@@ -258,6 +258,10 @@ pub fn codex_screen_ready_for_input(screen: &str) -> bool {
         return false;
     }
 
+    if has_live_working_status(screen) {
+        return false;
+    }
+
     if has_loaded_live_footer(screen) {
         return true;
     }
@@ -1008,10 +1012,31 @@ fn read_file_event_title(line: &str) -> Option<String> {
         return None;
     }
     let rest = trimmed.strip_prefix("Read ")?;
-    let raw_path = rest.split_whitespace().next()?.trim_matches(|ch: char| {
-        matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')
-    });
-    is_probable_read_file_path(raw_path).then(|| trimmed.to_owned())
+    read_file_event_paths_are_complete(rest).then(|| trimmed.to_owned())
+}
+
+fn read_file_event_paths_are_complete(rest: &str) -> bool {
+    let mut saw_path = false;
+    for raw_part in rest.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return false;
+        }
+        let token = part.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
+            )
+        });
+        if token.is_empty() || token.split_whitespace().count() != 1 {
+            return false;
+        }
+        if !is_probable_read_file_path(token) {
+            return false;
+        }
+        saw_path = true;
+    }
+    saw_path
 }
 
 fn is_probable_read_file_path(path: &str) -> bool {
@@ -1466,7 +1491,7 @@ fn is_transient_status_bullet(content: &str) -> bool {
     content.starts_with("Starting MCP servers")
         || content.starts_with("Working (")
         || content.starts_with("Thinking (")
-        || content.starts_with("Explored")
+        || content == "Explored"
 }
 
 fn transient_bullet_content(line: &str) -> Option<&str> {
@@ -1563,6 +1588,14 @@ fn has_loaded_live_footer(screen: &str) -> bool {
     screen.lines().any(|line| {
         let trimmed = line.trim();
         trimmed.contains(" · ") && trimmed.contains("gpt-")
+    })
+}
+
+fn has_live_working_status(screen: &str) -> bool {
+    screen.lines().rev().take(8).any(|line| {
+        transient_bullet_content(line).is_some_and(|content| {
+            content.starts_with("Working (") || content.starts_with("Thinking (")
+        })
     })
 }
 
@@ -1763,6 +1796,19 @@ mod tests {
                 message: "Read SKILL.md".to_owned(),
             }))
         );
+    }
+
+    #[test]
+    fn read_file_event_requires_complete_path_list() {
+        let events = parse_codex_event_blocks("Read README.md, crates/core/src/lib.rs\nbody");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            CodexTranscriptEvent::Tool { title, .. }
+                if title == "Read README.md, crates/core/src/lib.rs"
+        ));
+
+        assert!(parse_codex_event_blocks("Read README.md before changing the parser").is_empty());
     }
 
     #[test]
@@ -2726,6 +2772,18 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
   gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
 
         assert!(codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_when_loaded_footer_still_shows_working() {
+        let screen = "\
+› Fix this bug
+
+• Working (12s • esc to interrupt)
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert!(!codex_screen_ready_for_input(screen));
     }
 
     #[test]

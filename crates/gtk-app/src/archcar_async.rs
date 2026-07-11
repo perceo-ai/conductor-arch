@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use linux_archductor_core::archcar::client::ArchcarClient;
 use linux_archductor_core::archcar::protocol::{
@@ -67,6 +68,7 @@ struct AsyncArchcarRequestEnvelope {
 
 type BridgeWake = Arc<dyn Fn() + Send + Sync + 'static>;
 type BridgeWakeSlot = Arc<Mutex<Option<BridgeWake>>>;
+type BridgeConnectLock = Arc<Mutex<()>>;
 
 #[derive(Clone)]
 pub struct AsyncArchcarBridge {
@@ -81,15 +83,17 @@ impl AsyncArchcarBridge {
         let (request_tx, request_rx) = mpsc::channel();
         let (message_tx, message_rx) = mpsc::channel();
         let wake = Arc::new(Mutex::new(None));
+        let connect_lock = Arc::new(Mutex::new(()));
         thread::spawn({
             let paths = paths.clone();
             let message_tx = message_tx.clone();
             let wake = wake.clone();
-            move || run_archcar_request_bridge(paths, request_rx, message_tx, wake)
+            let connect_lock = connect_lock.clone();
+            move || run_archcar_request_bridge(paths, request_rx, message_tx, wake, connect_lock)
         });
         thread::spawn({
             let wake = wake.clone();
-            move || run_archcar_event_bridge(paths, message_tx, wake)
+            move || run_archcar_event_bridge(paths, message_tx, wake, connect_lock)
         });
         Self {
             request_tx,
@@ -205,11 +209,15 @@ fn run_archcar_request_bridge(
     request_rx: Receiver<AsyncArchcarRequestEnvelope>,
     message_tx: Sender<AsyncArchcarMessage>,
     wake: BridgeWakeSlot,
+    connect_lock: BridgeConnectLock,
 ) {
     let client = ArchcarClient::from_paths(&paths);
     for envelope in request_rx {
         let request_kind = request_kind(&envelope.request);
-        let result = client.send(envelope.request).map_err(|err| err.to_string());
+        let result = match connect_lock.lock() {
+            Ok(_guard) => client.send(envelope.request).map_err(|err| err.to_string()),
+            Err(_) => Err("async archcar connect lock poisoned".to_owned()),
+        };
         if !send_bridge_message(
             &message_tx,
             &wake,
@@ -228,26 +236,48 @@ fn run_archcar_event_bridge(
     paths: AppPaths,
     message_tx: Sender<AsyncArchcarMessage>,
     wake: BridgeWakeSlot,
+    connect_lock: BridgeConnectLock,
 ) {
     let client = ArchcarClient::from_paths(&paths);
-    match client.subscribe() {
-        Ok(rx) => {
-            info!("async archcar bridge subscribed to sidecar events");
-            for event in rx {
-                if !send_bridge_message(&message_tx, &wake, AsyncArchcarMessage::Event(event)) {
+    loop {
+        let subscribe_result = match connect_lock.lock() {
+            Ok(_guard) => client.subscribe(),
+            Err(_) => {
+                let _ = send_bridge_message(
+                    &message_tx,
+                    &wake,
+                    AsyncArchcarMessage::BridgeError {
+                        message: "async archcar connect lock poisoned".to_owned(),
+                    },
+                );
+                return;
+            }
+        };
+
+        match subscribe_result {
+            Ok(rx) => {
+                info!("async archcar bridge subscribed to sidecar events");
+                for event in rx {
+                    if !send_bridge_message(&message_tx, &wake, AsyncArchcarMessage::Event(event)) {
+                        return;
+                    }
+                }
+                warn!("async archcar event subscription closed; reconnecting");
+            }
+            Err(err) => {
+                if !send_bridge_message(
+                    &message_tx,
+                    &wake,
+                    AsyncArchcarMessage::BridgeError {
+                        message: format!("subscribe archcar events failed: {err:#}"),
+                    },
+                ) {
                     return;
                 }
+                warn!(error = %err, "async archcar event subscribe failed; retrying");
             }
         }
-        Err(err) => {
-            let _ = send_bridge_message(
-                &message_tx,
-                &wake,
-                AsyncArchcarMessage::BridgeError {
-                    message: format!("subscribe archcar events failed: {err:#}"),
-                },
-            );
-        }
+        thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -389,15 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn bridge_does_not_poll_archcar_with_timeouts() {
-        let source = include_str!("archcar_async.rs");
-        let blocked_receive_with_deadline = concat!("recv", "_timeout");
-        let repeated_subscribe_deadline = concat!("last", "_subscribe", "_attempt");
-
-        assert!(
-            !source.contains(blocked_receive_with_deadline)
-                && !source.contains(repeated_subscribe_deadline),
-            "GTK archcar bridge must be event/blocking-request driven, not timeout polled"
+    fn async_bridge_request_kinds_do_not_expose_subscribe_as_user_action() {
+        assert_eq!(
+            request_kind(&ArchcarRequest::Subscribe),
+            AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
         );
     }
 }

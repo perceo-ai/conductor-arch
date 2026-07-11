@@ -80,7 +80,7 @@ fn render_dashboard(
     if selected_project
         .borrow()
         .as_ref()
-        .is_some_and(|selected| !repo_names.iter().any(|repo| repo == selected))
+        .is_some_and(|selected| !repo_names.iter().take(5).any(|repo| repo == selected))
     {
         *selected_project.borrow_mut() = None;
     }
@@ -88,11 +88,15 @@ fn render_dashboard(
 
     let all_tab = dashboard_project_tab("All projects", selected.is_none(), {
         let db_path = db_path.to_path_buf();
-        let project_tabs = project_tabs.clone();
-        let board = board.clone();
+        let project_tabs = project_tabs.downgrade();
+        let board = board.downgrade();
         let selected_project = selected_project.clone();
         move || {
             *selected_project.borrow_mut() = None;
+            let (Some(project_tabs), Some(board)) = (project_tabs.upgrade(), board.upgrade())
+            else {
+                return;
+            };
             render_dashboard(&db_path, &project_tabs, &board, selected_project.clone());
         }
     });
@@ -100,12 +104,16 @@ fn render_dashboard(
     for repo in repo_names.iter().take(5) {
         let tab = dashboard_project_tab(repo, selected.as_deref() == Some(repo.as_str()), {
             let db_path = db_path.to_path_buf();
-            let project_tabs = project_tabs.clone();
-            let board = board.clone();
+            let project_tabs = project_tabs.downgrade();
+            let board = board.downgrade();
             let selected_project = selected_project.clone();
             let repo = repo.clone();
             move || {
                 *selected_project.borrow_mut() = Some(repo.clone());
+                let (Some(project_tabs), Some(board)) = (project_tabs.upgrade(), board.upgrade())
+                else {
+                    return;
+                };
                 render_dashboard(&db_path, &project_tabs, &board, selected_project.clone());
             }
         });

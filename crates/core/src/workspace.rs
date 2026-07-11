@@ -3986,6 +3986,10 @@ mutation($threadId: ID!) {{
         self.get_by_id(id)
     }
 
+    pub fn get_workspace_record_by_name(&self, name: &str) -> Result<Workspace> {
+        self.get_by_name(name)
+    }
+
     pub fn list_local_chat_history(
         &self,
         workspace_path: Option<&Path>,
@@ -4893,12 +4897,13 @@ mutation($threadId: ID!) {{
     ) -> Result<()> {
         let now = timestamp();
         let archived_at = archived.then_some(now.as_str());
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE chat_threads
              SET status = ?1, updated_at = ?2, archived_at = ?3
              WHERE id = ?4",
             params![status, now, archived_at, thread_id],
         )?;
+        anyhow::ensure!(changed > 0, "chat thread {thread_id} not found");
         Ok(())
     }
 
@@ -5909,8 +5914,14 @@ fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> R
                 )
             })?;
             let top_level = PathBuf::from(top_level.trim());
+            let canonical_workspace_path = workspace_path.canonicalize().with_context(|| {
+                format!(
+                    "canonicalize workspace path {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
             anyhow::ensure!(
-                top_level == workspace_path,
+                top_level == canonical_workspace_path,
                 "refusing fallback delete for {} because git top-level is {} after git worktree remove failed: {err:#}",
                 workspace_path.display(),
                 top_level.display()

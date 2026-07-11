@@ -237,6 +237,11 @@ pub fn spawn_managed_session_for_thread(
 ) -> Result<SessionHandle> {
     let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
     let thread_record = store.get_chat_thread_record(thread_id)?;
+    let workspace_record = store.get_workspace_record_by_name(&workspace)?;
+    anyhow::ensure!(
+        thread_record.workspace_id == workspace_record.id,
+        "chat thread {thread_id} does not belong to workspace {workspace}"
+    );
     anyhow::ensure!(
         thread_record.provider == provider_name(kind),
         "chat thread {thread_id} is not a {:?} thread",
@@ -740,6 +745,7 @@ fn run_session_loop(
                 let current = snapshot.lock().unwrap().clone();
                 let _ = event_tx.send(ArchcarEvent::SessionError {
                     session_id: Some(current.session_id),
+                    thread_id: Some(current.thread_id),
                     message: err.to_string(),
                 });
                 break;

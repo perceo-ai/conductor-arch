@@ -839,6 +839,7 @@ pub fn agent_session_panel(
                                     label.set_wrap(true);
                                     label.set_xalign(0.0);
                                     clear_box(&messages);
+                                    *last_render_signature.borrow_mut() = None;
                                     apply_context_usage_state(&context_usage, None);
                                     append_chat_refresh_row(&messages, &label);
                                     return;
@@ -884,6 +885,10 @@ pub fn agent_session_panel(
                                         &messages,
                                         &codex_working_indicator_widget(elapsed),
                                     );
+                                } else if let Some(widget) =
+                                    codex_startup_state_widget(&startup_state)
+                                {
+                                    append_chat_refresh_row(&messages, &widget);
                                 }
                                 let timeline = merge_chat_timeline_for_render(
                                     thread_messages.clone(),
@@ -930,6 +935,14 @@ pub fn agent_session_panel(
                     }
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
+                    if let Some(elapsed) = working_elapsed {
+                        append_chat_refresh_row(
+                            &messages,
+                            &codex_working_indicator_widget(elapsed),
+                        );
+                    } else if let Some(widget) = codex_startup_state_widget(&startup_state) {
+                        append_chat_refresh_row(&messages, &widget);
+                    }
                     let empty = Label::new(Some("No messages yet."));
                     empty.add_css_class("chat-agent-text");
                     empty.set_selectable(true);
@@ -1984,7 +1997,7 @@ fn strip_codex_status_blocks(content: &str) -> String {
 }
 
 fn is_codex_status_block_header(line: &str) -> bool {
-    normalize_chat_status_line(line).starts_with("Explored")
+    normalize_chat_status_line(line) == "Explored"
 }
 
 fn is_codex_status_block_continuation(line: &str) -> bool {
@@ -4086,11 +4099,15 @@ fn codex_thread_id_for_session(
 
 fn codex_thread_id_for_startup_error(
     session_id: Option<i64>,
+    event_thread_id: Option<i64>,
     session_threads: &RefCell<HashMap<i64, i64>>,
     records: &[ProcessRecord],
     selected_harness: SessionKind,
     selected_thread_id: Option<i64>,
 ) -> Option<i64> {
+    if event_thread_id.is_some() {
+        return event_thread_id;
+    }
     match session_id {
         Some(session_id) => codex_thread_id_for_session(session_id, session_threads, records),
         None if selected_harness == SessionKind::Codex => selected_thread_id,
@@ -4155,6 +4172,22 @@ fn codex_working_indicator_widget(elapsed: Duration) -> Widget {
     row.append(&label);
 
     row.upcast()
+}
+
+fn codex_startup_state_widget(state: &CodexStartupState) -> Option<Widget> {
+    let text = match state {
+        CodexStartupState::Loading { message } | CodexStartupState::Error { message } => message,
+        CodexStartupState::Idle | CodexStartupState::Ready => return None,
+    };
+    let label = Label::new(Some(text));
+    label.add_css_class("chat-agent-text");
+    if matches!(state, CodexStartupState::Error { .. }) {
+        label.add_css_class("status-error");
+    }
+    label.set_selectable(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    Some(label.upcast())
 }
 
 fn session_event_role_for_line(line: &str) -> Option<SessionTranscriptRole> {
@@ -4710,9 +4743,14 @@ fn update_working_indicator_for_archcar_event(
             };
             clear_thread_working(working_threads, thread_id)
         }
-        ArchcarEvent::SessionError { session_id, .. } => {
+        ArchcarEvent::SessionError {
+            session_id,
+            thread_id,
+            ..
+        } => {
             let Some(thread_id) = codex_thread_id_for_startup_error(
                 *session_id,
+                *thread_id,
                 session_threads,
                 records,
                 selected_harness,
@@ -4804,14 +4842,16 @@ fn handle_archcar_event(
         }
         ArchcarEvent::SessionError {
             session_id,
+            thread_id,
             message,
         } => {
-            warn!(?session_id, %message, "archcar session error");
+            warn!(?session_id, ?thread_id, %message, "archcar session error");
             if let Some(session_id) = session_id {
                 note_archcar_ready(&mut ready_cache.borrow_mut(), *session_id, false);
             }
             if let Some(thread_id) = codex_thread_id_for_startup_error(
                 *session_id,
+                *thread_id,
                 session_threads,
                 records,
                 selected_harness,
@@ -6336,6 +6376,14 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
+    fn status_block_filter_keeps_explored_prose() {
+        assert_eq!(
+            strip_codex_status_blocks("Explored two alternatives before choosing the small fix."),
+            "Explored two alternatives before choosing the small fix."
+        );
+    }
+
+    #[test]
     fn composer_enter_key_sends_without_shift() {
         assert!(should_send_composer_message(
             gtk::gdk::Key::Return,
@@ -6748,6 +6796,7 @@ Schema confirms the app moved CRM around businesses.";
         let session_threads = RefCell::new(HashMap::<i64, i64>::new());
 
         let thread_id = codex_thread_id_for_startup_error(
+            None,
             None,
             &session_threads,
             &records,

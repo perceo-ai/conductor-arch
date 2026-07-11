@@ -487,4 +487,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn removing_selected_workspace_clears_active_state() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.set_selected_chat_thread(Some(42));
+        state.set_selected_agent_session(Some(99));
+        state.set_staged_review_prompt(Some("review".to_owned()));
+        state.queue_pending_chat_prompt("fix bug".to_owned());
+
+        state.remove_workspace_from_navigation("berlin", AppPage::Dashboard);
+        let snapshot = state.snapshot();
+
+        assert_eq!(snapshot.selected_workspace, None);
+        assert_eq!(snapshot.selected_chat_thread, None);
+        assert_eq!(snapshot.selected_agent_session, None);
+        assert_eq!(snapshot.staged_review_prompt, None);
+        assert_eq!(snapshot.pending_chat_prompt, None);
+        assert_eq!(snapshot.active_page, AppPage::Dashboard);
+    }
 }
