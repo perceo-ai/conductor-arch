@@ -57,6 +57,8 @@ pub(crate) fn resolve_icon_name(icon: &str) -> &'static str {
         "list-drag-handle-symbolic" => "list-drag-handle-symbolic",
         "utilities-terminal-symbolic" => "utilities-terminal-symbolic",
         "view-more-symbolic" => "view-more-symbolic",
+        "process-stop-symbolic" => "process-stop-symbolic",
+        "view-refresh-symbolic" => "view-refresh-symbolic",
         "window-close-symbolic" => "window-close-symbolic",
         "window-minimize-symbolic" => "window-minimize-symbolic",
         "window-maximize-symbolic" => "window-maximize-symbolic",
