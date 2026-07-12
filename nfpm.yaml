@@ -12,7 +12,7 @@ description: |
   agent sessions, run scripts, diffs, checks, and a pull request path.
 vendor: linux-archductor
 homepage: https://github.com/pranavkannepalli/conductor-arch
-license: MIT
+license: Apache-2.0
 
 contents:
   - src: target/release/linux-archductor
