@@ -1413,27 +1413,11 @@ impl WorkspaceStore {
             self.workspace_name_available_for_rename(&repository, workspace.id, new_name)?,
             "workspace {new_name} already exists"
         );
-        let new_path = workspace
-            .path
-            .parent()
-            .map(|parent| parent.join(new_name))
-            .with_context(|| {
-                format!("workspace path has no parent: {}", workspace.path.display())
-            })?;
-
-        if workspace.path.exists() && workspace.path != new_path {
-            move_workspace_worktree(&repository.root_path, &workspace.path, &new_path)?;
-        }
 
         let now = timestamp();
         let changed = self.conn.execute(
-            "UPDATE workspaces SET name = ?1, path = ?2, updated_at = ?3 WHERE id = ?4",
-            params![
-                new_name,
-                new_path.to_string_lossy().to_string(),
-                now,
-                workspace.id
-            ],
+            "UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_name, now, workspace.id],
         )?;
         self.conn.execute(
             "UPDATE spotlight_sessions SET workspace_name = ?1 WHERE workspace_id = ?2",
@@ -6837,27 +6821,6 @@ fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMet
     }))
 }
 
-fn move_workspace_worktree(repository_root: &Path, old_path: &Path, new_path: &Path) -> Result<()> {
-    let old_path_arg = old_path.to_string_lossy();
-    let new_path_arg = new_path.to_string_lossy();
-    git_dynamic(
-        repository_root,
-        &[
-            "worktree",
-            "move",
-            old_path_arg.as_ref(),
-            new_path_arg.as_ref(),
-        ],
-    )
-    .with_context(|| {
-        format!(
-            "move git worktree {} to {}",
-            old_path.display(),
-            new_path.display()
-        )
-    })
-}
-
 fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<()> {
     if !workspace_path.exists() {
         let _ = git_dynamic(repository_root, &["worktree", "prune"]);
@@ -9149,12 +9112,8 @@ branch_prefix = "team"
             renamed.branch,
             "lc/fix-the-customer-billing-webhook-failure"
         );
-        assert_eq!(
-            renamed.path,
-            workspace_parent.join("fix-the-customer-billing-webhook-failure")
-        );
+        assert_eq!(renamed.path, workspace.path);
         assert!(renamed.path.is_dir());
-        assert!(!workspace.path.exists());
         let branch = git_output(&renamed.path, ["branch", "--show-current"]);
         assert_eq!(branch.trim(), "lc/fix-the-customer-billing-webhook-failure");
         let worktrees = Command::new("git")
@@ -9164,13 +9123,13 @@ branch_prefix = "team"
             .output()
             .unwrap();
         let worktrees = String::from_utf8_lossy(&worktrees.stdout);
-        assert!(worktrees.contains(
+        assert!(worktrees.contains(workspace.path.to_str().unwrap()));
+        assert!(!worktrees.contains(
             workspace_parent
                 .join("fix-the-customer-billing-webhook-failure")
                 .to_str()
                 .unwrap()
         ));
-        assert!(!worktrees.contains(workspace.path.to_str().unwrap()));
     }
 
     #[test]
@@ -16696,7 +16655,7 @@ exit 1
     }
 
     #[test]
-    fn rename_updates_name_path_and_moves_directory() {
+    fn rename_updates_name_without_moving_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -16726,8 +16685,8 @@ exit 1
         let renamed = store.rename("berlin", "oslo").unwrap();
 
         assert_eq!(renamed.name, "oslo");
-        assert!(!old_path.exists());
-        assert!(renamed.path.exists());
+        assert_eq!(renamed.path, old_path);
+        assert!(old_path.exists());
         assert!(renamed.path.join(".context").is_dir());
         let branch = git_output(&renamed.path, ["branch", "--show-current"]);
         assert_eq!(branch.trim(), "lc/berlin");
@@ -16739,7 +16698,6 @@ exit 1
             .unwrap();
         let worktrees = String::from_utf8_lossy(&worktrees.stdout);
         assert!(worktrees.contains(renamed.path.to_str().unwrap()));
-        assert!(!worktrees.contains(old_path.to_str().unwrap()));
 
         // Should appear under new name in list
         let list = store.list().unwrap();
