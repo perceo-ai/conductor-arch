@@ -1,0 +1,25 @@
+crates/core/src/codex_tui.rs
+  s_2e84601370cf60::t_50898bbe549ae2 2906,3063,3104
+  s_2e84601370cf60::t_a638dfd4251767 1739,1756,1795-1798
+  s_2e84601370cf60::t_232d9767a15e17 2169,2245,2822,2869
+  s_2e84601370cf60::t_30a967e38a894b 1687-1690,1701-1736,1743-1755,1760-1794,1805-1809
+  s_2e84601370cf60::t_4c1640d10a7575 1737-1738,1740-1742,1757-1759,1799-1804
+  s_2e84601370cf60::t_c9648712ab69ce 2734-2774
+  s_2e84601370cf60::t_d307b7bc426189 1810
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "4483d6b30489546678700cfbc65959d89c2c22b7",
+  "prompts": {},
+  "sessions": {
+    "s_2e84601370cf60": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f550b-9bcc-7cd1-983a-aa2611e01676",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
