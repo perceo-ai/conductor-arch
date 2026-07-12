@@ -26,6 +26,7 @@ pub mod settings;
 pub mod storage;
 pub mod terminal_logs;
 pub mod todos;
+pub mod workflow_actions;
 pub mod workspace;
 
 #[cfg(test)]

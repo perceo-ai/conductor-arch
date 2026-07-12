@@ -166,6 +166,10 @@ enum ArchcarCommand {
     },
     Send {
         session_id: i64,
+        #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
+        kind: CliArchcarInputKind,
+        #[arg(long)]
+        visible_input: Option<String>,
         input: Vec<String>,
     },
     Resize {
@@ -474,6 +478,13 @@ enum CliSessionKind {
     Claude,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliArchcarInputKind {
+    User,
+    ReviewPrompt,
+    ControlCommand,
+}
+
 fn main() -> Result<()> {
     if std::env::args().any(|arg| arg == "--archcar-serve") {
         let paths = AppPaths::from_env();
@@ -555,12 +566,17 @@ fn main() -> Result<()> {
                         client.send(ArchcarRequest::GetSessionScreen { session_id })?,
                     );
                 }
-                ArchcarCommand::Send { session_id, input } => {
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    input,
+                } => {
                     print_archcar_response(client.send(ArchcarRequest::SendInput {
                         session_id,
                         input: input.join(" "),
-                        visible_input: None,
-                        kind: ArchcarInputKind::User,
+                        visible_input,
+                        kind: kind.into(),
                     })?);
                 }
                 ArchcarCommand::Resize {
@@ -1552,6 +1568,16 @@ impl From<CliSessionKind> for SessionKind {
     }
 }
 
+impl From<CliArchcarInputKind> for ArchcarInputKind {
+    fn from(value: CliArchcarInputKind) -> Self {
+        match value {
+            CliArchcarInputKind::User => Self::User,
+            CliArchcarInputKind::ReviewPrompt => Self::ReviewPrompt,
+            CliArchcarInputKind::ControlCommand => Self::ControlCommand,
+        }
+    }
+}
+
 fn open_interactive_session(launch: &SessionLaunch, terminal: Option<&str>) -> Result<()> {
     let terminal = terminal
         .map(str::to_owned)
@@ -2059,6 +2085,67 @@ mod tests {
             panic!("expected session open");
         };
         assert_eq!(open_model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn cli_archcar_send_accepts_automation_input_kinds() {
+        let control = Cli::try_parse_from([
+            "linux-archductor",
+            "archcar",
+            "send",
+            "7",
+            "--kind",
+            "control-command",
+            "/model",
+            "gpt-5.6-sol",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    input,
+                },
+        } = control.command
+        else {
+            panic!("expected archcar send");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(kind, CliArchcarInputKind::ControlCommand);
+        assert_eq!(visible_input, None);
+        assert_eq!(input, vec!["/model".to_owned(), "gpt-5.6-sol".to_owned()]);
+
+        let review = Cli::try_parse_from([
+            "linux-archductor",
+            "archcar",
+            "send",
+            "8",
+            "--kind",
+            "review-prompt",
+            "--visible-input",
+            "Review selected comments",
+            "address",
+            "comments",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    input,
+                },
+        } = review.command
+        else {
+            panic!("expected archcar send");
+        };
+        assert_eq!(session_id, 8);
+        assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
+        assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
+        assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
     }
 
     #[test]

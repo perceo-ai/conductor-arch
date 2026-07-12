@@ -24,6 +24,7 @@ use linux_archductor_core::provider_events::{
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
 use linux_archductor_core::settings::load_repository_settings;
+use linux_archductor_core::workflow_actions::gtk_live_controls_for_provider;
 use linux_archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
@@ -4255,15 +4256,13 @@ fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
 }
 
 fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
-    match provider {
-        "codex" => vec![
-            "provider".to_owned(),
-            "model".to_owned(),
-            "thinking".to_owned(),
-        ],
-        "claude" => vec!["provider".to_owned()],
-        "shell" => vec!["provider".to_owned()],
-        _ => vec!["provider".to_owned()],
+    let controls = gtk_live_controls_for_provider(provider)
+        .map(|control| control.control.to_owned())
+        .collect::<Vec<_>>();
+    if controls.is_empty() {
+        vec!["provider".to_owned()]
+    } else {
+        controls
     }
 }
 
