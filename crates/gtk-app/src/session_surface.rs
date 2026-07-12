@@ -1543,10 +1543,6 @@ pub fn agent_session_panel(
                     thread_id: Some(thread_id),
                 },
             );
-            if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
-                let _ =
-                    writer.append_chat_message(thread_id, "user", &command, "queued_before_spawn");
-            }
             queue_archcar_input(
                 &pending_archcar_inputs_for_send,
                 thread_id,
@@ -1558,6 +1554,7 @@ pub fn agent_session_panel(
                     ArchcarInputKind::User
                 },
             );
+            persist_turn_checkpoint();
             let queued = Label::new(Some(
                 "[session start] Runtime session requested through archcar. Queued message will send when the session is ready.",
             ));

@@ -328,15 +328,46 @@ fn split_redacted_stream_for_chunks(redacted: &str, chunks: &[(usize, &str)]) ->
         let end = if is_last {
             redacted.len()
         } else if newline_count == 0 {
-            cursor
+            redacted_offset_after_chars(redacted, cursor, chunk.chars().count())
+                .map(|end| extend_past_partial_redaction_marker(redacted, end))
+                .unwrap_or(redacted.len())
         } else {
             redacted_offset_after_newlines(redacted, cursor, newline_count)
+                .map(|end| extend_past_partial_redaction_marker(redacted, end))
                 .unwrap_or(redacted.len())
         };
         output.push(redacted[cursor..end].to_owned());
         cursor = end;
     }
     output
+}
+
+fn redacted_offset_after_chars(redacted: &str, start: usize, char_count: usize) -> Option<usize> {
+    if char_count == 0 {
+        return Some(start);
+    }
+    let mut seen = 0;
+    for (offset, ch) in redacted[start..].char_indices() {
+        seen += 1;
+        if seen == char_count {
+            return Some(start + offset + ch.len_utf8());
+        }
+    }
+    None
+}
+
+fn extend_past_partial_redaction_marker(redacted: &str, end: usize) -> usize {
+    const MARKER: &str = "[redacted]";
+    let mut search_start = 0;
+    while let Some(offset) = redacted[search_start..].find(MARKER) {
+        let marker_start = search_start + offset;
+        let marker_end = marker_start + MARKER.len();
+        if marker_start < end && end < marker_end {
+            return marker_end;
+        }
+        search_start = marker_end;
+    }
+    end
 }
 
 fn redacted_offset_after_newlines(
@@ -1129,6 +1160,41 @@ mod tests {
 
         assert_eq!(rendered, "TOKEN=[redacted]\n");
         assert!(!rendered.contains("split-secret"));
+    }
+
+    #[test]
+    fn inspector_keeps_non_newline_raw_chunks_non_empty() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "abc".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "def\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "abc");
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<String>(),
+            "abcdef\n"
+        );
     }
 
     #[test]

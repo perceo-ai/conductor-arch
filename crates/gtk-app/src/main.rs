@@ -552,7 +552,8 @@ window.lc-custom-colors,
     border-color: @lc-accent;
 }
 
-.lc-custom-colors .suggested-action {
+.lc-custom-colors .suggested-action,
+.lc-custom-colors .suggested-action:hover {
     background-color: @lc-accent;
     color: @lc-accent-fg;
 }

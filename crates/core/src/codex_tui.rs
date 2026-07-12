@@ -1684,7 +1684,10 @@ fn push_message_span(
     start_index: usize,
     end_index: usize,
 ) {
-    let content = trim_blank_edges(&body.join("\n"));
+    let content = match role {
+        ScreenMessageRole::Agent => normalize_agent_screen_message_body(&body),
+        ScreenMessageRole::User => trim_blank_edges(&body.join("\n")),
+    };
     if content.is_empty() {
         return;
     }
@@ -1707,6 +1710,62 @@ fn trim_blank_edges(content: &str) -> String {
         .map(|index| index + 1)
         .unwrap_or(start);
     lines[start..end].join("\n")
+}
+
+fn normalize_agent_screen_message_body(body: &[String]) -> String {
+    let mut content = String::new();
+    let mut previous_line: Option<String> = None;
+    let mut pending_blank = false;
+
+    for raw_line in body {
+        let line = raw_line.trim_end();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !content.is_empty() {
+                pending_blank = true;
+            }
+            previous_line = None;
+            continue;
+        }
+
+        let join_with_previous = previous_line
+            .as_deref()
+            .is_some_and(|previous| is_likely_terminal_soft_wrap(previous, trimmed));
+        if content.is_empty() {
+            content.push_str(trimmed);
+        } else if pending_blank {
+            content.push_str("\n\n");
+            content.push_str(trimmed);
+        } else if join_with_previous {
+            if should_insert_agent_soft_wrap_space(previous_line.as_deref().unwrap(), trimmed) {
+                content.push(' ');
+            }
+            content.push_str(trimmed);
+        } else {
+            content.push('\n');
+            content.push_str(trimmed);
+        }
+
+        pending_blank = false;
+        previous_line = Some(trimmed.to_owned());
+    }
+
+    content
+}
+
+fn is_likely_terminal_soft_wrap(previous: &str, current: &str) -> bool {
+    (previous.ends_with('/') && starts_wordish(current))
+        || (previous.starts_with("http") && starts_wordish(current))
+}
+
+fn should_insert_agent_soft_wrap_space(previous: &str, current: &str) -> bool {
+    !(previous.ends_with('/') || previous.ends_with('-')) || !starts_wordish(current)
+}
+
+fn starts_wordish(line: &str) -> bool {
+    line.chars()
+        .next()
+        .is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '/' | '-'))
 }
 
 #[cfg(test)]
@@ -2640,6 +2699,24 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
     }
 
     #[test]
+    fn rejoins_agent_path_and_url_wraps() {
+        let screen = "\
+╭─ Codex ───────────────╮
+│ Open /home/kitts/archductor/workspaces/chandelier/
+│ hoi-an and then visit https://example.com/docs/
+│ getting-started.
+╰───────────────────────╯";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "Open /home/kitts/archductor/workspaces/chandelier/hoi-an and then visit https://example.com/docs/getting-started.".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
     fn preserves_agent_list_item_boundaries_when_rejoining_wraps() {
         let screen = "\
 ╭─ Codex ───────────────╮
@@ -2947,7 +3024,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/\nhoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
+                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/hoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
             }]
         );
     }

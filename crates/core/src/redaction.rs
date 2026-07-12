@@ -187,35 +187,69 @@ fn redact_assignment_secret(part: &str) -> Option<String> {
 }
 
 fn redact_embedded_assignment_secret(part: &str) -> Option<String> {
-    for (index, separator) in part.char_indices() {
+    let mut output = String::with_capacity(part.len());
+    let mut cursor = 0;
+    let mut changed = false;
+
+    while let Some((_key_start, _separator_index, value_start)) =
+        find_embedded_assignment_secret(part, cursor)
+    {
+        output.push_str(&part[cursor..value_start]);
+        output.push_str("[redacted]");
+        cursor = embedded_assignment_value_end(part, value_start);
+        changed = true;
+    }
+
+    if changed {
+        output.push_str(&part[cursor..]);
+        Some(output)
+    } else {
+        None
+    }
+}
+
+fn find_embedded_assignment_secret(part: &str, start: usize) -> Option<(usize, usize, usize)> {
+    for (offset, separator) in part[start..].char_indices() {
         if !matches!(separator, '=' | ':') {
             continue;
         }
-        let key_start = part[..index]
-            .rfind(['"', '\'', ' ', ',', '{', '['])
+        let separator_index = start + offset;
+        let key_start = part[..separator_index]
+            .rfind(['"', '\'', ' ', ',', '{', '[', ';'])
             .map(|offset| offset + 1)
             .unwrap_or(0);
-        let key = &part[key_start..index];
-        if key.is_empty()
-            || !is_sensitive_key_or_flag(key)
-            || index + separator.len_utf8() >= part.len()
-        {
+        if key_start < start {
             continue;
         }
-        let value_start = index + separator.len_utf8();
-        let value_end = part[value_start..]
-            .find(['"', '\'', ',', '}', ']'])
-            .map(|offset| value_start + offset)
-            .unwrap_or(part.len());
-        let mut redacted = String::new();
-        redacted.push_str(&part[..key_start]);
-        redacted.push_str(key);
-        redacted.push(separator);
-        redacted.push_str("[redacted]");
-        redacted.push_str(&part[value_end..]);
-        return Some(redacted);
+
+        let key = &part[key_start..separator_index];
+        let value_start = separator_index + separator.len_utf8();
+        if !key.is_empty() && value_start < part.len() && is_sensitive_key_or_flag(key) {
+            return Some((key_start, separator_index, value_start));
+        }
     }
     None
+}
+
+fn embedded_assignment_value_end(part: &str, value_start: usize) -> usize {
+    let quote_or_whitespace_end = part[value_start..]
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\''))
+        .map(|(offset, _)| value_start + offset)
+        .unwrap_or(part.len());
+
+    let next_assignment_start =
+        find_embedded_assignment_secret(part, value_start).map(|(key_start, _, _)| {
+            part[..key_start]
+                .char_indices()
+                .rev()
+                .find_map(|(index, ch)| matches!(ch, ',' | ';').then_some(index))
+                .unwrap_or(key_start)
+        });
+
+    next_assignment_start
+        .map(|index| index.min(quote_or_whitespace_end))
+        .unwrap_or(quote_or_whitespace_end)
 }
 
 fn is_sensitive_key_marker(part: &str) -> bool {
@@ -336,5 +370,31 @@ mod tests {
 
         assert!(!redacted.contains("sk-secret"));
         assert!(redacted.contains("OPENAI_API_KEY=[redacted]"));
+    }
+
+    #[test]
+    fn redacts_embedded_assignment_values_with_punctuation() {
+        let raw = r#"{"input":"TOKEN=first,second]tail","safe":"visible"}"#;
+
+        let redacted = redact_sensitive_text(raw);
+
+        assert!(!redacted.contains("first"));
+        assert!(!redacted.contains("second"));
+        assert!(!redacted.contains("tail"));
+        assert_eq!(redacted, r#"{"input":"TOKEN=[redacted]","safe":"visible"}"#);
+    }
+
+    #[test]
+    fn redacts_multiple_embedded_assignments_in_one_token() {
+        let raw = r#"{"input":"TOKEN=one,API_KEY=two,visible"}"#;
+
+        let redacted = redact_sensitive_text(raw);
+
+        assert!(!redacted.contains("one"));
+        assert!(!redacted.contains("two"));
+        assert_eq!(
+            redacted,
+            r#"{"input":"TOKEN=[redacted],API_KEY=[redacted]"}"#
+        );
     }
 }
