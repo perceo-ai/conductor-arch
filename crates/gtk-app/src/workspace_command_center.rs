@@ -3,8 +3,8 @@ use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
-    Paned, PolicyType, Popover, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag, TextView,
-    WrapMode,
+    Paned, PolicyType, Popover, ScrolledWindow, Separator, Spinner, Stack, StackSwitcher, TextTag,
+    TextView, WrapMode,
 };
 use linux_archductor_core::agent_tools::launchable_provider_key;
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
@@ -115,6 +115,11 @@ pub(crate) fn build_workspace_command_center(
             return;
         };
 
+        if matches!(line.workspace.status.as_str(), "creating" | "failed") {
+            body.append(&workspace_creation_status_shell(&line.workspace));
+            return;
+        }
+
         body.append(&simple_workspace_shell(
             &db_path,
             &store,
@@ -129,6 +134,59 @@ pub(crate) fn build_workspace_command_center(
     };
     refresh();
     (root, refresh)
+}
+
+fn workspace_creation_status_shell(ws: &Workspace) -> GBox {
+    let shell = GBox::new(Orientation::Vertical, 0);
+    shell.set_vexpand(true);
+    shell.set_hexpand(true);
+    shell.add_css_class("chat-surface");
+
+    let header = GBox::new(Orientation::Horizontal, 8);
+    header.add_css_class("session-header-row");
+    header.set_margin_top(14);
+    header.set_margin_bottom(14);
+    header.set_margin_start(14);
+    header.set_margin_end(14);
+
+    if ws.status == "creating" {
+        let spinner = Spinner::new();
+        spinner.start();
+        header.append(&spinner);
+    }
+
+    let title_box = GBox::new(Orientation::Vertical, 2);
+    title_box.set_hexpand(true);
+    let title = Label::new(Some(&title_case_workspace(&ws.name)));
+    title.add_css_class("session-title");
+    title.set_xalign(0.0);
+    title_box.append(&title);
+    let meta = Label::new(Some(&format!("{} · {}", ws.branch, ws.status)));
+    meta.add_css_class("workspace-meta");
+    meta.set_xalign(0.0);
+    title_box.append(&meta);
+    header.append(&title_box);
+    shell.append(&header);
+
+    let body = GBox::new(Orientation::Vertical, 8);
+    body.set_vexpand(true);
+    body.set_valign(Align::Center);
+    body.set_halign(Align::Center);
+    let status = if ws.status == "failed" {
+        "Workspace creation failed."
+    } else {
+        "Creating workspace..."
+    };
+    let label = Label::new(Some(status));
+    label.add_css_class(if ws.status == "failed" {
+        "status-error"
+    } else {
+        "workspace-empty-label"
+    });
+    body.append(&label);
+    shell.append(&body);
+
+    shell
 }
 
 fn simple_workspace_shell(

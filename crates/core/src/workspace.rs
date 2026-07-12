@@ -1129,13 +1129,13 @@ impl WorkspaceStore {
     }
 
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
-        self.create_with_progress(input, || {})
+        self.create_with_progress(input, |_| {})
     }
 
     pub fn create_with_progress(
         &self,
         input: CreateWorkspace,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
         ensure_repository_config(&repository.root_path)?;
@@ -1197,7 +1197,7 @@ impl WorkspaceStore {
             "workspace.creating",
             &format!("Creating workspace on branch {}", workspace.branch),
         )?;
-        after_insert();
+        after_insert(&workspace);
 
         let create_result = (|| -> Result<()> {
             git_dynamic(
@@ -3217,7 +3217,7 @@ impl WorkspaceStore {
         issue_number: u64,
         branch_prefix: Option<&str>,
     ) -> Result<Workspace> {
-        self.create_from_issue_with_progress(repository_name, issue_number, branch_prefix, || {})
+        self.create_from_issue_with_progress(repository_name, issue_number, branch_prefix, |_| {})
     }
 
     pub fn create_from_issue_with_progress(
@@ -3225,7 +3225,7 @@ impl WorkspaceStore {
         repository_name: &str,
         issue_number: u64,
         branch_prefix: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -3292,7 +3292,7 @@ impl WorkspaceStore {
             pr_number,
             workspace_name,
             branch_name,
-            || {},
+            |_| {},
         )
     }
 
@@ -3302,7 +3302,7 @@ impl WorkspaceStore {
         pr_number: u64,
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -3399,7 +3399,7 @@ impl WorkspaceStore {
             workspace_name,
             branch_name,
             base_ref,
-            || {},
+            |_| {},
         )
     }
 
@@ -3410,7 +3410,7 @@ impl WorkspaceStore {
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
         base_ref: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let prompt = prompt.trim();
         anyhow::ensure!(!prompt.is_empty(), "prompt is required");
@@ -3457,7 +3457,7 @@ impl WorkspaceStore {
             workspace_name,
             branch_name,
             base_ref,
-            || {},
+            |_| {},
         )
     }
 
@@ -3468,7 +3468,7 @@ impl WorkspaceStore {
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
         base_ref: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(

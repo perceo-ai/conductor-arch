@@ -12,9 +12,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use tracing::error;
 
-use crate::archcar_async::{spawn_archcar_request, spawn_background_job};
+use crate::archcar_async::{
+    spawn_archcar_request, spawn_background_job, spawn_background_job_with_progress,
+};
 use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -313,19 +316,56 @@ pub(crate) fn build_app_sidebar(
                             let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
                             let repo_name_for_callback = repo_name.clone();
                             let toast_create = toast_create.clone();
-                            spawn_background_job(
+                            let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
+                            spawn_background_job_with_progress(
                                 {
                                     let db_path = db_path.clone();
                                     let repo_name = repo_name.clone();
-                                    move || {
+                                    let inserted_workspace_name = inserted_workspace_name.clone();
+                                    move |progress| {
                                         WorkspaceStore::open(db_path).and_then(|store| {
-                                            store.create(CreateWorkspace {
-                                                repository_name: repo_name,
-                                                name: String::new(),
-                                                branch: String::new(),
-                                                base_ref: None,
-                                            })
+                                            store.create_with_progress(
+                                                CreateWorkspace {
+                                                    repository_name: repo_name,
+                                                    name: String::new(),
+                                                    branch: String::new(),
+                                                    base_ref: None,
+                                                },
+                                                |workspace| {
+                                                    if let Ok(mut name) =
+                                                        inserted_workspace_name.lock()
+                                                    {
+                                                        *name = Some(workspace.name.clone());
+                                                    }
+                                                    progress();
+                                                },
+                                            )
                                         })
+                                    }
+                                },
+                                {
+                                    let inserted_workspace_name = inserted_workspace_name.clone();
+                                    let app_state = app_state.clone();
+                                    let stack = stack.clone();
+                                    let refresh_hub = refresh_hub.clone();
+                                    let refresh_workspace = refresh_workspace.clone();
+                                    let refresh_view_preferences = refresh_view_preferences.clone();
+                                    move || {
+                                        let workspace_name = inserted_workspace_name
+                                            .lock()
+                                            .ok()
+                                            .and_then(|name| name.clone());
+                                        if let Some(workspace_name) = workspace_name {
+                                            app_state.navigate_to_workspace_with_default_tab(
+                                                Some(workspace_name),
+                                                Some(WorkspaceTab::Chats),
+                                            );
+                                            stack.set_visible_child_name("workspace");
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            refresh_hub.refresh(RefreshScope::Dashboard);
+                                            refresh_workspace();
+                                            refresh_view_preferences();
+                                        }
                                     }
                                 },
                                 move |result| {
@@ -336,18 +376,9 @@ pub(crate) fn build_app_sidebar(
                                     add_btn.set_tooltip_text(Some("Create workspace"));
                                     match result {
                                         Ok(workspace) => {
-                                            let default_tab = WorkspaceStore::open(
-                                                app_state.workspace_database_path(),
-                                            )
-                                            .and_then(|store| {
-                                                store.workspace_view_defaults(&workspace.name)
-                                            })
-                                            .ok()
-                                            .and_then(|defaults| defaults.default_visible_tab)
-                                            .and_then(|tab| WorkspaceTab::from_config(&tab));
                                             app_state.navigate_to_workspace_with_default_tab(
                                                 Some(workspace.name),
-                                                default_tab,
+                                                Some(WorkspaceTab::Chats),
                                             );
                                             stack.set_visible_child_name("workspace");
                                             refresh_hub.refresh(RefreshScope::Projects);

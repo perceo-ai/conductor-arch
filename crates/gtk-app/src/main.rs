@@ -702,6 +702,19 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
+    let navigate_created_workspace: Rc<dyn Fn(String)> = {
+        let app_state = app_state.clone();
+        let main_stack_handle = main_stack_handle.clone();
+        Rc::new(move |workspace_name| {
+            app_state.navigate_to_workspace_with_default_tab(
+                Some(workspace_name),
+                Some(WorkspaceTab::Chats),
+            );
+            if let Some(stack) = main_stack_handle.borrow().as_ref() {
+                stack.set_visible_child_name("workspace");
+            }
+        })
+    };
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
@@ -713,6 +726,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 refresh_hub.refresh(RefreshScope::Sidebar);
             }
         },
+        navigate_created_workspace,
         toast_manager.clone(),
     );
     tracing::info!(
