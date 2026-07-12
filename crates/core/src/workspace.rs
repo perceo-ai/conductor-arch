@@ -1547,6 +1547,25 @@ impl WorkspaceStore {
         Ok(workspace)
     }
 
+    pub fn cleanup_deleted_workspace_artifacts(
+        &self,
+        workspace: &Workspace,
+        remove_worktree: bool,
+        delete_branch: bool,
+    ) -> Result<()> {
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        if remove_worktree {
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
+        }
+        if delete_branch {
+            let _ = git_dynamic(
+                &repository.root_path,
+                &["branch", "-D", workspace.branch.as_str()],
+            );
+        }
+        Ok(())
+    }
+
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;

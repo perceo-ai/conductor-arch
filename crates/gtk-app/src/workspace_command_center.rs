@@ -2756,23 +2756,49 @@ fn lifecycle_panel(
         let confirm_action = confirm.clone();
         let progress_action = progress.clone();
         let toast_action = toast_overlay.clone();
+        let state_after_action = state.clone();
         button.connect_clicked(move |_| {
             if matches!(action, "archive" | "discard" | "delete") && !confirm_action.is_active() {
                 progress_action.set_text("Check confirm before archive/discard/delete.");
                 return;
             }
             progress_action.set_text(&format!("{action} in progress..."));
+            if action == "delete" {
+                match WorkspaceStore::open(db_action.clone())
+                    .and_then(|store| store.delete(&workspace, false, false))
+                {
+                    Ok(deleted) => {
+                        progress_action.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                        state_after_action.set_selected_workspace(None);
+                        refresh_after_action.refresh(RefreshScope::All);
+                        let db_cleanup = db_action.clone();
+                        std::thread::spawn(move || {
+                            if let Err(err) = WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                store.cleanup_deleted_workspace_artifacts(&deleted, true, true)
+                            }) {
+                                error!(
+                                    workspace = %deleted.name,
+                                    error = %err,
+                                    "background workspace artifact cleanup failed after delete"
+                                );
+                            }
+                        });
+                    }
+                    Err(err) => apply_runtime_action_feedback(
+                        &progress_action,
+                        &toast_action,
+                        lifecycle_action_failure_feedback("Delete", &err),
+                    ),
+                }
+                return;
+            }
             let result = WorkspaceStore::open(db_action.clone()).and_then(|store| match action {
                 "archive" => store.archive(&workspace, false),
                 "restore" => store.restore(&workspace),
                 "discard" => store.discard(&workspace),
-                "delete" => store.delete(&workspace, true, true),
                 _ => unreachable!(),
             });
             match result {
-                Ok(workspace) if action == "delete" => {
-                    progress_action.set_text(&workspace_delete_feedback(Ok(workspace)))
-                }
                 Ok(workspace) => progress_action.set_text(&format!(
                     "{} complete: {}",
                     title_case_workspace(action),
@@ -2781,11 +2807,7 @@ fn lifecycle_panel(
                 Err(err) => apply_runtime_action_feedback(
                     &progress_action,
                     &toast_action,
-                    if action == "delete" {
-                        lifecycle_action_failure_feedback("Delete", &err)
-                    } else {
-                        lifecycle_action_failure_feedback(&title_case_workspace(action), &err)
-                    },
+                    lifecycle_action_failure_feedback(&title_case_workspace(action), &err),
                 ),
             }
             refresh_after_action.refresh(RefreshScope::All);
