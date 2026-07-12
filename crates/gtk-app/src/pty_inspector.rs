@@ -399,6 +399,7 @@ fn raw_redaction_marker_is_literal(
     let raw_after_marker = raw_cursor + MARKER.len();
     let redacted_after_marker = redacted_cursor + MARKER.len();
     redacted_after_marker >= redacted.len()
+        || raw[raw_after_marker..] == redacted[redacted_after_marker..]
         || common_prefix_chars(&raw[raw_after_marker..], &redacted[redacted_after_marker..]) >= 4
 }
 
@@ -1336,6 +1337,35 @@ mod tests {
 
         assert_eq!(rendered[0].text, "TOKEN=[redacted]");
         assert_eq!(rendered[1].text, "\nvisible\n");
+    }
+
+    #[test]
+    fn inspector_preserves_literal_redacted_marker_split_across_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "notice [red".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "acted]\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "notice [red");
+        assert_eq!(rendered[1].text, "acted]\n");
     }
 
     #[test]
