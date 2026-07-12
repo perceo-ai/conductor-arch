@@ -1212,6 +1212,7 @@ pub(crate) fn build_settings_page(
             } else {
                 current_file_globs
             },
+            env_file_refs: current_settings.env_file_refs,
             spotlight_testing: bool_setting_for_layer(
                 layer,
                 current_settings.spotlight_testing,

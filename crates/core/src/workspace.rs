@@ -2397,7 +2397,7 @@ impl WorkspaceStore {
         let settings = load_repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let started_at = timestamp();
-        let mut env = conductor_environment(&settings, &repository, &workspace);
+        let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         let output = Command::new("sh")
             .arg("-c")
@@ -4375,7 +4375,7 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
-        let mut env = conductor_environment(&settings, &repository, &workspace);
+        let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         Ok(SessionLaunch {
             kind: SessionKind::Shell,
@@ -4423,7 +4423,7 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
-        let mut env = conductor_environment(&settings, &repository, &workspace);
+        let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         let (program, mut args) = match kind {
             SessionKind::Shell => (
@@ -5965,7 +5965,7 @@ mutation($threadId: ID!) {{
             .try_clone()
             .with_context(|| format!("clone log {}", log_path.display()))?;
         let cwd = workspace_working_directory(settings, workspace)?;
-        let mut env = conductor_environment(settings, repository, workspace);
+        let mut env = conductor_environment(settings, repository, workspace)?;
         env.extend(self.linked_directory_env(workspace)?);
         env.extend(extra_env.iter().cloned());
 
@@ -6242,7 +6242,46 @@ fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
                 process_id
             ],
         );
+        let _ = record_process_exit_timeline_event(&conn, process_id, status.code());
     });
+}
+
+fn record_process_exit_timeline_event(
+    conn: &Connection,
+    process_id: i64,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    let (workspace_id, workspace_name, kind): (i64, String, String) = conn
+        .query_row(
+            "SELECT p.workspace_id, w.name, p.kind
+             FROM processes p
+             JOIN workspaces w ON w.id = p.workspace_id
+             WHERE p.id = ?1",
+            [process_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .with_context(|| format!("load process {process_id} for timeline"))?;
+    if !matches!(kind.as_str(), "setup" | "run" | "check") {
+        return Ok(());
+    }
+    let status = if exit_code.unwrap_or(0) == 0 {
+        "completed"
+    } else {
+        "failed"
+    };
+    let event_kind = format!("{kind}.{status}");
+    let summary = match exit_code {
+        Some(code) => format!("{kind} script {status} with exit code {code}"),
+        None => format!("{kind} script {status} without an exit code"),
+    };
+    let now = timestamp();
+    conn.execute(
+        "INSERT INTO workspace_timeline (
+            workspace_id, workspace_name, kind, summary, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![workspace_id, workspace_name, event_kind, summary, now],
+    )?;
+    Ok(())
 }
 
 pub fn format_codex_raw_output(raw: &str) -> String {
@@ -7966,7 +8005,7 @@ fn run_shell_script(
     extra_env: &[(String, OsString)],
 ) -> Result<()> {
     let cwd = workspace_working_directory(settings, workspace)?;
-    let mut env = conductor_environment(settings, repository, workspace);
+    let mut env = conductor_environment(settings, repository, workspace)?;
     env.extend(extra_env.iter().cloned());
     let mut command = Command::new("sh");
     command.arg("-c").arg(script).current_dir(&cwd).envs(env);
@@ -7989,7 +8028,7 @@ fn conductor_environment(
     settings: &crate::settings::RepositorySettings,
     repository: &RepositoryRecord,
     workspace: &Workspace,
-) -> Vec<(String, OsString)> {
+) -> Result<Vec<(String, OsString)>> {
     let working_directory =
         workspace_working_directory(settings, workspace).unwrap_or_else(|_| workspace.path.clone());
     let mut env = vec![
@@ -8019,13 +8058,77 @@ fn conductor_environment(
         ),
         ("ARCHDUCTOR_IS_LOCAL".to_owned(), OsString::from("1")),
     ];
+    env.extend(load_env_file_refs(
+        settings,
+        &repository.root_path,
+        &workspace.path,
+    )?);
     env.extend(
         settings
             .environment_variables
             .iter()
             .map(|(key, value)| (key.clone(), OsString::from(value))),
     );
-    env
+    Ok(env)
+}
+
+fn load_env_file_refs(
+    settings: &crate::settings::RepositorySettings,
+    repository_root: &Path,
+    workspace_path: &Path,
+) -> Result<Vec<(String, OsString)>> {
+    let mut values = Vec::new();
+    for relative in &settings.env_file_refs {
+        validate_relative_workspace_path(relative)?;
+        let workspace_file = workspace_path.join(relative);
+        let path = if workspace_file.exists() {
+            workspace_file
+        } else {
+            repository_root.join(relative)
+        };
+        if !path.exists() {
+            anyhow::bail!("env file reference {relative} does not exist");
+        }
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("read env file {}", path.display()))?;
+        values.extend(parse_env_file_contents(relative, &contents)?);
+    }
+    Ok(values)
+}
+
+fn parse_env_file_contents(source: &str, contents: &str) -> Result<Vec<(String, OsString)>> {
+    let mut values = Vec::new();
+    for (index, raw) in contents.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else {
+            anyhow::bail!("invalid env line {} in {source}", index + 1);
+        };
+        let key = key.trim();
+        anyhow::ensure!(
+            crate::settings::is_valid_environment_key(key),
+            "environment variable key {key:?} in {source} is invalid"
+        );
+        values.push((
+            key.to_owned(),
+            OsString::from(unquote_env_value(value.trim())),
+        ));
+    }
+    Ok(values)
+}
+
+fn unquote_env_value(value: &str) -> String {
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        value.to_owned()
+    }
 }
 
 fn workspace_working_directory(
@@ -9903,6 +10006,85 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn run_workspace_loads_env_file_refs_without_logging_secret_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".env.local"),
+            "SECRET_TOKEN=from-file\nCUSTOM_VALUE=from-file\n",
+        )
+        .unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+env_file_refs = ".env.local"
+
+[scripts]
+run = "printf '%s:%s\n' \"$SECRET_TOKEN\" \"$CUSTOM_VALUE\" > .context/env-file-result"
+
+[environment_variables]
+CUSTOM_VALUE = "from-settings"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add env file run script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let run = store.run_workspace("berlin").unwrap();
+        wait_for_path(&workspace.path.join(".context/env-file-result"));
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join(".context/env-file-result")).unwrap(),
+            "from-file:from-settings\n"
+        );
+        assert!(!fs::read_to_string(&run.log_path)
+            .unwrap()
+            .contains("from-file"));
+    }
+
+    #[test]
     fn run_workspace_captures_logs() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -10038,6 +10220,11 @@ run = "printf 'done\n'; exit 3"
         assert_eq!(exited.id, run.id);
         assert_eq!(exited.exit_code, Some(3));
         assert!(exited.ended_at.is_some());
+        let events = store
+            .workspace_timeline("berlin", Some("run.failed"))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].summary.contains("exit code 3"));
     }
 
     #[test]

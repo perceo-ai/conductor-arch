@@ -189,6 +189,10 @@ file_include_globs = """
 config/*.local.json
 """
 
+env_file_refs = """
+.env.local
+"""
+
 spotlight_testing = false
 
 [scripts]
