@@ -364,7 +364,7 @@ fn redacted_offsets_for_raw_boundaries(
             let raw_char = raw[raw_cursor..].chars().next();
             let redacted_char = redacted[redacted_cursor..].chars().next();
             if redacted[redacted_cursor..].starts_with(MARKER)
-                && !raw[raw_cursor..].starts_with(MARKER)
+                && !raw_redaction_marker_is_literal(raw, raw_cursor, redacted, redacted_cursor)
             {
                 redacted_cursor += MARKER.len();
                 raw_cursor =
@@ -384,6 +384,22 @@ fn redacted_offsets_for_raw_boundaries(
         offsets.push(redacted_cursor);
     }
     offsets
+}
+
+fn raw_redaction_marker_is_literal(
+    raw: &str,
+    raw_cursor: usize,
+    redacted: &str,
+    redacted_cursor: usize,
+) -> bool {
+    const MARKER: &str = "[redacted]";
+    if !raw[raw_cursor..].starts_with(MARKER) {
+        return false;
+    }
+    let raw_after_marker = raw_cursor + MARKER.len();
+    let redacted_after_marker = redacted_cursor + MARKER.len();
+    redacted_after_marker >= redacted.len()
+        || common_prefix_chars(&raw[raw_after_marker..], &redacted[redacted_after_marker..]) >= 4
 }
 
 fn find_redaction_resume_offset(
@@ -1274,6 +1290,35 @@ mod tests {
                 occurred_at_ms: 10,
                 stream: "stdout".to_owned(),
                 text: "TOKEN=[secret-value]".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "\nvisible\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "TOKEN=[redacted]");
+        assert_eq!(rendered[1].text, "\nvisible\n");
+    }
+
+    #[test]
+    fn inspector_redacted_literal_prefix_value_does_not_consume_later_visible_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=[redacted]suffix".to_owned(),
                 created_at: "now".to_owned(),
             },
             PtyChunkRecord {
