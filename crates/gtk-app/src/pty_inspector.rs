@@ -211,7 +211,7 @@ fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
 fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
     let raw_chunks = session.raw_chunks.clone();
     let normalized_text = if raw_chunks.is_empty() {
-        normalize_pty_text(&session.raw_output)
+        normalize_pty_text(&redact_sensitive_text(&session.raw_output))
     } else {
         raw_chunks
             .iter()
@@ -263,12 +263,13 @@ fn raw_chunks_from_log(raw: &str) -> Vec<RawChunk> {
         .filter(|chunk| !chunk.is_empty())
         .enumerate()
         .map(|(index, chunk)| {
-            let normalized_text = normalize_pty_text(chunk);
+            let text = redact_sensitive_text(chunk);
+            let normalized_text = normalize_pty_text(&text);
             let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
             previous = normalized_text.clone();
             RawChunk {
                 index: index + 1,
-                text: chunk.to_owned(),
+                text,
                 normalized_text,
                 duplicate,
                 delayed: false,
@@ -283,12 +284,13 @@ fn raw_chunks_from_records(records: &[PtyChunkRecord]) -> Vec<RawChunk> {
     records
         .iter()
         .map(|record| {
-            let normalized_text = normalize_pty_text(&record.text);
+            let text = redact_sensitive_text(&record.text);
+            let normalized_text = normalize_pty_text(&text);
             let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
             previous = normalized_text.clone();
             RawChunk {
                 index: record.sequence as usize,
-                text: record.text.clone(),
+                text,
                 normalized_text,
                 duplicate,
                 delayed: false,
@@ -303,12 +305,12 @@ fn normalize_pty_text(raw: &str) -> String {
 }
 
 fn event_row(event: &SessionEvent, chunks: &[RawChunk]) -> InspectorEventRow {
-    let rendered_text = event.render_text();
+    let rendered_text = redact_sensitive_text(&event.render_text());
     let source_chunk = event
         .raw_text
         .as_deref()
         .and_then(|raw| {
-            let raw = normalize_pty_text(raw);
+            let raw = normalize_pty_text(&redact_sensitive_text(raw));
             chunks
                 .iter()
                 .find(|chunk| chunk.normalized_text.contains(raw.trim()))
@@ -426,7 +428,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     title.set_xalign(0.0);
     root.append(&title);
     root.append(&small_label(
-        "Local storage only. Routine logs omit raw PTY screens by default.",
+        "Debug mode only. Raw PTY logs can contain sensitive data; secret-looking values are redacted before display or copy.",
     ));
 
     let layout = GBox::new(Orientation::Horizontal, 12);
@@ -467,7 +469,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     center_stack.set_visible_child_name("raw");
     let center = GBox::new(Orientation::Vertical, 8);
     let toolbar = GBox::new(Orientation::Horizontal, 6);
-    let raw_toggle = CheckButton::with_label("Raw chunks");
+    let raw_toggle = CheckButton::with_label("Raw chunks (redacted)");
     raw_toggle.set_active(true);
     let normalized_toggle = CheckButton::with_label("Normalized text");
     normalized_toggle.set_group(Some(&raw_toggle));
@@ -498,7 +500,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
             normalized_container.append(&small_label("Local normalized view cleared."));
         });
     }
-    let copy_btn = Button::with_label("Copy visible output");
+    let copy_btn = Button::with_label("Copy redacted output");
     let visible_output = Rc::new(RefCell::new(model.selected.normalized_text.clone()));
     {
         let visible_output = Rc::clone(&visible_output);
@@ -614,6 +616,7 @@ fn clear_box(panel: &GBox) {
 
 fn render_raw_chunks_into(panel: &GBox, detail: &InspectorSessionDetail) {
     clear_box(panel);
+    panel.append(&section_label("Sensitive raw logs (redacted)"));
     if detail.raw_chunks.is_empty() {
         panel.append(&small_label("No raw output."));
     }
@@ -638,6 +641,7 @@ fn render_raw_chunks_into(panel: &GBox, detail: &InspectorSessionDetail) {
 
 fn render_normalized_into(panel: &GBox, detail: &InspectorSessionDetail) {
     clear_box(panel);
+    panel.append(&section_label("Normalized output (redacted)"));
     panel.append(&mono_label(if detail.normalized_text.is_empty() {
         "No normalized output."
     } else {
@@ -871,6 +875,66 @@ mod tests {
         assert_eq!(model.selected.normalized_text, "\u{1b}[2Jreal chunk\n");
         assert_eq!(model.selected.raw_chunks[0].text, "\u{1b}[2Jreal");
         assert!(!model.selected.normalized_text.contains("[codex raw]"));
+    }
+
+    #[test]
+    fn inspector_model_redacts_raw_chunks_normalized_text_and_events() {
+        let session = InspectorSessionInput {
+            id: 10,
+            workspace: "milan".to_owned(),
+            command: "codex".to_owned(),
+            pid: Some(3333),
+            status: ProcessStatus::Stopped,
+            started_at: "2026-07-06T12:00:00Z".to_owned(),
+            ended_at: Some("2026-07-06T12:01:00Z".to_owned()),
+            exit_code: Some(0),
+            raw_output: "TOKEN=raw-secret\n".to_owned(),
+            raw_chunks: raw_chunks_from_log(
+                "TOKEN=raw-secret\nAuthorization: Bearer bearer-secret\n",
+            ),
+            events: vec![SessionEvent::new(
+                SessionEventSource::Runtime,
+                Some("TOKEN=event-secret".to_owned()),
+                SessionEventPayload::CommandOutput {
+                    title: "print env".to_owned(),
+                    output: "api_key: event-api-secret".to_owned(),
+                    status: SessionCommandOutputStatus::Succeeded,
+                },
+            )
+            .with_sequence(1)
+            .with_occurred_at_ms(100)],
+        };
+
+        let model = build_inspector_model(vec![session]);
+        let raw_text = model
+            .selected
+            .raw_chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        let rendered_events = model
+            .selected
+            .events
+            .iter()
+            .map(|event| event.rendered_text.as_str())
+            .collect::<String>();
+
+        for leaked in [
+            "raw-secret",
+            "bearer-secret",
+            "event-secret",
+            "event-api-secret",
+        ] {
+            assert!(
+                !raw_text.contains(leaked)
+                    && !model.selected.normalized_text.contains(leaked)
+                    && !rendered_events.contains(leaked),
+                "{leaked} leaked"
+            );
+        }
+        assert!(raw_text.contains("TOKEN=[redacted]"));
+        assert!(model.selected.normalized_text.contains("Bearer [redacted]"));
+        assert!(rendered_events.contains("api_key: [redacted]"));
     }
 
     #[test]
