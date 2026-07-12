@@ -2469,16 +2469,16 @@ window,
 
 .suggested-action,
 .chat-send-btn-active {
-    background-color: #22c55e;
-    border-color: #22c55e;
-    color: #052e16;
+    background-color: #282828;
+    border-color: #4a4a4a;
+    color: #f4f4f4;
 }
 
 .suggested-action:hover,
 .chat-send-btn-active:hover {
-    background-color: #4ade80;
-    border-color: #4ade80;
-    color: #052e16;
+    background-color: #333333;
+    border-color: #5a5a5a;
+    color: #ffffff;
 }
 
 .destructive-action {

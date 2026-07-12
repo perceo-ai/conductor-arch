@@ -147,15 +147,6 @@ fn simple_workspace_shell(
     shell.set_hexpand(true);
     shell.set_overflow(gtk::Overflow::Hidden);
 
-    let outer_split = Paned::new(Orientation::Horizontal);
-    outer_split.set_wide_handle(false);
-    outer_split.set_resize_start_child(true);
-    outer_split.set_resize_end_child(true);
-    outer_split.set_shrink_start_child(true);
-    outer_split.set_shrink_end_child(true);
-    outer_split.set_position(260);
-    outer_split.set_vexpand(true);
-
     // Horizontal split: center (flex) + right review/context panel.
     let main_split = Paned::new(Orientation::Horizontal);
     main_split.set_wide_handle(false);
@@ -193,9 +184,6 @@ fn simple_workspace_shell(
     );
     main_split.set_start_child(Some(&center));
 
-    let left = ws_left_navigation_panel(db_path, store, ws, open_file.clone());
-    outer_split.set_start_child(Some(&left));
-
     // Right: file list + run console
     let right = ws_right_panel(
         db_path,
@@ -211,9 +199,8 @@ fn simple_workspace_shell(
     );
     *right_panel_handle.borrow_mut() = Some(right.clone());
     main_split.set_end_child(Some(&right));
-    outer_split.set_end_child(Some(&main_split));
 
-    shell.append(&outer_split);
+    shell.append(&main_split);
     shell
 }
 
@@ -466,35 +453,6 @@ fn ws_center_panel(
     }
     tab_bar.append(&chat_tabs_scroll);
     tab_bar.append(&file_tabs);
-    let pr_status = workspace_pr_status_snapshot(store, &ws.name);
-    let create_pr_btn = text_button(workspace_pr_primary_action_label(&pr_status));
-    create_pr_btn.add_css_class("ws-pr-action-button");
-    if let Some(status) = pr_status.status.as_ref() {
-        create_pr_btn.add_css_class(status.css_class);
-    } else {
-        create_pr_btn.add_css_class("suggested-action");
-    }
-    create_pr_btn.set_tooltip_text(Some(workspace_pr_primary_action_tooltip(&pr_status)));
-    match pr_status.pr.as_ref() {
-        Some(pr) => {
-            let url = pr.url.clone();
-            create_pr_btn.connect_clicked(move |_| open_external_url(&url));
-        }
-        None => {
-            let db_path = db_path.to_path_buf();
-            let workspace_name = ws.name.clone();
-            let state = state.clone();
-            let refresh_hub = refresh_hub.clone();
-            connect_create_pr_prompt_button(
-                &create_pr_btn,
-                db_path,
-                workspace_name,
-                state,
-                refresh_hub,
-            );
-        }
-    }
-    tab_bar.append(&create_pr_btn);
     panel.append(&tab_bar);
 
     // Separator below tab bar
@@ -1209,45 +1167,6 @@ where
 
 // ── Left/right workspace panels ─────────────────────────────────
 
-fn ws_left_navigation_panel(
-    db_path: &Path,
-    store: &WorkspaceStore,
-    ws: &Workspace,
-    open_file: Rc<dyn Fn(&str)>,
-) -> GBox {
-    let panel = GBox::new(Orientation::Vertical, 0);
-    panel.add_css_class("ws-left-panel");
-    panel.set_width_request(240);
-    panel.set_vexpand(true);
-    panel.set_overflow(gtk::Overflow::Hidden);
-
-    let stack = Stack::new();
-    stack.set_vexpand(true);
-    let switcher = StackSwitcher::new();
-    switcher.set_stack(Some(&stack));
-    switcher.add_css_class("panel-switcher");
-    panel.append(&switcher);
-
-    stack.add_titled(
-        &ws_simple_file_list(db_path, ws, open_file),
-        Some("files"),
-        "Files",
-    );
-    let git_text = store
-        .diff_file_summaries(&ws.name)
-        .map(|summaries| format_diff_file_summary(&summaries))
-        .unwrap_or_else(|err| format!("Could not read git changes: {err:#}\n"));
-    stack.add_titled(&text_panel(&git_text), Some("git"), "Git");
-    stack.add_titled(
-        &text_panel(&workspace_todos_text(store, &ws.name)),
-        Some("todos"),
-        "Todos",
-    );
-    stack.set_visible_child_name("files");
-    panel.append(&stack);
-    panel
-}
-
 fn ws_right_panel(
     db_path: &Path,
     store: &WorkspaceStore,
@@ -1272,6 +1191,7 @@ fn ws_right_panel(
         &ws.name,
         state,
         refresh_hub.clone(),
+        &toast_overlay,
     ));
     panel.append(&Separator::new(Orientation::Horizontal));
 
@@ -2306,12 +2226,6 @@ fn workspace_status_strip(
             .unwrap_or_else(|| "-".to_owned()),
     ));
     strip.append(&metric_card(
-        "Todos",
-        &checks
-            .map(|summary| format!("{} open", summary.open_todos))
-            .unwrap_or_else(|| "-".to_owned()),
-    ));
-    strip.append(&metric_card(
         "Review",
         &checks
             .map(|summary| format!("{} open", summary.open_review_comments))
@@ -2975,11 +2889,6 @@ fn work_tabs(
         "Terminal",
     );
     tabs.add_titled(
-        &workspace_todos_panel(store, &ws.name),
-        Some("todos"),
-        "Todos",
-    );
-    tabs.add_titled(
         &workspace_checkpoint_panel(
             db_path,
             &ws.name,
@@ -3031,7 +2940,6 @@ fn work_tabs(
                     state_tabs.set_active_workspace_tab(WorkspaceTab::Changes);
                 }
             }
-            Some("todos") => state_tabs.set_active_workspace_tab(WorkspaceTab::Todos),
             Some("processes") => state_tabs.set_active_workspace_tab(WorkspaceTab::Processes),
             Some("terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Terminal),
             Some("chat-terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
@@ -3046,9 +2954,11 @@ fn work_tabs(
 fn workspace_tab_stack_name(tab: &WorkspaceTab) -> &'static str {
     match tab {
         WorkspaceTab::Chats => "chat-terminal",
-        WorkspaceTab::Changes | WorkspaceTab::Checks | WorkspaceTab::Review => "work",
+        WorkspaceTab::Changes
+        | WorkspaceTab::Checks
+        | WorkspaceTab::Review
+        | WorkspaceTab::Todos => "work",
         WorkspaceTab::Checkpoints => "checkpoints",
-        WorkspaceTab::Todos => "todos",
         WorkspaceTab::Processes => "processes",
         WorkspaceTab::Terminal => "terminal",
     }
@@ -5420,6 +5330,7 @@ fn workspace_pr_status_panel(
     workspace_name: &str,
     state: &AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: &ToastOverlay,
 ) -> GBox {
     let snapshot = workspace_pr_status_snapshot(store, workspace_name);
     let panel = GBox::new(Orientation::Vertical, 8);
@@ -5453,6 +5364,26 @@ fn workspace_pr_status_panel(
     detail.set_wrap(true);
     panel.append(&detail);
 
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    let branch_row = make_action_row();
+    let push_btn = secondary_button("Push branch");
+    let force_push_btn = destructive_button("Force Push Lease");
+    connect_push_branch_button(&push_btn, db_path, workspace_name, &feedback, toast_overlay);
+    connect_force_push_button(
+        &force_push_btn,
+        db_path,
+        workspace_name,
+        &feedback,
+        toast_overlay,
+    );
+    branch_row.append(&push_btn);
+    branch_row.append(&force_push_btn);
+    panel.append(&branch_row);
+
     if let Some(pr) = snapshot.pr.as_ref() {
         let row = make_action_row();
         let view_btn = secondary_button("View PR");
@@ -5475,6 +5406,7 @@ fn workspace_pr_status_panel(
         row.append(&create_btn);
         panel.append(&row);
     }
+    panel.append(&feedback);
 
     panel
 }
@@ -5958,6 +5890,40 @@ fn check_status_icon(key: &str, val: &str) -> (&'static str, &'static str) {
     } else {
         ("◈ ", "ws-check-icon-muted")
     }
+}
+
+fn connect_push_branch_button(
+    push_btn: &Button,
+    db_path: &Path,
+    name: &str,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+) {
+    let db_for_push = db_path.to_path_buf();
+    let workspace_for_push = name.to_owned();
+    let feedback_for_push = feedback.clone();
+    let toast_for_push = toast_overlay.clone();
+    push_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_push.clone())
+            .and_then(|store| store.push_branch(&workspace_for_push))
+        {
+            Ok(output) => {
+                let message = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| format!("Pushed branch: {line}"))
+                    .unwrap_or_else(|| "Pushed branch.".to_owned());
+                apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_push,
+                &toast_for_push,
+                &push_branch_error_feedback(&err),
+                true,
+            ),
+        }
+    });
 }
 
 fn connect_force_push_button(
@@ -6557,120 +6523,18 @@ fn workspace_checks_panel(
             header.append(&actions);
         }
         None => {
-            let action_labels = pull_request_action_labels(None);
             let status_row = GBox::new(Orientation::Horizontal, 8);
             status_row.add_css_class("ws-pr-nav");
             status_row.set_hexpand(true);
-            let empty = Label::new(Some("No pull request yet."));
+            let empty = Label::new(Some(
+                "No pull request yet. Use the Branch / PR controls at the top of the right column.",
+            ));
             empty.add_css_class("card-meta");
             empty.set_xalign(0.0);
             empty.set_wrap(true);
             empty.set_hexpand(true);
             status_row.append(&empty);
             header.append(&status_row);
-
-            let title_row = make_action_row();
-            let title_entry = Entry::new();
-            title_entry.set_placeholder_text(Some("PR title"));
-            title_entry.set_hexpand(true);
-            let template = store.render_pull_request_template(name).ok();
-            if let Some(template) = template.as_ref() {
-                title_entry.set_text(&template.title);
-            }
-            title_row.append(&title_entry);
-            header.append(&title_row);
-
-            let body_label = toolbar_label("PR body");
-            header.append(&body_label);
-            let body_view = TextView::new();
-            body_view.set_wrap_mode(WrapMode::WordChar);
-            body_view.set_top_margin(8);
-            body_view.set_bottom_margin(8);
-            body_view.set_left_margin(8);
-            body_view.set_right_margin(8);
-            let body_text = template
-                .as_ref()
-                .map(|template| template.body.clone())
-                .or_else(|| store.read_context_brief(name).ok().flatten())
-                .unwrap_or_default();
-            body_view.buffer().set_text(&body_text);
-            let body_scroll = ScrolledWindow::new();
-            body_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
-            body_scroll.set_min_content_height(72);
-            body_scroll.set_max_content_height(120);
-            body_scroll.set_child(Some(&body_view));
-            header.append(&body_scroll);
-
-            let button_row = make_action_row();
-            let draft_check = CheckButton::with_label("Draft");
-            let push_btn = secondary_button(action_labels[0]);
-            let force_push_btn = destructive_button("Force Push Lease");
-            connect_force_push_button(&force_push_btn, db_path, name, &feedback, &toast_overlay);
-            let create_btn = text_button(action_labels[1]);
-            create_btn.add_css_class("suggested-action");
-            let body_buffer = body_view.buffer();
-
-            let db_for_push = db_path.to_path_buf();
-            let workspace_for_push = name.to_owned();
-            let feedback_for_push = feedback.clone();
-            let toast_for_push = toast_overlay.clone();
-            push_btn.connect_clicked(move |_| {
-                match WorkspaceStore::open(db_for_push.clone())
-                    .and_then(|store| store.push_branch(&workspace_for_push))
-                {
-                    Ok(output) => {
-                        let message = output
-                            .lines()
-                            .map(str::trim)
-                            .find(|line| !line.is_empty())
-                            .map(|line| format!("Pushed branch: {line}"))
-                            .unwrap_or_else(|| "Pushed branch.".to_owned());
-                        apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
-                    }
-                    Err(err) => apply_action_feedback(
-                        &feedback_for_push,
-                        &toast_for_push,
-                        &push_branch_error_feedback(&err),
-                        true,
-                    ),
-                }
-            });
-
-            let db_for_create = db_path.to_path_buf();
-            let workspace_for_create = name.to_owned();
-            let feedback_for_create = feedback.clone();
-            let toast_for_create = toast_overlay.clone();
-            let refresh_after_create = refresh_hub.clone();
-            let title_entry_for_create = title_entry.clone();
-            let draft_check_for_create = draft_check.clone();
-            create_btn.connect_clicked(move |_| {
-                let title = optional_entry_text(&title_entry_for_create);
-                let body = optional_text_buffer_text(&body_buffer);
-                let result = WorkspaceStore::open(db_for_create.clone()).and_then(|store| {
-                    store.create_pull_request(
-                        &workspace_for_create,
-                        title.as_deref(),
-                        body.as_deref(),
-                        draft_check_for_create.is_active(),
-                    )
-                });
-                let should_refresh = result.is_ok();
-                apply_action_feedback(
-                    &feedback_for_create,
-                    &toast_for_create,
-                    &pull_request_create_feedback(result),
-                    true,
-                );
-                if should_refresh {
-                    refresh_after_create.refresh(RefreshScope::All);
-                }
-            });
-
-            button_row.append(&draft_check);
-            button_row.append(&push_btn);
-            button_row.append(&force_push_btn);
-            button_row.append(&create_btn);
-            header.append(&button_row);
         }
     }
 
@@ -7884,7 +7748,7 @@ mod tests {
             workspace_tab_stack_name(&WorkspaceTab::Terminal),
             "terminal"
         );
-        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Todos), "todos");
+        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Todos), "work");
         assert_eq!(
             workspace_tab_stack_name(&WorkspaceTab::Checkpoints),
             "checkpoints"
