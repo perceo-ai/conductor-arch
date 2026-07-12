@@ -904,11 +904,14 @@ pub(crate) fn build_settings_page(
                             source
                         ));
                 }
-                Err(err) => surface_label_error(
-                    &settings_result_load,
-                    &toast_load,
-                    format!("Load failed: {err:#}"),
-                ),
+                Err(err) => {
+                    *loaded_settings_target_load.borrow_mut() = None;
+                    surface_label_error(
+                        &settings_result_load,
+                        &toast_load,
+                        format!("Load failed: {err:#}"),
+                    );
+                }
             }
             *loading_settings_for_load.borrow_mut() = false;
         })
@@ -1187,6 +1190,17 @@ pub(crate) fn build_settings_page(
             setup_script: optional_buffer_text(&prompt_views[13].1),
             run_script: optional_buffer_text(&prompt_views[14].1),
         };
+        let environment_variables = match parse_environment_lines(&text_buffer_text(&env_view.1)) {
+            Ok(environment_variables) => environment_variables,
+            Err(err) => {
+                surface_label_error(
+                    &settings_result,
+                    &toast_save,
+                    format!("Save failed: {err:#}"),
+                );
+                return;
+            }
+        };
         let settings = RepositorySettings {
             file_include_globs: if file_globs_view.2.is_editable() {
                 text_buffer_text(&file_globs_view.1)
@@ -1222,7 +1236,7 @@ pub(crate) fn build_settings_page(
                 build: build_command,
                 run_mode: run_mode_setting_for_layer(layer, optional_entry_text(&run_mode_entry)),
             },
-            environment_variables: parse_environment_lines(&text_buffer_text(&env_view.1)),
+            environment_variables,
             prompt_pack: current_settings.prompt_pack,
             prompts: (!prompt_settings_is_empty(&prompt_settings)).then_some(prompt_settings),
             providers: ProviderSettings {
@@ -1433,7 +1447,7 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
     RepositoryStore::open(db_path)?
         .list()?
         .into_iter()
-        .find(|repo| repo.name == name)
+        .find(|repo| repo.id.to_string() == name || repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
 }
@@ -1492,7 +1506,7 @@ fn refresh_repository_select(
     if let Ok(store) = RepositoryStore::open(db_path) {
         if let Ok(repositories) = store.list() {
             for repository in repositories {
-                select.append(Some(&repository.name), &repository.name);
+                select.append(Some(&repository.id.to_string()), &repository.name);
             }
         }
     }
@@ -1546,14 +1560,32 @@ fn text_buffer_text(buffer: &gtk::TextBuffer) -> String {
         .to_owned()
 }
 
-fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            let key = key.trim();
-            (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
-        })
-        .collect()
+fn parse_environment_lines(text: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let mut environment = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("environment line {} must be KEY=value", index + 1))?;
+        let key = key.trim();
+        anyhow::ensure!(
+            is_valid_environment_key(key),
+            "environment line {} has invalid key {:?}",
+            index + 1,
+            key
+        );
+        environment.push((key.to_owned(), value.trim().to_owned()));
+    }
+    Ok(environment)
+}
+
+fn is_valid_environment_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn parse_text_lines(text: &str) -> Vec<String> {

@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -60,6 +61,7 @@ pub use crate::local_chat::{
 pub use crate::terminal_logs::{TerminalLogMatch, TerminalSessionSummary};
 
 const SIGTERM_EXIT_CODE: i32 = 143;
+const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -1023,6 +1025,14 @@ impl WorkspaceStore {
     }
 
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
+        self.create_with_progress(input, || {})
+    }
+
+    pub fn create_with_progress(
+        &self,
+        input: CreateWorkspace,
+        after_insert: impl FnOnce(),
+    ) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
         ensure_repository_config(&repository.root_path)?;
         let settings = load_repository_settings(&repository.root_path)?;
@@ -1083,6 +1093,7 @@ impl WorkspaceStore {
             "workspace.creating",
             &format!("Creating workspace on branch {}", workspace.branch),
         )?;
+        after_insert();
 
         let create_result = (|| -> Result<()> {
             git_dynamic(
@@ -2718,6 +2729,16 @@ impl WorkspaceStore {
         issue_number: u64,
         branch_prefix: Option<&str>,
     ) -> Result<Workspace> {
+        self.create_from_issue_with_progress(repository_name, issue_number, branch_prefix, || {})
+    }
+
+    pub fn create_from_issue_with_progress(
+        &self,
+        repository_name: &str,
+        issue_number: u64,
+        branch_prefix: Option<&str>,
+        after_insert: impl FnOnce(),
+    ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
             preflight.github_ready(),
@@ -2753,12 +2774,15 @@ impl WorkspaceStore {
         let branch = format!("{prefix}/{issue_number}/{slug}");
         let workspace_name = format!("issue-{issue_number}");
 
-        let workspace = self.create(CreateWorkspace {
-            repository_name: repository_name.to_owned(),
-            name: workspace_name,
-            branch,
-            base_ref: None,
-        })?;
+        let workspace = self.create_with_progress(
+            CreateWorkspace {
+                repository_name: repository_name.to_owned(),
+                name: workspace_name,
+                branch,
+                base_ref: None,
+            },
+            after_insert,
+        )?;
         write_context_brief(
             &workspace.path,
             &format!(
@@ -2774,6 +2798,23 @@ impl WorkspaceStore {
         pr_number: u64,
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
+    ) -> Result<Workspace> {
+        self.create_from_pull_request_with_progress(
+            repository_name,
+            pr_number,
+            workspace_name,
+            branch_name,
+            || {},
+        )
+    }
+
+    pub fn create_from_pull_request_with_progress(
+        &self,
+        repository_name: &str,
+        pr_number: u64,
+        workspace_name: Option<&str>,
+        branch_name: Option<&str>,
+        after_insert: impl FnOnce(),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -2818,16 +2859,19 @@ impl WorkspaceStore {
             ],
         )?;
 
-        let workspace = self.create(CreateWorkspace {
-            repository_name: repository_name.to_owned(),
-            name: workspace_name
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("pr-{pr_number}")),
-            branch: branch_name
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{prefix}/pr-{pr_number}-{slug}")),
-            base_ref: Some(remote_ref),
-        })?;
+        let workspace = self.create_with_progress(
+            CreateWorkspace {
+                repository_name: repository_name.to_owned(),
+                name: workspace_name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("pr-{pr_number}")),
+                branch: branch_name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{prefix}/pr-{pr_number}-{slug}")),
+                base_ref: Some(remote_ref),
+            },
+            after_insert,
+        )?;
 
         if let Some(url) = url {
             self.record_pull_request(workspace.id, &url)?;
@@ -2861,6 +2905,25 @@ impl WorkspaceStore {
         branch_name: Option<&str>,
         base_ref: Option<&str>,
     ) -> Result<Workspace> {
+        self.create_from_prompt_with_progress(
+            repository_name,
+            prompt,
+            workspace_name,
+            branch_name,
+            base_ref,
+            || {},
+        )
+    }
+
+    pub fn create_from_prompt_with_progress(
+        &self,
+        repository_name: &str,
+        prompt: &str,
+        workspace_name: Option<&str>,
+        branch_name: Option<&str>,
+        base_ref: Option<&str>,
+        after_insert: impl FnOnce(),
+    ) -> Result<Workspace> {
         let prompt = prompt.trim();
         anyhow::ensure!(!prompt.is_empty(), "prompt is required");
         let repository = self.load_repository(repository_name)?;
@@ -2872,16 +2935,19 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(prompt);
-        let workspace = self.create(CreateWorkspace {
-            repository_name: repository_name.to_owned(),
-            name: workspace_name
-                .map(str::to_owned)
-                .unwrap_or_else(|| slug.clone()),
-            branch: branch_name
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{prefix}/{slug}")),
-            base_ref: base_ref.map(str::to_owned),
-        })?;
+        let workspace = self.create_with_progress(
+            CreateWorkspace {
+                repository_name: repository_name.to_owned(),
+                name: workspace_name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| slug.clone()),
+                branch: branch_name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{prefix}/{slug}")),
+                base_ref: base_ref.map(str::to_owned),
+            },
+            after_insert,
+        )?;
         write_context_brief(
             &workspace.path,
             &format!("# Brief\n\n{prompt}\n\n## Source\n\nPrompt\n"),
@@ -2896,6 +2962,25 @@ impl WorkspaceStore {
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
         base_ref: Option<&str>,
+    ) -> Result<Workspace> {
+        self.create_from_linear_issue_with_progress(
+            repository_name,
+            issue_id,
+            workspace_name,
+            branch_name,
+            base_ref,
+            || {},
+        )
+    }
+
+    pub fn create_from_linear_issue_with_progress(
+        &self,
+        repository_name: &str,
+        issue_id: &str,
+        workspace_name: Option<&str>,
+        branch_name: Option<&str>,
+        base_ref: Option<&str>,
+        after_insert: impl FnOnce(),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -2915,19 +3000,22 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(&issue.title);
-        let workspace = self.create(CreateWorkspace {
-            repository_name: repository_name.to_owned(),
-            name: workspace_name
-                .map(str::to_owned)
-                .unwrap_or_else(|| issue.identifier.to_ascii_lowercase()),
-            branch: branch_name
-                .map(str::to_owned)
-                .or(issue.branch_name)
-                .unwrap_or_else(|| {
-                    format!("{prefix}/{}-{slug}", issue.identifier.to_ascii_lowercase())
-                }),
-            base_ref: base_ref.map(str::to_owned),
-        })?;
+        let workspace = self.create_with_progress(
+            CreateWorkspace {
+                repository_name: repository_name.to_owned(),
+                name: workspace_name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| issue.identifier.to_ascii_lowercase()),
+                branch: branch_name
+                    .map(str::to_owned)
+                    .or(issue.branch_name)
+                    .unwrap_or_else(|| {
+                        format!("{prefix}/{}-{slug}", issue.identifier.to_ascii_lowercase())
+                    }),
+                base_ref: base_ref.map(str::to_owned),
+            },
+            after_insert,
+        )?;
         write_context_brief(
             &workspace.path,
             &format!(
@@ -6568,14 +6656,36 @@ fn is_conductor_context_path(path: &str) -> bool {
 }
 
 fn untracked_file_counts(path: &Path) -> Result<(usize, usize)> {
-    let contents = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let additions = if contents.is_empty() {
-        0
-    } else {
-        contents.iter().filter(|byte| **byte == b'\n').count()
-            + usize::from(!contents.ends_with(b"\n"))
-    };
-    Ok((additions, contents.len()))
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Ok((0, 0));
+    }
+    let mut file = fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut buffer = [0_u8; 8192];
+    let mut additions = 0;
+    let mut bytes_read = 0;
+    let mut last_byte = None;
+    while bytes_read < UNTRACKED_FILE_COUNT_BYTE_LIMIT {
+        let remaining = UNTRACKED_FILE_COUNT_BYTE_LIMIT - bytes_read;
+        let read_capacity = buffer.len().min(remaining);
+        let read_len = file
+            .read(&mut buffer[..read_capacity])
+            .with_context(|| format!("read {}", path.display()))?;
+        if read_len == 0 {
+            break;
+        }
+        bytes_read += read_len;
+        additions += buffer[..read_len]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+        last_byte = Some(buffer[read_len - 1]);
+    }
+    if bytes_read > 0 && last_byte != Some(b'\n') {
+        additions += 1;
+    }
+    Ok((additions, bytes_read))
 }
 
 fn format_review_comments_agent_prompt(name: &str, comments: &[ReviewComment]) -> String {
@@ -6792,17 +6902,6 @@ fn sync_repository_default_branch(
     )?;
     let remote_ref = format!("refs/remotes/{remote_name}/{default_branch}");
     git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref])?;
-    let current_branch = git_output_dynamic(root_path, &["branch", "--show-current"])
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    if current_branch == default_branch {
-        git_dynamic(
-            root_path,
-            &["pull", "--ff-only", remote_name, default_branch],
-        )?;
-        return Ok(default_branch.to_owned());
-    }
     let local_ref = format!("refs/heads/{default_branch}");
     if git_dynamic(root_path, &["rev-parse", "--verify", &local_ref]).is_ok()
         && git_dynamic(
@@ -6817,6 +6916,17 @@ fn sync_repository_default_branch(
             "local default branch is ahead or diverged; using remote branch as workspace base"
         );
         return Ok(format!("{remote_name}/{default_branch}"));
+    }
+    let current_branch = git_output_dynamic(root_path, &["branch", "--show-current"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if current_branch == default_branch {
+        git_dynamic(
+            root_path,
+            &["pull", "--ff-only", remote_name, default_branch],
+        )?;
+        return Ok(default_branch.to_owned());
     }
     match git_dynamic(root_path, &["update-ref", &local_ref, &remote_ref]) {
         Ok(()) => Ok(default_branch.to_owned()),
@@ -7062,8 +7172,18 @@ fn gitignore_patch_is_managed(chunk: &str) -> bool {
         }
         let pattern = line[1..].trim();
         match (prefix, gitignore_pattern_key(pattern).as_deref()) {
-            ('+', Some(".context" | ".archductor/settings.local.toml*"))
-            | ('-', Some(".archductor")) => changed = true,
+            (
+                '+',
+                Some(
+                    ".context"
+                    | ".archductor"
+                    | ".archductor/settings.toml"
+                    | ".archductor/prompt-packs"
+                    | ".archductor/prompt-packs/*.toml"
+                    | ".archductor/settings.local.toml*",
+                ),
+            )
+            | ('-', Some(".archductor" | ".archductor/*" | ".archductor/**")) => changed = true,
             _ => return false,
         }
     }
@@ -7082,7 +7202,16 @@ fn gitignore_without_managed_patterns(contents: &str) -> Vec<String> {
         .filter(|line| {
             !matches!(
                 gitignore_pattern_key(line).as_deref(),
-                Some(".context" | ".archductor" | ".archductor/settings.local.toml*")
+                Some(
+                    ".context"
+                        | ".archductor"
+                        | ".archductor/*"
+                        | ".archductor/**"
+                        | ".archductor/settings.toml"
+                        | ".archductor/prompt-packs"
+                        | ".archductor/prompt-packs/*.toml"
+                        | ".archductor/settings.local.toml*"
+                )
             )
         })
         .map(str::to_owned)

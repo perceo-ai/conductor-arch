@@ -215,11 +215,7 @@ pub fn load_repository_settings_for_layer(
         SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
         SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
     };
-    match load_optional_settings(&path) {
-        Ok(settings) => Ok(settings.into_settings()),
-        Err(err) if is_recoverable_settings_load_error(&err) => Ok(RepositorySettings::default()),
-        Err(err) => Err(err),
-    }
+    load_optional_settings(&path).map(|settings| settings.into_settings())
 }
 
 pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettingsLoadReport {
@@ -281,6 +277,12 @@ fn load_prompt_pack_prompts(
         return Ok(None);
     };
     let path = repo_path.join(relative_path);
+    if !prompt_pack_path_is_real(&repo_path.join(".archductor/prompt-packs"), true)? {
+        return Ok(None);
+    }
+    if !prompt_pack_path_is_real(&path, false)? {
+        return Ok(None);
+    }
     let contents = fs::read_to_string(&path)
         .with_context(|| format!("read prompt pack {}", path.display()))?;
     let raw: RawPromptPackFile = toml::from_str(&contents)
@@ -463,7 +465,7 @@ pub fn default_repository_settings_toml() -> Result<String> {
             run_mode: Some("concurrent".to_owned()),
             ..ScriptSettings::default()
         },
-        prompts: Some(default_prompt_settings()),
+        prompts: None,
         prompt_pack: PromptPackSettings {
             active: Some("default".to_owned()),
             version: Some("v1".to_owned()),
@@ -629,8 +631,8 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
     }
     if let Some(path) = settings.prompt_pack.path.as_deref() {
         anyhow::ensure!(
-            is_safe_relative_path(path),
-            "prompt_pack.path must be a safe relative path"
+            active_prompt_pack_path(path).is_some(),
+            "prompt_pack.path must name a file directly under .archductor/prompt-packs"
         );
     }
     for (key, _) in &settings.environment_variables {
@@ -1838,12 +1840,29 @@ fn ensure_context_gitignored(repo_path: &Path) -> Result<bool> {
         )
     });
     let original_len = lines.len();
-    lines.retain(|line| gitignore_pattern_key(line).as_deref() != Some(".archductor"));
+    lines.retain(|line| !is_managed_archductor_ignore_pattern(line));
     let mut changed = lines.len() != original_len;
 
     if !had_context {
         lines.push(".context/".to_owned());
         changed = true;
+    }
+    if lines
+        .iter()
+        .any(|line| is_archductor_directory_ignore_pattern(line))
+    {
+        let unignore_rules = [
+            "!.archductor/",
+            "!.archductor/settings.toml",
+            "!.archductor/prompt-packs/",
+            "!.archductor/prompt-packs/*.toml",
+        ];
+        for rule in unignore_rules {
+            if !lines.iter().any(|line| line.trim() == rule) {
+                lines.push(rule.to_owned());
+                changed = true;
+            }
+        }
     }
     if !had_local_settings {
         lines.push(".archductor/settings.local.toml*".to_owned());
@@ -1868,6 +1887,17 @@ pub(crate) fn gitignore_pattern_key(line: &str) -> Option<String> {
     }
     let trimmed = trimmed.trim_start_matches('/');
     Some(trimmed.trim_end_matches('/').to_owned())
+}
+
+fn is_managed_archductor_ignore_pattern(line: &str) -> bool {
+    matches!(gitignore_pattern_key(line).as_deref(), Some(".archductor"))
+}
+
+fn is_archductor_directory_ignore_pattern(line: &str) -> bool {
+    matches!(
+        gitignore_pattern_key(line).as_deref(),
+        Some(".archductor/*" | ".archductor/**")
+    )
 }
 
 fn active_prompt_pack_path(path: &str) -> Option<&Path> {
@@ -1977,6 +2007,31 @@ fn reject_symlink_file(path: &Path) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
     }
     Ok(())
+}
+
+fn prompt_pack_path_is_real(path: &Path, directory: bool) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    };
+    let file_type = metadata.file_type();
+    anyhow::ensure!(
+        !file_type.is_symlink(),
+        "{} must not be a symlink",
+        path.display()
+    );
+    anyhow::ensure!(
+        if directory {
+            file_type.is_dir()
+        } else {
+            file_type.is_file()
+        },
+        "{} must be a real {}",
+        path.display(),
+        if directory { "directory" } else { "file" }
+    );
+    Ok(true)
 }
 
 fn set_local_default_agent_provider(value: &mut toml::Value, provider: &str) -> Result<()> {

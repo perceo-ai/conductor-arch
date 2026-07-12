@@ -138,6 +138,7 @@ struct ChatRenderSignature {
     threads: Vec<ChatRenderThreadSignature>,
     messages: Vec<ChatRenderMessageSignature>,
     events: Vec<ChatRenderEventSignature>,
+    transcript_display: String,
     render_state: &'static str,
     runtime_summary: Option<String>,
 }
@@ -787,6 +788,7 @@ pub fn agent_session_panel(
                             &thread_state.borrow(),
                             &[],
                             &[],
+                            "structured",
                             "missing_thread",
                             None,
                         );
@@ -928,6 +930,7 @@ pub fn agent_session_panel(
                                     &thread_state.borrow(),
                                     &thread_messages,
                                     &thread_events,
+                                    &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
                                 );
@@ -961,6 +964,7 @@ pub fn agent_session_panel(
                                         ChatTimelineItem::Message(message) => {
                                             if let Some(widget) = chat_message_widget(
                                                 &message,
+                                                render_raw_message_content(&transcript_display),
                                                 render_legacy_inline_events,
                                             ) {
                                                 append_chat_refresh_row(&messages, &widget);
@@ -989,6 +993,7 @@ pub fn agent_session_panel(
                         &thread_state.borrow(),
                         &[],
                         &[],
+                        "structured",
                         "empty",
                         runtime_summary.clone(),
                     );
@@ -1023,6 +1028,7 @@ pub fn agent_session_panel(
                         &thread_state.borrow(),
                         &[],
                         &[],
+                        "structured",
                         "no_thread",
                         None,
                     );
@@ -2018,6 +2024,7 @@ fn chat_render_signature(
     threads: &[ChatThreadRecord],
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
+    transcript_display: &str,
     render_state: &'static str,
     runtime_summary: Option<String>,
 ) -> ChatRenderSignature {
@@ -2076,6 +2083,7 @@ fn chat_render_signature(
                 )
             })
             .collect(),
+        transcript_display: transcript_display.to_owned(),
         render_state,
         runtime_summary,
     }
@@ -2083,6 +2091,7 @@ fn chat_render_signature(
 
 fn chat_message_widget(
     message: &ChatMessageRecord,
+    render_raw_message_content: bool,
     render_legacy_inline_events: bool,
 ) -> Option<Widget> {
     match message.role.as_str() {
@@ -2102,7 +2111,7 @@ fn chat_message_widget(
             if !inline_events.is_empty() {
                 return Some(inline_events_widget(&inline_events));
             }
-            let content = chat_agent_message_display_content(message, render_legacy_inline_events);
+            let content = chat_agent_message_display_content(message, render_raw_message_content);
             if content.trim().is_empty() {
                 return None;
             }
@@ -2120,9 +2129,9 @@ fn chat_message_widget(
 
 fn chat_agent_message_display_content(
     message: &ChatMessageRecord,
-    render_legacy_inline_events: bool,
+    render_raw_message_content: bool,
 ) -> String {
-    if render_legacy_inline_events {
+    if render_raw_message_content {
         message.content.clone()
     } else {
         strip_codex_status_blocks(&message.content)
@@ -2201,9 +2210,17 @@ fn render_legacy_inline_events_for_thread(
     transcript_display: &str,
 ) -> bool {
     match transcript_display.trim().to_ascii_lowercase().as_str() {
-        "raw" | "legacy" => true,
+        "raw" => false,
+        "legacy" => thread_events.is_empty(),
         _ => thread_events.is_empty(),
     }
+}
+
+fn render_raw_message_content(transcript_display: &str) -> bool {
+    matches!(
+        transcript_display.trim().to_ascii_lowercase().as_str(),
+        "raw" | "legacy"
+    )
 }
 
 fn transcript_display_for_workspace(database_path: &Path, workspace_name: &str) -> String {
@@ -6892,7 +6909,7 @@ I summarized the result.
 
         assert_eq!(legacy_events.len(), 1);
         assert!(persisted_timeline_events.is_empty());
-        assert_eq!(raw_events.len(), 1);
+        assert!(raw_events.is_empty());
     }
 
     #[test]
