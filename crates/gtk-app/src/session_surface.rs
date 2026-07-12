@@ -1351,24 +1351,26 @@ pub fn agent_session_panel(
             selected_record_id = selected_record.as_ref().map(|record| record.id),
             "session send stage: selected thread record"
         );
-        let persist_turn_checkpoint = || {
-            if let Err(err) = create_turn_checkpoint_for_send(
-                &db_for_send,
-                &workspace_for_send,
-                thread_id,
-                selected_record.as_ref().map(|record| record.id),
-                staged_review,
-            ) {
+        let create_turn_checkpoint = |session_id: Option<i64>| match create_turn_checkpoint_for_send(
+            &db_for_send,
+            &workspace_for_send,
+            thread_id,
+            session_id,
+            staged_review,
+        ) {
+            Ok(checkpoint_id) => Some(checkpoint_id),
+            Err(err) => {
                 warn!(
                     workspace = %workspace_for_send,
                     thread_id,
                     error = %err,
-                    "turn checkpoint creation failed after session send queued"
+                    "turn checkpoint creation failed before session send queued"
                 );
                 append_session_status_message(
                     &messages_for_send,
                     &format!("[checkpoint] Could not create turn checkpoint: {err:#}"),
                 );
+                None
             }
         };
         if matches!(selected_kind, SessionKind::Codex) {
@@ -1417,6 +1419,7 @@ pub fn agent_session_panel(
                     } else {
                         ArchcarInputKind::User
                     };
+                    let checkpoint_id = create_turn_checkpoint(Some(record.id));
                     if !queue_archcar_user_send(
                         &archcar_bridge_for_send,
                         inflight_archcar_actions_for_send.as_ref(),
@@ -1425,8 +1428,15 @@ pub fn agent_session_panel(
                         send_input.clone(),
                         visible_input.clone(),
                         kind.clone(),
-                        None,
+                        checkpoint_id,
                     ) {
+                        if let Some(checkpoint_id) = checkpoint_id {
+                            discard_turn_checkpoint(
+                                &db_for_send,
+                                &workspace_for_send,
+                                checkpoint_id,
+                            );
+                        }
                         append_session_status_message(
                             &messages_for_send,
                             "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
@@ -1438,7 +1448,6 @@ pub fn agent_session_panel(
                         record.id,
                         false,
                     );
-                    persist_turn_checkpoint();
                     mark_thread_working(working_threads_for_send.as_ref(), thread_id);
                     if staged_review {
                         app_state_for_send.set_staged_review_prompt(None);
@@ -1474,7 +1483,6 @@ pub fn agent_session_panel(
                         ArchcarInputKind::User
                     },
                 );
-                persist_turn_checkpoint();
                 apply_codex_startup_signal(
                     &mut codex_startup_states_for_send.borrow_mut(),
                     CodexStartupSignal::Loading { thread_id },
@@ -1603,6 +1611,7 @@ pub fn agent_session_panel(
         } else {
             ArchcarInputKind::User
         };
+        let checkpoint_id = create_turn_checkpoint(Some(process_id));
         if !queue_archcar_user_send(
             &archcar_bridge_for_send,
             inflight_archcar_actions_for_send.as_ref(),
@@ -1611,8 +1620,11 @@ pub fn agent_session_panel(
             send_input.clone(),
             visible_input.clone(),
             input_kind,
-            None,
+            checkpoint_id,
         ) {
+            if let Some(checkpoint_id) = checkpoint_id {
+                discard_turn_checkpoint(&db_for_send, &workspace_for_send, checkpoint_id);
+            }
             append_session_status_message(
                 &messages_for_send,
                 "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
@@ -1624,7 +1636,6 @@ pub fn agent_session_panel(
             process_id,
             false,
         );
-        persist_turn_checkpoint();
         if staged_review {
             app_state_for_send.set_staged_review_prompt(None);
         }

@@ -363,7 +363,13 @@ fn redacted_offsets_for_raw_boundaries(
         while raw_cursor < boundary && raw_cursor < raw.len() && redacted_cursor < redacted.len() {
             let raw_char = raw[raw_cursor..].chars().next();
             let redacted_char = redacted[redacted_cursor..].chars().next();
-            if raw_char == redacted_char {
+            if redacted[redacted_cursor..].starts_with(MARKER)
+                && !raw[raw_cursor..].starts_with(MARKER)
+            {
+                redacted_cursor += MARKER.len();
+                raw_cursor =
+                    find_redaction_resume_offset(raw, raw_cursor, redacted, redacted_cursor);
+            } else if raw_char == redacted_char {
                 advance_char(raw, &mut raw_cursor);
                 advance_char(redacted, &mut redacted_cursor);
             } else if redacted[redacted_cursor..].starts_with(MARKER) {
@@ -1239,6 +1245,35 @@ mod tests {
                 occurred_at_ms: 10,
                 stream: "stdout".to_owned(),
                 text: "TOKEN=very-long-secret-value".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "\nvisible\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "TOKEN=[redacted]");
+        assert_eq!(rendered[1].text, "\nvisible\n");
+    }
+
+    #[test]
+    fn inspector_redacted_bracket_value_does_not_consume_later_visible_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=[secret-value]".to_owned(),
                 created_at: "now".to_owned(),
             },
             PtyChunkRecord {
