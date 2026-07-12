@@ -5232,6 +5232,10 @@ fn workspace_checks_panel(
             let title_entry = Entry::new();
             title_entry.set_placeholder_text(Some("PR title"));
             title_entry.set_hexpand(true);
+            let template = store.render_pull_request_template(name).ok();
+            if let Some(template) = template.as_ref() {
+                title_entry.set_text(&template.title);
+            }
             title_row.append(&title_entry);
             header.append(&title_row);
 
@@ -5243,13 +5247,12 @@ fn workspace_checks_panel(
             body_view.set_bottom_margin(8);
             body_view.set_left_margin(8);
             body_view.set_right_margin(8);
-            body_view.buffer().set_text(
-                &store
-                    .read_context_brief(name)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default(),
-            );
+            let body_text = template
+                .as_ref()
+                .map(|template| template.body.clone())
+                .or_else(|| store.read_context_brief(name).ok().flatten())
+                .unwrap_or_default();
+            body_view.buffer().set_text(&body_text);
             let body_scroll = ScrolledWindow::new();
             body_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
             body_scroll.set_min_content_height(72);
@@ -5645,13 +5648,23 @@ fn workspace_conflict_resolution_panel(
 
 fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
     match result {
-        Ok(output) => output
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|line| line.starts_with("https://"))
-            .map(|url| format!("Created PR: {url}"))
-            .unwrap_or_else(|| "Created PR.".to_owned()),
+        Ok(output) => {
+            if let Some(url) = output.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("Existing PR:")
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+            }) {
+                return format!("Existing PR: {url}");
+            }
+            output
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| line.starts_with("https://"))
+                .map(|url| format!("Created PR: {url}"))
+                .unwrap_or_else(|| "Created PR.".to_owned())
+        }
         Err(err) => format!("Create PR failed: {err:#}"),
     }
 }

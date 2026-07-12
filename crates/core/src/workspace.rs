@@ -921,6 +921,12 @@ pub struct PullRequestPanelState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestTemplate {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergePullRequestResult {
     pub merge_output: String,
     pub archived_workspace: Option<Workspace>,
@@ -2801,6 +2807,9 @@ impl WorkspaceStore {
         draft: bool,
     ) -> Result<String> {
         let workspace = self.get_by_name(name)?;
+        if let Some(existing) = self.existing_pull_request_for_workspace(&workspace)? {
+            return Ok(format!("Existing PR: {}\n", existing.url));
+        }
         let changed = self.changed_files(name)?;
         if changed.is_empty() {
             anyhow::bail!(
@@ -2824,6 +2833,92 @@ impl WorkspaceStore {
             self.record_pull_request(workspace.id, &url)?;
         }
         Ok(output)
+    }
+
+    pub fn render_pull_request_template(&self, name: &str) -> Result<PullRequestTemplate> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let changed_files = self
+            .changed_files(name)?
+            .into_iter()
+            .filter(|path| !is_conductor_context_path(path))
+            .collect::<Vec<_>>();
+        let changed_files_text = if changed_files.is_empty() {
+            "No changed files detected.".to_owned()
+        } else {
+            changed_files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let changed_files_inline = if changed_files.is_empty() {
+            "no changed files".to_owned()
+        } else {
+            changed_files.join(", ")
+        };
+        let session_summary = self
+            .latest_session_summary(&workspace)?
+            .unwrap_or_else(|| "No saved agent session summary yet.".to_owned());
+        let context_brief = self
+            .read_context_brief(name)?
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .unwrap_or(&workspace.name)
+            .to_owned();
+
+        let default_title = format!("{}: {}", workspace.name, context_brief);
+        let title_template = settings
+            .customization
+            .naming
+            .pr_title_template
+            .as_deref()
+            .filter(|template| !template.trim().is_empty())
+            .unwrap_or(&default_title);
+        let title = render_pr_template_text(
+            title_template,
+            &workspace,
+            changed_files.len(),
+            &changed_files_inline,
+            &session_summary,
+            &context_brief,
+        );
+
+        let sections = if settings.customization.naming.pr_body_sections.is_empty() {
+            vec!["Summary".to_owned(), "Tests".to_owned(), "Risk".to_owned()]
+        } else {
+            settings.customization.naming.pr_body_sections
+        };
+        let mut body = String::new();
+        for section in sections {
+            let normalized = section.to_ascii_lowercase();
+            body.push_str(&format!("## {section}\n\n"));
+            if normalized.contains("summary") {
+                body.push_str(&format!(
+                    "- Workspace: {}\n- Branch: {}\n- Changed files: {}\n\n{}\n\nSession summary:\n{}\n",
+                    workspace.name,
+                    workspace.branch,
+                    changed_files.len(),
+                    changed_files_text,
+                    session_summary
+                ));
+            } else if normalized.contains("test") || normalized.contains("verification") {
+                body.push_str("- TODO: Add checks/tests run before creating the PR.\n");
+            } else if normalized.contains("risk") {
+                body.push_str("- TODO: Note migration, data, rollout, or UX risk.\n");
+            } else {
+                body.push_str("- TODO\n");
+            }
+            body.push('\n');
+        }
+
+        Ok(PullRequestTemplate {
+            title: title.trim().to_owned(),
+            body: body.trim().to_owned(),
+        })
     }
 
     pub fn create_from_issue(
@@ -3443,6 +3538,48 @@ mutation($threadId: ID!) {{
         }
         args.extend(extra.iter().map(|arg| (*arg).to_owned()));
         Ok(args)
+    }
+
+    fn existing_pull_request_for_workspace(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Option<PullRequest>> {
+        if let Some(pr) = self.pull_request_by_workspace_id(workspace.id)? {
+            return Ok(Some(pr));
+        }
+        let output = command_output(
+            &workspace.path,
+            "gh",
+            &[
+                "pr",
+                "list",
+                "--head",
+                workspace.branch.as_str(),
+                "--state",
+                "open",
+                "--json",
+                "url",
+                "--limit",
+                "1",
+            ],
+        )?;
+        match first_pull_request_url_from_json(&output) {
+            Some(url) => self.record_pull_request(workspace.id, &url).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn latest_session_summary(&self, workspace: &Workspace) -> Result<Option<String>> {
+        let Some(process) = self
+            .list_processes(&workspace.name, ProcessKind::Session)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let transcript = fs::read_to_string(&process.log_path).unwrap_or_default();
+        let summary = terminal_log_preview(&transcript);
+        Ok((!summary.trim().is_empty()).then_some(summary))
     }
 
     fn record_pull_request(&self, workspace_id: i64, url: &str) -> Result<PullRequest> {
@@ -7708,6 +7845,34 @@ fn quote_shell_word(value: &str) -> String {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn first_pull_request_url_from_json(output: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    value
+        .as_array()?
+        .first()?
+        .get("url")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn render_pr_template_text(
+    template: &str,
+    workspace: &Workspace,
+    changed_files_count: usize,
+    changed_files: &str,
+    session_summary: &str,
+    summary: &str,
+) -> String {
+    template
+        .replace("{workspace}", &workspace.name)
+        .replace("{branch}", &workspace.branch)
+        .replace("{changed_files_count}", &changed_files_count.to_string())
+        .replace("{changed_files}", changed_files)
+        .replace("{session_summary}", session_summary)
+        .replace("{summary}", summary)
+        .replace("{type}", "feat")
 }
 
 fn random_index(len: usize) -> usize {
@@ -14830,6 +14995,127 @@ exit 1
 
         let summary = store.checks_summary("berlin").unwrap();
         assert_eq!(summary.pull_request, Some(recorded));
+    }
+
+    #[test]
+    fn render_pull_request_template_uses_workspace_variables_and_default_sections() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[customization.naming]
+pr_title_template = "{workspace}: {branch} ({changed_files_count})"
+pr_body_sections = ["Summary", "Tests", "Risk"]
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add pr template settings",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
+
+        let template = store.render_pull_request_template("berlin").unwrap();
+
+        assert_eq!(template.title, "berlin: lc/berlin (1)");
+        assert!(template.body.contains("## Summary"));
+        assert!(template.body.contains("## Tests"));
+        assert!(template.body.contains("## Risk"));
+        assert!(template.body.contains("- README.md"));
+        assert!(template
+            .body
+            .contains("No saved agent session summary yet."));
+    }
+
+    #[test]
+    fn create_pull_request_returns_existing_remote_pr_instead_of_duplicate() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[{"url":"https://github.com/example/demo/pull/42"}]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let output = store
+            .create_pull_request("berlin", Some("Title"), Some("Body"), true)
+            .unwrap();
+
+        restore_path(old_path);
+        assert_eq!(
+            output.trim(),
+            "Existing PR: https://github.com/example/demo/pull/42"
+        );
+        assert_eq!(store.pull_request("berlin").unwrap().unwrap().number, 42);
     }
 
     #[test]
