@@ -11,9 +11,9 @@ use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest}
 use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
-    WorkspaceTimelineEvent,
+    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
+    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
+    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -23,11 +23,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::error;
 
-const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
-const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
-const WORKSPACE_SPLIT_MIN_START: i32 = 360;
-const WORKSPACE_SPLIT_MIN_END: i32 = 280;
+const WORKSPACE_SPLIT_MIN_START: i32 = 280;
+const WORKSPACE_SPLIT_MIN_END: i32 = 260;
+const WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH: i32 = 820;
+const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
+const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
+const WORKSPACE_TURN_DIFF_LIMIT: usize = 25;
+const WORKSPACE_TURN_DIFF_MAX_KIB: usize = 64;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
@@ -144,21 +147,15 @@ fn simple_workspace_shell(
     shell.set_hexpand(true);
     shell.set_overflow(gtk::Overflow::Hidden);
 
-    // Horizontal split: center (flex) + right (fixed 300px)
-    let split = Paned::new(Orientation::Horizontal);
-    split.set_wide_handle(false);
-    split.set_resize_start_child(true);
-    split.set_resize_end_child(true);
-    split.set_shrink_start_child(true);
-    split.set_shrink_end_child(true);
-    split.set_position(split_position_for_ratio(
-        1280,
-        WORKSPACE_SPLIT_START_WEIGHT,
-        WORKSPACE_SPLIT_END_WEIGHT,
-        WORKSPACE_SPLIT_MIN_START,
-        WORKSPACE_SPLIT_MIN_END,
-    ));
-    split.set_vexpand(true);
+    // Horizontal split: center (flex) + right review/context panel.
+    let main_split = Paned::new(Orientation::Horizontal);
+    main_split.set_wide_handle(false);
+    main_split.set_resize_start_child(true);
+    main_split.set_resize_end_child(false);
+    main_split.set_shrink_start_child(true);
+    main_split.set_shrink_end_child(true);
+    main_split.set_position(WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH);
+    main_split.set_vexpand(true);
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
         let right_panel_handle = right_panel_handle.clone();
@@ -179,7 +176,7 @@ fn simple_workspace_shell(
         collapse_right_panel,
         ToastManager::new(&toast_overlay),
     );
-    split.set_start_child(Some(&center));
+    main_split.set_start_child(Some(&center));
 
     // Right: file list + run console
     let right = ws_right_panel(
@@ -195,9 +192,9 @@ fn simple_workspace_shell(
         collapse_sidebar,
     );
     *right_panel_handle.borrow_mut() = Some(right.clone());
-    split.set_end_child(Some(&right));
+    main_split.set_end_child(Some(&right));
 
-    shell.append(&split);
+    shell.append(&main_split);
     shell
 }
 
@@ -310,6 +307,7 @@ impl WorkspaceRunConsoleTerminalConnection {
             ArchcarRequest::SendInput {
                 session_id: record.id,
                 input: input.to_owned(),
+                visible_input: None,
                 kind: ArchcarInputKind::ControlCommand,
             },
         );
@@ -450,35 +448,6 @@ fn ws_center_panel(
     }
     tab_bar.append(&chat_tabs_scroll);
     tab_bar.append(&file_tabs);
-    let pr_status = workspace_pr_status_snapshot(store, &ws.name);
-    let create_pr_btn = text_button(workspace_pr_primary_action_label(&pr_status));
-    create_pr_btn.add_css_class("ws-pr-action-button");
-    if let Some(status) = pr_status.status.as_ref() {
-        create_pr_btn.add_css_class(status.css_class);
-    } else {
-        create_pr_btn.add_css_class("suggested-action");
-    }
-    create_pr_btn.set_tooltip_text(Some(workspace_pr_primary_action_tooltip(&pr_status)));
-    match pr_status.pr.as_ref() {
-        Some(pr) => {
-            let url = pr.url.clone();
-            create_pr_btn.connect_clicked(move |_| open_external_url(&url));
-        }
-        None => {
-            let db_path = db_path.to_path_buf();
-            let workspace_name = ws.name.clone();
-            let state = state.clone();
-            let refresh_hub = refresh_hub.clone();
-            connect_create_pr_prompt_button(
-                &create_pr_btn,
-                db_path,
-                workspace_name,
-                state,
-                refresh_hub,
-            );
-        }
-    }
-    tab_bar.append(&create_pr_btn);
     panel.append(&tab_bar);
 
     // Separator below tab bar
@@ -1191,7 +1160,7 @@ where
     }
 }
 
-// ── Right panel (file list + run console) ───────────────────────
+// ── Left/right workspace panels ─────────────────────────────────
 
 fn ws_right_panel(
     db_path: &Path,
@@ -1208,7 +1177,8 @@ fn ws_right_panel(
     let panel = GBox::new(Orientation::Vertical, 0);
     panel.add_css_class("ws-right-panel");
     panel.set_vexpand(true);
-    panel.set_hexpand(true);
+    panel.set_hexpand(false);
+    panel.set_width_request(WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH);
     panel.set_overflow(gtk::Overflow::Hidden);
 
     panel.append(&workspace_pr_status_panel(
@@ -1217,6 +1187,7 @@ fn ws_right_panel(
         &ws.name,
         state,
         refresh_hub.clone(),
+        &toast_overlay,
     ));
     panel.append(&Separator::new(Orientation::Horizontal));
 
@@ -2251,12 +2222,6 @@ fn workspace_status_strip(
             .unwrap_or_else(|| "-".to_owned()),
     ));
     strip.append(&metric_card(
-        "Todos",
-        &checks
-            .map(|summary| format!("{} open", summary.open_todos))
-            .unwrap_or_else(|| "-".to_owned()),
-    ));
-    strip.append(&metric_card(
         "Review",
         &checks
             .map(|summary| format!("{} open", summary.open_review_comments))
@@ -2792,23 +2757,49 @@ fn lifecycle_panel(
         let confirm_action = confirm.clone();
         let progress_action = progress.clone();
         let toast_action = toast_overlay.clone();
+        let state_after_action = state.clone();
         button.connect_clicked(move |_| {
             if matches!(action, "archive" | "discard" | "delete") && !confirm_action.is_active() {
                 progress_action.set_text("Check confirm before archive/discard/delete.");
                 return;
             }
             progress_action.set_text(&format!("{action} in progress..."));
+            if action == "delete" {
+                match WorkspaceStore::open(db_action.clone())
+                    .and_then(|store| store.delete(&workspace, false, false))
+                {
+                    Ok(deleted) => {
+                        progress_action.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                        state_after_action.set_selected_workspace(None);
+                        refresh_after_action.refresh(RefreshScope::All);
+                        let db_cleanup = db_action.clone();
+                        std::thread::spawn(move || {
+                            if let Err(err) = WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                store.cleanup_deleted_workspace_artifacts(&deleted, true, true)
+                            }) {
+                                error!(
+                                    workspace = %deleted.name,
+                                    error = %err,
+                                    "background workspace artifact cleanup failed after delete"
+                                );
+                            }
+                        });
+                    }
+                    Err(err) => apply_runtime_action_feedback(
+                        &progress_action,
+                        &toast_action,
+                        lifecycle_action_failure_feedback("Delete", &err),
+                    ),
+                }
+                return;
+            }
             let result = WorkspaceStore::open(db_action.clone()).and_then(|store| match action {
                 "archive" => store.archive(&workspace, false),
                 "restore" => store.restore(&workspace),
                 "discard" => store.discard(&workspace),
-                "delete" => store.delete(&workspace, true, true),
                 _ => unreachable!(),
             });
             match result {
-                Ok(workspace) if action == "delete" => {
-                    progress_action.set_text(&workspace_delete_feedback(Ok(workspace)))
-                }
                 Ok(workspace) => progress_action.set_text(&format!(
                     "{} complete: {}",
                     title_case_workspace(action),
@@ -2817,11 +2808,7 @@ fn lifecycle_panel(
                 Err(err) => apply_runtime_action_feedback(
                     &progress_action,
                     &toast_action,
-                    if action == "delete" {
-                        lifecycle_action_failure_feedback("Delete", &err)
-                    } else {
-                        lifecycle_action_failure_feedback(&title_case_workspace(action), &err)
-                    },
+                    lifecycle_action_failure_feedback(&title_case_workspace(action), &err),
                 ),
             }
             refresh_after_action.refresh(RefreshScope::All);
@@ -2879,6 +2866,7 @@ fn work_tabs(
         .map(|defaults| terminal::terminal_command_presets(&defaults.command_palette_presets))
         .unwrap_or_else(|_| terminal::terminal_command_presets(&[]));
 
+    let work_detail_tabs = Stack::new();
     tabs.add_titled(
         &changes_checks_review_tabs(
             db_path,
@@ -2887,6 +2875,7 @@ fn work_tabs(
             state.clone(),
             refresh_hub.clone(),
             toast_overlay.clone(),
+            work_detail_tabs.clone(),
         ),
         Some("work"),
         "Changes",
@@ -2918,11 +2907,6 @@ fn work_tabs(
         "Terminal",
     );
     tabs.add_titled(
-        &workspace_todos_panel(store, &ws.name),
-        Some("todos"),
-        "Todos",
-    );
-    tabs.add_titled(
         &workspace_checkpoint_panel(
             db_path,
             &ws.name,
@@ -2949,7 +2933,13 @@ fn work_tabs(
         "Branch",
     );
     tabs.add_titled(
-        &workspace_timeline_panel(store, &ws.name),
+        &workspace_timeline_panel(
+            store,
+            &ws.name,
+            state.clone(),
+            tabs.clone(),
+            work_detail_tabs.clone(),
+        ),
         Some("timeline"),
         "Timeline",
     );
@@ -2968,7 +2958,6 @@ fn work_tabs(
                     state_tabs.set_active_workspace_tab(WorkspaceTab::Changes);
                 }
             }
-            Some("todos") => state_tabs.set_active_workspace_tab(WorkspaceTab::Todos),
             Some("processes") => state_tabs.set_active_workspace_tab(WorkspaceTab::Processes),
             Some("terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Terminal),
             Some("chat-terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Chats),
@@ -2983,9 +2972,11 @@ fn work_tabs(
 fn workspace_tab_stack_name(tab: &WorkspaceTab) -> &'static str {
     match tab {
         WorkspaceTab::Chats => "chat-terminal",
-        WorkspaceTab::Changes | WorkspaceTab::Checks | WorkspaceTab::Review => "work",
+        WorkspaceTab::Changes
+        | WorkspaceTab::Checks
+        | WorkspaceTab::Review
+        | WorkspaceTab::Todos => "work",
         WorkspaceTab::Checkpoints => "checkpoints",
-        WorkspaceTab::Todos => "todos",
         WorkspaceTab::Processes => "processes",
         WorkspaceTab::Terminal => "terminal",
     }
@@ -3098,16 +3089,85 @@ fn workspace_branch_panel(
     panel
 }
 
-fn workspace_timeline_panel(store: &WorkspaceStore, name: &str) -> GBox {
+fn workspace_timeline_panel(
+    store: &WorkspaceStore,
+    name: &str,
+    app_state: AppState,
+    workspace_tabs: Stack,
+    work_detail_tabs: Stack,
+) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.add_css_class("command-panel");
     panel.append(&section_title("Timeline"));
-    let text = store
-        .workspace_timeline(name, None)
-        .map(|events| format_workspace_timeline(&events))
-        .unwrap_or_else(|err| format!("Could not load timeline: {err:#}"));
-    panel.append(&text_panel(&text));
+    match store.workspace_timeline(name, None) {
+        Ok(events) if events.is_empty() => {
+            panel.append(&detail_row("Timeline", "No workspace timeline events yet."))
+        }
+        Ok(events) => {
+            let list = GBox::new(Orientation::Vertical, 4);
+            let (visible, hidden) = visible_timeline_events(&events);
+            if hidden > 0 {
+                list.append(&detail_row(
+                    "Timeline",
+                    &format!(
+                        "Showing latest {} events; {hidden} older hidden.",
+                        visible.len()
+                    ),
+                ));
+            }
+            for event in visible {
+                list.append(&workspace_timeline_event_row(
+                    event,
+                    app_state.clone(),
+                    workspace_tabs.clone(),
+                    work_detail_tabs.clone(),
+                ));
+            }
+            let scroll = ScrolledWindow::new();
+            scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+            scroll.set_vexpand(true);
+            scroll.set_child(Some(&list));
+            panel.append(&scroll);
+        }
+        Err(err) => panel.append(&detail_row(
+            "Timeline",
+            &format!("Could not load timeline: {err:#}"),
+        )),
+    }
     panel
+}
+
+fn workspace_timeline_event_row(
+    event: &WorkspaceTimelineEvent,
+    app_state: AppState,
+    workspace_tabs: Stack,
+    work_detail_tabs: Stack,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("ws-git-file-action-row");
+    let label = Label::new(Some(&format_workspace_timeline_event(event)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    row.append(&label);
+
+    if let Some((tab, label)) = timeline_jump_target(event.kind.as_str()) {
+        let button = text_button(label);
+        let target_tab = tab.clone();
+        button.connect_clicked(move |_| {
+            app_state.set_active_workspace_tab(target_tab.clone());
+            workspace_tabs.set_visible_child_name(workspace_tab_stack_name(&target_tab));
+            if matches!(
+                target_tab,
+                WorkspaceTab::Changes | WorkspaceTab::Checks | WorkspaceTab::Review
+            ) {
+                work_detail_tabs
+                    .set_visible_child_name(changes_checks_review_tab_stack_name(&target_tab));
+            }
+        });
+        row.append(&button);
+    }
+    row
 }
 
 fn workspace_checkpoint_panel(
@@ -3256,9 +3316,9 @@ fn changes_checks_review_tabs(
     app_state: AppState,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
+    tabs: Stack,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
-    let tabs = Stack::new();
     tabs.set_vexpand(true);
     let switcher = StackSwitcher::new();
     switcher.set_stack(Some(&tabs));
@@ -3696,8 +3756,8 @@ fn workspace_changes_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
-    _refresh_hub: RefreshHub,
-    _toast_overlay: ToastOverlay,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let header_row = GBox::new(Orientation::Horizontal, 8);
@@ -3724,6 +3784,29 @@ fn workspace_changes_panel(
     status.set_wrap(true);
     panel.append(&status);
 
+    let feedback = Label::new(Some("Stage files, edit the commit message, then commit."));
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    panel.append(&workspace_base_ref_controls(
+        db_path,
+        store,
+        name,
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        &feedback,
+    ));
+
+    panel.append(&workspace_git_file_actions_panel(
+        db_path,
+        store,
+        name,
+        refresh_hub,
+        toast_overlay.clone(),
+        &feedback,
+    ));
+
     let body_stack = Stack::new();
     body_stack.set_vexpand(true);
     body_stack.set_hexpand(true);
@@ -3731,10 +3814,13 @@ fn workspace_changes_panel(
     let total_view = workspace_changes_text_view(store, name);
     body_stack.add_named(&total_view, Some("total"));
 
+    let split_view = workspace_split_changes_text_view(store, name);
+    body_stack.add_named(&split_view, Some("split"));
+
     let untracked_view = workspace_untracked_changes_view(db_path, name);
     body_stack.add_named(&untracked_view, Some("untracked"));
 
-    let last_turn_view = workspace_last_turn_changes_view(db_path, name);
+    let last_turn_view = workspace_turn_changes_view(db_path, name);
     body_stack.add_named(&last_turn_view, Some("last_turn"));
 
     let checks_view = workspace_checks_text_view(store, name);
@@ -3754,8 +3840,9 @@ fn workspace_changes_panel(
 
     for (label, target, scope_text) in [
         ("Total changes", "total", "Total changes"),
+        ("Split diff", "split", "Split diff"),
         ("Untracked changes", "untracked", "Untracked changes"),
-        ("Last turn changes", "last_turn", "Last turn changes"),
+        ("Turn changes", "last_turn", "Turn changes"),
         ("By commit", "commits", "Changes by commit"),
         ("Checks", "checks", "Checks"),
     ] {
@@ -3775,13 +3862,723 @@ fn workspace_changes_panel(
         popover.popup();
     });
 
-    let feedback = Label::new(Some("Use the menu for diffs, commit views, and PR checks."));
-    feedback.add_css_class("card-meta");
-    feedback.set_xalign(0.0);
-    feedback.set_wrap(true);
     panel.append(&feedback);
 
     panel
+}
+
+fn workspace_base_ref_controls(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-base-ref-row");
+    let label = Label::new(Some("Base"));
+    label.add_css_class("detail-label");
+    let entry = Entry::new();
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some("main"));
+    if let Ok(base_ref) = store.workspace_base_ref(name) {
+        entry.set_text(&base_ref);
+    }
+    let save_btn = text_button("Set Base");
+    let db_path_for_save = db_path.to_path_buf();
+    let workspace_for_save = name.to_owned();
+    let entry_for_save = entry.clone();
+    let feedback_for_save = feedback.clone();
+    save_btn.connect_clicked(move |_| {
+        let base_ref = entry_for_save.text();
+        let result = WorkspaceStore::open(&db_path_for_save)
+            .and_then(|store| store.set_workspace_base_ref(&workspace_for_save, &base_ref));
+        match result {
+            Ok(workspace) => {
+                apply_action_feedback(
+                    &feedback_for_save,
+                    &toast_overlay,
+                    &format!("Base branch set to {}.", workspace.base_ref),
+                    true,
+                );
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_save,
+                &toast_overlay,
+                &format!("Could not set base branch: {err:#}"),
+                true,
+            ),
+        }
+    });
+    row.append(&label);
+    row.append(&entry);
+    row.append(&save_btn);
+    row
+}
+
+fn workspace_git_file_actions_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.add_css_class("ws-git-actions-panel");
+
+    let mut has_stageable = false;
+    let mut has_staged = false;
+    match store.diff_file_summaries(name) {
+        Ok(summaries) if summaries.is_empty() => {
+            let empty = Label::new(Some("No file changes."));
+            empty.add_css_class("card-meta");
+            empty.set_xalign(0.0);
+            panel.append(&empty);
+        }
+        Ok(summaries) => {
+            has_stageable = summaries
+                .iter()
+                .any(|summary| summary.unstaged || summary.untracked || !summary.staged);
+            has_staged = summaries.iter().any(|summary| summary.staged);
+            let list = GBox::new(Orientation::Vertical, 4);
+            for summary in summaries {
+                let file_block = GBox::new(Orientation::Vertical, 3);
+                let path = summary.path.clone();
+                let staged = summary.staged;
+                let unstaged = summary.unstaged || summary.untracked;
+                list.append(&file_block);
+                file_block.append(&workspace_git_file_action_row(
+                    db_path,
+                    name,
+                    summary,
+                    refresh_hub.clone(),
+                    toast_overlay.clone(),
+                    feedback,
+                ));
+                file_block.append(&workspace_git_hunk_actions_panel(
+                    db_path,
+                    name,
+                    &path,
+                    unstaged,
+                    staged,
+                    refresh_hub.clone(),
+                    toast_overlay.clone(),
+                    feedback,
+                ));
+            }
+            panel.append(&list);
+        }
+        Err(err) => {
+            let error = Label::new(Some(&format!("Could not read file changes: {err:#}")));
+            error.add_css_class("card-meta");
+            error.set_xalign(0.0);
+            error.set_wrap(true);
+            panel.append(&error);
+        }
+    }
+
+    panel.append(&workspace_git_batch_actions_row(
+        db_path,
+        name,
+        has_stageable,
+        has_staged,
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+    ));
+
+    let commit_row = GBox::new(Orientation::Horizontal, 6);
+    let message = Entry::new();
+    message.set_hexpand(true);
+    message.set_placeholder_text(Some("Commit message"));
+    if let Ok(draft) = store.commit_message_draft(name) {
+        message.set_text(&draft);
+    }
+    let generate_btn = text_button("Generate");
+    generate_btn.set_sensitive(has_staged);
+    let db_path_for_generate = db_path.to_path_buf();
+    let workspace_for_generate = name.to_owned();
+    let feedback_for_generate = feedback.clone();
+    let toast_for_generate = toast_overlay.clone();
+    let message_for_generate = message.clone();
+    generate_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path_for_generate).and_then(|store| {
+            store.generated_commit_message_from_staged_diff(&workspace_for_generate)
+        });
+        match result {
+            Ok(generated) => {
+                message_for_generate.set_text(&generated);
+                apply_action_feedback(
+                    &feedback_for_generate,
+                    &toast_for_generate,
+                    "Generated commit message from staged diff.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_generate,
+                &toast_for_generate,
+                &git_action_error("Could not generate commit message", &err),
+                true,
+            ),
+        }
+    });
+    let commit_btn = text_button("Commit");
+    commit_btn.set_sensitive(has_staged);
+    let db_path_for_commit = db_path.to_path_buf();
+    let workspace_for_commit = name.to_owned();
+    let refresh_for_commit = refresh_hub;
+    let toast_for_commit = toast_overlay;
+    let feedback_for_commit = feedback.clone();
+    let message_for_commit = message.clone();
+    commit_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path_for_commit).and_then(|store| {
+            store.commit_workspace_changes(&workspace_for_commit, &message_for_commit.text())
+        });
+        match result {
+            Ok(output) => {
+                let first_line = output.lines().next().unwrap_or("Committed staged changes.");
+                apply_action_feedback(&feedback_for_commit, &toast_for_commit, first_line, true);
+                refresh_for_commit.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_commit,
+                &toast_for_commit,
+                &format!("Could not commit: {err:#}"),
+                true,
+            ),
+        }
+    });
+    commit_row.append(&message);
+    commit_row.append(&generate_btn);
+    commit_row.append(&commit_btn);
+    panel.append(&commit_row);
+
+    panel
+}
+
+fn workspace_git_batch_actions_row(
+    db_path: &Path,
+    name: &str,
+    has_stageable: bool,
+    has_staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-git-file-action-row");
+    let label = Label::new(Some("All files"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&label);
+
+    let stage_all_btn = text_button("Stage All");
+    stage_all_btn.set_sensitive(has_stageable);
+    connect_git_workspace_action(
+        &stage_all_btn,
+        db_path,
+        name,
+        "Staged all files.",
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+        |store, workspace_name| store.stage_all_workspace_files(workspace_name),
+    );
+    row.append(&stage_all_btn);
+
+    let unstage_all_btn = text_button("Unstage All");
+    unstage_all_btn.set_sensitive(has_staged);
+    connect_git_workspace_action(
+        &unstage_all_btn,
+        db_path,
+        name,
+        "Unstaged all files.",
+        refresh_hub,
+        toast_overlay,
+        feedback,
+        |store, workspace_name| store.unstage_all_workspace_files(workspace_name),
+    );
+    row.append(&unstage_all_btn);
+
+    row
+}
+
+fn workspace_git_hunk_actions_panel(
+    db_path: &Path,
+    name: &str,
+    path: &str,
+    show_unstaged: bool,
+    show_staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 2);
+    if show_unstaged {
+        append_hunk_rows(
+            &panel,
+            db_path,
+            name,
+            path,
+            false,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+            feedback,
+        );
+    }
+    if show_staged {
+        append_hunk_rows(
+            &panel,
+            db_path,
+            name,
+            path,
+            true,
+            refresh_hub,
+            toast_overlay,
+            feedback,
+        );
+    }
+    panel
+}
+
+fn append_hunk_rows(
+    panel: &GBox,
+    db_path: &Path,
+    name: &str,
+    path: &str,
+    staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) {
+    let hunks = WorkspaceStore::open(db_path)
+        .and_then(|store| store.diff_hunks(name, path, staged))
+        .unwrap_or_else(|err| {
+            vec![DiffHunkSummary {
+                index: 0,
+                header: "Could not read hunks".to_owned(),
+                additions: 0,
+                deletions: 0,
+                staged,
+                unsupported_reason: Some(format!("{err:#}")),
+            }]
+        });
+    let total_hunks = hunks.len();
+    for hunk in hunks.into_iter().take(8) {
+        panel.append(&workspace_git_hunk_action_row(
+            db_path,
+            name,
+            path,
+            hunk,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+            feedback,
+        ));
+    }
+    if total_hunks > 8 {
+        panel.append(&detail_row(
+            "Hunks",
+            &format!(
+                "{} additional hunks omitted here. Use file-level actions for the full file.",
+                total_hunks - 8
+            ),
+        ));
+    }
+}
+
+fn workspace_git_hunk_action_row(
+    db_path: &Path,
+    name: &str,
+    path: &str,
+    hunk: DiffHunkSummary,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-git-file-action-row");
+    let label = Label::new(Some(&hunk_action_label(&hunk)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    row.append(&label);
+
+    if let Some(reason) = hunk.unsupported_reason {
+        let unsupported = Label::new(Some(&format!("{reason}; use file-level fallback.")));
+        unsupported.add_css_class("card-meta");
+        unsupported.set_xalign(0.0);
+        unsupported.set_wrap(true);
+        row.append(&unsupported);
+        return row;
+    }
+
+    let action_label = if hunk.staged {
+        "Unstage Hunk"
+    } else {
+        "Stage Hunk"
+    };
+    let button = text_button(action_label);
+    let hunk_index = hunk.index;
+    connect_git_hunk_action(
+        &button,
+        db_path,
+        name,
+        path,
+        hunk_index,
+        hunk.staged,
+        refresh_hub,
+        toast_overlay,
+        feedback,
+    );
+    row.append(&button);
+    row
+}
+
+fn hunk_action_label(hunk: &DiffHunkSummary) -> String {
+    let state = if hunk.staged { "staged" } else { "unstaged" };
+    format!(
+        "  Hunk {} [{state}] +{} -{} {}",
+        hunk.index + 1,
+        hunk.additions,
+        hunk.deletions,
+        hunk.header
+    )
+}
+
+fn workspace_git_file_action_row(
+    db_path: &Path,
+    name: &str,
+    summary: DiffFileSummary,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-git-file-action-row");
+    let path = summary.path.clone();
+    let counts = match (summary.additions, summary.deletions) {
+        (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
+        _ => "binary".to_owned(),
+    };
+    let label = Label::new(Some(&format!(
+        "{} {} {}",
+        summary.path,
+        diff_state_label(&summary),
+        counts
+    )));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    row.append(&label);
+
+    let open_btn = text_button("Open");
+    let db_path_for_open = db_path.to_path_buf();
+    let workspace_for_open = name.to_owned();
+    let path_for_open = path.clone();
+    let feedback_for_open = feedback.clone();
+    let toast_for_open = toast_overlay.clone();
+    open_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(&db_path_for_open)
+            .and_then(|store| store.workspace_path(&workspace_for_open))
+            .map(|workspace_path| workspace_path.join(&path_for_open))
+        {
+            Ok(file_path) if file_path.exists() => {
+                match std::process::Command::new("xdg-open")
+                    .arg(&file_path)
+                    .spawn()
+                {
+                    Ok(_) => apply_action_feedback(
+                        &feedback_for_open,
+                        &toast_for_open,
+                        &format!("Opened {}.", file_path.display()),
+                        true,
+                    ),
+                    Err(err) => apply_action_feedback(
+                        &feedback_for_open,
+                        &toast_for_open,
+                        &format!("Could not open {}: {err}", file_path.display()),
+                        true,
+                    ),
+                }
+            }
+            Ok(file_path) => apply_action_feedback(
+                &feedback_for_open,
+                &toast_for_open,
+                &format!("File does not exist: {}", file_path.display()),
+                true,
+            ),
+            Err(err) => apply_action_feedback(
+                &feedback_for_open,
+                &toast_for_open,
+                &format!("Could not resolve file path: {err:#}"),
+                true,
+            ),
+        }
+    });
+    row.append(&open_btn);
+
+    let copy_diff_btn = text_button("Copy Diff");
+    let db_path_for_copy = db_path.to_path_buf();
+    let workspace_for_copy = name.to_owned();
+    let path_for_copy = path.clone();
+    let feedback_for_copy = feedback.clone();
+    let toast_for_copy = toast_overlay.clone();
+    copy_diff_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path_for_copy).map(|store| {
+            workspace_diff_text_for_clipboard(&store, &workspace_for_copy, Some(&path_for_copy))
+        });
+        match result {
+            Ok(diff_text) => {
+                if let Some(display) = gtk::gdk::Display::default() {
+                    display.clipboard().set_text(&diff_text);
+                    apply_action_feedback(
+                        &feedback_for_copy,
+                        &toast_for_copy,
+                        &format!("Copied diff for {}.", path_for_copy),
+                        true,
+                    );
+                } else {
+                    apply_action_feedback(
+                        &feedback_for_copy,
+                        &toast_for_copy,
+                        "Could not access clipboard.",
+                        true,
+                    );
+                }
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_copy,
+                &toast_for_copy,
+                &format!("Could not copy diff for {}: {err:#}", path_for_copy),
+                true,
+            ),
+        }
+    });
+    row.append(&copy_diff_btn);
+
+    let stage_btn = text_button("Stage");
+    stage_btn.set_sensitive(!summary.staged || summary.unstaged || summary.untracked);
+    connect_git_file_action(
+        &stage_btn,
+        db_path,
+        name,
+        &path,
+        "Staged",
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+        None,
+        |store, workspace_name, file_path| store.stage_workspace_file(workspace_name, file_path),
+    );
+    row.append(&stage_btn);
+
+    let unstage_btn = text_button("Unstage");
+    unstage_btn.set_sensitive(summary.staged);
+    connect_git_file_action(
+        &unstage_btn,
+        db_path,
+        name,
+        &path,
+        "Unstaged",
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+        None,
+        |store, workspace_name, file_path| store.unstage_workspace_file(workspace_name, file_path),
+    );
+    row.append(&unstage_btn);
+
+    let revert_btn = destructive_button("Revert");
+    revert_btn.set_sensitive(!summary.untracked);
+    connect_git_file_action(
+        &revert_btn,
+        db_path,
+        name,
+        &path,
+        "Reverted",
+        refresh_hub,
+        toast_overlay,
+        feedback,
+        Some("Confirm Revert"),
+        |store, workspace_name, file_path| store.revert_workspace_file(workspace_name, file_path),
+    );
+    row.append(&revert_btn);
+
+    row
+}
+
+fn connect_git_hunk_action(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    file_path: &str,
+    hunk_index: usize,
+    staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) {
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    let file_path = file_path.to_owned();
+    let feedback = feedback.clone();
+    let button_for_click = button.clone();
+    button.connect_clicked(move |_| {
+        button_for_click.set_sensitive(false);
+        let action_text = if staged {
+            "Unstaging hunk..."
+        } else {
+            "Staging hunk..."
+        };
+        apply_action_feedback(&feedback, &toast_overlay, action_text, false);
+        let result = WorkspaceStore::open(&db_path).and_then(|store| {
+            if staged {
+                store.unstage_workspace_hunk(&workspace_name, &file_path, hunk_index)
+            } else {
+                store.stage_workspace_hunk(&workspace_name, &file_path, hunk_index)
+            }
+        });
+        match result {
+            Ok(()) => {
+                let done = if staged {
+                    format!("Unstaged hunk {} in {}.", hunk_index + 1, file_path)
+                } else {
+                    format!("Staged hunk {} in {}.", hunk_index + 1, file_path)
+                };
+                apply_action_feedback(&feedback, &toast_overlay, &done, true);
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => {
+                button_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!(
+                        "{}\nFallback: use Stage/Unstage on the full file.",
+                        git_action_error("Could not update hunk", &err)
+                    ),
+                    true,
+                );
+            }
+        }
+    });
+}
+
+fn connect_git_workspace_action<F>(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    success_message: &'static str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+    action: F,
+) where
+    F: Fn(&WorkspaceStore, &str) -> anyhow::Result<()> + 'static,
+{
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    let feedback = feedback.clone();
+    let button_for_click = button.clone();
+    button.connect_clicked(move |_| {
+        button_for_click.set_sensitive(false);
+        apply_action_feedback(&feedback, &toast_overlay, "Updating files...", false);
+        let result =
+            WorkspaceStore::open(&db_path).and_then(|store| action(&store, &workspace_name));
+        match result {
+            Ok(()) => {
+                apply_action_feedback(&feedback, &toast_overlay, success_message, true);
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => {
+                button_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &git_action_error("Could not update files", &err),
+                    true,
+                );
+            }
+        }
+    });
+}
+
+fn connect_git_file_action<F>(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    file_path: &str,
+    action_label: &'static str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+    confirm_label: Option<&'static str>,
+    action: F,
+) where
+    F: Fn(&WorkspaceStore, &str, &str) -> anyhow::Result<()> + 'static,
+{
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    let file_path = file_path.to_owned();
+    let feedback = feedback.clone();
+    let confirmed = Rc::new(RefCell::new(confirm_label.is_none()));
+    let button_for_click = button.clone();
+    button.connect_clicked(move |_| {
+        if let Some(confirm_label) = confirm_label {
+            if !*confirmed.borrow() {
+                *confirmed.borrow_mut() = true;
+                button_for_click.set_label(confirm_label);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!(
+                        "Click {confirm_label} to discard staged and working tree changes in {file_path}."
+                    ),
+                    true,
+                );
+                return;
+            }
+        }
+        button_for_click.set_sensitive(false);
+        apply_action_feedback(
+            &feedback,
+            &toast_overlay,
+            &format!("Updating {file_path}..."),
+            false,
+        );
+        let result = WorkspaceStore::open(&db_path)
+            .and_then(|store| action(&store, &workspace_name, &file_path));
+        match result {
+            Ok(()) => {
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!("{action_label} {file_path}."),
+                    true,
+                );
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => {
+                button_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &git_action_error(&format!("Could not update {file_path}"), &err),
+                    true,
+                );
+            }
+        }
+    });
+}
+
+fn git_action_error(prefix: &str, err: &anyhow::Error) -> String {
+    format!(
+        "{prefix}: {err:#}\nHint: Refresh changes, inspect git status, and retry after resolving path conflicts."
+    )
 }
 
 fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
@@ -3806,11 +4603,12 @@ fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
         )),
     }
     out.push_str("\n\nDiff\n");
-    out.push_str(
-        &store
-            .unified_diff(name, None)
-            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
-    );
+    out.push_str(&workspace_diff_sections(
+        store,
+        name,
+        None,
+        Some(DIFF_RENDER_LIMIT_BYTES),
+    ));
     out
 }
 
@@ -3831,20 +4629,202 @@ fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
 }
 
 fn workspace_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
-    match path {
-        Some(path) => store
-            .unified_diff(name, Some(Path::new(path)))
-            .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
-        None => store
-            .unified_diff(name, None)
-            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
+    workspace_diff_sections(store, name, path, Some(DIFF_RENDER_LIMIT_BYTES))
+}
+
+fn workspace_diff_text_for_clipboard(
+    store: &WorkspaceStore,
+    name: &str,
+    path: Option<&str>,
+) -> String {
+    workspace_diff_sections(store, name, path, None)
+}
+
+fn workspace_diff_sections(
+    store: &WorkspaceStore,
+    name: &str,
+    path: Option<&str>,
+    limit: Option<usize>,
+) -> String {
+    let path_ref = path.map(Path::new);
+    let target = path.unwrap_or("workspace");
+    let base_ref = store
+        .workspace_base_ref(name)
+        .unwrap_or_else(|_| "base".to_owned());
+    let mut out = format!("Target: {target}\nBase comparison: {base_ref}\n\n");
+    out.push_str(&format_diff_section(
+        "Base comparison",
+        store.unified_diff_against_base(name, path_ref),
+        limit,
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Unstaged changes",
+        store.unified_diff(name, path_ref),
+        limit,
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Staged changes",
+        store.staged_diff(name, path_ref),
+        limit,
+    ));
+    out
+}
+
+fn format_diff_section(
+    title: &str,
+    result: anyhow::Result<String>,
+    limit: Option<usize>,
+) -> String {
+    let text = match result {
+        Ok(text) => text,
+        Err(err) => return format!("{title}\nCould not read diff: {err:#}\n"),
+    };
+    if text.trim().is_empty() {
+        return format!("{title}\nNo changes.\n");
     }
+    match limit {
+        Some(limit) => {
+            let (visible, truncated) = truncate_text_at_char_boundary(&text, limit);
+            if truncated {
+                format!(
+                    "{title}\n{visible}\n[Diff truncated after {limit} bytes. Copy the diff or open the file for full context.]\n"
+                )
+            } else {
+                format!("{title}\n{visible}")
+            }
+        }
+        None => format!("{title}\n{text}"),
+    }
+}
+
+fn truncate_text_at_char_boundary(text: &str, limit: usize) -> (&str, bool) {
+    if text.len() <= limit {
+        return (text, false);
+    }
+    let mut end = 0;
+    for (index, _) in text.char_indices() {
+        if index > limit {
+            break;
+        }
+        end = index;
+    }
+    if end == 0 {
+        end = limit.min(text.len());
+    }
+    (&text[..end], true)
 }
 
 fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) -> String {
     WorkspaceStore::open(db_path)
         .map(|store| workspace_diff_text(&store, name, path))
         .unwrap_or_else(|err| format!("Could not open workspace database: {err:#}\n"))
+}
+
+fn workspace_split_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+    let diff = match path {
+        Some(path) => store
+            .unified_diff_against_base(name, Some(Path::new(path)))
+            .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
+        None => store
+            .unified_diff_against_base(name, None)
+            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
+    };
+    format_split_diff_text(&diff, Some(DIFF_RENDER_LIMIT_BYTES))
+}
+
+fn format_split_diff_text(diff: &str, limit: Option<usize>) -> String {
+    if diff.trim().is_empty() {
+        return "Split diff\nNo changes.\n".to_owned();
+    }
+    if limit.is_some_and(|limit| diff.len() > limit) {
+        return "Split diff\nDiff is too large for split view. Use Unified or Copy Diff for full context.\n".to_owned();
+    }
+
+    let mut out = String::from("Split diff\nleft: old/base | right: new/workspace\n\n");
+    let mut pending_deleted = std::collections::VecDeque::<String>::new();
+    for line in diff.lines() {
+        if line.starts_with('-') && !line.starts_with("---") {
+            pending_deleted.push_back(line[1..].to_owned());
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            let right = line[1..].to_owned();
+            let left = pending_deleted.pop_front().unwrap_or_default();
+            push_split_diff_row(&mut out, &left, &right);
+        } else {
+            while let Some(left) = pending_deleted.pop_front() {
+                push_split_diff_row(&mut out, &left, "");
+            }
+            if line.starts_with("diff ")
+                || line.starts_with("index ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+                || line.starts_with("@@")
+            {
+                out.push_str(line);
+                out.push('\n');
+            } else if let Some(context) = line.strip_prefix(' ') {
+                push_split_diff_row(&mut out, context, context);
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        if let Some(limit) = limit {
+            if out.len() > limit {
+                return truncate_owned_with_marker(
+                    out,
+                    limit,
+                    "\n[Split diff truncated after rendered output limit. Use Unified or Copy Diff for full context.]\n",
+                );
+            }
+        }
+    }
+    while let Some(left) = pending_deleted.pop_front() {
+        push_split_diff_row(&mut out, &left, "");
+        if let Some(limit) = limit {
+            if out.len() > limit {
+                return truncate_owned_with_marker(
+                    out,
+                    limit,
+                    "\n[Split diff truncated after rendered output limit. Use Unified or Copy Diff for full context.]\n",
+                );
+            }
+        }
+    }
+    out
+}
+
+fn truncate_owned_with_marker(mut value: String, limit: usize, marker: &str) -> String {
+    if value.len() + marker.len() <= limit {
+        value.push_str(marker);
+        return value;
+    }
+    let mut end = limit.saturating_sub(marker.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push_str(marker);
+    value
+}
+
+fn push_split_diff_row(out: &mut String, left: &str, right: &str) {
+    out.push_str(&format!(
+        "{:<72} | {}\n",
+        split_diff_cell(left),
+        split_diff_cell(right)
+    ));
+}
+
+fn split_diff_cell(value: &str) -> String {
+    const CELL_LIMIT: usize = 96;
+    let (visible, truncated) = truncate_text_at_char_boundary(value, CELL_LIMIT);
+    if truncated {
+        format!("{visible}...")
+    } else {
+        visible.to_owned()
+    }
 }
 
 fn workspace_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
@@ -3858,6 +4838,23 @@ fn workspace_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWi
     view.set_top_margin(4);
     view.buffer().set_text(&workspace_changes_text(store, name));
     apply_diff_tags(&view.buffer());
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_child(Some(&view));
+    scroll
+}
+
+fn workspace_split_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
+    let view = TextView::new();
+    view.set_editable(false);
+    view.set_monospace(true);
+    view.set_vexpand(true);
+    view.add_css_class("ws-diff-view");
+    view.set_left_margin(6);
+    view.set_right_margin(6);
+    view.set_top_margin(4);
+    view.buffer()
+        .set_text(&workspace_split_diff_text(store, name, None));
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     scroll.set_child(Some(&view));
@@ -3882,7 +4879,7 @@ fn workspace_untracked_changes_view(db_path: &Path, name: &str) -> ScrolledWindo
     scroll
 }
 
-fn workspace_last_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindow {
+fn workspace_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindow {
     let view = TextView::new();
     view.set_editable(false);
     view.set_monospace(true);
@@ -3892,7 +4889,7 @@ fn workspace_last_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindo
     view.set_right_margin(6);
     view.set_top_margin(4);
     view.buffer()
-        .set_text(&workspace_last_turn_changes_text(db_path, name));
+        .set_text(&workspace_turn_changes_text(db_path, name));
     apply_diff_tags(&view.buffer());
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
@@ -4026,17 +5023,159 @@ fn workspace_untracked_changes_text(db_path: &Path, name: &str) -> String {
     }
 }
 
-fn workspace_last_turn_changes_text(db_path: &Path, name: &str) -> String {
-    WorkspaceStore::open(db_path)
-        .and_then(|store| store.git_show_commit(name, "HEAD"))
-        .unwrap_or_else(|err| format!("Last turn changes\nCould not read HEAD commit: {err:#}\n"))
+fn workspace_turn_changes_text(db_path: &Path, name: &str) -> String {
+    let result = WorkspaceStore::open(db_path)
+        .and_then(|store| store.turn_checkpoint_diffs(name, WORKSPACE_TURN_DIFF_LIMIT));
+    match result {
+        Ok(turns) if turns.is_empty() => {
+            "Turn changes\nNo turn checkpoints yet. Send chat prompts to create them.\n".to_owned()
+        }
+        Ok(turns) => format_workspace_turn_changes(&turns),
+        Err(err) => format!("Turn changes\nCould not read turn diffs: {err:#}\n"),
+    }
+}
+
+fn format_workspace_turn_changes(turns: &[TurnCheckpointDiff]) -> String {
+    let mut out = format!(
+        "Turn changes\nShowing up to {} recent turns. Each diff is capped at {} KiB.\n",
+        WORKSPACE_TURN_DIFF_LIMIT, WORKSPACE_TURN_DIFF_MAX_KIB
+    );
+    for turn in turns {
+        out.push('\n');
+        out.push_str(&format!(
+            "Checkpoint #{} {}\n{}\n",
+            turn.checkpoint.id, turn.checkpoint.created_at, turn.checkpoint.message
+        ));
+        if let Some(end) = &turn.end_checkpoint {
+            out.push_str(&format!(
+                "Range: checkpoint #{} -> checkpoint #{}\n",
+                turn.checkpoint.id, end.id
+            ));
+        } else {
+            out.push_str(&format!(
+                "Range: checkpoint #{} -> current worktree\n",
+                turn.checkpoint.id
+            ));
+        }
+        if turn.diff.trim().is_empty() {
+            out.push_str("No changes for this turn.\n");
+        } else {
+            out.push_str(&turn.diff);
+            if !turn.diff.ends_with('\n') {
+                out.push('\n');
+            }
+            if turn.truncated {
+                out.push_str("[Turn diff reached hard display limit]\n");
+            }
+        }
+    }
+    out
 }
 
 fn workspace_checks_and_todos_text(store: &WorkspaceStore, name: &str) -> String {
     let mut out = workspace_checks_text(store, name);
+    out.push_str("\n\nWorkspace Context Estimate\n");
+    out.push_str(&workspace_context_estimate_text(store, name));
     out.push_str("\n\nTodos\n");
     out.push_str(&workspace_todos_text(store, name));
     out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct WorkspaceContextEstimate {
+    thread_count: usize,
+    message_count: usize,
+    event_count: usize,
+    transcript_bytes: usize,
+    estimated_tokens: u64,
+    threads: Vec<WorkspaceThreadContextEstimate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceThreadContextEstimate {
+    title: String,
+    provider: String,
+    message_count: usize,
+    event_count: usize,
+    transcript_bytes: usize,
+    estimated_tokens: u64,
+}
+
+fn workspace_context_estimate_text(store: &WorkspaceStore, name: &str) -> String {
+    match workspace_context_estimate(store, name) {
+        Ok(estimate) => format_workspace_context_estimate(&estimate),
+        Err(err) => format!("Could not estimate context usage: {err:#}\n"),
+    }
+}
+
+fn workspace_context_estimate(
+    store: &WorkspaceStore,
+    name: &str,
+) -> anyhow::Result<WorkspaceContextEstimate> {
+    let threads = store.chat_thread_context_summaries(name)?;
+    let mut estimate = WorkspaceContextEstimate {
+        thread_count: threads.len(),
+        ..Default::default()
+    };
+    for thread in threads {
+        let thread_estimate = WorkspaceThreadContextEstimate {
+            title: thread.title,
+            provider: thread.provider,
+            message_count: thread.message_count,
+            event_count: thread.event_count,
+            transcript_bytes: thread.transcript_bytes,
+            estimated_tokens: estimate_tokens_from_bytes(thread.transcript_bytes),
+        };
+        estimate.message_count += thread_estimate.message_count;
+        estimate.event_count += thread_estimate.event_count;
+        estimate.transcript_bytes += thread_estimate.transcript_bytes;
+        estimate.estimated_tokens += thread_estimate.estimated_tokens;
+        estimate.threads.push(thread_estimate);
+    }
+    Ok(estimate)
+}
+
+fn format_workspace_context_estimate(estimate: &WorkspaceContextEstimate) -> String {
+    let mut out = format!(
+        "{} estimated tokens from {} persisted bytes across {} threads, {} messages, {} events.\nEstimate method: persisted transcript/event bytes divided by 4, rounded up.\n",
+        format_context_number(estimate.estimated_tokens),
+        format_context_number(estimate.transcript_bytes as u64),
+        format_context_number(estimate.thread_count as u64),
+        format_context_number(estimate.message_count as u64),
+        format_context_number(estimate.event_count as u64),
+    );
+    if estimate.threads.is_empty() {
+        out.push_str("No chat transcripts recorded.\n");
+        return out;
+    }
+    for thread in &estimate.threads {
+        out.push_str(&format!(
+            "- {} [{}]: {} tokens, {} bytes, {} messages, {} events\n",
+            thread.title,
+            thread.provider,
+            format_context_number(thread.estimated_tokens),
+            format_context_number(thread.transcript_bytes as u64),
+            format_context_number(thread.message_count as u64),
+            format_context_number(thread.event_count as u64),
+        ));
+    }
+    out
+}
+
+fn estimate_tokens_from_bytes(bytes: usize) -> u64 {
+    (bytes as u64).div_ceil(4)
+}
+
+fn format_context_number(value: u64) -> String {
+    let raw = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in raw.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 fn workspace_todos_text(store: &WorkspaceStore, name: &str) -> String {
@@ -4095,6 +5234,7 @@ impl PullRequestStatusSummary {
 struct WorkspacePrStatusSnapshot {
     pr: Option<PullRequest>,
     status: Option<PullRequestStatusSummary>,
+    summary: Option<linux_archductor_core::workspace::ChecksSummary>,
 }
 
 pub(crate) fn pull_request_status_summary(
@@ -4163,29 +5303,124 @@ fn workspace_pr_status_snapshot(
     workspace_name: &str,
 ) -> WorkspacePrStatusSnapshot {
     let pr = store.pull_request(workspace_name).ok().flatten();
+    let summary = store.checks_summary(workspace_name).ok();
     let status = pr
         .as_ref()
         .map(|pr| workspace_pull_request_status_summary(store, workspace_name, pr));
-    WorkspacePrStatusSnapshot { pr, status }
-}
-
-fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
-    if snapshot.pr.is_some() {
-        "View PR"
-    } else {
-        "Create PR"
+    WorkspacePrStatusSnapshot {
+        pr,
+        status,
+        summary,
     }
 }
 
-fn workspace_pr_primary_action_tooltip(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspacePrTopActionKind {
+    CreatePr,
+    CommitAndPush,
+    Push,
+    MergePr,
+    FixBlocked,
+    ViewPr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkspacePrTopAction {
+    label: &'static str,
+    tooltip: &'static str,
+    css_class: &'static str,
+    kind: WorkspacePrTopActionKind,
+}
+
+fn workspace_pr_primary_action(
+    snapshot: &WorkspacePrStatusSnapshot,
+) -> Option<WorkspacePrTopAction> {
+    let has_conflicts = snapshot
+        .summary
+        .as_ref()
+        .is_some_and(|summary| !summary.conflicting_workspaces.is_empty());
+    if has_conflicts {
+        return Some(WorkspacePrTopAction {
+            label: "Resolve Conflicts",
+            tooltip: "Queue a prompt to resolve workspace conflicts",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::FixBlocked,
+        });
+    }
+
+    let changed_files = snapshot
+        .summary
+        .as_ref()
+        .map(|summary| summary.changed_files)
+        .unwrap_or_default();
+    if changed_files > 0 {
+        return Some(WorkspacePrTopAction {
+            label: "Commit and Push",
+            tooltip: "Ask the current chat to commit and push local changes",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::CommitAndPush,
+        });
+    }
+
+    let needs_push = snapshot
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.branch_push_state.as_ref())
+        .is_some_and(|push| push.ahead > 0);
+    if needs_push {
+        if snapshot.pr.is_some() {
+            return Some(WorkspacePrTopAction {
+                label: "Push Branch",
+                tooltip: "Push the workspace branch",
+                css_class: "ws-pr-status-muted",
+                kind: WorkspacePrTopActionKind::Push,
+            });
+        }
+        return Some(WorkspacePrTopAction {
+            label: "Create PR",
+            tooltip: "Ask the current chat to create a pull request",
+            css_class: "ws-pr-status-missing",
+            kind: WorkspacePrTopActionKind::CreatePr,
+        });
+    }
+
     match snapshot.status.as_ref().map(|status| status.kind) {
-        Some(PullRequestStateKind::Pending) => "Open pull request with pending checks",
-        Some(PullRequestStateKind::Ready) => "Open pull request ready to merge",
-        Some(PullRequestStateKind::Failed) => "Open pull request with failing checks",
-        Some(PullRequestStateKind::Merged) => "Open merged pull request",
-        Some(PullRequestStateKind::Open) => "Open pull request",
-        None => "Ask the current chat to create a pull request",
+        Some(PullRequestStateKind::Ready) => Some(WorkspacePrTopAction {
+            label: "Merge PR",
+            tooltip: "Merge the ready pull request",
+            css_class: "ws-pr-status-ready",
+            kind: WorkspacePrTopActionKind::MergePr,
+        }),
+        Some(PullRequestStateKind::Failed) => Some(WorkspacePrTopAction {
+            label: "Fix Checks",
+            tooltip: "Queue a prompt to fix failing checks",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::FixBlocked,
+        }),
+        Some(PullRequestStateKind::Merged) => Some(WorkspacePrTopAction {
+            label: "Merged",
+            tooltip: "Open the merged pull request",
+            css_class: "ws-pr-status-merged",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        Some(PullRequestStateKind::Pending) => Some(WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request with pending checks",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        Some(PullRequestStateKind::Open) => Some(WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        None => None,
     }
+}
+
+fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> Option<&'static str> {
+    workspace_pr_primary_action(snapshot).map(|action| action.label)
 }
 
 fn connect_create_pr_prompt_button(
@@ -4203,72 +5438,177 @@ fn connect_create_pr_prompt_button(
     });
 }
 
+fn connect_commit_and_push_prompt_button(
+    button: &Button,
+    db_path: PathBuf,
+    workspace_name: String,
+    state: AppState,
+    refresh_hub: RefreshHub,
+) {
+    button.connect_clicked(move |_| {
+        let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
+        state.queue_pending_chat_prompt(prompt);
+        state.set_active_workspace_tab(WorkspaceTab::Chats);
+        refresh_hub.refresh(RefreshScope::Workspace);
+    });
+}
+
+fn connect_fix_blocked_prompt_button(
+    button: &Button,
+    db_path: PathBuf,
+    workspace_name: String,
+    state: AppState,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+) {
+    let feedback_for_fix = feedback.clone();
+    let toast_for_fix = toast_overlay.clone();
+    button.connect_clicked(move |_| {
+        let prompt = WorkspaceStore::open(db_path.clone())
+            .and_then(|store| store.pull_request_checks_agent_prompt(&workspace_name))
+            .unwrap_or_else(|_| workspace_conflict_resolution_prompt(&db_path, &workspace_name));
+        state.queue_pending_chat_prompt(prompt);
+        state.set_active_workspace_tab(WorkspaceTab::Chats);
+        apply_action_feedback(
+            &feedback_for_fix,
+            &toast_for_fix,
+            "Queued a prompt for the selected chat.",
+            true,
+        );
+    });
+}
+
+fn connect_merge_pr_button(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+    refresh_hub: RefreshHub,
+) {
+    let db_for_merge = db_path.to_path_buf();
+    let workspace_for_merge = workspace_name.to_owned();
+    let feedback_for_merge = feedback.clone();
+    let toast_for_merge = toast_overlay.clone();
+    button.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
+            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
+        });
+        apply_action_feedback(
+            &feedback_for_merge,
+            &toast_for_merge,
+            &pull_request_merge_and_archive_feedback(result),
+            true,
+        );
+        refresh_hub.refresh(RefreshScope::All);
+    });
+}
+
 fn workspace_pr_status_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     workspace_name: &str,
     state: &AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: &ToastOverlay,
 ) -> GBox {
     let snapshot = workspace_pr_status_snapshot(store, workspace_name);
-    let panel = GBox::new(Orientation::Vertical, 8);
+    let action = workspace_pr_primary_action(&snapshot);
+    let panel = GBox::new(Orientation::Horizontal, 8);
     panel.add_css_class("ws-pr-compact-panel");
-    if let Some(status) = snapshot.status.as_ref() {
-        panel.add_css_class(status.css_class);
-    } else {
-        panel.add_css_class("ws-pr-status-missing");
-    }
-
-    let top = GBox::new(Orientation::Horizontal, 8);
-    top.set_hexpand(true);
-    let title = Label::new(Some(workspace_pr_status_title(&snapshot)));
+    panel.add_css_class(
+        action
+            .as_ref()
+            .map(|action| action.css_class)
+            .unwrap_or("ws-pr-status-muted"),
+    );
+    let title = Label::new(Some(match action {
+        Some(action) => workspace_pr_status_title(&snapshot, action),
+        None => "No changes",
+    }));
     title.add_css_class("ws-pr-compact-title");
     title.set_xalign(0.0);
     title.set_hexpand(true);
-    top.append(&title);
+    panel.append(&title);
 
-    if let Some(status) = snapshot.status.as_ref() {
-        let badge = Label::new(Some(&status.label));
-        badge.add_css_class("ws-pr-status");
-        badge.add_css_class(status.css_class);
-        top.append(&badge);
-    }
-    panel.append(&top);
+    let Some(action) = action else {
+        return panel;
+    };
 
-    let detail_text = workspace_pr_status_detail(&snapshot);
-    let detail = Label::new(Some(&detail_text));
-    detail.add_css_class("card-meta");
-    detail.set_xalign(0.0);
-    detail.set_wrap(true);
-    panel.append(&detail);
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
 
-    if let Some(pr) = snapshot.pr.as_ref() {
-        let row = make_action_row();
-        let view_btn = secondary_button("View PR");
-        let url = pr.url.clone();
-        view_btn.connect_clicked(move |_| open_external_url(&url));
-        row.append(&view_btn);
-        panel.append(&row);
-    } else {
-        let row = make_action_row();
-        let create_btn = secondary_button("Create PR");
-        create_btn.add_css_class("suggested-action");
-        create_btn.set_tooltip_text(Some(workspace_pr_primary_action_tooltip(&snapshot)));
-        connect_create_pr_prompt_button(
-            &create_btn,
+    let primary_btn = secondary_button(action.label);
+    primary_btn.add_css_class("ws-pr-action-button");
+    primary_btn.add_css_class(action.css_class);
+    primary_btn.set_tooltip_text(Some(action.tooltip));
+    match action.kind {
+        WorkspacePrTopActionKind::CreatePr => connect_create_pr_prompt_button(
+            &primary_btn,
             db_path.to_path_buf(),
             workspace_name.to_owned(),
             state.clone(),
-            refresh_hub,
-        );
-        row.append(&create_btn);
-        panel.append(&row);
+            refresh_hub.clone(),
+        ),
+        WorkspacePrTopActionKind::CommitAndPush => connect_commit_and_push_prompt_button(
+            &primary_btn,
+            db_path.to_path_buf(),
+            workspace_name.to_owned(),
+            state.clone(),
+            refresh_hub.clone(),
+        ),
+        WorkspacePrTopActionKind::Push => {
+            connect_push_branch_button(
+                &primary_btn,
+                db_path,
+                workspace_name,
+                &feedback,
+                toast_overlay,
+            );
+        }
+        WorkspacePrTopActionKind::MergePr => connect_merge_pr_button(
+            &primary_btn,
+            db_path,
+            workspace_name,
+            &feedback,
+            toast_overlay,
+            refresh_hub.clone(),
+        ),
+        WorkspacePrTopActionKind::FixBlocked => connect_fix_blocked_prompt_button(
+            &primary_btn,
+            db_path.to_path_buf(),
+            workspace_name.to_owned(),
+            state.clone(),
+            &feedback,
+            toast_overlay,
+        ),
+        WorkspacePrTopActionKind::ViewPr => {
+            if let Some(pr) = snapshot.pr.as_ref() {
+                let url = pr.url.clone();
+                primary_btn.connect_clicked(move |_| open_external_url(&url));
+            }
+        }
     }
+    panel.append(&primary_btn);
 
     panel
 }
 
-fn workspace_pr_status_title(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
+fn workspace_pr_status_title(
+    snapshot: &WorkspacePrStatusSnapshot,
+    action: WorkspacePrTopAction,
+) -> &'static str {
+    match action.kind {
+        WorkspacePrTopActionKind::CommitAndPush => return "Commit and push branch",
+        WorkspacePrTopActionKind::Push => return "Push branch",
+        WorkspacePrTopActionKind::CreatePr => return "No pull request yet",
+        WorkspacePrTopActionKind::FixBlocked if action.css_class == "ws-pr-status-failed" => {
+            return "Blocked";
+        }
+        _ => {}
+    }
     match snapshot.status.as_ref().map(|status| status.kind) {
         Some(PullRequestStateKind::Pending) => "Checks pending",
         Some(PullRequestStateKind::Ready) => "Ready to merge",
@@ -4276,22 +5616,6 @@ fn workspace_pr_status_title(snapshot: &WorkspacePrStatusSnapshot) -> &'static s
         Some(PullRequestStateKind::Merged) => "Pull request merged",
         Some(PullRequestStateKind::Open) => "Pull request open",
         None => "No pull request yet",
-    }
-}
-
-fn workspace_pr_status_detail(snapshot: &WorkspacePrStatusSnapshot) -> String {
-    match (snapshot.pr.as_ref(), snapshot.status.as_ref()) {
-        (Some(pr), Some(status)) => match status.kind {
-            PullRequestStateKind::Pending => {
-                format!("PR #{} is waiting on GitHub checks.", pr.number)
-            }
-            PullRequestStateKind::Ready => format!("PR #{} is clear to merge.", pr.number),
-            PullRequestStateKind::Failed => format!("PR #{} needs fixes.", pr.number),
-            PullRequestStateKind::Merged => format!("PR #{} has been merged.", pr.number),
-            PullRequestStateKind::Open => format!("PR #{} is open.", pr.number),
-        },
-        (Some(pr), None) => format!("PR #{} is recorded.", pr.number),
-        (None, _) => "Use Create PR when the branch is ready.".to_owned(),
     }
 }
 
@@ -4434,6 +5758,22 @@ fn workspace_create_pr_chat_prompt_from_parts(
         prompt.push_str(context_brief);
     }
     prompt
+}
+
+fn workspace_commit_and_push_chat_prompt(_db_path: &Path, name: &str) -> String {
+    format!(
+        "Commit and push workspace {name}.\n\n\
+         Review staged, unstaged, and untracked changes. Make the smallest coherent commit for \
+         the current work, push the workspace branch, and report the commit plus push result."
+    )
+}
+
+fn workspace_conflict_resolution_prompt(_db_path: &Path, name: &str) -> String {
+    format!(
+        "Resolve the blockers for workspace {name} before PR/merge.\n\n\
+         Inspect workspace conflicts, failing checks, and branch state. Make the smallest safe \
+         fix, rerun the relevant verification, and report what changed."
+    )
 }
 
 fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: &str) -> String {
@@ -4598,12 +5938,13 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
                 summary.conflicting_workspaces.len(),
             );
             format!(
-                "Changed files: {}\nRun: {}\nSessions: {}\nPR: {}\n{}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
+                "Changed files: {}\nRun: {}\nChecks: {}\nSessions: {}\nPR: {}\n{}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
                 summary.changed_files,
                 summary
                     .run_status
                     .map(|status| status.as_str().to_owned())
                     .unwrap_or_else(|| "none".to_owned()),
+                latest_check_status_line(store, name),
                 summary.active_sessions,
                 pr,
                 blockers,
@@ -4623,13 +5964,73 @@ fn format_workspace_timeline(events: &[WorkspaceTimelineEvent]) -> String {
         return "No workspace timeline events yet.".to_owned();
     }
     let mut out = String::new();
-    for event in events {
+    let (visible, hidden) = visible_timeline_events(events);
+    if hidden > 0 {
         out.push_str(&format!(
-            "#{} {} [{}] {}\n",
-            event.id, event.created_at, event.kind, event.summary
+            "Showing latest {} events; {hidden} older hidden.\n",
+            visible.len()
         ));
     }
+    for event in visible {
+        out.push_str(&format_workspace_timeline_event(event));
+        out.push('\n');
+    }
     out
+}
+
+fn visible_timeline_events(
+    events: &[WorkspaceTimelineEvent],
+) -> (&[WorkspaceTimelineEvent], usize) {
+    const TIMELINE_EVENT_LIMIT: usize = 200;
+    if events.len() <= TIMELINE_EVENT_LIMIT {
+        return (events, 0);
+    }
+    let hidden = events.len() - TIMELINE_EVENT_LIMIT;
+    (&events[hidden..], hidden)
+}
+
+fn format_workspace_timeline_event(event: &WorkspaceTimelineEvent) -> String {
+    let jump = timeline_jump_target(event.kind.as_str())
+        .map(|(_, label)| format!(" -> {label}"))
+        .unwrap_or_default();
+    format!(
+        "#{} {} [{}] {}{}",
+        event.id, event.created_at, event.kind, event.summary, jump
+    )
+}
+
+fn timeline_jump_target(kind: &str) -> Option<(WorkspaceTab, &'static str)> {
+    if kind.contains("check")
+        || kind.contains("run")
+        || kind.contains("setup")
+        || kind.contains("failed")
+    {
+        return Some((WorkspaceTab::Checks, "Open Checks"));
+    }
+    if kind.contains("git")
+        || kind.contains("branch")
+        || kind.contains("commit")
+        || kind.contains("file.")
+        || kind.contains("base_ref")
+    {
+        return Some((WorkspaceTab::Changes, "Open Changes"));
+    }
+    if kind.contains("review") || kind.contains("pull_request") || kind.contains("pr.") {
+        return Some((WorkspaceTab::Review, "Open Review"));
+    }
+    if kind.contains("checkpoint") || kind.contains("archive") {
+        return Some((WorkspaceTab::Checkpoints, "Open Checkpoints"));
+    }
+    if kind.contains("chat")
+        || kind.contains("prompt")
+        || kind.contains("assistant")
+        || kind.contains("tool")
+        || kind.contains("skill")
+        || kind.contains("session")
+    {
+        return Some((WorkspaceTab::Chats, "Open Chat"));
+    }
+    None
 }
 
 fn ws_checks_visual_header(store: &WorkspaceStore, name: &str) -> GBox {
@@ -4686,6 +6087,218 @@ fn check_status_icon(key: &str, val: &str) -> (&'static str, &'static str) {
     } else {
         ("◈ ", "ws-check-icon-muted")
     }
+}
+
+fn connect_push_branch_button(
+    push_btn: &Button,
+    db_path: &Path,
+    name: &str,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+) {
+    let db_for_push = db_path.to_path_buf();
+    let workspace_for_push = name.to_owned();
+    let feedback_for_push = feedback.clone();
+    let toast_for_push = toast_overlay.clone();
+    push_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_push.clone())
+            .and_then(|store| store.push_branch(&workspace_for_push))
+        {
+            Ok(output) => {
+                let message = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| format!("Pushed branch: {line}"))
+                    .unwrap_or_else(|| "Pushed branch.".to_owned());
+                apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_push,
+                &toast_for_push,
+                &push_branch_error_feedback(&err),
+                true,
+            ),
+        }
+    });
+}
+
+fn connect_force_push_button(
+    force_push_btn: &Button,
+    db_path: &Path,
+    name: &str,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+) {
+    let db_for_force_push = db_path.to_path_buf();
+    let workspace_for_force_push = name.to_owned();
+    let feedback_for_force_push = feedback.clone();
+    let toast_for_force_push = toast_overlay.clone();
+    let force_confirmed = Rc::new(RefCell::new(false));
+    let force_confirmed_for_click = force_confirmed.clone();
+    let force_push_btn_for_click = force_push_btn.clone();
+    force_push_btn.connect_clicked(move |_| {
+        if !*force_confirmed_for_click.borrow() {
+            *force_confirmed_for_click.borrow_mut() = true;
+            force_push_btn_for_click.set_label("Confirm Force Push");
+            apply_action_feedback(
+                &feedback_for_force_push,
+                &toast_for_force_push,
+                "Click Confirm Force Push to run git push --force-with-lease.",
+                true,
+            );
+            return;
+        }
+        force_push_btn_for_click.set_sensitive(false);
+        match WorkspaceStore::open(db_for_force_push.clone())
+            .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
+        {
+            Ok(output) => {
+                *force_confirmed_for_click.borrow_mut() = false;
+                force_push_btn_for_click.set_sensitive(true);
+                force_push_btn_for_click.set_label("Force Push");
+                let message = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| format!("Force pushed with lease: {line}"))
+                    .unwrap_or_else(|| "Force pushed with lease.".to_owned());
+                apply_action_feedback(
+                    &feedback_for_force_push,
+                    &toast_for_force_push,
+                    &message,
+                    true,
+                );
+            }
+            Err(err) => {
+                *force_confirmed_for_click.borrow_mut() = false;
+                force_push_btn_for_click.set_sensitive(true);
+                force_push_btn_for_click.set_label("Force Push");
+                apply_action_feedback(
+                    &feedback_for_force_push,
+                    &toast_for_force_push,
+                    &push_branch_error_feedback(&err),
+                    true,
+                );
+            }
+        }
+    });
+}
+
+fn workspace_check_runner_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    app_state: AppState,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.append(&section_title("Configured Checks"));
+
+    match store.configured_check_commands(name) {
+        Ok(commands) if commands.is_empty() => {
+            panel.append(&detail_row(
+                "Checks",
+                "No test/lint/typecheck/build commands configured.",
+            ));
+        }
+        Ok(commands) => {
+            for command in commands {
+                let row = make_action_row();
+                let label = Label::new(Some(&format!("{}: {}", command.label, command.command)));
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                label.set_hexpand(true);
+                let run_btn = text_button(&format!("Run {}", command.label));
+                run_btn.add_css_class("suggested-action");
+
+                let db_for_run = db_path.to_path_buf();
+                let workspace_for_run = name.to_owned();
+                let key_for_run = command.key.clone();
+                let label_for_run = command.label.clone();
+                let feedback_for_run = feedback.clone();
+                let toast_for_run = toast_overlay.clone();
+                let refresh_after_run = refresh_hub.clone();
+                run_btn.connect_clicked(move |_| {
+                    let result = WorkspaceStore::open(db_for_run.clone()).and_then(|store| {
+                        store.run_workspace_check(&workspace_for_run, &key_for_run)
+                    });
+                    match result {
+                        Ok(process) => {
+                            apply_action_feedback(
+                                &feedback_for_run,
+                                &toast_for_run,
+                                &format!(
+                                    "Started {} check as process #{}.",
+                                    label_for_run, process.id
+                                ),
+                                true,
+                            );
+                            refresh_after_run.refresh(RefreshScope::All);
+                        }
+                        Err(err) => apply_action_feedback(
+                            &feedback_for_run,
+                            &toast_for_run,
+                            &format!("Run {} check failed: {err:#}", label_for_run),
+                            true,
+                        ),
+                    }
+                });
+
+                row.append(&label);
+                row.append(&run_btn);
+                panel.append(&row);
+            }
+        }
+        Err(err) => panel.append(&detail_row(
+            "Checks",
+            &format!("Could not load configured checks: {err:#}"),
+        )),
+    }
+
+    let latest_row = make_action_row();
+    let latest = Label::new(Some(&latest_check_status_line(store, name)));
+    latest.set_xalign(0.0);
+    latest.set_wrap(true);
+    latest.set_hexpand(true);
+    let stage_btn = secondary_button("Queue Latest Check Output");
+    let db_for_stage = db_path.to_path_buf();
+    let workspace_for_stage = name.to_owned();
+    let app_state_for_stage = app_state;
+    let feedback_for_stage = feedback.clone();
+    let toast_for_stage = toast_overlay;
+    stage_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_stage.clone())
+            .and_then(|store| latest_check_agent_prompt(&store, &workspace_for_stage))
+        {
+            Ok(prompt) => {
+                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                apply_action_feedback(
+                    &feedback_for_stage,
+                    &toast_for_stage,
+                    "Latest local check output queued for the selected agent session.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_stage,
+                &toast_for_stage,
+                &format!("Could not queue latest check output: {err:#}"),
+                true,
+            ),
+        }
+    });
+    latest_row.append(&latest);
+    latest_row.append(&stage_btn);
+    panel.append(&latest_row);
+    panel.append(&pull_request_text_section(
+        "Latest Local Check Output",
+        &latest_check_log_line(store, name),
+    ));
+
+    panel
 }
 
 fn workspace_checks_panel(
@@ -4757,6 +6370,15 @@ fn workspace_checks_panel(
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
     feedback.set_wrap(true);
+    header.append(&workspace_check_runner_panel(
+        db_path,
+        store,
+        name,
+        app_state.clone(),
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        &feedback,
+    ));
 
     match pr {
         Some(pr) => {
@@ -5087,117 +6709,34 @@ fn workspace_checks_panel(
                     actions.append(&top_row);
                 }
             }
+            if !matches!(status_summary.kind, PullRequestStateKind::Merged) {
+                let force_row = make_action_row();
+                let force_push_btn = destructive_button("Force Push Lease");
+                connect_force_push_button(
+                    &force_push_btn,
+                    db_path,
+                    name,
+                    &feedback,
+                    &toast_overlay,
+                );
+                force_row.append(&force_push_btn);
+                actions.append(&force_row);
+            }
             header.append(&actions);
         }
         None => {
-            let action_labels = pull_request_action_labels(None);
             let status_row = GBox::new(Orientation::Horizontal, 8);
             status_row.add_css_class("ws-pr-nav");
             status_row.set_hexpand(true);
-            let empty = Label::new(Some("No pull request yet."));
+            let empty = Label::new(Some(
+                "No pull request yet. Use the Branch / PR controls at the top of the right column.",
+            ));
             empty.add_css_class("card-meta");
             empty.set_xalign(0.0);
             empty.set_wrap(true);
             empty.set_hexpand(true);
             status_row.append(&empty);
             header.append(&status_row);
-
-            let title_row = make_action_row();
-            let title_entry = Entry::new();
-            title_entry.set_placeholder_text(Some("PR title"));
-            title_entry.set_hexpand(true);
-            title_row.append(&title_entry);
-            header.append(&title_row);
-
-            let body_label = toolbar_label("PR body");
-            header.append(&body_label);
-            let body_view = TextView::new();
-            body_view.set_wrap_mode(WrapMode::WordChar);
-            body_view.set_top_margin(8);
-            body_view.set_bottom_margin(8);
-            body_view.set_left_margin(8);
-            body_view.set_right_margin(8);
-            body_view.buffer().set_text(
-                &store
-                    .read_context_brief(name)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default(),
-            );
-            let body_scroll = ScrolledWindow::new();
-            body_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
-            body_scroll.set_min_content_height(72);
-            body_scroll.set_max_content_height(120);
-            body_scroll.set_child(Some(&body_view));
-            header.append(&body_scroll);
-
-            let button_row = make_action_row();
-            let draft_check = CheckButton::with_label("Draft");
-            let push_btn = secondary_button(action_labels[0]);
-            let create_btn = text_button(action_labels[1]);
-            create_btn.add_css_class("suggested-action");
-            let body_buffer = body_view.buffer();
-
-            let db_for_push = db_path.to_path_buf();
-            let workspace_for_push = name.to_owned();
-            let feedback_for_push = feedback.clone();
-            let toast_for_push = toast_overlay.clone();
-            push_btn.connect_clicked(move |_| {
-                match WorkspaceStore::open(db_for_push.clone())
-                    .and_then(|store| store.push_branch(&workspace_for_push))
-                {
-                    Ok(output) => {
-                        let message = output
-                            .lines()
-                            .map(str::trim)
-                            .find(|line| !line.is_empty())
-                            .map(|line| format!("Pushed branch: {line}"))
-                            .unwrap_or_else(|| "Pushed branch.".to_owned());
-                        apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
-                    }
-                    Err(err) => apply_action_feedback(
-                        &feedback_for_push,
-                        &toast_for_push,
-                        &format!("Push branch failed: {err:#}"),
-                        true,
-                    ),
-                }
-            });
-
-            let db_for_create = db_path.to_path_buf();
-            let workspace_for_create = name.to_owned();
-            let feedback_for_create = feedback.clone();
-            let toast_for_create = toast_overlay.clone();
-            let refresh_after_create = refresh_hub.clone();
-            let title_entry_for_create = title_entry.clone();
-            let draft_check_for_create = draft_check.clone();
-            create_btn.connect_clicked(move |_| {
-                let title = optional_entry_text(&title_entry_for_create);
-                let body = optional_text_buffer_text(&body_buffer);
-                let result = WorkspaceStore::open(db_for_create.clone()).and_then(|store| {
-                    store.create_pull_request(
-                        &workspace_for_create,
-                        title.as_deref(),
-                        body.as_deref(),
-                        draft_check_for_create.is_active(),
-                    )
-                });
-                let should_refresh = result.is_ok();
-                apply_action_feedback(
-                    &feedback_for_create,
-                    &toast_for_create,
-                    &pull_request_create_feedback(result),
-                    true,
-                );
-                if should_refresh {
-                    refresh_after_create.refresh(RefreshScope::All);
-                }
-            });
-
-            button_row.append(&draft_check);
-            button_row.append(&push_btn);
-            button_row.append(&create_btn);
-            header.append(&button_row);
         }
     }
 
@@ -5519,15 +7058,31 @@ fn workspace_conflict_resolution_panel(
 
 fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
     match result {
-        Ok(output) => output
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|line| line.starts_with("https://"))
-            .map(|url| format!("Created PR: {url}"))
-            .unwrap_or_else(|| "Created PR.".to_owned()),
+        Ok(output) => {
+            if let Some(url) = output.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("Existing PR:")
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+            }) {
+                return format!("Existing PR: {url}");
+            }
+            output
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| line.starts_with("https://"))
+                .map(|url| format!("Created PR: {url}"))
+                .unwrap_or_else(|| "Created PR.".to_owned())
+        }
         Err(err) => format!("Create PR failed: {err:#}"),
     }
+}
+
+fn push_branch_error_feedback(err: &anyhow::Error) -> String {
+    format!(
+        "Push branch failed: {err:#}\nSuggested fix: fetch latest origin state, inspect branch divergence, then retry normal push or use Force Push Lease when replacing your own remote branch is intended."
+    )
 }
 
 fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
@@ -6064,6 +7619,24 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
         }
         Err(err) => out.push_str(&format!("Could not read runs: {err:#}\n")),
     }
+    out.push_str("\nChecks\n");
+    match store.list_checks(name) {
+        Ok(records) if records.is_empty() => out.push_str("No check runs recorded.\n"),
+        Ok(records) => {
+            for record in records {
+                out.push_str(&format!(
+                    "#{} {} pid={} exit={} started={} log={}\n",
+                    record.id,
+                    record.status.as_str(),
+                    record.pid,
+                    exit_code_label(record.exit_code),
+                    record.started_at,
+                    record.log_path.display()
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("Could not read checks: {err:#}\n")),
+    }
     out.push_str("\nSessions\n");
     match store.list_sessions(name) {
         Ok(records) if records.is_empty() => out.push_str("No sessions recorded.\n"),
@@ -6143,6 +7716,25 @@ fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
     }
 }
 
+fn latest_check_status_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.list_checks(name) {
+        Ok(records) => records
+            .into_iter()
+            .next()
+            .map(|record| {
+                format!(
+                    "{} pid={} exit={} log={}",
+                    record.status.as_str(),
+                    record.pid,
+                    exit_code_label(record.exit_code),
+                    record.log_path.display()
+                )
+            })
+            .unwrap_or_else(|| "No local checks recorded.".to_owned()),
+        Err(err) => format!("Could not read local checks: {err:#}"),
+    }
+}
+
 fn spotlight_line(store: &WorkspaceStore, name: &str) -> String {
     match store.spotlight_status(name) {
         Ok(Some(session)) => {
@@ -6182,6 +7774,49 @@ fn latest_run_log_line(store: &WorkspaceStore, name: &str) -> String {
         Ok(log) => tail_lines(&log, 12),
         Err(_) => "No run log yet.".to_owned(),
     }
+}
+
+fn latest_check_log_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.read_latest_check_log(name) {
+        Ok(log) => tail_lines(&log, 16),
+        Err(_) => "No local check output yet.".to_owned(),
+    }
+}
+
+fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Result<String> {
+    let record = store
+        .list_checks(name)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No local check runs recorded"))?;
+    let output = store.read_latest_check_log(name)?;
+    let output = bounded_check_prompt_output(&output);
+    Ok(format!(
+        "Address the latest local check output for workspace {name}. If it failed, make the smallest safe fix and rerun the relevant check.\n\nProcess #{}: {}\nStatus: {}\nExit: {}\nStarted: {}\n\nOutput:\n```text\n{}\n```",
+        record.id,
+        record.command,
+        record.status.as_str(),
+        exit_code_label(record.exit_code),
+        record.started_at,
+        output
+    ))
+}
+
+fn bounded_check_prompt_output(output: &str) -> String {
+    const MAX_BYTES: usize = 32 * 1024;
+    let trimmed = output.trim();
+    if trimmed.len() <= MAX_BYTES {
+        return trimmed.to_owned();
+    }
+    let mut start = trimmed.len() - MAX_BYTES;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[output truncated to last {} KiB]\n{}",
+        MAX_BYTES / 1024,
+        &trimmed[start..]
+    )
 }
 
 fn tail_lines(text: &str, max_lines: usize) -> String {
@@ -6292,6 +7927,67 @@ fn apply_action_feedback(
 mod tests {
     use super::*;
 
+    fn test_checkpoint(id: i64, message: &str) -> linux_archductor_core::workspace::Checkpoint {
+        linux_archductor_core::workspace::Checkpoint {
+            id,
+            workspace_id: 1,
+            session_id: None,
+            git_ref: format!("refs/test/{id}"),
+            message: message.to_owned(),
+            created_at: "2026-07-12T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn test_workspace() -> Workspace {
+        Workspace {
+            id: 1,
+            repository_id: 2,
+            name: "berlin".to_owned(),
+            path: std::path::PathBuf::from("/tmp/berlin"),
+            branch: "lc/berlin".to_owned(),
+            base_ref: "main".to_owned(),
+            port_base: 4200,
+            status: "active".to_owned(),
+            archived_at: None,
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
+    fn test_pull_request(state: &str) -> linux_archductor_core::workspace::PullRequest {
+        linux_archductor_core::workspace::PullRequest {
+            id: 1,
+            workspace_id: 2,
+            provider: "github".to_owned(),
+            number: 42,
+            url: "https://github.com/example/demo/pull/42".to_owned(),
+            state: state.to_owned(),
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
+    fn test_checks_summary(
+        changed_files: usize,
+        branch_push_state: Option<linux_archductor_core::workspace::BranchPushState>,
+        conflicting_workspaces: Vec<(String, Vec<String>)>,
+    ) -> linux_archductor_core::workspace::ChecksSummary {
+        linux_archductor_core::workspace::ChecksSummary {
+            workspace: test_workspace(),
+            changed_files,
+            run_status: None,
+            session_status: None,
+            check_status: None,
+            active_sessions: 0,
+            pull_request: None,
+            open_todos: 0,
+            total_todos: 0,
+            branch_push_state,
+            open_review_comments: 0,
+            conflicting_workspaces,
+        }
+    }
+
     #[test]
     fn workspace_tab_stack_name_maps_palette_targets_to_tabs() {
         assert_eq!(
@@ -6304,7 +8000,7 @@ mod tests {
             workspace_tab_stack_name(&WorkspaceTab::Terminal),
             "terminal"
         );
-        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Todos), "todos");
+        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Todos), "work");
         assert_eq!(
             workspace_tab_stack_name(&WorkspaceTab::Checkpoints),
             "checkpoints"
@@ -6399,6 +8095,66 @@ mod tests {
         assert!(rendered.contains("Files changed"));
         assert!(rendered.contains("README.md [staged+unstaged] +2 -1"));
         assert!(rendered.contains("assets/logo.png [untracked] binary"));
+    }
+
+    #[test]
+    fn diff_section_truncates_large_output() {
+        let rendered = format_diff_section("Base comparison", Ok("x".repeat(96)), Some(32));
+
+        assert!(rendered.contains("Base comparison"));
+        assert!(rendered.contains("Diff truncated after 32 bytes"));
+        assert!(rendered.len() < 160);
+    }
+
+    #[test]
+    fn diff_section_reports_empty_diff() {
+        let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
+
+        assert_eq!(rendered, "Staged changes\nNo changes.\n");
+    }
+
+    #[test]
+    fn split_diff_pairs_added_and_deleted_lines() {
+        let rendered = format_split_diff_text(
+            "diff --git a/a.txt b/a.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n+added\n",
+            Some(1024),
+        );
+
+        assert!(rendered.contains("old"));
+        assert!(rendered.contains("new"));
+        assert!(rendered.contains("same"));
+        assert!(rendered.contains("added"));
+    }
+
+    #[test]
+    fn split_diff_falls_back_for_large_diffs() {
+        let rendered =
+            format_split_diff_text(&format!("diff --git a/a b/a\n{}", "x".repeat(64)), Some(32));
+
+        assert!(rendered.contains("too large for split view"));
+    }
+
+    #[test]
+    fn git_action_error_includes_recovery_hint() {
+        let rendered = git_action_error("Could not update README.md", &anyhow::anyhow!("bad path"));
+
+        assert!(rendered.contains("bad path"));
+        assert!(rendered.contains("Hint: Refresh changes"));
+    }
+
+    #[test]
+    fn hunk_action_label_includes_state_and_counts() {
+        let label = hunk_action_label(&linux_archductor_core::workspace::DiffHunkSummary {
+            index: 1,
+            header: "@@ -10,2 +10,3 @@".to_owned(),
+            additions: 3,
+            deletions: 1,
+            staged: false,
+            unsupported_reason: None,
+        });
+
+        assert!(label.contains("Hunk 2 [unstaged] +3 -1"));
+        assert!(label.contains("@@ -10,2 +10,3 @@"));
     }
 
     #[test]
@@ -6517,10 +8273,37 @@ mod tests {
     }
 
     #[test]
-    fn split_position_for_ratio_prefers_five_to_three_layout_and_clamps() {
-        assert_eq!(split_position_for_ratio(1280, 5, 3, 360, 280), 800);
-        assert_eq!(split_position_for_ratio(700, 5, 3, 360, 280), 420);
-        assert_eq!(split_position_for_ratio(500, 5, 3, 360, 280), 360);
+    fn split_position_for_ratio_prefers_chat_dominant_layout_and_clamps() {
+        assert_eq!(
+            split_position_for_ratio(
+                1280,
+                7,
+                3,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END
+            ),
+            896
+        );
+        assert_eq!(
+            split_position_for_ratio(
+                700,
+                7,
+                3,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END
+            ),
+            440
+        );
+        assert_eq!(
+            split_position_for_ratio(
+                500,
+                7,
+                3,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END
+            ),
+            280
+        );
     }
 
     #[test]
@@ -6540,6 +8323,59 @@ mod tests {
         };
 
         assert_eq!(state.active_tab_name(), "setup");
+    }
+
+    #[test]
+    fn workspace_context_estimate_formats_workspace_and_thread_totals() {
+        let estimate = WorkspaceContextEstimate {
+            thread_count: 2,
+            message_count: 3,
+            event_count: 1,
+            transcript_bytes: 12_345,
+            estimated_tokens: estimate_tokens_from_bytes(12_345),
+            threads: vec![WorkspaceThreadContextEstimate {
+                title: "Fix parser".to_owned(),
+                provider: "codex".to_owned(),
+                message_count: 2,
+                event_count: 1,
+                transcript_bytes: 40,
+                estimated_tokens: estimate_tokens_from_bytes(40),
+            }],
+        };
+
+        let text = format_workspace_context_estimate(&estimate);
+
+        assert!(text.contains("3,087 estimated tokens"));
+        assert!(text.contains("12,345 persisted bytes"));
+        assert!(text.contains("persisted transcript/event bytes divided by 4"));
+        assert!(text.contains("- Fix parser [codex]: 10 tokens, 40 bytes, 2 messages, 1 events"));
+    }
+
+    #[test]
+    fn workspace_turn_changes_formats_multiple_bounded_turns() {
+        let turns = vec![
+            TurnCheckpointDiff {
+                checkpoint: test_checkpoint(2, "Turn start: thread #7 user"),
+                end_checkpoint: None,
+                diff: "diff --git a/README.md b/README.md\n+latest\n".to_owned(),
+                truncated: false,
+            },
+            TurnCheckpointDiff {
+                checkpoint: test_checkpoint(1, "Turn start: thread #7 user"),
+                end_checkpoint: Some(test_checkpoint(2, "Turn start: thread #7 user")),
+                diff: String::new(),
+                truncated: true,
+            },
+        ];
+
+        let text = format_workspace_turn_changes(&turns);
+
+        assert!(text.contains("Showing up to 25 recent turns"));
+        assert!(text.contains("Each diff is capped at 64 KiB"));
+        assert!(text.contains("Range: checkpoint #2 -> current worktree"));
+        assert!(text.contains("Range: checkpoint #1 -> checkpoint #2"));
+        assert!(text.contains("+latest"));
+        assert!(text.contains("No changes for this turn."));
     }
 
     #[test]
@@ -6647,30 +8483,143 @@ mod tests {
     }
 
     #[test]
-    fn pr_primary_action_switches_to_view_when_pr_exists() {
+    fn pr_primary_action_switches_by_workspace_state() {
+        let no_pr = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+        };
+        assert_eq!(workspace_pr_primary_action_label(&no_pr), None);
+        assert!(workspace_pr_primary_action(&no_pr).is_none());
+
+        let dirty = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(3, None, Vec::new())),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&dirty),
+            Some("Commit and Push")
+        );
+        let dirty_action = workspace_pr_primary_action(&dirty).unwrap();
+        assert_eq!(
+            workspace_pr_status_title(&dirty, dirty_action),
+            "Commit and push branch"
+        );
+        assert_eq!(dirty_action.css_class, "ws-pr-status-muted");
+
+        let needs_push = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(
+                0,
+                Some(linux_archductor_core::workspace::BranchPushState {
+                    ahead: 2,
+                    behind: 0,
+                    has_upstream: true,
+                }),
+                Vec::new(),
+            )),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&needs_push),
+            Some("Create PR")
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&needs_push).unwrap().css_class,
+            "ws-pr-status-missing"
+        );
+
+        let clean_without_upstream = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(
+                0,
+                Some(linux_archductor_core::workspace::BranchPushState {
+                    ahead: 0,
+                    behind: 0,
+                    has_upstream: false,
+                }),
+                Vec::new(),
+            )),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&clean_without_upstream),
+            None
+        );
+
         let snapshot = WorkspacePrStatusSnapshot {
-            pr: Some(linux_archductor_core::workspace::PullRequest {
-                id: 1,
-                workspace_id: 2,
-                provider: "github".to_owned(),
-                number: 42,
-                url: "https://github.com/example/demo/pull/42".to_owned(),
-                state: "OPEN".to_owned(),
-                created_at: "then".to_owned(),
-                updated_at: "now".to_owned(),
-            }),
+            pr: Some(test_pull_request("OPEN")),
             status: Some(PullRequestStatusSummary {
-                label: "checks pending".to_owned(),
-                css_class: "ws-pr-status-pending",
-                kind: PullRequestStateKind::Pending,
+                label: "ready to merge".to_owned(),
+                css_class: "ws-pr-status-ready",
+                kind: PullRequestStateKind::Ready,
             }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
         };
 
-        assert_eq!(workspace_pr_primary_action_label(&snapshot), "View PR");
-        assert_eq!(workspace_pr_status_title(&snapshot), "Checks pending");
         assert_eq!(
-            workspace_pr_primary_action_tooltip(&snapshot),
-            "Open pull request with pending checks"
+            workspace_pr_primary_action_label(&snapshot),
+            Some("Merge PR")
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&snapshot).unwrap().css_class,
+            "ws-pr-status-ready"
+        );
+
+        let blocked = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("OPEN")),
+            status: Some(PullRequestStatusSummary {
+                label: "checks failed".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::Failed,
+            }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&blocked),
+            Some("Fix Checks")
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&blocked).unwrap().css_class,
+            "ws-pr-status-failed"
+        );
+
+        let conflict = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("OPEN")),
+            status: Some(PullRequestStatusSummary {
+                label: "ready to merge".to_owned(),
+                css_class: "ws-pr-status-ready",
+                kind: PullRequestStateKind::Ready,
+            }),
+            summary: Some(test_checks_summary(
+                0,
+                None,
+                vec![("paris".to_owned(), vec!["src/main.rs".to_owned()])],
+            )),
+        };
+        assert_eq!(
+            workspace_pr_primary_action(&conflict).unwrap().kind,
+            WorkspacePrTopActionKind::FixBlocked
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&conflict).unwrap().css_class,
+            "ws-pr-status-failed"
+        );
+
+        let merged = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("merged")),
+            status: Some(PullRequestStatusSummary {
+                label: "merged".to_owned(),
+                css_class: "ws-pr-status-merged",
+                kind: PullRequestStateKind::Merged,
+            }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+        };
+        assert_eq!(workspace_pr_primary_action_label(&merged), Some("Merged"));
+        assert_eq!(
+            workspace_pr_primary_action(&merged).unwrap().css_class,
+            "ws-pr-status-merged"
         );
     }
 
@@ -6716,6 +8665,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7006,6 +8956,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7052,6 +9003,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7139,6 +9091,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7231,8 +9184,63 @@ mod tests {
 
         assert_eq!(
             text,
-            "#9 2026-07-09T12:00:00Z [branch.renamed] Renamed branch lc/a to lc/b\n"
+            "#9 2026-07-09T12:00:00Z [branch.renamed] Renamed branch lc/a to lc/b -> Open Changes\n"
         );
+    }
+
+    #[test]
+    fn workspace_timeline_formatter_lists_jump_targets() {
+        let text = format_workspace_timeline(&[
+            WorkspaceTimelineEvent {
+                id: 1,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "prompt.submitted".to_owned(),
+                summary: "Build the fix".to_owned(),
+                created_at: "2026-07-09T12:00:00Z".to_owned(),
+            },
+            WorkspaceTimelineEvent {
+                id: 2,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "run.failed".to_owned(),
+                summary: "cargo test failed".to_owned(),
+                created_at: "2026-07-09T12:01:00Z".to_owned(),
+            },
+            WorkspaceTimelineEvent {
+                id: 3,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "pull_request.ready".to_owned(),
+                summary: "PR ready".to_owned(),
+                created_at: "2026-07-09T12:02:00Z".to_owned(),
+            },
+        ]);
+
+        assert!(text.contains("prompt.submitted] Build the fix -> Open Chat"));
+        assert!(text.contains("run.failed] cargo test failed -> Open Checks"));
+        assert!(text.contains("pull_request.ready] PR ready -> Open Review"));
+    }
+
+    #[test]
+    fn workspace_timeline_formatter_trims_long_lists() {
+        let events = (1..=205)
+            .map(|id| WorkspaceTimelineEvent {
+                id,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "session.event".to_owned(),
+                summary: format!("Event {id}"),
+                created_at: "2026-07-09T12:00:00Z".to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        let text = format_workspace_timeline(&events);
+
+        assert!(text.starts_with("Showing latest 200 events; 5 older hidden.\n"));
+        assert!(!text.contains("#5 2026-07-09T12:00:00Z"));
+        assert!(text.contains("#6 2026-07-09T12:00:00Z"));
+        assert!(text.contains("#205 2026-07-09T12:00:00Z"));
     }
 
     #[test]

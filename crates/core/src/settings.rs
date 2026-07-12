@@ -12,6 +12,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepositorySettings {
     pub file_include_globs: Vec<String>,
+    pub env_file_refs: Vec<String>,
     pub spotlight_testing: Option<bool>,
     pub enterprise_data_privacy: Option<bool>,
     pub scripts: ScriptSettings,
@@ -641,6 +642,12 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
             "environment variable key {key:?} is invalid"
         );
     }
+    for path in &settings.env_file_refs {
+        anyhow::ensure!(
+            is_safe_relative_path(path),
+            "env_file_refs entry must be a safe relative path: {path}"
+        );
+    }
     if let Some(port_block_size) = settings.customization.workspace_defaults.port_block_size {
         anyhow::ensure!(
             port_block_size > 0,
@@ -699,6 +706,8 @@ struct RawRepositorySettings {
     schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_include_globs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env_file_refs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     spotlight_testing: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -982,6 +991,7 @@ impl RawRepositorySettings {
     fn merge(self, local: Self) -> Self {
         Self {
             file_include_globs: local.file_include_globs.or(self.file_include_globs),
+            env_file_refs: local.env_file_refs.or(self.env_file_refs),
             spotlight_testing: local.spotlight_testing.or(self.spotlight_testing),
             enterprise_data_privacy: local
                 .enterprise_data_privacy
@@ -1024,6 +1034,7 @@ impl RawRepositorySettings {
         let scripts = self.scripts.unwrap_or_default();
         RepositorySettings {
             file_include_globs: split_patterns(self.file_include_globs),
+            env_file_refs: split_patterns(self.env_file_refs),
             spotlight_testing: self.spotlight_testing,
             enterprise_data_privacy: self.enterprise_data_privacy,
             scripts: ScriptSettings {
@@ -1054,6 +1065,8 @@ impl RawRepositorySettings {
             schema: Some("https://conductor.build/schemas/settings.repo.schema.json".to_owned()),
             file_include_globs: (!settings.file_include_globs.is_empty())
                 .then(|| settings.file_include_globs.join("\n")),
+            env_file_refs: (!settings.env_file_refs.is_empty())
+                .then(|| settings.env_file_refs.join("\n")),
             spotlight_testing: settings.spotlight_testing,
             enterprise_data_privacy: settings.enterprise_data_privacy,
             scripts: Some(RawScriptSettings {
@@ -1695,7 +1708,7 @@ fn merge_maps(
     shared
 }
 
-fn is_valid_environment_key(key: &str) -> bool {
+pub(crate) fn is_valid_environment_key(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
@@ -2160,6 +2173,10 @@ file_include_globs = """
 .env*
 config/*.local.json
 """
+env_file_refs = """
+.env
+.env.local
+"""
 
 [scripts]
 setup = "pnpm install"
@@ -2178,6 +2195,7 @@ API_BASE_URL = "http://localhost:3000"
             settings.file_include_globs,
             [".env*", "config/*.local.json"]
         );
+        assert_eq!(settings.env_file_refs, [".env", ".env.local"]);
         assert_eq!(settings.scripts.setup, Some("pnpm install".to_owned()));
         assert_eq!(
             settings.scripts.run,
@@ -2255,6 +2273,7 @@ LOCAL_ONLY = "1"
         let temp = tempfile::tempdir().unwrap();
         let settings = RepositorySettings {
             file_include_globs: vec![".env*".to_owned(), "config/*.local.json".to_owned()],
+            env_file_refs: vec![".env.local".to_owned()],
             spotlight_testing: Some(true),
             enterprise_data_privacy: Some(false),
             scripts: ScriptSettings {
@@ -2352,6 +2371,19 @@ LOCAL_ONLY = "1"
             settings.customization.workspace_defaults.port_block_size,
             Some(10)
         );
+    }
+
+    #[test]
+    fn load_repository_settings_missing_config_uses_safe_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert!(settings.file_include_globs.is_empty());
+        assert!(settings.env_file_refs.is_empty());
+        assert!(settings.scripts.run.is_none());
+        assert!(settings.environment_variables.is_empty());
+        assert_eq!(settings.customization, CustomizationSettings::default());
     }
 
     #[test]

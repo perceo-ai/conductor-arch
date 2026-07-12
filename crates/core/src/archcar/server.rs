@@ -220,13 +220,17 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::SendInput {
             session_id,
             input,
+            visible_input,
             kind,
         } => match load_or_restore_session_handle(state, session_id) {
             Ok(Some(handle)) => {
                 match handle
                     .command_tx
-                    .send(crate::archcar::session::SessionCommand::SendInput { input, kind })
-                {
+                    .send(crate::archcar::session::SessionCommand::SendInput {
+                        input,
+                        visible_input,
+                        kind,
+                    }) {
                     Ok(_) => ArchcarResponse::Ack,
                     Err(err) => ArchcarResponse::Error {
                         message: err.to_string(),
@@ -1044,6 +1048,7 @@ mod tests {
             payload: ArchcarRequest::SendInput {
                 session_id: 42,
                 input: "paste OPENAI_API_KEY=sk-secret into session".to_owned(),
+                visible_input: None,
                 kind: ArchcarInputKind::User,
             },
         };
@@ -1064,6 +1069,7 @@ mod tests {
                 session_id: 42,
                 input: "paste OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish"
                     .to_owned(),
+                visible_input: None,
                 kind: ArchcarInputKind::User,
             },
         };

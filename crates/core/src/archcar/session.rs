@@ -26,6 +26,7 @@ use crate::workspace::{
 pub enum SessionCommand {
     SendInput {
         input: String,
+        visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
     Resize {
@@ -558,8 +559,13 @@ fn run_session_loop(
     loop {
         while let Ok(command) = command_rx.try_recv() {
             match command {
-                SessionCommand::SendInput { input, kind } => {
+                SessionCommand::SendInput {
+                    input,
+                    visible_input,
+                    kind,
+                } => {
                     let current = snapshot.lock().unwrap().clone();
+                    let persisted_input = visible_input.as_deref().unwrap_or(&input);
                     info!(
                         session_id = current.session_id,
                         thread_id = current.thread_id,
@@ -576,14 +582,14 @@ fn run_session_loop(
                     let log_text = format_input_audit_log(
                         &current.workspace,
                         current.session_id,
-                        &input,
+                        persisted_input,
                         &kind,
                     );
                     let _ = runtime_store.append_input_and_audit_log(
                         current.thread_id,
                         current.session_id,
                         role,
-                        &input,
+                        persisted_input,
                         source,
                         &log_text,
                     );

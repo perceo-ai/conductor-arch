@@ -29,8 +29,8 @@ use command_palette::{
     ShortcutAction,
 };
 use gtk::{
-    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overlay, ScrolledWindow, Stack,
-    STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overflow, Overlay, ScrolledWindow,
+    Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_archductor_core::archcar::server::{
     reconcile_managed_sessions_on_startup, ArchcarServer,
@@ -473,8 +473,8 @@ const VIEW_COLOR_TOKENS: &[(&str, &str, &str)] = &[
     ("text", "lc-text", "#e4e4e4"),
     ("text_strong", "lc-text-strong", "#f8fafc"),
     ("text_muted", "lc-text-muted", "#8a8a8a"),
-    ("accent", "lc-accent", "#22c55e"),
-    ("accent_fg", "lc-accent-fg", "#052e16"),
+    ("accent", "lc-accent", "#8a8a8a"),
+    ("accent_fg", "lc-accent-fg", "#f5f5f5"),
     ("success", "lc-success", "#84e0a0"),
     ("warning", "lc-warning", "#f59e0b"),
     ("danger", "lc-danger", "#ff8a8a"),
@@ -552,12 +552,9 @@ window.lc-custom-colors,
     border-color: @lc-accent;
 }
 
-.lc-custom-colors .chat-mode-selected,
-.lc-custom-colors .chat-send-btn-active,
-.lc-custom-colors .chat-user-bubble,
-.lc-custom-colors .suggested-action {
+.lc-custom-colors .suggested-action,
+.lc-custom-colors .suggested-action:hover {
     background-color: @lc-accent;
-    border-color: @lc-accent;
     color: @lc-accent-fg;
 }
 
@@ -818,11 +815,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     refresh_hub.set_history(refresh_history.clone());
     refresh_hub.set_sidebar(refresh_sidebar.clone());
 
-    split.set_sidebar(Some(&sidebar));
-    toast_overlay.set_child(Some(&main_stack));
-
     let content_overlay = Overlay::new();
-    content_overlay.set_child(Some(&toast_overlay));
+    content_overlay.set_child(Some(&main_stack));
+
+    toast_overlay.set_halign(Align::End);
+    toast_overlay.set_valign(Align::End);
+    toast_overlay.set_overflow(Overflow::Visible);
+    toast_overlay.set_margin_end(16);
+    toast_overlay.set_margin_bottom(16);
+    content_overlay.add_overlay(&toast_overlay);
 
     let reopen_sidebar_btn = icon_button("sidebar-show-symbolic", "Show sidebar");
     reopen_sidebar_btn.add_css_class("sidebar-reopen-button");
@@ -838,6 +839,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         });
     }
     content_overlay.add_overlay(&reopen_sidebar_btn);
+
+    split.set_sidebar(Some(&sidebar));
     reopen_sidebar_btn.set_visible(split.is_collapsed());
     {
         let reopen_sidebar_btn = reopen_sidebar_btn.clone();
@@ -1725,7 +1728,10 @@ mod tests {
         assert!(css.contains("@define-color lc-accent-lc_custom_colors_test #0ea5e9;"));
         assert!(css.contains("@define-color lc-accent-fg-lc_custom_colors_test #001018;"));
         assert!(css.contains("@define-color lc-bg-lc_custom_colors_test #101820;"));
-        assert!(css.contains(".lc-custom-colors-test .chat-mode-selected"));
+        assert!(!css.contains(".lc-custom-colors-test .chat-mode-selected"));
+        assert!(!css.contains(".lc-custom-colors-test .chat-send-btn-active"));
+        assert!(!css.contains(".lc-custom-colors-test .chat-user-bubble"));
+        assert!(css.contains(".lc-custom-colors-test .suggested-action"));
         assert!(!css.contains(".lc-custom-colors .chat-mode-selected"));
     }
 

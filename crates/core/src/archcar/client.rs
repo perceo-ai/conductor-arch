@@ -265,6 +265,7 @@ mod tests {
             payload: ArchcarRequest::SendInput {
                 session_id: 42,
                 input: "OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish".to_owned(),
+                visible_input: None,
                 kind: ArchcarInputKind::User,
             },
         };
@@ -294,6 +295,7 @@ mod tests {
             &ArchcarRequest::SendInput {
                 session_id: 42,
                 input: "hello".to_owned(),
+                visible_input: None,
                 kind: ArchcarInputKind::User,
             }
         ));

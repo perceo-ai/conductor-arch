@@ -444,6 +444,7 @@ fn run_terminal_command(
         ArchcarRequest::SendInput {
             session_id: record.id,
             input: command.clone(),
+            visible_input: None,
             kind: ArchcarInputKind::ControlCommand,
         },
     );

@@ -17,6 +17,7 @@ struct InspectorSessionInput {
     id: i64,
     workspace: String,
     command: String,
+    log_path: PathBuf,
     pid: Option<u32>,
     status: ProcessStatus,
     started_at: String,
@@ -49,6 +50,7 @@ struct InspectorSessionRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InspectorSessionDetail {
     session_id: Option<i64>,
+    log_path: String,
     raw_chunks: Vec<RawChunk>,
     normalized_text: String,
     events: Vec<InspectorEventRow>,
@@ -60,6 +62,7 @@ struct RawChunk {
     index: usize,
     text: String,
     normalized_text: String,
+    raw_normalized_text: String,
     duplicate: bool,
     delayed: bool,
     partial: bool,
@@ -160,6 +163,7 @@ fn session_input_from_process(
         id: process.id,
         workspace: workspace.to_owned(),
         command: process.command,
+        log_path: process.log_path,
         pid: (process.pid > 0).then_some(process.pid),
         status: process.status,
         started_at: process.started_at,
@@ -211,7 +215,7 @@ fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
 fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
     let raw_chunks = session.raw_chunks.clone();
     let normalized_text = if raw_chunks.is_empty() {
-        normalize_pty_text(&session.raw_output)
+        normalize_pty_text(&redact_sensitive_text(&session.raw_output))
     } else {
         raw_chunks
             .iter()
@@ -225,6 +229,7 @@ fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
         .collect::<Vec<_>>();
     InspectorSessionDetail {
         session_id: Some(session.id),
+        log_path: session.log_path.display().to_string(),
         raw_chunks,
         normalized_text,
         events,
@@ -235,6 +240,7 @@ fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
 fn empty_session_detail() -> InspectorSessionDetail {
     InspectorSessionDetail {
         session_id: None,
+        log_path: "n/a".to_owned(),
         raw_chunks: Vec::new(),
         normalized_text: String::new(),
         events: Vec::new(),
@@ -257,19 +263,54 @@ fn raw_chunks_from_log(raw: &str) -> Vec<RawChunk> {
     if raw.is_empty() {
         return Vec::new();
     }
-    let mut previous = String::new();
-    raw.split_inclusive('\n')
+    let chunks = raw
+        .split_inclusive('\n')
         .chain((!raw.ends_with('\n')).then_some(""))
         .filter(|chunk| !chunk.is_empty())
         .enumerate()
-        .map(|(index, chunk)| {
-            let normalized_text = normalize_pty_text(chunk);
+        .map(|(index, chunk)| (index + 1, chunk))
+        .collect::<Vec<_>>();
+    raw_chunks_from_slices(raw, &chunks)
+}
+
+fn raw_chunks_from_records(records: &[PtyChunkRecord]) -> Vec<RawChunk> {
+    let raw = records
+        .iter()
+        .map(|record| record.text.as_str())
+        .collect::<String>();
+    let mut offset = 0;
+    let chunks = records
+        .iter()
+        .map(|record| {
+            let start = offset;
+            offset += record.text.len();
+            (record.sequence as usize, &raw[start..offset])
+        })
+        .collect::<Vec<_>>();
+    raw_chunks_from_slices(&raw, &chunks)
+}
+
+fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let redacted = redact_sensitive_text(raw);
+    let redacted_chunks = split_redacted_stream_for_chunks(raw, &redacted, chunks);
+    let mut previous = String::new();
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(position, (index, chunk))| {
+            let text = redacted_chunks.get(position).cloned().unwrap_or_default();
+            let normalized_text = normalize_pty_text(&text);
+            let raw_normalized_text = normalize_pty_text(chunk);
             let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
             previous = normalized_text.clone();
             RawChunk {
-                index: index + 1,
-                text: chunk.to_owned(),
+                index: *index,
+                text,
                 normalized_text,
+                raw_normalized_text,
                 duplicate,
                 delayed: false,
                 partial: !chunk.ends_with('\n'),
@@ -278,24 +319,127 @@ fn raw_chunks_from_log(raw: &str) -> Vec<RawChunk> {
         .collect()
 }
 
-fn raw_chunks_from_records(records: &[PtyChunkRecord]) -> Vec<RawChunk> {
-    let mut previous = String::new();
-    records
+fn split_redacted_stream_for_chunks(
+    raw: &str,
+    redacted: &str,
+    chunks: &[(usize, &str)],
+) -> Vec<String> {
+    let mut output = Vec::with_capacity(chunks.len());
+    let mut raw_cursor = 0;
+    let mut cursor = 0;
+    let raw_boundaries = chunks
         .iter()
-        .map(|record| {
-            let normalized_text = normalize_pty_text(&record.text);
-            let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
-            previous = normalized_text.clone();
-            RawChunk {
-                index: record.sequence as usize,
-                text: record.text.clone(),
-                normalized_text,
-                duplicate,
-                delayed: false,
-                partial: !record.text.ends_with('\n'),
-            }
+        .take(chunks.len().saturating_sub(1))
+        .map(|(_, chunk)| {
+            raw_cursor += chunk.len();
+            raw_cursor
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let redacted_boundaries = redacted_offsets_for_raw_boundaries(raw, redacted, &raw_boundaries);
+    for (position, _) in chunks.iter().enumerate() {
+        let is_last = position + 1 == chunks.len();
+        let end = if is_last {
+            redacted.len()
+        } else {
+            redacted_boundaries[position].max(cursor)
+        };
+        output.push(redacted[cursor..end].to_owned());
+        cursor = end;
+    }
+    output
+}
+
+fn redacted_offsets_for_raw_boundaries(
+    raw: &str,
+    redacted: &str,
+    raw_boundaries: &[usize],
+) -> Vec<usize> {
+    const MARKER: &str = "[redacted]";
+    let mut offsets = Vec::with_capacity(raw_boundaries.len());
+    let mut raw_cursor = 0;
+    let mut redacted_cursor = 0;
+
+    for &boundary in raw_boundaries {
+        while raw_cursor < boundary && raw_cursor < raw.len() && redacted_cursor < redacted.len() {
+            let raw_char = raw[raw_cursor..].chars().next();
+            let redacted_char = redacted[redacted_cursor..].chars().next();
+            if redacted[redacted_cursor..].starts_with(MARKER)
+                && !raw_redaction_marker_is_literal(raw, raw_cursor, redacted, redacted_cursor)
+            {
+                redacted_cursor += MARKER.len();
+                raw_cursor =
+                    find_redaction_resume_offset(raw, raw_cursor, redacted, redacted_cursor);
+            } else if raw_char == redacted_char {
+                advance_char(raw, &mut raw_cursor);
+                advance_char(redacted, &mut redacted_cursor);
+            } else if redacted[redacted_cursor..].starts_with(MARKER) {
+                redacted_cursor += MARKER.len();
+                raw_cursor =
+                    find_redaction_resume_offset(raw, raw_cursor, redacted, redacted_cursor);
+            } else {
+                advance_char(raw, &mut raw_cursor);
+                advance_char(redacted, &mut redacted_cursor);
+            }
+        }
+        offsets.push(redacted_cursor);
+    }
+    offsets
+}
+
+fn raw_redaction_marker_is_literal(
+    raw: &str,
+    raw_cursor: usize,
+    redacted: &str,
+    redacted_cursor: usize,
+) -> bool {
+    const MARKER: &str = "[redacted]";
+    if !raw[raw_cursor..].starts_with(MARKER) {
+        return false;
+    }
+    let raw_after_marker = raw_cursor + MARKER.len();
+    let redacted_after_marker = redacted_cursor + MARKER.len();
+    redacted_after_marker >= redacted.len()
+        || raw[raw_after_marker..] == redacted[redacted_after_marker..]
+        || common_prefix_chars(&raw[raw_after_marker..], &redacted[redacted_after_marker..]) >= 4
+}
+
+fn find_redaction_resume_offset(
+    raw: &str,
+    raw_start: usize,
+    redacted: &str,
+    redacted_start: usize,
+) -> usize {
+    if redacted_start >= redacted.len() {
+        return raw.len();
+    }
+    let mut best = raw.len();
+    for (offset, _) in raw[raw_start..].char_indices() {
+        let candidate = raw_start + offset;
+        if common_prefix_chars(&raw[candidate..], &redacted[redacted_start..]) >= 4 {
+            return candidate;
+        }
+        if best == raw.len()
+            && raw[candidate..].chars().next() == redacted[redacted_start..].chars().next()
+        {
+            best = candidate;
+        }
+    }
+    best
+}
+
+fn common_prefix_chars(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn advance_char(value: &str, cursor: &mut usize) {
+    if let Some(ch) = value[*cursor..].chars().next() {
+        *cursor += ch.len_utf8();
+    } else {
+        *cursor = value.len();
+    }
 }
 
 fn normalize_pty_text(raw: &str) -> String {
@@ -303,7 +447,7 @@ fn normalize_pty_text(raw: &str) -> String {
 }
 
 fn event_row(event: &SessionEvent, chunks: &[RawChunk]) -> InspectorEventRow {
-    let rendered_text = event.render_text();
+    let rendered_text = redact_sensitive_text(&event.render_text());
     let source_chunk = event
         .raw_text
         .as_deref()
@@ -311,7 +455,7 @@ fn event_row(event: &SessionEvent, chunks: &[RawChunk]) -> InspectorEventRow {
             let raw = normalize_pty_text(raw);
             chunks
                 .iter()
-                .find(|chunk| chunk.normalized_text.contains(raw.trim()))
+                .find(|chunk| chunk.raw_normalized_text.contains(raw.trim()))
                 .map(|chunk| format!("chunk {}", chunk.index))
         })
         .unwrap_or_else(|| "unmatched".to_owned());
@@ -398,6 +542,95 @@ fn diagnostics(session: &InspectorSessionInput) -> InspectorDiagnostics {
     }
 }
 
+fn diagnostic_bundle_text(detail: &InspectorSessionDetail) -> String {
+    let mut out = String::new();
+    out.push_str("Archductor PTY diagnostic bundle\n");
+    out.push_str(&format!("App version: {}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!(
+        "Session: {}\n",
+        detail
+            .session_id
+            .map(|id| format!("#{id}"))
+            .unwrap_or_else(|| "n/a".to_owned())
+    ));
+    out.push_str(&format!("Raw log path: {}\n\n", detail.log_path));
+
+    out.push_str("Process metadata\n");
+    out.push_str(&format!("PID: {}\n", detail.diagnostics.pid));
+    out.push_str(&format!("Command: {}\n", detail.diagnostics.command));
+    out.push_str(&format!(
+        "Workspace: {}\n",
+        detail.diagnostics.cwd_or_workspace
+    ));
+    out.push_str(&format!("Started: {}\n", detail.diagnostics.start_time));
+    out.push_str(&format!("Exit code: {}\n", detail.diagnostics.exit_code));
+    out.push_str(&format!("Signal: {}\n", detail.diagnostics.signal));
+    out.push_str(&format!("State: {}\n", detail.diagnostics.session_state));
+    out.push_str(&format!(
+        "Last action: {}\n\n",
+        detail.diagnostics.last_lifecycle_action
+    ));
+
+    out.push_str("Lifecycle\n");
+    for item in &detail.diagnostics.lifecycle {
+        out.push_str(&format!("- {item}\n"));
+    }
+
+    out.push_str("\nState transitions\n");
+    let state_rows = detail
+        .events
+        .iter()
+        .filter(|event| event.filter == EventFilter::StateTransitions)
+        .collect::<Vec<_>>();
+    if state_rows.is_empty() {
+        out.push_str("- None recorded.\n");
+    } else {
+        for event in state_rows {
+            out.push_str(&format!(
+                "- #{} {} {}\n{}\n",
+                event.sequence, event.timestamp, event.status, event.rendered_text
+            ));
+        }
+    }
+
+    out.push_str("\nParsed events\n");
+    if detail.events.is_empty() {
+        out.push_str("- None recorded.\n");
+    } else {
+        for event in &detail.events {
+            out.push_str(&format!(
+                "- #{} {} {:?} {} {}\n{}\n",
+                event.sequence,
+                event.timestamp,
+                event.filter,
+                event.source_chunk,
+                event.status,
+                event.rendered_text
+            ));
+        }
+    }
+
+    out.push_str("\nRaw output (redacted)\n");
+    if detail.raw_chunks.is_empty() {
+        out.push_str("No raw output.\n");
+    } else {
+        for chunk in &detail.raw_chunks {
+            out.push_str(&format!("chunk {}\n{}\n", chunk.index, chunk.text));
+        }
+    }
+
+    out.push_str("\nNormalized output (redacted)\n");
+    if detail.normalized_text.is_empty() {
+        out.push_str("No normalized output.\n");
+    } else {
+        out.push_str(&detail.normalized_text);
+        if !detail.normalized_text.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn signal_label(exit_code: Option<i32>) -> String {
     match exit_code {
         Some(code) if code >= 128 => format!("signal {}", code - 128),
@@ -426,7 +659,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     title.set_xalign(0.0);
     root.append(&title);
     root.append(&small_label(
-        "Local storage only. Routine logs omit raw PTY screens by default.",
+        "Debug mode only. Raw PTY logs can contain sensitive data; secret-looking values are redacted before display or copy.",
     ));
 
     let layout = GBox::new(Orientation::Horizontal, 12);
@@ -465,9 +698,10 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     center_stack.add_named(&raw_scroll, Some("raw"));
     center_stack.add_named(&normalized_scroll, Some("normalized"));
     center_stack.set_visible_child_name("raw");
+    let selected_detail = Rc::new(RefCell::new(model.selected.clone()));
     let center = GBox::new(Orientation::Vertical, 8);
     let toolbar = GBox::new(Orientation::Horizontal, 6);
-    let raw_toggle = CheckButton::with_label("Raw chunks");
+    let raw_toggle = CheckButton::with_label("Raw chunks (redacted)");
     raw_toggle.set_active(true);
     let normalized_toggle = CheckButton::with_label("Normalized text");
     normalized_toggle.set_group(Some(&raw_toggle));
@@ -498,13 +732,23 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
             normalized_container.append(&small_label("Local normalized view cleared."));
         });
     }
-    let copy_btn = Button::with_label("Copy visible output");
+    let copy_btn = Button::with_label("Copy redacted output");
     let visible_output = Rc::new(RefCell::new(model.selected.normalized_text.clone()));
     {
         let visible_output = Rc::clone(&visible_output);
         copy_btn.connect_clicked(move |_| {
             if let Some(display) = gtk::gdk::Display::default() {
                 display.clipboard().set_text(&visible_output.borrow());
+            }
+        });
+    }
+    let export_btn = Button::with_label("Copy diagnostic bundle");
+    {
+        let selected_detail = Rc::clone(&selected_detail);
+        export_btn.connect_clicked(move |_| {
+            let bundle = diagnostic_bundle_text(&selected_detail.borrow());
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&bundle);
             }
         });
     }
@@ -515,6 +759,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     toolbar.append(&pause_toggle);
     toolbar.append(&clear_btn);
     toolbar.append(&copy_btn);
+    toolbar.append(&export_btn);
     toolbar.append(&jump_btn);
     center.append(&toolbar);
     center.append(&center_stack);
@@ -528,7 +773,6 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
         &model.selected.events,
         &all_event_filters(),
     );
-    let selected_detail = Rc::new(RefCell::new(model.selected.clone()));
     let active_filters = Rc::new(RefCell::new(all_event_filters()));
     right.append(&event_filters_panel(
         &events_container,
@@ -614,6 +858,7 @@ fn clear_box(panel: &GBox) {
 
 fn render_raw_chunks_into(panel: &GBox, detail: &InspectorSessionDetail) {
     clear_box(panel);
+    panel.append(&section_label("Sensitive raw logs (redacted)"));
     if detail.raw_chunks.is_empty() {
         panel.append(&small_label("No raw output."));
     }
@@ -638,6 +883,7 @@ fn render_raw_chunks_into(panel: &GBox, detail: &InspectorSessionDetail) {
 
 fn render_normalized_into(panel: &GBox, detail: &InspectorSessionDetail) {
     clear_box(panel);
+    panel.append(&section_label("Normalized output (redacted)"));
     panel.append(&mono_label(if detail.normalized_text.is_empty() {
         "No normalized output."
     } else {
@@ -768,6 +1014,7 @@ mod tests {
     use super::*;
     use linux_archductor_core::session_event::{
         SessionCommandOutputStatus, SessionEvent, SessionEventPayload, SessionEventSource,
+        SessionEventStatus,
     };
     use linux_archductor_core::workspace::ProcessStatus;
 
@@ -777,6 +1024,7 @@ mod tests {
             id: 7,
             workspace: "berlin".to_owned(),
             command: "ARCHDUCTOR_TOKEN=secret codex --model gpt-5".to_owned(),
+            log_path: PathBuf::from("/tmp/session-7.log"),
             pid: Some(4242),
             status: ProcessStatus::Running,
             started_at: "2026-07-05T12:00:00Z".to_owned(),
@@ -838,6 +1086,7 @@ mod tests {
             id: 9,
             workspace: "oslo".to_owned(),
             command: "codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-9.log"),
             pid: Some(2222),
             status: ProcessStatus::Running,
             started_at: "2026-07-06T12:00:00Z".to_owned(),
@@ -849,6 +1098,7 @@ mod tests {
                     index: 1,
                     text: "\u{1b}[2Jreal".to_owned(),
                     normalized_text: "\u{1b}[2Jreal".to_owned(),
+                    raw_normalized_text: "\u{1b}[2Jreal".to_owned(),
                     duplicate: false,
                     delayed: false,
                     partial: true,
@@ -857,6 +1107,7 @@ mod tests {
                     index: 2,
                     text: " chunk\n".to_owned(),
                     normalized_text: " chunk\n".to_owned(),
+                    raw_normalized_text: " chunk\n".to_owned(),
                     duplicate: false,
                     delayed: false,
                     partial: false,
@@ -871,6 +1122,325 @@ mod tests {
         assert_eq!(model.selected.normalized_text, "\u{1b}[2Jreal chunk\n");
         assert_eq!(model.selected.raw_chunks[0].text, "\u{1b}[2Jreal");
         assert!(!model.selected.normalized_text.contains("[codex raw]"));
+    }
+
+    #[test]
+    fn inspector_model_redacts_raw_chunks_normalized_text_and_events() {
+        let session = InspectorSessionInput {
+            id: 10,
+            workspace: "milan".to_owned(),
+            command: "codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-10.log"),
+            pid: Some(3333),
+            status: ProcessStatus::Stopped,
+            started_at: "2026-07-06T12:00:00Z".to_owned(),
+            ended_at: Some("2026-07-06T12:01:00Z".to_owned()),
+            exit_code: Some(0),
+            raw_output: "TOKEN=raw-secret\n".to_owned(),
+            raw_chunks: raw_chunks_from_log(
+                "TOKEN=raw-secret\nAuthorization: Bearer bearer-secret\n",
+            ),
+            events: vec![SessionEvent::new(
+                SessionEventSource::Runtime,
+                Some("TOKEN=event-secret".to_owned()),
+                SessionEventPayload::CommandOutput {
+                    title: "print env".to_owned(),
+                    output: "api_key: event-api-secret".to_owned(),
+                    status: SessionCommandOutputStatus::Succeeded,
+                },
+            )
+            .with_sequence(1)
+            .with_occurred_at_ms(100)],
+        };
+
+        let model = build_inspector_model(vec![session]);
+        let raw_text = model
+            .selected
+            .raw_chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        let rendered_events = model
+            .selected
+            .events
+            .iter()
+            .map(|event| event.rendered_text.as_str())
+            .collect::<String>();
+
+        for leaked in [
+            "raw-secret",
+            "bearer-secret",
+            "event-secret",
+            "event-api-secret",
+        ] {
+            assert!(
+                !raw_text.contains(leaked)
+                    && !model.selected.normalized_text.contains(leaked)
+                    && !rendered_events.contains(leaked),
+                "{leaked} leaked"
+            );
+        }
+        assert!(raw_text.contains("TOKEN=[redacted]"));
+        assert!(model.selected.normalized_text.contains("Bearer [redacted]"));
+        assert!(rendered_events.contains("api_key: [redacted]"));
+    }
+
+    #[test]
+    fn inspector_redacts_secrets_split_across_chunk_boundaries() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "split-secret\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks)
+            .into_iter()
+            .map(|chunk| chunk.text)
+            .collect::<String>();
+
+        assert_eq!(rendered, "TOKEN=[redacted]\n");
+        assert!(!rendered.contains("split-secret"));
+    }
+
+    #[test]
+    fn inspector_keeps_non_newline_raw_chunks_non_empty() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "abc".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "def\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "abc");
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<String>(),
+            "abcdef\n"
+        );
+    }
+
+    #[test]
+    fn inspector_redacted_value_does_not_consume_later_visible_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=very-long-secret-value".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "\nvisible\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "TOKEN=[redacted]");
+        assert_eq!(rendered[1].text, "\nvisible\n");
+    }
+
+    #[test]
+    fn inspector_redacted_bracket_value_does_not_consume_later_visible_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=[secret-value]".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "\nvisible\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "TOKEN=[redacted]");
+        assert_eq!(rendered[1].text, "\nvisible\n");
+    }
+
+    #[test]
+    fn inspector_redacted_literal_prefix_value_does_not_consume_later_visible_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=[redacted]suffix".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "\nvisible\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "TOKEN=[redacted]");
+        assert_eq!(rendered[1].text, "\nvisible\n");
+    }
+
+    #[test]
+    fn inspector_preserves_literal_redacted_marker_split_across_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "notice [red".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "acted]\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "notice [red");
+        assert_eq!(rendered[1].text, "acted]\n");
+    }
+
+    #[test]
+    fn event_source_chunk_uses_raw_text_before_redacted_matching() {
+        let chunks = raw_chunks_from_log("TOKEN=first-secret\nTOKEN=second-secret\n");
+        let event = SessionEvent::new(
+            SessionEventSource::Runtime,
+            Some("TOKEN=second-secret".to_owned()),
+            SessionEventPayload::CommandOutput {
+                title: "env".to_owned(),
+                output: "TOKEN=second-secret".to_owned(),
+                status: SessionCommandOutputStatus::Succeeded,
+            },
+        );
+
+        let row = event_row(&event, &chunks);
+
+        assert_eq!(row.source_chunk, "chunk 2");
+        assert!(!row.rendered_text.contains("second-secret"));
+    }
+
+    #[test]
+    fn diagnostic_bundle_includes_redacted_debug_data() {
+        let session = InspectorSessionInput {
+            id: 11,
+            workspace: "zurich".to_owned(),
+            command: "TOKEN=command-secret codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-11.log"),
+            pid: Some(4444),
+            status: ProcessStatus::Running,
+            started_at: "2026-07-06T12:00:00Z".to_owned(),
+            ended_at: None,
+            exit_code: None,
+            raw_output: String::new(),
+            raw_chunks: raw_chunks_from_log("TOKEN=raw-secret\n"),
+            events: vec![
+                SessionEvent::new(
+                    SessionEventSource::Runtime,
+                    Some("running".to_owned()),
+                    SessionEventPayload::StatusChange {
+                        status: SessionEventStatus::Running,
+                        message: Some("session running".to_owned()),
+                    },
+                )
+                .with_sequence(1)
+                .with_occurred_at_ms(100),
+                SessionEvent::new(
+                    SessionEventSource::Runtime,
+                    Some("api_key=event-secret".to_owned()),
+                    SessionEventPayload::CommandOutput {
+                        title: "env".to_owned(),
+                        output: "api_key=event-secret".to_owned(),
+                        status: SessionCommandOutputStatus::Succeeded,
+                    },
+                )
+                .with_sequence(2)
+                .with_occurred_at_ms(120),
+            ],
+        };
+        let model = build_inspector_model(vec![session]);
+
+        let bundle = diagnostic_bundle_text(&model.selected);
+
+        assert!(bundle.contains("Archductor PTY diagnostic bundle"));
+        assert!(bundle.contains("App version:"));
+        assert!(bundle.contains("Session: #11"));
+        assert!(bundle.contains("Raw log path: /tmp/session-11.log"));
+        assert!(bundle.contains("Process metadata"));
+        assert!(bundle.contains("State transitions"));
+        assert!(bundle.contains("Parsed events"));
+        assert!(bundle.contains("Raw output (redacted)"));
+        assert!(bundle.contains("TOKEN=[redacted]"));
+        for leaked in ["command-secret", "raw-secret", "event-secret"] {
+            assert!(!bundle.contains(leaked), "{leaked} leaked in bundle");
+        }
     }
 
     #[test]

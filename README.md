@@ -181,12 +181,19 @@ project wraps one repository. Commit shared `.archductor` files except
 same setup. Workspace `.context/` files are local scratch context and should
 stay gitignored.
 
+Every `env_file_refs` path is required when a workspace launches. Remove the
+block if the file does not exist, or commit/create the referenced `.env` file.
+
 ```toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 file_include_globs = """
 .env*
 config/*.local.json
+"""
+
+env_file_refs = """
+.env
 """
 
 spotlight_testing = false
@@ -590,4 +597,4 @@ linux-archductor checkpoint restore <workspace> <id>
 
 ## License
 
-MIT
+Apache-2.0

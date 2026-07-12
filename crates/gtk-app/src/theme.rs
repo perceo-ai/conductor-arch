@@ -818,8 +818,8 @@ separator {
 }
 
 .setup-status-ready {
-    background-color: #142018;
-    border: 1px solid #264633;
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
 }
 
 .setup-status-missing-required {
@@ -1144,65 +1144,33 @@ separator {
 .lc-accent-blue .section-title,
 .lc-accent-blue .project-tab-active,
 .lc-accent-blue .card-activity,
-.lc-accent-blue .workspace-title,
-.lc-accent-blue .chat-mode-selected,
-.lc-accent-blue .chat-send-btn-active,
-.lc-accent-blue .chat-user-bubble {
+.lc-accent-blue .workspace-title {
     color: #f5f5f5;
     border-color: #5a5a5a;
-}
-.lc-accent-blue .chat-mode-selected,
-.lc-accent-blue .chat-send-btn-active,
-.lc-accent-blue .chat-user-bubble {
-    background-color: #333333;
 }
 
 .lc-accent-green .section-title,
 .lc-accent-green .project-tab-active,
 .lc-accent-green .card-activity,
-.lc-accent-green .workspace-title,
-.lc-accent-green .chat-mode-selected,
-.lc-accent-green .chat-send-btn-active,
-.lc-accent-green .chat-user-bubble {
-    color: #ecfdf5;
-    border-color: #22c55e;
-}
-.lc-accent-green .chat-mode-selected,
-.lc-accent-green .chat-send-btn-active,
-.lc-accent-green .chat-user-bubble {
-    background-color: #22c55e;
+.lc-accent-green .workspace-title {
+    color: #f5f5f5;
+    border-color: #5a5a5a;
 }
 
 .lc-accent-amber .section-title,
 .lc-accent-amber .project-tab-active,
 .lc-accent-amber .card-activity,
-.lc-accent-amber .workspace-title,
-.lc-accent-amber .chat-mode-selected,
-.lc-accent-amber .chat-send-btn-active,
-.lc-accent-amber .chat-user-bubble {
+.lc-accent-amber .workspace-title {
     color: #fff7ed;
     border-color: #b35c00;
-}
-.lc-accent-amber .chat-mode-selected,
-.lc-accent-amber .chat-send-btn-active,
-.lc-accent-amber .chat-user-bubble {
-    background-color: #b35c00;
 }
 
 .lc-accent-rose .section-title,
 .lc-accent-rose .project-tab-active,
 .lc-accent-rose .card-activity,
-.lc-accent-rose .workspace-title,
-.lc-accent-rose .chat-mode-selected,
-.lc-accent-rose .chat-send-btn-active,
-.lc-accent-rose .chat-user-bubble {
+.lc-accent-rose .workspace-title {
     color: #fff1f2;
     border-color: #be123c;
-}
-.lc-accent-rose .chat-mode-selected,
-.lc-accent-rose .chat-send-btn-active,
-.lc-accent-rose .chat-user-bubble {
-    background-color: #be123c;
 }
 
 .lc-density-compact .nav-row,
@@ -1626,45 +1594,62 @@ window.lc-theme-dark,
     color: #a8a8a8;
 }
 .ws-pr-compact-panel {
+    min-height: 42px;
     padding: 10px 12px;
     border-bottom: 1px solid #232323;
     background-color: #181818;
 }
+.ws-pr-compact-panel.ws-pr-status-muted,
 .ws-pr-compact-panel.ws-pr-status-missing {
-    border-left: 3px solid #3a3a3a;
+    background-color: #181818;
+    border-bottom-color: #232323;
 }
 .ws-pr-compact-panel.ws-pr-status-pending {
-    border-left: 3px solid #3a3a3a;
+    background-color: #181818;
+    border-bottom-color: #2d2d2d;
 }
 .ws-pr-compact-panel.ws-pr-status-ready {
-    border-left: 3px solid #84e0a0;
+    background-color: #14251a;
+    border-bottom-color: #214b2d;
 }
 .ws-pr-compact-panel.ws-pr-status-failed {
-    border-left: 3px solid #ff8a8a;
+    background-color: #2a1718;
+    border-bottom-color: #5c2529;
 }
 .ws-pr-compact-panel.ws-pr-status-merged {
-    border-left: 3px solid #c6a3ff;
+    background-color: #251935;
+    border-bottom-color: #533379;
 }
 .ws-pr-compact-title {
     font-size: 13px;
     font-weight: 700;
     color: #e6e6e6;
 }
+.ws-pr-action-button {
+    min-height: 32px;
+    padding: 0 14px;
+}
+.ws-pr-action-button.ws-pr-status-muted,
+.ws-pr-action-button.ws-pr-status-missing,
 .ws-pr-action-button.ws-pr-status-pending {
     background-color: #262626;
     color: #a8a8a8;
+    border-color: #3a3a3a;
 }
 .ws-pr-action-button.ws-pr-status-ready {
-    background-color: #163522;
-    color: #84e0a0;
+    background-color: #1f6b39;
+    color: #f1fff4;
+    border-color: #2c874b;
 }
 .ws-pr-action-button.ws-pr-status-failed {
-    background-color: #3a1a1a;
-    color: #ff8a8a;
+    background-color: #8d2e34;
+    color: #fff5f5;
+    border-color: #b3444b;
 }
 .ws-pr-action-button.ws-pr-status-merged {
-    background-color: #311d46;
-    color: #c6a3ff;
+    background-color: #6d3fa0;
+    color: #fbf7ff;
+    border-color: #8655bd;
 }
 .ws-changes-menu-btn,
 .ws-run-collapse-btn {
@@ -2144,15 +2129,19 @@ popover.context-menu-popover arrow {
     padding: 0 6px;
 }
 .chat-context-usage {
-    border: 1px solid #333333;
+    border: 1px solid #2b2b2b;
     border-radius: 8px;
+    background-color: #181818;
     color: #a6a6a6;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     font-weight: 700;
-    min-width: 44px;
+    min-width: 60px;
     min-height: 28px;
     padding: 0 6px;
+}
+.chat-context-usage-label {
+    color: inherit;
 }
 .chat-context-usage-empty {
     background-color: transparent;
@@ -2160,9 +2149,9 @@ popover.context-menu-popover arrow {
     color: #777777;
 }
 .chat-context-usage-normal {
-    background-color: #1f2a22;
-    border-color: #395540;
-    color: #b8d7bf;
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
 }
 .chat-context-usage-warning {
     background-color: #2c281b;
@@ -2173,6 +2162,10 @@ popover.context-menu-popover arrow {
     background-color: #2c1f1f;
     border-color: #753838;
     color: #efb0b0;
+}
+.chat-context-details {
+    min-width: 420px;
+    padding: 14px;
 }
 .chat-send-btn {
     min-width: 0;
@@ -2465,16 +2458,16 @@ window,
 
 .suggested-action,
 .chat-send-btn-active {
-    background-color: #22c55e;
-    border-color: #22c55e;
-    color: #052e16;
+    background-color: #282828;
+    border-color: #4a4a4a;
+    color: #f4f4f4;
 }
 
 .suggested-action:hover,
 .chat-send-btn-active:hover {
-    background-color: #4ade80;
-    border-color: #4ade80;
-    color: #052e16;
+    background-color: #333333;
+    border-color: #5a5a5a;
+    color: #ffffff;
 }
 
 .destructive-action {
@@ -2598,9 +2591,9 @@ textview:focus,
 }
 
 .chat-context-usage-normal {
-    background-color: #0f2f1c;
-    border-color: #22c55e;
-    color: #bbf7d0;
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
 }
 
 .chat-context-usage-warning {
@@ -2675,6 +2668,9 @@ mod tests {
         ));
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
+        assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
+        assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
+        assert!(!css.contains(".lc-accent-green .suggested-action"));
         assert!(!css.contains("#38bdf8"));
         assert!(!css.contains("#2563eb"));
         assert!(!css.contains("#1d4ed8"));
