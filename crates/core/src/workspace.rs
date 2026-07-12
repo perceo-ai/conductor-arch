@@ -2795,6 +2795,18 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    pub fn stage_all_workspace_files(&self, name: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        git_dynamic(&workspace.path, &["add", "-A"])?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "git.staged_all",
+            "Staged all changed files",
+        )?;
+        Ok(())
+    }
+
     pub fn unstage_workspace_file(&self, name: &str, relative_path: &str) -> Result<()> {
         let workspace = self.get_by_name(name)?;
         let validated = validate_workspace_relative_path(relative_path)?;
@@ -2808,6 +2820,18 @@ impl WorkspaceStore {
             &workspace.name,
             "git.unstaged",
             &format!("Unstaged {relative_path}"),
+        )?;
+        Ok(())
+    }
+
+    pub fn unstage_all_workspace_files(&self, name: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        git_dynamic(&workspace.path, &["restore", "--staged", "--", "."])?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "git.unstaged_all",
+            "Unstaged all files",
         )?;
         Ok(())
     }
@@ -15545,6 +15569,33 @@ exit 1
             .changed_files("berlin")
             .unwrap()
             .contains(&"README.md".to_owned()));
+
+        fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+        store.stage_all_workspace_files("berlin").unwrap();
+        let staged_files = git_output(&workspace.path, ["diff", "--cached", "--name-only"]);
+        assert!(staged_files.contains("README.md"));
+        assert!(staged_files.contains("notes.txt"));
+        assert_eq!(
+            store
+                .workspace_timeline("berlin", Some("git.staged_all"))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store.unstage_all_workspace_files("berlin").unwrap();
+        assert!(
+            git_output(&workspace.path, ["diff", "--cached", "--name-only"])
+                .trim()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .workspace_timeline("berlin", Some("git.unstaged_all"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

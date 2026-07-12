@@ -3866,6 +3866,8 @@ fn workspace_git_file_actions_panel(
     let panel = GBox::new(Orientation::Vertical, 6);
     panel.add_css_class("ws-git-actions-panel");
 
+    let mut has_stageable = false;
+    let mut has_staged = false;
     match store.diff_file_summaries(name) {
         Ok(summaries) if summaries.is_empty() => {
             let empty = Label::new(Some("No file changes."));
@@ -3874,6 +3876,10 @@ fn workspace_git_file_actions_panel(
             panel.append(&empty);
         }
         Ok(summaries) => {
+            has_stageable = summaries
+                .iter()
+                .any(|summary| summary.unstaged || summary.untracked || !summary.staged);
+            has_staged = summaries.iter().any(|summary| summary.staged);
             let list = GBox::new(Orientation::Vertical, 4);
             for summary in summaries {
                 list.append(&workspace_git_file_action_row(
@@ -3895,6 +3901,16 @@ fn workspace_git_file_actions_panel(
             panel.append(&error);
         }
     }
+
+    panel.append(&workspace_git_batch_actions_row(
+        db_path,
+        name,
+        has_stageable,
+        has_staged,
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+    ));
 
     let commit_row = GBox::new(Orientation::Horizontal, 6);
     let message = Entry::new();
@@ -3933,6 +3949,53 @@ fn workspace_git_file_actions_panel(
     panel.append(&commit_row);
 
     panel
+}
+
+fn workspace_git_batch_actions_row(
+    db_path: &Path,
+    name: &str,
+    has_stageable: bool,
+    has_staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-git-file-action-row");
+    let label = Label::new(Some("All files"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&label);
+
+    let stage_all_btn = text_button("Stage All");
+    stage_all_btn.set_sensitive(has_stageable);
+    connect_git_workspace_action(
+        &stage_all_btn,
+        db_path,
+        name,
+        "Staged all files.",
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+        |store, workspace_name| store.stage_all_workspace_files(workspace_name),
+    );
+    row.append(&stage_all_btn);
+
+    let unstage_all_btn = text_button("Unstage All");
+    unstage_all_btn.set_sensitive(has_staged);
+    connect_git_workspace_action(
+        &unstage_all_btn,
+        db_path,
+        name,
+        "Unstaged all files.",
+        refresh_hub,
+        toast_overlay,
+        feedback,
+        |store, workspace_name| store.unstage_all_workspace_files(workspace_name),
+    );
+    row.append(&unstage_all_btn);
+
+    row
 }
 
 fn workspace_git_file_action_row(
@@ -4097,6 +4160,45 @@ fn workspace_git_file_action_row(
     row
 }
 
+fn connect_git_workspace_action<F>(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    success_message: &'static str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+    action: F,
+) where
+    F: Fn(&WorkspaceStore, &str) -> anyhow::Result<()> + 'static,
+{
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    let feedback = feedback.clone();
+    let button_for_click = button.clone();
+    button.connect_clicked(move |_| {
+        button_for_click.set_sensitive(false);
+        apply_action_feedback(&feedback, &toast_overlay, "Updating files...", false);
+        let result =
+            WorkspaceStore::open(&db_path).and_then(|store| action(&store, &workspace_name));
+        match result {
+            Ok(()) => {
+                apply_action_feedback(&feedback, &toast_overlay, success_message, true);
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => {
+                button_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &git_action_error("Could not update files", &err),
+                    true,
+                );
+            }
+        }
+    });
+}
+
 fn connect_git_file_action<F>(
     button: &Button,
     db_path: &Path,
@@ -4157,12 +4259,18 @@ fn connect_git_file_action<F>(
                 apply_action_feedback(
                     &feedback,
                     &toast_overlay,
-                    &format!("Could not update {file_path}: {err:#}"),
+                    &git_action_error(&format!("Could not update {file_path}"), &err),
                     true,
                 );
             }
         }
     });
+}
+
+fn git_action_error(prefix: &str, err: &anyhow::Error) -> String {
+    format!(
+        "{prefix}: {err:#}\nHint: Refresh changes, inspect git status, and retry after resolving path conflicts."
+    )
 }
 
 fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
@@ -7132,6 +7240,14 @@ mod tests {
         let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
 
         assert_eq!(rendered, "Staged changes\nNo changes.\n");
+    }
+
+    #[test]
+    fn git_action_error_includes_recovery_hint() {
+        let rendered = git_action_error("Could not update README.md", &anyhow::anyhow!("bad path"));
+
+        assert!(rendered.contains("bad path"));
+        assert!(rendered.contains("Hint: Refresh changes"));
     }
 
     #[test]
