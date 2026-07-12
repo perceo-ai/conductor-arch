@@ -2174,6 +2174,10 @@ popover.context-menu-popover arrow {
     border-color: #753838;
     color: #efb0b0;
 }
+.chat-context-details {
+    min-width: 420px;
+    padding: 14px;
+}
 .chat-send-btn {
     min-width: 0;
     min-height: 0;

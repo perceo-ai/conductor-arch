@@ -53,6 +53,10 @@ const SESSION_SCROLLBACK_LINES: usize = 2_000;
 const SESSION_TAIL_HISTORY: usize = 120;
 const DEFAULT_CHAT_TITLE_PREFIX: &str = "New Chat";
 const REVEAL_EXISTING_CHAT_REFRESH_ROWS: bool = false;
+const CONTEXT_WARNING_PERCENT: u8 = 70;
+const CONTEXT_COMPACTION_RISK_PERCENT: u8 = 90;
+const CONTEXT_DETAIL_HISTORY_LIMIT: usize = 6;
+const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -120,6 +124,26 @@ struct ContextUsageDisplayState {
     percent_label: String,
     css_class: &'static str,
     tooltip: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextUsageHistoryPoint {
+    label: String,
+    usage: CodexContextUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextDetailSummary {
+    usage: Option<CodexContextUsage>,
+    transcript_bytes: usize,
+    estimated_tokens: u64,
+    estimate_method: &'static str,
+    recent_growth: String,
+    history: Vec<ContextUsageHistoryPoint>,
+    compaction_events: Vec<String>,
+    top_contributors: Vec<String>,
+    message_count: usize,
+    event_count: usize,
 }
 
 type ChatRenderRecordSignature = (i64, Option<i64>, ProcessStatus, Option<i32>, Option<String>);
@@ -442,6 +466,19 @@ pub fn agent_session_panel(
     let new_chat_btn = session_secondary_button("New Chat");
     new_chat_btn.set_tooltip_text(Some("Create a new chat thread"));
     let context_usage = context_usage_widget();
+    context_usage.connect_clicked({
+        let database_path = database_path.clone();
+        let selected_thread = selected_thread.clone();
+        let input_view = input_view.clone();
+        move |button| {
+            show_context_details_popover(
+                button,
+                &database_path,
+                *selected_thread.borrow(),
+                &input_view,
+            );
+        }
+    });
 
     let send_btn = icon_button("send-symbolic", "Send message");
     send_btn.add_css_class("chat-send-btn");
@@ -2801,6 +2838,368 @@ fn latest_context_usage_from_messages(messages: &[ChatMessageRecord]) -> Option<
         .find_map(|message| parse_codex_context_usage_local(&message.content))
 }
 
+fn context_detail_summary(
+    messages: &[ChatMessageRecord],
+    events: &[ChatEventRecord],
+) -> ContextDetailSummary {
+    let usage = latest_context_usage_from_messages(messages);
+    let transcript_bytes = messages
+        .iter()
+        .map(|message| message.content.len())
+        .sum::<usize>()
+        + events
+            .iter()
+            .map(|event| event.title.len() + event.body.len() + event.payload_json.len())
+            .sum::<usize>();
+    let estimated_tokens = usage
+        .and_then(|usage| usage.used_tokens)
+        .unwrap_or_else(|| stable_token_estimate_from_bytes(transcript_bytes));
+    let estimate_method = if usage.and_then(|usage| usage.used_tokens).is_some() {
+        "reported by Codex transcript"
+    } else {
+        "estimated from persisted transcript bytes at 4 chars/token"
+    };
+    let history = context_usage_history(messages);
+    let recent_growth = context_recent_growth_label(&history);
+    let compaction_events = context_compaction_events(messages, events);
+    let top_contributors = context_top_contributors(messages, events);
+
+    ContextDetailSummary {
+        usage,
+        transcript_bytes,
+        estimated_tokens,
+        estimate_method,
+        recent_growth,
+        history,
+        compaction_events,
+        top_contributors,
+        message_count: messages.len(),
+        event_count: events.len(),
+    }
+}
+
+fn stable_token_estimate_from_bytes(bytes: usize) -> u64 {
+    ((bytes as u64) + 3) / 4
+}
+
+fn context_usage_history(messages: &[ChatMessageRecord]) -> Vec<ContextUsageHistoryPoint> {
+    let mut history = messages
+        .iter()
+        .filter_map(|message| {
+            parse_codex_context_usage_local(&message.content).map(|usage| {
+                ContextUsageHistoryPoint {
+                    label: format!("#{} {}", message.id, message.updated_at),
+                    usage,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    if history.len() > CONTEXT_DETAIL_HISTORY_LIMIT {
+        history.drain(0..history.len() - CONTEXT_DETAIL_HISTORY_LIMIT);
+    }
+    history
+}
+
+fn context_recent_growth_label(history: &[ContextUsageHistoryPoint]) -> String {
+    let Some(latest) = history.last() else {
+        return "No prior context reports.".to_owned();
+    };
+    let Some(previous) = history.iter().rev().nth(1) else {
+        return "Only one context report recorded.".to_owned();
+    };
+    match (
+        latest.usage.used_tokens,
+        previous.usage.used_tokens,
+        latest.usage.percent.checked_sub(previous.usage.percent),
+    ) {
+        (Some(latest_tokens), Some(previous_tokens), _) => format!(
+            "{} tokens since previous report.",
+            signed_token_delta(latest_tokens as i64 - previous_tokens as i64)
+        ),
+        (_, _, Some(delta)) => format!("+{delta}% since previous report."),
+        _ if latest.usage.percent < previous.usage.percent => format!(
+            "-{}% since previous report.",
+            previous.usage.percent - latest.usage.percent
+        ),
+        _ => "No measurable growth since previous report.".to_owned(),
+    }
+}
+
+fn signed_token_delta(delta: i64) -> String {
+    if delta >= 0 {
+        format!("+{}", format_token_count(delta as u64))
+    } else {
+        format!("-{}", format_token_count(delta.unsigned_abs()))
+    }
+}
+
+fn context_compaction_events(
+    messages: &[ChatMessageRecord],
+    events: &[ChatEventRecord],
+) -> Vec<String> {
+    let mut detections = Vec::new();
+    for message in messages {
+        if is_compaction_like_text(&message.content) {
+            detections.push(format!(
+                "{} message #{}: {}",
+                message.updated_at,
+                message.id,
+                first_non_empty_line(&message.content)
+            ));
+        }
+    }
+    for event in events {
+        let combined = format!("{} {}", event.title, event.body);
+        if is_compaction_like_text(&combined) {
+            detections.push(format!(
+                "{} event #{} [{}]: {}",
+                event.updated_at,
+                event.id,
+                event.kind,
+                first_non_empty_line(&combined)
+            ));
+        }
+    }
+    detections.truncate(CONTEXT_DETAIL_HISTORY_LIMIT);
+    detections
+}
+
+fn is_compaction_like_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("compaction")
+        || lower.contains("compacted")
+        || lower.contains("context transition")
+        || lower.contains("context compact")
+        || lower.contains("ran out of context")
+        || lower.contains("summary instead of the full thread")
+}
+
+fn first_non_empty_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(empty)")
+        .chars()
+        .take(120)
+        .collect()
+}
+
+fn context_top_contributors(
+    messages: &[ChatMessageRecord],
+    events: &[ChatEventRecord],
+) -> Vec<String> {
+    let mut contributors = messages
+        .iter()
+        .map(|message| {
+            (
+                message.content.len(),
+                format!(
+                    "message #{} {} / {}: {} bytes",
+                    message.id,
+                    message.role,
+                    message.source,
+                    format_token_count(message.content.len() as u64)
+                ),
+            )
+        })
+        .chain(events.iter().map(|event| {
+            let size = event.title.len() + event.body.len() + event.payload_json.len();
+            (
+                size,
+                format!(
+                    "event #{} {}: {} bytes",
+                    event.id,
+                    event.kind,
+                    format_token_count(size as u64)
+                ),
+            )
+        }))
+        .collect::<Vec<_>>();
+    contributors.sort_by(|a, b| b.0.cmp(&a.0));
+    contributors
+        .into_iter()
+        .take(CONTEXT_DETAIL_CONTRIBUTOR_LIMIT)
+        .map(|(_, label)| label)
+        .collect()
+}
+
+fn format_context_detail_summary(summary: &ContextDetailSummary) -> String {
+    let context_line = match summary.usage {
+        Some(usage) => format!(
+            "Context: {}% ({})",
+            usage.percent,
+            context_risk_label(usage)
+        ),
+        None => "Context: unknown".to_owned(),
+    };
+    let mut lines = vec![
+        context_line,
+        format!(
+            "Transcript: {} bytes across {} messages and {} events",
+            format_token_count(summary.transcript_bytes as u64),
+            summary.message_count,
+            summary.event_count
+        ),
+        format!(
+            "Estimated tokens: {}",
+            format_token_count(summary.estimated_tokens)
+        ),
+        format!("Estimate: {}", summary.estimate_method),
+        format!("Recent growth: {}", summary.recent_growth),
+        format!(
+            "Thresholds: warn at {}%, compaction risk at {}%.",
+            CONTEXT_WARNING_PERCENT, CONTEXT_COMPACTION_RISK_PERCENT
+        ),
+    ];
+
+    lines.push("History:".to_owned());
+    if summary.history.is_empty() {
+        lines.push("- No context reports found.".to_owned());
+    } else {
+        for point in &summary.history {
+            lines.push(format!(
+                "- {}: {}{}",
+                point.label,
+                context_usage_token_label(point.usage),
+                context_usage_percent_suffix(point.usage)
+            ));
+        }
+    }
+
+    lines.push("Compaction events:".to_owned());
+    if summary.compaction_events.is_empty() {
+        lines.push("- None detected in transcript/log text.".to_owned());
+    } else {
+        lines.extend(
+            summary
+                .compaction_events
+                .iter()
+                .map(|event| format!("- {event}")),
+        );
+    }
+
+    lines.push("Top contributors:".to_owned());
+    if summary.top_contributors.is_empty() {
+        lines.push("- No transcript content yet.".to_owned());
+    } else {
+        lines.extend(
+            summary
+                .top_contributors
+                .iter()
+                .map(|contributor| format!("- {contributor}")),
+        );
+    }
+
+    lines.join("\n")
+}
+
+fn context_risk_label(usage: CodexContextUsage) -> &'static str {
+    if usage.percent < CONTEXT_WARNING_PERCENT {
+        "normal"
+    } else if usage.percent < CONTEXT_COMPACTION_RISK_PERCENT {
+        "warning"
+    } else {
+        "compaction risk"
+    }
+}
+
+fn context_usage_token_label(usage: CodexContextUsage) -> String {
+    match (usage.used_tokens, usage.max_tokens) {
+        (Some(used), Some(max)) => format!(
+            "{} / {} tokens",
+            format_token_count(used),
+            format_token_count(max)
+        ),
+        _ => "reported usage".to_owned(),
+    }
+}
+
+fn context_usage_percent_suffix(usage: CodexContextUsage) -> String {
+    format!(" ({}%)", usage.percent)
+}
+
+fn load_context_detail_summary(
+    db_path: &Path,
+    thread_id: Option<i64>,
+) -> anyhow::Result<ContextDetailSummary> {
+    let Some(thread_id) = thread_id else {
+        anyhow::bail!("No chat thread selected");
+    };
+    let store = WorkspaceStore::open(db_path.to_path_buf())?;
+    let messages = store.list_chat_messages(thread_id)?;
+    let events = store.list_chat_events(thread_id)?;
+    Ok(context_detail_summary(&messages, &events))
+}
+
+fn show_context_details_popover(
+    anchor: &Button,
+    db_path: &Path,
+    thread_id: Option<i64>,
+    input_view: &TextView,
+) {
+    let summary_text = load_context_detail_summary(db_path, thread_id)
+        .map(|summary| format_context_detail_summary(&summary))
+        .unwrap_or_else(|err| format!("Context details unavailable: {err:#}"));
+
+    let popover = Popover::new();
+    popover.set_has_arrow(true);
+    popover.set_parent(anchor);
+
+    let body = GBox::new(Orientation::Vertical, 8);
+    body.add_css_class("chat-context-details");
+
+    let title = Label::new(Some("Context Details"));
+    title.add_css_class("chat-inline-event-title");
+    title.set_xalign(0.0);
+    body.append(&title);
+
+    let detail = Label::new(Some(&summary_text));
+    detail.add_css_class("chat-agent-text");
+    detail.set_selectable(true);
+    detail.set_wrap(true);
+    detail.set_xalign(0.0);
+    body.append(&detail);
+
+    let actions = GBox::new(Orientation::Horizontal, 8);
+    let summarize = session_secondary_button("Summarize");
+    summarize.connect_clicked({
+        let input_view = input_view.clone();
+        move |_| {
+            input_view.buffer().set_text(
+                "Summarize this thread with decisions, changed files, open risks, and next steps.",
+            );
+            input_view.grab_focus();
+        }
+    });
+    let handoff = session_secondary_button("Handoff");
+    handoff.connect_clicked({
+        let input_view = input_view.clone();
+        let summary_text = summary_text.clone();
+        move |_| {
+            input_view.buffer().set_text(&format!(
+                "Create a compact handoff for the next agent. Include goal, current branch, completed work, verification, blockers, and next steps.\n\nCurrent context details:\n{summary_text}"
+            ));
+            input_view.grab_focus();
+        }
+    });
+    let copy = session_secondary_button("Copy");
+    copy.connect_clicked({
+        let summary_text = summary_text.clone();
+        move |_| {
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&summary_text);
+            }
+        }
+    });
+    actions.append(&summarize);
+    actions.append(&handoff);
+    actions.append(&copy);
+    body.append(&actions);
+
+    popover.set_child(Some(&body));
+    popover.popup();
+}
+
 fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsageDisplayState {
     let Some(usage) = usage else {
         return ContextUsageDisplayState {
@@ -2809,19 +3208,26 @@ fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsage
             tooltip: "Context usage unknown".to_owned(),
         };
     };
-    let css_class = match usage.percent {
-        0..=69 => "chat-context-usage-normal",
-        70..=89 => "chat-context-usage-warning",
-        _ => "chat-context-usage-danger",
+    let css_class = if usage.percent < CONTEXT_WARNING_PERCENT {
+        "chat-context-usage-normal"
+    } else if usage.percent < CONTEXT_COMPACTION_RISK_PERCENT {
+        "chat-context-usage-warning"
+    } else {
+        "chat-context-usage-danger"
     };
     let tooltip = match (usage.used_tokens, usage.max_tokens) {
         (Some(used), Some(max)) => format!(
-            "Context usage: {} / {} tokens ({}%)",
+            "Context usage: {} / {} tokens ({}%). Warn at {}%, compaction risk at {}%. Click for details.",
             format_token_count(used),
             format_token_count(max),
-            usage.percent
+            usage.percent,
+            CONTEXT_WARNING_PERCENT,
+            CONTEXT_COMPACTION_RISK_PERCENT
         ),
-        _ => format!("Context usage: {}%", usage.percent),
+        _ => format!(
+            "Context usage: {}%. Warn at {}%, compaction risk at {}%. Click for details.",
+            usage.percent, CONTEXT_WARNING_PERCENT, CONTEXT_COMPACTION_RISK_PERCENT
+        ),
     };
     ContextUsageDisplayState {
         percent_label: format!("{}%", usage.percent),
@@ -2842,26 +3248,27 @@ fn format_token_count(value: u64) -> String {
     out.chars().rev().collect()
 }
 
-fn context_usage_widget() -> Label {
-    let label = Label::new(Some("--"));
-    label.add_css_class("chat-context-usage");
-    apply_context_usage_state(&label, None);
-    label
+fn context_usage_widget() -> Button {
+    let button = Button::with_label("--");
+    button.add_css_class("chat-context-usage");
+    button.set_tooltip_text(Some("Context usage unknown. Click for details."));
+    apply_context_usage_state(&button, None);
+    button
 }
 
-fn apply_context_usage_state(label: &Label, usage: Option<CodexContextUsage>) {
+fn apply_context_usage_state(button: &Button, usage: Option<CodexContextUsage>) {
     for class in [
         "chat-context-usage-normal",
         "chat-context-usage-warning",
         "chat-context-usage-danger",
         "chat-context-usage-empty",
     ] {
-        label.remove_css_class(class);
+        button.remove_css_class(class);
     }
     let state = context_usage_display_state(usage);
-    label.set_text(&state.percent_label);
-    label.set_tooltip_text(Some(&state.tooltip));
-    label.add_css_class(state.css_class);
+    button.set_label(&state.percent_label);
+    button.set_tooltip_text(Some(&state.tooltip));
+    button.add_css_class(state.css_class);
 }
 
 fn session_kind_name(kind: SessionKind) -> &'static str {
@@ -6192,6 +6599,80 @@ fix it
         assert_eq!(usage.used_tokens, Some(128_000));
         assert_eq!(usage.max_tokens, Some(200_000));
         assert_eq!(usage.percent, 64);
+    }
+
+    #[test]
+    fn context_detail_summary_reports_history_growth_and_compaction() {
+        let messages = vec![
+            ChatMessageRecord {
+                id: 1,
+                thread_id: 10,
+                role: "agent".to_owned(),
+                content: "Context window: 120k / 200k tokens".to_owned(),
+                source: "agent_screen_parse".to_owned(),
+                timeline_seq: Some(1),
+                created_at: "2026-07-09T12:00:00Z".to_owned(),
+                updated_at: "2026-07-09T12:00:00Z".to_owned(),
+            },
+            ChatMessageRecord {
+                id: 2,
+                thread_id: 10,
+                role: "agent".to_owned(),
+                content: "After compaction, continuing with summary instead of the full thread.\nContext window: 150k / 200k tokens".to_owned(),
+                source: "agent_screen_parse".to_owned(),
+                timeline_seq: Some(2),
+                created_at: "2026-07-09T12:05:00Z".to_owned(),
+                updated_at: "2026-07-09T12:05:00Z".to_owned(),
+            },
+        ];
+        let events = vec![ChatEventRecord {
+            id: 3,
+            thread_id: 10,
+            process_id: Some(4),
+            kind: "tool".to_owned(),
+            title: "exec".to_owned(),
+            body: "long command output".to_owned(),
+            path: None,
+            payload_json: "{}".to_owned(),
+            timeline_seq: 3,
+            created_at: "2026-07-09T12:06:00Z".to_owned(),
+            updated_at: "2026-07-09T12:06:00Z".to_owned(),
+        }];
+
+        let summary = context_detail_summary(&messages, &events);
+        let text = format_context_detail_summary(&summary);
+
+        assert_eq!(summary.usage.unwrap().percent, 75);
+        assert_eq!(summary.estimated_tokens, 150_000);
+        assert!(summary.recent_growth.contains("+30,000 tokens"));
+        assert_eq!(summary.compaction_events.len(), 1);
+        assert!(text.contains("compaction risk at 90%"));
+        assert!(text.contains("Compaction events:"));
+        assert!(text.contains("Top contributors:"));
+    }
+
+    #[test]
+    fn context_detail_summary_uses_stable_byte_estimate_without_usage() {
+        let messages = vec![ChatMessageRecord {
+            id: 1,
+            thread_id: 10,
+            role: "user".to_owned(),
+            content: "abcdefghijkl".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "2026-07-09T12:00:00Z".to_owned(),
+            updated_at: "2026-07-09T12:00:00Z".to_owned(),
+        }];
+
+        let summary = context_detail_summary(&messages, &[]);
+
+        assert_eq!(summary.usage, None);
+        assert_eq!(summary.transcript_bytes, 12);
+        assert_eq!(summary.estimated_tokens, 3);
+        assert_eq!(
+            summary.estimate_method,
+            "estimated from persisted transcript bytes at 4 chars/token"
+        );
     }
 
     #[test]
