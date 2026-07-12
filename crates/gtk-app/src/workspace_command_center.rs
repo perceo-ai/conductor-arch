@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::error;
 
-const WORKSPACE_SPLIT_START_WEIGHT: i32 = 7;
-const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
 const WORKSPACE_SPLIT_MIN_START: i32 = 420;
 const WORKSPACE_SPLIT_MIN_END: i32 = 260;
+const WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH: i32 = 1_040;
+const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 const WORKSPACE_TURN_DIFF_LIMIT: usize = 25;
@@ -154,13 +154,7 @@ fn simple_workspace_shell(
     main_split.set_resize_end_child(false);
     main_split.set_shrink_start_child(true);
     main_split.set_shrink_end_child(true);
-    main_split.set_position(split_position_for_ratio(
-        1280,
-        WORKSPACE_SPLIT_START_WEIGHT,
-        WORKSPACE_SPLIT_END_WEIGHT,
-        WORKSPACE_SPLIT_MIN_START,
-        WORKSPACE_SPLIT_MIN_END,
-    ));
+    main_split.set_position(WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH);
     main_split.set_vexpand(true);
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
@@ -1182,7 +1176,8 @@ fn ws_right_panel(
     let panel = GBox::new(Orientation::Vertical, 0);
     panel.add_css_class("ws-right-panel");
     panel.set_vexpand(true);
-    panel.set_hexpand(true);
+    panel.set_hexpand(false);
+    panel.set_width_request(WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH);
     panel.set_overflow(gtk::Overflow::Hidden);
 
     panel.append(&workspace_pr_status_panel(
