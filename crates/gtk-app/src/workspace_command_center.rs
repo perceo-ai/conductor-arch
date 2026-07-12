@@ -3696,8 +3696,8 @@ fn workspace_changes_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
-    _refresh_hub: RefreshHub,
-    _toast_overlay: ToastOverlay,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let header_row = GBox::new(Orientation::Horizontal, 8);
@@ -3723,6 +3723,20 @@ fn workspace_changes_panel(
     status.set_xalign(0.0);
     status.set_wrap(true);
     panel.append(&status);
+
+    let feedback = Label::new(Some("Stage files, edit the commit message, then commit."));
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    panel.append(&workspace_git_file_actions_panel(
+        db_path,
+        store,
+        name,
+        refresh_hub,
+        toast_overlay.clone(),
+        &feedback,
+    ));
 
     let body_stack = Stack::new();
     body_stack.set_vexpand(true);
@@ -3775,13 +3789,203 @@ fn workspace_changes_panel(
         popover.popup();
     });
 
-    let feedback = Label::new(Some("Use the menu for diffs, commit views, and PR checks."));
-    feedback.add_css_class("card-meta");
-    feedback.set_xalign(0.0);
-    feedback.set_wrap(true);
     panel.append(&feedback);
 
     panel
+}
+
+fn workspace_git_file_actions_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.add_css_class("ws-git-actions-panel");
+
+    match store.diff_file_summaries(name) {
+        Ok(summaries) if summaries.is_empty() => {
+            let empty = Label::new(Some("No file changes."));
+            empty.add_css_class("card-meta");
+            empty.set_xalign(0.0);
+            panel.append(&empty);
+        }
+        Ok(summaries) => {
+            let list = GBox::new(Orientation::Vertical, 4);
+            for summary in summaries {
+                list.append(&workspace_git_file_action_row(
+                    db_path,
+                    name,
+                    summary,
+                    refresh_hub.clone(),
+                    toast_overlay.clone(),
+                    feedback,
+                ));
+            }
+            panel.append(&list);
+        }
+        Err(err) => {
+            let error = Label::new(Some(&format!("Could not read file changes: {err:#}")));
+            error.add_css_class("card-meta");
+            error.set_xalign(0.0);
+            error.set_wrap(true);
+            panel.append(&error);
+        }
+    }
+
+    let commit_row = GBox::new(Orientation::Horizontal, 6);
+    let message = Entry::new();
+    message.set_hexpand(true);
+    message.set_placeholder_text(Some("Commit message"));
+    if let Ok(draft) = store.commit_message_draft(name) {
+        message.set_text(&draft);
+    }
+    let commit_btn = text_button("Commit");
+    let db_path_for_commit = db_path.to_path_buf();
+    let workspace_for_commit = name.to_owned();
+    let refresh_for_commit = refresh_hub;
+    let toast_for_commit = toast_overlay;
+    let feedback_for_commit = feedback.clone();
+    let message_for_commit = message.clone();
+    commit_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path_for_commit).and_then(|store| {
+            store.commit_workspace_changes(&workspace_for_commit, &message_for_commit.text())
+        });
+        match result {
+            Ok(output) => {
+                let first_line = output.lines().next().unwrap_or("Committed staged changes.");
+                apply_action_feedback(&feedback_for_commit, &toast_for_commit, first_line, true);
+                refresh_for_commit.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_commit,
+                &toast_for_commit,
+                &format!("Could not commit: {err:#}"),
+                true,
+            ),
+        }
+    });
+    commit_row.append(&message);
+    commit_row.append(&commit_btn);
+    panel.append(&commit_row);
+
+    panel
+}
+
+fn workspace_git_file_action_row(
+    db_path: &Path,
+    name: &str,
+    summary: DiffFileSummary,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-git-file-action-row");
+    let path = summary.path.clone();
+    let counts = match (summary.additions, summary.deletions) {
+        (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
+        _ => "binary".to_owned(),
+    };
+    let label = Label::new(Some(&format!(
+        "{} {} {}",
+        summary.path,
+        diff_state_label(&summary),
+        counts
+    )));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    row.append(&label);
+
+    let stage_btn = text_button("Stage");
+    stage_btn.set_sensitive(!summary.staged || summary.unstaged || summary.untracked);
+    connect_git_file_action(
+        &stage_btn,
+        db_path,
+        name,
+        &path,
+        "Staged",
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+        |store, workspace_name, file_path| store.stage_workspace_file(workspace_name, file_path),
+    );
+    row.append(&stage_btn);
+
+    let unstage_btn = text_button("Unstage");
+    unstage_btn.set_sensitive(summary.staged);
+    connect_git_file_action(
+        &unstage_btn,
+        db_path,
+        name,
+        &path,
+        "Unstaged",
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        feedback,
+        |store, workspace_name, file_path| store.unstage_workspace_file(workspace_name, file_path),
+    );
+    row.append(&unstage_btn);
+
+    let revert_btn = text_button("Revert");
+    revert_btn.set_sensitive(!summary.untracked);
+    connect_git_file_action(
+        &revert_btn,
+        db_path,
+        name,
+        &path,
+        "Reverted",
+        refresh_hub,
+        toast_overlay,
+        feedback,
+        |store, workspace_name, file_path| store.revert_workspace_file(workspace_name, file_path),
+    );
+    row.append(&revert_btn);
+
+    row
+}
+
+fn connect_git_file_action<F>(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    file_path: &str,
+    action_label: &'static str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+    action: F,
+) where
+    F: Fn(&WorkspaceStore, &str, &str) -> anyhow::Result<()> + 'static,
+{
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    let file_path = file_path.to_owned();
+    let feedback = feedback.clone();
+    button.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path)
+            .and_then(|store| action(&store, &workspace_name, &file_path));
+        match result {
+            Ok(()) => {
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!("{action_label} {file_path}."),
+                    true,
+                );
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback,
+                &toast_overlay,
+                &format!("Could not update {file_path}: {err:#}"),
+                true,
+            ),
+        }
+    });
 }
 
 fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {

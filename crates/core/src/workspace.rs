@@ -2724,6 +2724,72 @@ impl WorkspaceStore {
         )
     }
 
+    pub fn stage_workspace_file(&self, name: &str, relative_path: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let validated = validate_workspace_relative_path(relative_path)?;
+        let path_value = validated.to_string_lossy().to_string();
+        git_dynamic(&workspace.path, &["add", "--", path_value.as_str()])?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "git.staged",
+            &format!("Staged {relative_path}"),
+        )?;
+        Ok(())
+    }
+
+    pub fn unstage_workspace_file(&self, name: &str, relative_path: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let validated = validate_workspace_relative_path(relative_path)?;
+        let path_value = validated.to_string_lossy().to_string();
+        git_dynamic(
+            &workspace.path,
+            &["restore", "--staged", "--", path_value.as_str()],
+        )?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "git.unstaged",
+            &format!("Unstaged {relative_path}"),
+        )?;
+        Ok(())
+    }
+
+    pub fn commit_message_draft(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let staged = git_output_dynamic(&workspace.path, &["diff", "--cached", "--name-only"])?;
+        let files = if staged.trim().is_empty() {
+            self.changed_files(name)?
+        } else {
+            staged
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        Ok(commit_message_draft_for_files(&workspace.name, &files))
+    }
+
+    pub fn commit_workspace_changes(&self, name: &str, message: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let message = message.trim();
+        anyhow::ensure!(!message.is_empty(), "commit message cannot be empty");
+        let staged = git_output_dynamic(&workspace.path, &["diff", "--cached", "--name-only"])?;
+        anyhow::ensure!(
+            !staged.trim().is_empty(),
+            "stage at least one file before committing"
+        );
+        let output = git_output_dynamic(&workspace.path, &["commit", "-m", message])?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "commit.created",
+            &format!("Committed staged changes: {message}"),
+        )?;
+        Ok(output)
+    }
+
     pub fn diff_file_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
         let unstaged = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
@@ -7873,6 +7939,17 @@ fn render_pr_template_text(
         .replace("{session_summary}", session_summary)
         .replace("{summary}", summary)
         .replace("{type}", "feat")
+}
+
+fn commit_message_draft_for_files(workspace_name: &str, files: &[String]) -> String {
+    let focus = files
+        .iter()
+        .find(|path| !is_conductor_context_path(path))
+        .or_else(|| files.first());
+    match focus {
+        Some(path) => format!("chore: update {path}"),
+        None => format!("chore: update {workspace_name}"),
+    }
 }
 
 fn random_index(len: usize) -> usize {
@@ -14935,6 +15012,110 @@ exit 1
         assert_eq!(
             fs::read_to_string(workspace.path.join("notes.txt")).unwrap(),
             "new\n"
+        );
+    }
+
+    #[test]
+    fn stage_and_unstage_workspace_file_update_the_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
+        store.stage_workspace_file("berlin", "README.md").unwrap();
+        assert_eq!(
+            git_output(&workspace.path, ["diff", "--cached", "--name-only"]).trim(),
+            "README.md"
+        );
+
+        store.unstage_workspace_file("berlin", "README.md").unwrap();
+        assert!(
+            git_output(&workspace.path, ["diff", "--cached", "--name-only"])
+                .trim()
+                .is_empty()
+        );
+        assert!(store
+            .changed_files("berlin")
+            .unwrap()
+            .contains(&"README.md".to_owned()));
+    }
+
+    #[test]
+    fn commit_workspace_changes_commits_staged_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        git_dynamic(
+            &workspace.path,
+            &["config", "user.name", "Linux Archductor"],
+        )
+        .unwrap();
+        git_dynamic(
+            &workspace.path,
+            &["config", "user.email", "linux-archductor@example.test"],
+        )
+        .unwrap();
+        git_dynamic(&workspace.path, &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\ncommitted\n").unwrap();
+        store.stage_workspace_file("berlin", "README.md").unwrap();
+
+        let draft = store.commit_message_draft("berlin").unwrap();
+        assert_eq!(draft, "chore: update README.md");
+        let output = store
+            .commit_workspace_changes("berlin", "fix: update readme")
+            .unwrap();
+
+        assert!(output.contains("fix: update readme"));
+        assert!(!store
+            .changed_files("berlin")
+            .unwrap()
+            .contains(&"README.md".to_owned()));
+        assert_eq!(
+            git_output(&workspace.path, ["log", "-1", "--pretty=%s"]).trim(),
+            "fix: update readme"
         );
     }
 
