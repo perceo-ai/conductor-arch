@@ -528,21 +528,21 @@ pub fn agent_session_panel(
         let archcar_ready_cache = archcar_ready_cache.clone();
         let codex_startup_states = codex_startup_states.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
+        let working_threads = working_threads.clone();
         Rc::new(move || {
             let start = buffer_for_update.start_iter();
             let end = buffer_for_update.end_iter();
             let text = buffer_for_update.text(&start, &end, true);
             let has_text = !text.as_str().trim().is_empty();
             let thread_id = *selected_thread.borrow();
-            let has_running = thread_id
-                .and_then(|thread_id| {
-                    running_session_for_thread(
-                        &record_state.borrow(),
-                        thread_id,
-                        *selected_harness.borrow(),
-                    )
-                })
-                .is_some();
+            let has_active_generation = thread_id.is_some_and(|thread_id| {
+                active_generation_for_thread(
+                    &record_state.borrow(),
+                    working_threads.as_ref(),
+                    thread_id,
+                    *selected_harness.borrow(),
+                )
+            });
             let latest_status = thread_id.and_then(|thread_id| {
                 latest_session_status_for_thread(
                     &record_state.borrow(),
@@ -573,7 +573,7 @@ pub fn agent_session_panel(
                 placeholder.set_visible(!has_text);
                 let action = composer_action_for_state(
                     has_text,
-                    has_running,
+                    has_active_generation,
                     latest_status == Some(ProcessStatus::Stopped),
                     queued_count,
                 );
@@ -1756,6 +1756,7 @@ pub fn agent_session_panel(
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
+        let working_threads = working_threads.clone();
         let messages = messages.clone();
         let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
@@ -1766,15 +1767,14 @@ pub fn agent_session_panel(
                 .to_string();
             let has_text = !command.trim().is_empty();
             let thread_id = *selected_thread.borrow();
-            let has_running = thread_id
-                .and_then(|thread_id| {
-                    running_session_for_thread(
-                        &record_state.borrow(),
-                        thread_id,
-                        *selected_harness.borrow(),
-                    )
-                })
-                .is_some();
+            let has_active_generation = thread_id.is_some_and(|thread_id| {
+                active_generation_for_thread(
+                    &record_state.borrow(),
+                    working_threads.as_ref(),
+                    thread_id,
+                    *selected_harness.borrow(),
+                )
+            });
             let latest_status = thread_id.and_then(|thread_id| {
                 latest_session_status_for_thread(
                     &record_state.borrow(),
@@ -1787,7 +1787,7 @@ pub fn agent_session_panel(
                 .unwrap_or_default();
             match composer_action_for_state(
                 has_text,
-                has_running,
+                has_active_generation,
                 latest_status == Some(ProcessStatus::Stopped),
                 queued_count,
             ) {
@@ -3953,11 +3953,11 @@ enum ComposerAction {
 
 fn composer_action_for_state(
     has_text: bool,
-    has_running_session: bool,
+    has_active_generation: bool,
     was_interrupted: bool,
     queued_count: usize,
 ) -> ComposerAction {
-    if has_running_session {
+    if has_active_generation {
         if has_text {
             ComposerAction::Queue
         } else {
@@ -4018,6 +4018,16 @@ fn latest_session_status_for_thread(
         })
         .max_by_key(|record| record.id)
         .map(|record| record.status)
+}
+
+fn active_generation_for_thread(
+    records: &[ProcessRecord],
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    thread_id: i64,
+    kind: SessionKind,
+) -> bool {
+    working_threads.borrow().contains_key(&thread_id)
+        && running_session_for_thread(records, thread_id, kind).is_some()
 }
 
 fn running_session_for_thread(
@@ -6853,6 +6863,37 @@ fix it
             latest_session_status_for_thread(&records, 7, SessionKind::Shell),
             Some(ProcessStatus::Exited)
         );
+    }
+
+    #[test]
+    fn active_generation_requires_working_thread_and_running_session() {
+        let records = vec![process_record_with_thread(
+            1,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let working_threads = RefCell::new(HashMap::new());
+
+        assert!(!active_generation_for_thread(
+            &records,
+            &working_threads,
+            7,
+            SessionKind::Codex
+        ));
+        mark_thread_working(&working_threads, 7);
+        assert!(active_generation_for_thread(
+            &records,
+            &working_threads,
+            7,
+            SessionKind::Codex
+        ));
+        assert!(!active_generation_for_thread(
+            &records,
+            &working_threads,
+            8,
+            SessionKind::Codex
+        ));
     }
 
     #[test]

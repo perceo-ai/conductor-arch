@@ -1421,14 +1421,8 @@ impl WorkspaceStore {
                 format!("workspace path has no parent: {}", workspace.path.display())
             })?;
 
-        if workspace.path.exists() {
-            fs::rename(&workspace.path, &new_path).with_context(|| {
-                format!(
-                    "rename workspace directory {} to {}",
-                    workspace.path.display(),
-                    new_path.display()
-                )
-            })?;
+        if workspace.path.exists() && workspace.path != new_path {
+            move_workspace_worktree(&repository.root_path, &workspace.path, &new_path)?;
         }
 
         let now = timestamp();
@@ -6824,6 +6818,27 @@ fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMet
     }))
 }
 
+fn move_workspace_worktree(repository_root: &Path, old_path: &Path, new_path: &Path) -> Result<()> {
+    let old_path_arg = old_path.to_string_lossy();
+    let new_path_arg = new_path.to_string_lossy();
+    git_dynamic(
+        repository_root,
+        &[
+            "worktree",
+            "move",
+            old_path_arg.as_ref(),
+            new_path_arg.as_ref(),
+        ],
+    )
+    .with_context(|| {
+        format!(
+            "move git worktree {} to {}",
+            old_path.display(),
+            new_path.display()
+        )
+    })
+}
+
 fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<()> {
     if !workspace_path.exists() {
         let _ = git_dynamic(repository_root, &["worktree", "prune"]);
@@ -9000,7 +9015,7 @@ mod tests {
             .unwrap()
             .add(AddRepository {
                 name: Some("demo".to_owned()),
-                root_path: repo_path,
+                root_path: repo_path.clone(),
                 default_branch: Some("main".to_owned()),
                 remote_name: "origin".to_owned(),
                 workspace_parent_path: Some(temp.path().join("workspaces/demo")),
@@ -9082,7 +9097,7 @@ branch_prefix = "team"
             .unwrap()
             .add(AddRepository {
                 name: Some("demo".to_owned()),
-                root_path: repo_path,
+                root_path: repo_path.clone(),
                 default_branch: Some("main".to_owned()),
                 remote_name: "origin".to_owned(),
                 workspace_parent_path: Some(workspace_parent.clone()),
@@ -9123,6 +9138,20 @@ branch_prefix = "team"
         assert!(!workspace.path.exists());
         let branch = git_output(&renamed.path, ["branch", "--show-current"]);
         assert_eq!(branch.trim(), "lc/fix-the-customer-billing-webhook-failure");
+        let worktrees = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        let worktrees = String::from_utf8_lossy(&worktrees.stdout);
+        assert!(worktrees.contains(
+            workspace_parent
+                .join("fix-the-customer-billing-webhook-failure")
+                .to_str()
+                .unwrap()
+        ));
+        assert!(!worktrees.contains(workspace.path.to_str().unwrap()));
     }
 
     #[test]
@@ -9166,7 +9195,7 @@ exit 1
             .unwrap()
             .add(AddRepository {
                 name: Some("demo".to_owned()),
-                root_path: repo_path,
+                root_path: repo_path.clone(),
                 default_branch: Some("main".to_owned()),
                 remote_name: "origin".to_owned(),
                 workspace_parent_path: Some(temp.path().join("workspaces/demo")),
@@ -16657,7 +16686,7 @@ exit 1
             .unwrap()
             .add(AddRepository {
                 name: Some("demo".to_owned()),
-                root_path: repo_path,
+                root_path: repo_path.clone(),
                 default_branch: Some("main".to_owned()),
                 remote_name: "origin".to_owned(),
                 workspace_parent_path: Some(temp.path().join("workspaces/demo")),
@@ -16681,6 +16710,17 @@ exit 1
         assert!(!old_path.exists());
         assert!(renamed.path.exists());
         assert!(renamed.path.join(".context").is_dir());
+        let branch = git_output(&renamed.path, ["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "lc/berlin");
+        let worktrees = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        let worktrees = String::from_utf8_lossy(&worktrees.stdout);
+        assert!(worktrees.contains(renamed.path.to_str().unwrap()));
+        assert!(!worktrees.contains(old_path.to_str().unwrap()));
 
         // Should appear under new name in list
         let list = store.list().unwrap();

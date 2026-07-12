@@ -818,8 +818,8 @@ separator {
 }
 
 .setup-status-ready {
-    background-color: #142018;
-    border: 1px solid #264633;
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
 }
 
 .setup-status-missing-required {
@@ -1164,13 +1164,13 @@ separator {
 .lc-accent-green .chat-mode-selected,
 .lc-accent-green .chat-send-btn-active,
 .lc-accent-green .chat-user-bubble {
-    color: #ecfdf5;
-    border-color: #22c55e;
+    color: #f5f5f5;
+    border-color: #5a5a5a;
 }
 .lc-accent-green .chat-mode-selected,
 .lc-accent-green .chat-send-btn-active,
 .lc-accent-green .chat-user-bubble {
-    background-color: #22c55e;
+    background-color: #333333;
 }
 
 .lc-accent-amber .section-title,
@@ -2177,9 +2177,9 @@ popover.context-menu-popover arrow {
     color: #777777;
 }
 .chat-context-usage-normal {
-    background-color: #1f2a22;
-    border-color: #395540;
-    color: #b8d7bf;
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
 }
 .chat-context-usage-warning {
     background-color: #2c281b;
@@ -2619,9 +2619,9 @@ textview:focus,
 }
 
 .chat-context-usage-normal {
-    background-color: #0f2f1c;
-    border-color: #22c55e;
-    color: #bbf7d0;
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
 }
 
 .chat-context-usage-warning {
