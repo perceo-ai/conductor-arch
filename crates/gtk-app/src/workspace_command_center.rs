@@ -5185,7 +5185,7 @@ fn format_workspace_context_estimate(estimate: &WorkspaceContextEstimate) -> Str
 }
 
 fn estimate_tokens_from_bytes(bytes: usize) -> u64 {
-    ((bytes as u64) + 3) / 4
+    (bytes as u64).div_ceil(4)
 }
 
 fn format_context_number(value: u64) -> String {

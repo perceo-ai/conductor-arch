@@ -3088,7 +3088,7 @@ fn context_detail_summary(
 }
 
 fn stable_token_estimate_from_bytes(bytes: usize) -> u64 {
-    ((bytes as u64) + 3) / 4
+    (bytes as u64).div_ceil(4)
 }
 
 fn context_usage_history(messages: &[ChatMessageRecord]) -> Vec<ContextUsageHistoryPoint> {
@@ -3224,7 +3224,7 @@ fn context_top_contributors(
             )
         }))
         .collect::<Vec<_>>();
-    contributors.sort_by(|a, b| b.0.cmp(&a.0));
+    contributors.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     contributors
         .into_iter()
         .take(CONTEXT_DETAIL_CONTRIBUTOR_LIMIT)
@@ -3334,7 +3334,7 @@ fn load_context_detail_summary(
     let Some(thread_id) = thread_id else {
         anyhow::bail!("No chat thread selected");
     };
-    let store = WorkspaceStore::open(db_path.to_path_buf())?;
+    let store = WorkspaceStore::open(db_path)?;
     let messages = store.list_chat_messages(thread_id)?;
     let events = store.list_chat_events(thread_id)?;
     Ok(context_detail_summary(&messages, &events))
@@ -5865,7 +5865,7 @@ fn create_turn_checkpoint_for_send(
     staged_review: bool,
 ) -> anyhow::Result<i64> {
     let prompt_kind = if staged_review { "review" } else { "user" };
-    let checkpoint = WorkspaceStore::open(db_path.to_path_buf())?.checkpoint_create_turn_start(
+    let checkpoint = WorkspaceStore::open(db_path)?.checkpoint_create_turn_start(
         workspace,
         thread_id,
         session_id,
