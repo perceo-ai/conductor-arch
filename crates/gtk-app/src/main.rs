@@ -11,6 +11,7 @@ mod motion;
 mod projects;
 mod pty_inspector;
 mod refresh;
+mod session_projection;
 mod session_surface;
 mod settings;
 mod setup;

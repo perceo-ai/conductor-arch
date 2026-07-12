@@ -13,14 +13,16 @@ use crate::archcar::harness::{
     controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
 };
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputKind};
-use crate::codex_tui::{codex_persistent_screen_fingerprint, ScreenMessage};
+use crate::provider_events::{
+    ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
+};
 use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
-use crate::session_pipeline::PtyChunkInput;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
 use crate::workspace::{
     ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStore,
 };
+use serde_json::json;
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -225,7 +227,7 @@ fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHand
         start.workspace,
         start.kind,
         pid,
-        false,
+        process_lifecycle_ready(start.kind),
     );
     Ok(start_session_handle(
         start.db_path,
@@ -235,6 +237,67 @@ fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHand
         ManagedSessionConnection::Live(pty),
         start.event_tx,
     ))
+}
+
+fn process_lifecycle_ready(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::Codex | SessionKind::Shell)
+}
+
+struct RuntimeProviderEventInput<'a> {
+    kind: SessionKind,
+    session_id: i64,
+    thread_id: i64,
+    phase: ProviderEventPhase,
+    event_kind: ProviderEventKind,
+    subtype: &'a str,
+    title: &'a str,
+    body: &'a str,
+}
+
+fn runtime_provider_event(input: RuntimeProviderEventInput<'_>) -> ProviderEventDraft {
+    ProviderEventDraft {
+        provider: provider_name(input.kind).to_owned(),
+        provider_event_id: Some(format!("archcar:{}:{}", input.session_id, input.subtype)),
+        provider_item_id: Some(format!(
+            "archcar-session-{}-{}",
+            input.session_id, input.subtype
+        )),
+        provider_thread_id: Some(input.thread_id.to_string()),
+        provider_turn_id: None,
+        parent_provider_item_id: None,
+        parent_provider_thread_id: None,
+        workspace_id: None,
+        chat_thread_id: Some(input.thread_id),
+        process_id: Some(input.session_id),
+        phase: input.phase,
+        kind: input.event_kind,
+        provider_subtype: Some(input.subtype.to_owned()),
+        provider_sequence: None,
+        occurred_at_ms: ProviderEventContext::runtime(
+            None,
+            Some(input.thread_id),
+            Some(input.session_id),
+            "",
+        )
+        .occurred_at_ms,
+        normalized_payload: json!({
+            "title": input.title,
+            "body": input.body,
+        }),
+        raw_json: json!({
+            "source": "archcar",
+            "session_id": input.session_id,
+            "thread_id": input.thread_id,
+            "kind": format!("{:?}", input.kind),
+            "phase": input.phase.as_str(),
+            "event_kind": input.event_kind.as_str(),
+            "subtype": input.subtype,
+            "title": input.title,
+            "body": input.body,
+        }),
+        schema_version: 1,
+        adapter_version: "archcar-runtime".to_owned(),
+    }
 }
 
 fn start_session_handle(
@@ -476,18 +539,15 @@ fn format_input_audit_log(
 }
 
 fn should_persist_screen_output(
-    kind: SessionKind,
+    _kind: SessionKind,
     last_fingerprint: &mut Option<String>,
     screen: &str,
 ) -> bool {
-    let fingerprint = match kind {
-        SessionKind::Codex => codex_persistent_screen_fingerprint(screen),
-        _ => Some(screen.to_owned()),
-    };
-    if fingerprint.is_none() || fingerprint == *last_fingerprint {
+    let fingerprint = screen.to_owned();
+    if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return false;
     }
-    *last_fingerprint = fingerprint;
+    *last_fingerprint = Some(fingerprint);
     true
 }
 
@@ -519,15 +579,6 @@ fn pty_screen_snapshot_logging_enabled() -> bool {
     crate::env_flags::enabled("ARCHDUCTOR_LOG_PTY_SCREENS")
 }
 
-fn should_emit_message_update(
-    controller: &dyn HarnessController,
-    last_messages: &[ScreenMessage],
-    screen: &str,
-) -> Option<Vec<ScreenMessage>> {
-    let parsed = controller.parse_messages(screen);
-    (parsed != last_messages).then_some(parsed)
-}
-
 fn should_attempt_native_thread_resolution(kind: SessionKind, already_resolved: bool) -> bool {
     kind == SessionKind::Codex && !already_resolved
 }
@@ -549,13 +600,28 @@ fn run_session_loop(
         kind: started.kind,
         pid: started.pid,
     });
+    if started.ready {
+        let _ = event_tx.send(ArchcarEvent::SessionReady {
+            session_id: started.session_id,
+            thread_id: started.thread_id,
+        });
+    }
     let mut trust_answered = false;
     let mut last_screen = String::new();
     let mut last_persisted_screen_fingerprint = None;
-    let mut last_messages = Vec::new();
     let mut native_thread_id_resolved = false;
-    let mut pending_chunks = Vec::<PtyChunkInput>::new();
     let runtime_store = RuntimeSessionStore::new(db_path.clone());
+    let _ =
+        runtime_store.append_provider_event(&runtime_provider_event(RuntimeProviderEventInput {
+            kind: started.kind,
+            session_id: started.session_id,
+            thread_id: started.thread_id,
+            phase: ProviderEventPhase::Started,
+            event_kind: ProviderEventKind::ThreadSession,
+            subtype: "session_started",
+            title: "Session started",
+            body: provider_name(started.kind),
+        }));
     loop {
         while let Ok(command) = command_rx.try_recv() {
             match command {
@@ -593,8 +659,50 @@ fn run_session_loop(
                         source,
                         &log_text,
                     );
+                    let _ = runtime_store.append_provider_event(&runtime_provider_event(
+                        RuntimeProviderEventInput {
+                            kind: current.kind,
+                            session_id: current.session_id,
+                            thread_id: current.thread_id,
+                            phase: ProviderEventPhase::Started,
+                            event_kind: ProviderEventKind::UserInput,
+                            subtype: match kind {
+                                ArchcarInputKind::User => "user_input",
+                                ArchcarInputKind::ReviewPrompt => "review_prompt",
+                                ArchcarInputKind::ControlCommand => "control_command",
+                            },
+                            title: match kind {
+                                ArchcarInputKind::User => "User input",
+                                ArchcarInputKind::ReviewPrompt => "Review prompt",
+                                ArchcarInputKind::ControlCommand => "Control command",
+                            },
+                            body: persisted_input,
+                        },
+                    ));
                     match pty.send_line(&input) {
                         Ok(()) => {
+                            if matches!(current.kind, SessionKind::Codex | SessionKind::Shell) {
+                                if let Ok(mut state) = snapshot.lock() {
+                                    state.ready = true;
+                                    state.runtime_state = AgentSessionState::WaitingForInput;
+                                }
+                                let _ = runtime_store.append_provider_event(
+                                    &runtime_provider_event(RuntimeProviderEventInput {
+                                        kind: current.kind,
+                                        session_id: current.session_id,
+                                        thread_id: current.thread_id,
+                                        phase: ProviderEventPhase::Completed,
+                                        event_kind: ProviderEventKind::ThreadSession,
+                                        subtype: "session_ready",
+                                        title: "Session ready",
+                                        body: provider_name(current.kind),
+                                    }),
+                                );
+                                let _ = event_tx.send(ArchcarEvent::SessionReady {
+                                    session_id: current.session_id,
+                                    thread_id: current.thread_id,
+                                });
+                            }
                             info!(
                                 session_id = current.session_id,
                                 thread_id = current.thread_id,
@@ -658,20 +766,11 @@ fn run_session_loop(
         let raw = pty.read_available();
         if !raw.is_empty() {
             let current = snapshot.lock().unwrap().clone();
-            if let Ok(Some(chunk)) =
-                runtime_store.append_raw_output(current.session_id, current.kind, &raw)
-            {
-                pending_chunks.push(PtyChunkInput {
-                    sequence: chunk.sequence,
-                    text: chunk.text,
-                });
-            }
+            let _ = runtime_store.append_raw_output(current.session_id, current.kind, &raw);
         }
 
         let screen = pty.visible_screen_text();
         if !screen.is_empty() && screen != last_screen {
-            let mut codex_pipeline_ready = None;
-            let mut emit_codex_ready = false;
             if !trust_answered {
                 if let Some(input) = controller.startup_input(&screen) {
                     let _ = pty.send_line(&input);
@@ -687,32 +786,6 @@ fn run_session_loop(
             if persist_screen {
                 let _ =
                     runtime_store.append_screen_output(current.session_id, current.kind, &screen);
-                if current.kind == SessionKind::Codex {
-                    match runtime_store.persist_codex_pipeline_update(
-                        current.thread_id,
-                        current.session_id,
-                        std::mem::take(&mut pending_chunks),
-                        &screen,
-                        current.runtime_state,
-                    ) {
-                        Ok(output) => {
-                            codex_pipeline_ready = Some(output.ready_for_input);
-                            emit_codex_ready = !current.ready && output.ready_for_input;
-                            if let Ok(mut state) = snapshot.lock() {
-                                state.runtime_state = output.state;
-                                state.ready = output.ready_for_input;
-                            }
-                        }
-                        Err(err) => {
-                            warn!(
-                                session_id = current.session_id,
-                                thread_id = current.thread_id,
-                                error = %err,
-                                "archcar session pipeline persistence failed"
-                            );
-                        }
-                    }
-                }
                 write_pty_screen_snapshot(
                     &logs_dir,
                     "archcar-session-loop",
@@ -720,17 +793,11 @@ fn run_session_loop(
                     &screen,
                 );
             }
-            let parsed_messages =
-                should_emit_message_update(controller.as_ref(), &last_messages, &screen);
             {
                 let mut state = snapshot.lock().unwrap();
                 state.screen = screen.clone();
-                let ready_for_input = if state.kind == SessionKind::Codex {
-                    codex_pipeline_ready.unwrap_or(state.ready)
-                } else {
-                    controller.detect_ready(&screen)
-                };
-                if emit_codex_ready || (!state.ready && ready_for_input) {
+                let ready_for_input = controller.detect_ready(&screen);
+                if !state.ready && ready_for_input {
                     state.ready = true;
                     state.runtime_state = AgentSessionState::WaitingForInput;
                     let _ = event_tx.send(ArchcarEvent::SessionReady {
@@ -741,12 +808,6 @@ fn run_session_loop(
                 let _ = event_tx.send(ArchcarEvent::SessionScreenUpdated {
                     session_id: state.session_id,
                 });
-                if let Some(parsed_messages) = parsed_messages {
-                    last_messages = parsed_messages;
-                    let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
-                        thread_id: state.thread_id,
-                    });
-                }
             }
             last_screen = screen;
         }
@@ -820,7 +881,6 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archcar::harness::{CodexHarnessController, ShellHarnessController};
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::CreateWorkspace;
     use std::path::{Path, PathBuf};
@@ -884,36 +944,36 @@ mod tests {
     }
 
     #[test]
-    fn message_update_events_follow_parsed_transcript_changes() {
-        let controller = CodexHarnessController;
-        let first_screen = "╭─ You\n│ run tests\n╰─\n╭─ Codex\n│ Running now.\n╰─";
-        let repeated_screen =
-            "╭─ You\n│ run tests\n╰─\n╭─ Codex\n│ Running now.\n╰─\nstatus: spinner";
-        let changed_screen =
-            "╭─ You\n│ run tests\n╰─\n╭─ Codex\n│ Running now.\n│ Tests passed.\n╰─";
+    fn archcar_loop_keeps_pty_screens_out_of_normal_semantic_pipeline() {
+        let source = include_str!("session.rs");
+        let old_pipeline = concat!("persist_codex", "_pipeline_update");
+        let screen_message_parser = concat!("parse_codex", "_screen_messages");
+        let message_update_helper = concat!("should_emit", "_message_update");
 
-        let first = should_emit_message_update(&controller, &[], first_screen).unwrap();
-        assert_eq!(first.len(), 2);
-
-        let repeated = should_emit_message_update(&controller, &first, repeated_screen);
-        assert!(repeated.is_none());
-
-        let changed = should_emit_message_update(&controller, &first, changed_screen).unwrap();
-        assert_eq!(changed.len(), 2);
-        assert_ne!(changed, first);
+        assert!(source.contains("append_pty_chunk"));
+        assert!(
+            !source.contains(old_pipeline),
+            "archcar runtime loop must not persist Codex semantics from PTY screens"
+        );
+        assert!(
+            !source.contains(screen_message_parser),
+            "archcar runtime loop must not parse Codex screen text into messages"
+        );
+        assert!(
+            !source.contains(message_update_helper),
+            "archcar runtime loop must not emit semantic message updates from PTY screens"
+        );
+        assert!(
+            source.contains("append_provider_event"),
+            "archcar runtime loop should write canonical provider events instead"
+        );
     }
 
     #[test]
-    fn archcar_loop_routes_codex_screens_through_session_pipeline() {
-        let source = include_str!("session.rs");
-        let direct_delta_call = concat!("store.", "persist_codex_screen_delta(");
-
-        assert!(source.contains("append_pty_chunk"));
-        assert!(source.contains("persist_codex_pipeline_update"));
-        assert!(
-            !source.contains(direct_delta_call),
-            "archcar runtime loop should use the typed session pipeline"
-        );
+    fn codex_process_lifecycle_is_ready_without_screen_semantic_detection() {
+        assert!(process_lifecycle_ready(SessionKind::Codex));
+        assert!(process_lifecycle_ready(SessionKind::Shell));
+        assert!(!process_lifecycle_ready(SessionKind::Claude));
     }
 
     #[test]
@@ -929,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_timer_only_screen_repaints_are_not_persisted_as_transcript_output() {
+    fn screen_persistence_dedupes_exact_snapshots_without_codex_semantic_parsing() {
         let first_screen = "\
 › Explain this codebase
 
@@ -961,6 +1021,11 @@ mod tests {
             first_screen
         ));
         assert!(!should_persist_screen_output(
+            SessionKind::Codex,
+            &mut last_persisted,
+            first_screen
+        ));
+        assert!(should_persist_screen_output(
             SessionKind::Codex,
             &mut last_persisted,
             timer_repaint
@@ -1136,13 +1201,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write_pty_screen_snapshot(temp.path(), "archcar", 7, "hello\nworld\n");
         assert!(!temp.path().join("pty-screens.log").exists());
-    }
-
-    #[test]
-    fn empty_shell_parsing_does_not_emit_message_updates() {
-        let controller = ShellHarnessController;
-        let parsed = should_emit_message_update(&controller, &[], "plain shell output");
-        assert!(parsed.is_none());
     }
 
     fn seeded_workspace_store(root: &Path) -> WorkspaceStore {

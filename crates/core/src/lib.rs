@@ -12,6 +12,8 @@ pub mod linear;
 pub mod local_chat;
 pub mod mcp;
 pub mod paths;
+pub mod provider_adapters;
+pub mod provider_events;
 pub mod pty;
 pub mod redaction;
 pub mod repository;

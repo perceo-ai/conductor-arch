@@ -63,9 +63,8 @@ The current app supports the core Archductor loop, with some rough edges:
   and file-editable workflow defaults for naming, automation, agents, merge
   rules, workspaces, and views.
 
-- New PTY-backed Codex chat threads now use real pseudo-terminals, rendered
-  screen parsing, structured thread/message persistence, and exact resume IDs
-  captured from Codex rollout metadata.
+- Codex and Claude semantics are moving through canonical provider events; PTY
+  output is retained for raw terminal diagnostics and debugging.
 
 The GUI is usable, but not fully polished. Agent sessions run local PTY-backed
 harnesses and render structured app-native transcript events. Terminal
@@ -582,8 +581,8 @@ linux-archductor checkpoint restore <workspace> <id>
 
 ## Known Limits
 
-- Agent session surfaces are structured over local PTY harness logs rather than
-  provider-native chat protocols.
+- Provider-native event coverage is still being wired through every surface;
+  raw PTY logs remain diagnostic fallback only.
 - Terminal rendering handles common ANSI/control redraws, but it is not a full
   terminal emulator.
 - GitHub PR workflows use the local `gh` CLI and require `gh auth login`.

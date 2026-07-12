@@ -9,13 +9,15 @@ use linux_archductor_core::agent_tools::{
 };
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
-    merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
-    parse_codex_inline_event, parse_codex_screen_messages,
+    parse_codex_context_usage, parse_codex_file_change_block, parse_codex_inline_event,
     CodexFileChangeAction as CoreCodexFileChangeAction,
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
-    CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
+    CodexTranscriptEvent,
 };
 use linux_archductor_core::doctor::SetupReadiness;
+use linux_archductor_core::provider_events::{
+    ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
+};
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
 use linux_archductor_core::settings::load_repository_settings;
@@ -46,6 +48,11 @@ use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
+use crate::session_projection::{
+    render_provider_event_projection, ProjectionRenderClass, ProviderProjectionCategory,
+    ProviderProjectionEvent, ProviderProjectionItem, ProviderProjectionStatus,
+    ProviderProjectionStreamState,
+};
 use crate::state::AppState;
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
@@ -169,6 +176,7 @@ type ChatRenderRecordSignature = (i64, Option<i64>, ProcessStatus, Option<i32>, 
 type ChatRenderThreadSignature = (i64, String, String, String, String);
 type ChatRenderMessageSignature = (i64, String, Option<i64>, String, String);
 type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
+type ChatRenderProviderEventSignature = (String, i64, ProviderEventKind, ProviderEventPhase, usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChatRenderSignature {
@@ -181,6 +189,7 @@ struct ChatRenderSignature {
     threads: Vec<ChatRenderThreadSignature>,
     messages: Vec<ChatRenderMessageSignature>,
     events: Vec<ChatRenderEventSignature>,
+    provider_events: Vec<ChatRenderProviderEventSignature>,
     transcript_display: String,
     render_state: &'static str,
     runtime_summary: Option<String>,
@@ -905,6 +914,7 @@ pub fn agent_session_panel(
                             &thread_state.borrow(),
                             &[],
                             &[],
+                            &[],
                             "structured",
                             "missing_thread",
                             None,
@@ -996,33 +1006,36 @@ pub fn agent_session_panel(
                     });
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
-                            let (thread_messages, thread_events) = match WorkspaceStore::open(
-                                database_path.clone(),
-                            )
-                            .and_then(|store| {
-                                let messages = store.list_chat_messages(thread_id)?;
-                                let events = store.list_chat_events(thread_id)?;
-                                Ok((messages, events))
-                            }) {
-                                Ok(timeline) => timeline,
-                                Err(err) => {
-                                    error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
-                                    let message =
-                                        session_refresh_error_text("load chat timeline", &err);
-                                    toast_manager.error(message.clone());
-                                    let label = Label::new(Some(&message));
-                                    label.add_css_class("chat-agent-text");
-                                    label.set_selectable(true);
-                                    label.set_wrap(true);
-                                    label.set_xalign(0.0);
-                                    clear_box(&messages);
-                                    *last_render_signature.borrow_mut() = None;
-                                    apply_context_usage_state(&context_usage, None);
-                                    append_chat_refresh_row(&messages, &label);
-                                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                                    return;
-                                }
-                            };
+                            let (thread_messages, thread_events, provider_events) =
+                                match WorkspaceStore::open(database_path.clone()).and_then(
+                                    |store| {
+                                        let messages = store.list_chat_messages(thread_id)?;
+                                        let events = store.list_chat_events(thread_id)?;
+                                        let provider_events =
+                                            ProviderEventStore::new(database_path.clone())
+                                                .list_for_chat_thread(thread_id)?;
+                                        Ok((messages, events, provider_events))
+                                    },
+                                ) {
+                                    Ok(timeline) => timeline,
+                                    Err(err) => {
+                                        error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
+                                        let message =
+                                            session_refresh_error_text("load chat timeline", &err);
+                                        toast_manager.error(message.clone());
+                                        let label = Label::new(Some(&message));
+                                        label.add_css_class("chat-agent-text");
+                                        label.set_selectable(true);
+                                        label.set_wrap(true);
+                                        label.set_xalign(0.0);
+                                        clear_box(&messages);
+                                        *last_render_signature.borrow_mut() = None;
+                                        apply_context_usage_state(&context_usage, None);
+                                        append_chat_refresh_row(&messages, &label);
+                                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                        return;
+                                    }
+                                };
                             let transcript_display =
                                 transcript_display_for_workspace(&database_path, &workspace);
                             let render_legacy_inline_events =
@@ -1034,11 +1047,14 @@ pub fn agent_session_panel(
                                 workspace = %workspace,
                                 thread_id,
                                 thread_message_count = thread_messages.len(),
-                                thread_timeline_count = thread_messages.len() + thread_events.len(),
+                                thread_timeline_count = thread_messages.len() + thread_events.len() + provider_events.len(),
                                 render_legacy_inline_events,
                                 "chat refresh_view loaded persisted chat timeline"
                             );
-                            if !thread_messages.is_empty() || !thread_events.is_empty() {
+                            if !thread_messages.is_empty()
+                                || !thread_events.is_empty()
+                                || !provider_events.is_empty()
+                            {
                                 let signature = chat_render_signature(
                                     current_kind,
                                     Some(thread_id),
@@ -1049,6 +1065,7 @@ pub fn agent_session_panel(
                                     &thread_state.borrow(),
                                     &thread_messages,
                                     &thread_events,
+                                    &provider_events,
                                     &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
@@ -1097,6 +1114,14 @@ pub fn agent_session_panel(
                                         }
                                     }
                                 }
+                                let provider_projection =
+                                    provider_projection_from_records(&provider_events);
+                                for item in provider_projection.items {
+                                    append_chat_refresh_row(
+                                        &messages,
+                                        &provider_projection_item_widget(&item),
+                                    );
+                                }
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
                             }
@@ -1111,6 +1136,7 @@ pub fn agent_session_panel(
                         working_elapsed_seconds_for_signature(working_elapsed),
                         &current,
                         &thread_state.borrow(),
+                        &[],
                         &[],
                         &[],
                         "structured",
@@ -1147,6 +1173,7 @@ pub fn agent_session_panel(
                         None,
                         &current,
                         &thread_state.borrow(),
+                        &[],
                         &[],
                         &[],
                         "structured",
@@ -2358,6 +2385,7 @@ fn chat_render_signature(
     threads: &[ChatThreadRecord],
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
+    provider_events: &[ProviderEventRecord],
     transcript_display: &str,
     render_state: &'static str,
     runtime_summary: Option<String>,
@@ -2414,6 +2442,18 @@ fn chat_render_signature(
                     event.title.clone(),
                     event.updated_at.clone(),
                     event.body.len() + event.payload_json.len(),
+                )
+            })
+            .collect(),
+        provider_events: provider_events
+            .iter()
+            .map(|event| {
+                (
+                    event.identity_key.clone(),
+                    event.received_sequence,
+                    event.kind,
+                    event.phase,
+                    event.normalized_payload.to_string().len() + event.raw_json.to_string().len(),
                 )
             })
             .collect(),
@@ -2539,15 +2579,139 @@ fn chat_event_widget(event: &ChatEventRecord) -> Widget {
         })
 }
 
+fn provider_projection_from_records(
+    records: &[ProviderEventRecord],
+) -> crate::session_projection::ProviderProjection {
+    render_provider_event_projection(
+        records
+            .iter()
+            .map(provider_projection_event_from_record)
+            .collect(),
+    )
+}
+
+fn provider_projection_event_from_record(record: &ProviderEventRecord) -> ProviderProjectionEvent {
+    ProviderProjectionEvent {
+        canonical_id: record.identity_key.clone(),
+        sequence: record.received_sequence.max(0) as u64,
+        category: provider_projection_category(record.kind),
+        title: record
+            .normalized_payload
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        body: record
+            .normalized_payload
+            .get("body")
+            .or_else(|| record.normalized_payload.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        status: provider_projection_status(record.phase),
+        stream_state: provider_projection_stream_state(record.phase),
+        parent_id: record.parent_provider_item_id.clone(),
+        nested_thread_id: record.parent_provider_thread_id.clone(),
+        raw_payload: Some(record.raw_json.clone()),
+    }
+}
+
+fn provider_projection_category(kind: ProviderEventKind) -> ProviderProjectionCategory {
+    match kind {
+        ProviderEventKind::UserInput => ProviderProjectionCategory::UserMessage,
+        ProviderEventKind::AssistantOutput => ProviderProjectionCategory::AssistantMessage,
+        ProviderEventKind::PlanningReasoning => ProviderProjectionCategory::Reasoning,
+        ProviderEventKind::CommandProcess => ProviderProjectionCategory::Command,
+        ProviderEventKind::TerminalRuntime => ProviderProjectionCategory::BackgroundTerminal,
+        ProviderEventKind::FileSystem => ProviderProjectionCategory::FileRead,
+        ProviderEventKind::DiffFileChange => ProviderProjectionCategory::FileDiff,
+        ProviderEventKind::Tool => ProviderProjectionCategory::NativeTool,
+        ProviderEventKind::Mcp => ProviderProjectionCategory::McpTool,
+        ProviderEventKind::SkillPluginHook => ProviderProjectionCategory::Skill,
+        ProviderEventKind::ApprovalPermission => ProviderProjectionCategory::Approval,
+        ProviderEventKind::SubagentCollaboration => ProviderProjectionCategory::Subagent,
+        ProviderEventKind::WebBrowserMedia => ProviderProjectionCategory::Web,
+        ProviderEventKind::LimitFailure => ProviderProjectionCategory::Error,
+        ProviderEventKind::ThreadSession
+        | ProviderEventKind::GoalTask
+        | ProviderEventKind::Turn
+        | ProviderEventKind::AccountAuth
+        | ProviderEventKind::EnvironmentConfigModel => ProviderProjectionCategory::Status,
+        ProviderEventKind::Unknown => ProviderProjectionCategory::Unknown,
+    }
+}
+
+fn provider_projection_status(phase: ProviderEventPhase) -> ProviderProjectionStatus {
+    match phase {
+        ProviderEventPhase::Started | ProviderEventPhase::Progress | ProviderEventPhase::Delta => {
+            ProviderProjectionStatus::Running
+        }
+        ProviderEventPhase::Completed => ProviderProjectionStatus::Complete,
+        ProviderEventPhase::Failed => ProviderProjectionStatus::Failed,
+        ProviderEventPhase::Declined | ProviderEventPhase::Interrupted => {
+            ProviderProjectionStatus::Canceled
+        }
+        ProviderEventPhase::Unknown => ProviderProjectionStatus::Pending,
+    }
+}
+
+fn provider_projection_stream_state(phase: ProviderEventPhase) -> ProviderProjectionStreamState {
+    match phase {
+        ProviderEventPhase::Started | ProviderEventPhase::Progress | ProviderEventPhase::Delta => {
+            ProviderProjectionStreamState::Streaming
+        }
+        ProviderEventPhase::Completed
+        | ProviderEventPhase::Failed
+        | ProviderEventPhase::Declined
+        | ProviderEventPhase::Interrupted => ProviderProjectionStreamState::Complete,
+        ProviderEventPhase::Unknown => ProviderProjectionStreamState::Snapshot,
+    }
+}
+
+fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
+    match item.render_class {
+        ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
+        ProjectionRenderClass::AssistantChat => provider_projection_text_widget(&item.body),
+        _ => {
+            let mut text = item.title.clone();
+            if !item.body.trim().is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&item.body);
+            }
+            if item.inspectable {
+                if let Some(raw) = &item.raw_payload {
+                    if !raw.trim().is_empty() {
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(raw);
+                    }
+                }
+            }
+            provider_projection_text_widget(&text)
+        }
+    }
+}
+
+fn provider_projection_text_widget(text: &str) -> Widget {
+    let label = Label::new(Some(text));
+    label.add_css_class("chat-agent-text");
+    label.set_selectable(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_margin_bottom(18);
+    label.upcast()
+}
+
 fn render_legacy_inline_events_for_thread(
     thread_events: &[ChatEventRecord],
     transcript_display: &str,
 ) -> bool {
-    match transcript_display.trim().to_ascii_lowercase().as_str() {
-        "raw" => false,
-        "legacy" => thread_events.is_empty(),
-        _ => thread_events.is_empty(),
-    }
+    let _ = (thread_events, transcript_display);
+    false
 }
 
 fn render_raw_message_content(transcript_display: &str) -> bool {
@@ -4789,9 +4953,8 @@ fn format_selected_session_surface(
         .map(|code| code.to_string())
         .unwrap_or_else(|| "-".to_owned());
     let ended = record.ended_at.as_deref().unwrap_or("-");
-    let events = parse_session_transcript_events(transcript);
-    let event_summary = session_transcript_event_summary(&events);
-    let transcript = render_session_transcript_events(transcript);
+    let event_summary = raw_session_transcript_summary(transcript);
+    let transcript = raw_session_transcript_display(transcript);
 
     format!(
         "Session #{} - {}\nStatus: {}\nState: {}\nAttachment: {}\nEvents: {}\nPID: {}\nStarted: {}\nEnded: {}\nExit: {}\nHarness: {}\nCommand: {}\n\nTranscript\n{}\n",
@@ -4845,6 +5008,15 @@ fn session_transcript_event_summary(events: &[SessionTranscriptEvent]) -> String
         "{} total, {user} user, {review} review, {system} system, {agent} agent, {tool} tool, {skill} skill, {harness} harness",
         events.len()
     )
+}
+
+fn raw_session_transcript_summary(transcript: &str) -> String {
+    let display = raw_session_transcript_display(transcript);
+    if display == "[no transcript output yet]\n" {
+        "raw transcript, 0 bytes".to_owned()
+    } else {
+        format!("raw transcript, {} bytes", display.len())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4912,11 +5084,17 @@ fn render_session_transcript_events(transcript: &str) -> String {
 }
 
 fn live_session_append_text(text: &str) -> String {
-    let rendered = render_session_transcript_events(text);
-    if rendered == "[no transcript output yet]\n" {
-        String::new()
+    raw_session_transcript_display(text)
+}
+
+fn raw_session_transcript_display(transcript: &str) -> String {
+    let cleaned = terminal_display_text(&trim_session_scrollback(transcript)).to_string();
+    if cleaned.trim().is_empty() {
+        "[no transcript output yet]\n".to_owned()
+    } else if cleaned.ends_with('\n') {
+        cleaned
     } else {
-        rendered
+        format!("{cleaned}\n")
     }
 }
 
@@ -4924,8 +5102,6 @@ fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEve
     let cleaned = terminal_display_text(&trim_session_scrollback(transcript)).to_string();
     let lines = cleaned.lines().collect::<Vec<_>>();
     let mut events = Vec::new();
-    let mut codex_agent_messages = Vec::<ScreenMessage>::new();
-    let mut codex_agent_event_indices = Vec::<usize>::new();
     let mut index = 0usize;
 
     while index < lines.len() {
@@ -4942,17 +5118,7 @@ fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEve
         }
 
         if line == "[codex screen]" {
-            let (screen, next) = collect_codex_block(&lines, index + 1, "[/codex screen]");
-            let parsed = parse_codex_screen_messages(&screen)
-                .into_iter()
-                .filter(|message| message.role == ScreenMessageRole::Agent)
-                .collect::<Vec<_>>();
-            sync_codex_agent_events(
-                &mut events,
-                &mut codex_agent_messages,
-                &mut codex_agent_event_indices,
-                &parsed,
-            );
+            let (_, next) = collect_codex_block(&lines, index + 1, "[/codex screen]");
             index = next;
             continue;
         }
@@ -5014,35 +5180,6 @@ fn push_session_event(
     let body = body.trim().to_owned();
     if !body.is_empty() {
         events.push(SessionTranscriptEvent { role, body });
-    }
-}
-
-fn sync_codex_agent_events(
-    events: &mut Vec<SessionTranscriptEvent>,
-    codex_agent_messages: &mut Vec<ScreenMessage>,
-    codex_agent_event_indices: &mut Vec<usize>,
-    incoming: &[ScreenMessage],
-) {
-    let previous = codex_agent_messages.clone();
-    merge_screen_messages(codex_agent_messages, incoming);
-    let shared = previous.len().min(codex_agent_messages.len());
-
-    for index in 0..shared {
-        if previous[index].content != codex_agent_messages[index].content {
-            if let Some(event_index) = codex_agent_event_indices.get(index).copied() {
-                if let Some(event) = events.get_mut(event_index) {
-                    event.body = codex_agent_messages[index].content.clone();
-                }
-            }
-        }
-    }
-
-    for message in codex_agent_messages.iter().skip(previous.len()) {
-        events.push(SessionTranscriptEvent {
-            role: SessionTranscriptRole::Agent,
-            body: message.content.clone(),
-        });
-        codex_agent_event_indices.push(events.len() - 1);
     }
 }
 
@@ -6714,6 +6851,44 @@ mod tests {
         record
     }
 
+    fn provider_event_record(
+        kind: ProviderEventKind,
+        phase: ProviderEventPhase,
+    ) -> ProviderEventRecord {
+        ProviderEventRecord {
+            id: 1,
+            identity_key: "codex:thread-7:tool-1:completed".to_owned(),
+            provider: "codex".to_owned(),
+            provider_event_id: Some("evt-1".to_owned()),
+            provider_item_id: Some("tool-1".to_owned()),
+            provider_thread_id: Some("thread-7".to_owned()),
+            provider_turn_id: None,
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            phase,
+            kind,
+            provider_subtype: Some("tool_result".to_owned()),
+            provider_sequence: Some(1),
+            received_sequence: 3,
+            occurred_at_ms: 42,
+            normalized_payload: serde_json::json!({
+                "title": "Bash",
+                "body": "cargo test passed"
+            }),
+            raw_json: serde_json::json!({
+                "type": "tool_result",
+                "tool": "Bash"
+            }),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
+            created_at: "1".to_owned(),
+            updated_at: "1".to_owned(),
+        }
+    }
+
     #[test]
     fn harness_selection_updates_state_before_switch_callback() {
         let selected_harness = RefCell::new(SessionKind::Codex);
@@ -7742,24 +7917,27 @@ fix it
     }
 
     #[test]
-    fn live_session_append_renders_user_and_review_events_without_markers() {
+    fn live_session_append_keeps_user_and_review_markers_raw() {
         let user = live_session_append_text("[user input memphis#9]\ncargo test\n[/user input]\n");
         let review =
             live_session_append_text("[staged review prompt]\nFix CI\n[/staged review prompt]\n");
 
-        assert_eq!(user, "You\ncargo test\n\n");
-        assert_eq!(review, "Review Prompt\nFix CI\n\n");
+        assert_eq!(user, "[user input memphis#9]\ncargo test\n[/user input]\n");
+        assert_eq!(
+            review,
+            "[staged review prompt]\nFix CI\n[/staged review prompt]\n"
+        );
     }
 
     #[test]
-    fn live_session_append_renders_plain_output_as_agent_event() {
+    fn live_session_append_keeps_plain_output_raw() {
         let text = live_session_append_text("hello\x1b[31m agent\x1b[0m\n");
 
-        assert_eq!(text, "Agent\nhello agent\n\n");
+        assert_eq!(text, "hello agent\n");
     }
 
     #[test]
-    fn selected_session_surface_renders_labeled_transcript_events() {
+    fn selected_session_surface_renders_raw_transcript_without_semantic_labels() {
         let record = session_record(
             11,
             "cursor /tmp/workspace",
@@ -7780,17 +7958,16 @@ Fix the failing checks
 
         let surface = format_selected_session_surface(&record, transcript, "waiting", true);
 
-        assert!(surface.contains("System\n[session started] #11 kind=Cursor pid=1234"));
-        assert!(surface.contains("Harness\n[archductor bootstrap for codex]"));
-        assert!(surface.contains("Tool\n[tool bash]"));
-        assert!(surface.contains("Skill\n[skill tests]"));
-        assert!(surface.contains("You\nopen the project"));
-        assert!(surface.contains("Review Prompt\nFix the failing checks"));
-        assert!(surface.contains("Agent\nBuild succeeded"));
-        assert!(surface.contains(
-            "Events: 7 total, 1 user, 1 review, 1 system, 1 agent, 1 tool, 1 skill, 1 harness"
-        ));
-        assert!(!surface.contains("[user input memphis#11]"));
+        assert!(surface.contains("[session started] #11 kind=Cursor pid=1234"));
+        assert!(surface.contains("[archductor bootstrap for codex]"));
+        assert!(surface.contains("[tool bash]"));
+        assert!(surface.contains("[skill tests]"));
+        assert!(surface.contains("[user input memphis#11]"));
+        assert!(surface.contains("[staged review prompt]"));
+        assert!(surface.contains("Build succeeded"));
+        assert!(surface.contains("Events: raw transcript, "));
+        assert!(!surface.contains("Tool\n[tool bash]"));
+        assert!(!surface.contains("Agent\nBuild succeeded"));
     }
 
     #[test]
@@ -7838,7 +8015,7 @@ agent response
     }
 
     #[test]
-    fn transcript_events_parse_codex_screen_blocks_without_raw_duplication() {
+    fn transcript_events_skip_codex_raw_and_screen_diagnostic_blocks() {
         let transcript = "\
 [user input memphis#4]
 run tests
@@ -7867,11 +8044,29 @@ noise
 
         let events = parse_session_transcript_events(transcript);
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].role, SessionTranscriptRole::User);
         assert_eq!(events[0].body, "run tests");
-        assert_eq!(events[1].role, SessionTranscriptRole::Agent);
-        assert_eq!(events[1].body, "Running now.\nTests passed.");
+    }
+
+    #[test]
+    fn transcript_events_ignore_codex_screen_blocks_for_normal_session_semantics() {
+        let transcript = "\
+[user input memphis#4]
+run tests
+[/user input]
+[codex screen]
+╭─ Codex ─╮
+│ Parsed from screen.
+╰────
+[/codex screen]
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].role, SessionTranscriptRole::User);
+        assert_eq!(events[0].body, "run tests");
     }
 
     #[test]
@@ -8088,6 +8283,24 @@ I summarized the result.
     }
 
     #[test]
+    fn canonical_provider_tool_events_project_as_tool_cards_not_assistant_chat() {
+        let record = provider_event_record(ProviderEventKind::Tool, ProviderEventPhase::Completed);
+        let projection = provider_projection_from_records(&[record]);
+
+        assert_eq!(projection.items.len(), 1);
+        assert_eq!(
+            projection.items[0].render_class,
+            ProjectionRenderClass::ToolCard
+        );
+        assert_ne!(
+            projection.items[0].render_class,
+            ProjectionRenderClass::AssistantChat
+        );
+        assert_eq!(projection.items[0].title, "Bash");
+        assert_eq!(projection.items[0].body, "cargo test passed");
+    }
+
+    #[test]
     fn stored_chat_event_inline_event_reconstructs_tool_and_file_change_payloads() {
         let tool_event = ChatEventRecord {
             id: 100,
@@ -8165,7 +8378,7 @@ I summarized the result.
     }
 
     #[test]
-    fn legacy_inline_event_parsing_only_runs_without_persisted_events() {
+    fn legacy_inline_event_parsing_is_disabled_for_normal_chat_rendering() {
         let message = ChatMessageRecord {
             id: 10,
             thread_id: 7,
@@ -8201,7 +8414,7 @@ I summarized the result.
         let persisted_timeline_events = legacy_inline_events_for_message(&message, legacy_disabled);
         let raw_events = legacy_inline_events_for_message(&message, raw_enabled);
 
-        assert_eq!(legacy_events.len(), 1);
+        assert!(legacy_events.is_empty());
         assert!(persisted_timeline_events.is_empty());
         assert!(raw_events.is_empty());
     }

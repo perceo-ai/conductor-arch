@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::codex_tui::{merge_screen_messages, parse_codex_screen_messages, ScreenMessage};
 use crate::session_event::{SessionEvent, SessionEventPayload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,21 +42,12 @@ pub struct LocalChatHistoryMessage {
 pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage> {
     let lines = transcript.lines().collect::<Vec<_>>();
     let mut messages = Vec::new();
-    let mut codex_messages = Vec::<ScreenMessage>::new();
     let mut index = 0usize;
 
     while index < lines.len() {
         let line = lines[index].trim_end();
         if line.trim().is_empty() {
             index += 1;
-            continue;
-        }
-
-        if line == "[codex screen]" {
-            let (screen, next) = collect_codex_screen_block(&lines, index + 1);
-            let parsed = parse_codex_screen_messages(&screen);
-            merge_screen_messages(&mut codex_messages, &parsed);
-            index = next;
             continue;
         }
 
@@ -92,9 +82,6 @@ pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHist
         index = next;
     }
 
-    for message in codex_messages {
-        push_local_chat_message(&mut messages, message.role.as_str(), message.content);
-    }
     messages
 }
 
@@ -217,19 +204,6 @@ fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, us
     (content.join("\n"), index)
 }
 
-fn collect_codex_screen_block(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/codex screen]" {
-            return (content.join("\n"), index + 1);
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
-}
-
 fn collect_codex_raw_block(lines: &[&str], mut index: usize) -> (String, usize) {
     let mut content = Vec::new();
     while index < lines.len() {
@@ -249,8 +223,6 @@ fn is_local_chat_marker(line: &str) -> bool {
         || line == "[staged review prompt]"
         || line == "[codex raw]"
         || line == "[/codex raw]"
-        || line == "[codex screen]"
-        || line == "[/codex screen]"
         || is_local_system_marker(line)
 }
 

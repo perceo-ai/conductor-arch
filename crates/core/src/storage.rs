@@ -176,6 +176,42 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           UNIQUE(process_id, sequence)
         );
 
+        CREATE TABLE IF NOT EXISTS provider_events (
+          id INTEGER PRIMARY KEY,
+          identity_key TEXT NOT NULL UNIQUE,
+          provider TEXT NOT NULL,
+          provider_event_id TEXT,
+          provider_item_id TEXT,
+          provider_thread_id TEXT,
+          provider_turn_id TEXT,
+          parent_provider_item_id TEXT,
+          parent_provider_thread_id TEXT,
+          workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL,
+          chat_thread_id INTEGER REFERENCES chat_threads(id) ON DELETE SET NULL,
+          process_id INTEGER REFERENCES processes(id) ON DELETE SET NULL,
+          phase TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          provider_subtype TEXT,
+          provider_sequence INTEGER,
+          received_sequence INTEGER NOT NULL,
+          occurred_at_ms INTEGER NOT NULL,
+          normalized_payload_json TEXT NOT NULL,
+          raw_json TEXT NOT NULL,
+          schema_version INTEGER NOT NULL,
+          adapter_version TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_provider_events_thread
+          ON provider_events(provider, provider_thread_id, received_sequence, id);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_events_chat_thread
+          ON provider_events(chat_thread_id, received_sequence, id);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_events_process
+          ON provider_events(process_id, received_sequence, id);
+
         CREATE TABLE IF NOT EXISTS workspace_timeline (
           id INTEGER PRIMARY KEY,
           workspace_id INTEGER NOT NULL,

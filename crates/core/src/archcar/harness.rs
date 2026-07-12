@@ -1,9 +1,5 @@
 use anyhow::{anyhow, Result};
 
-use crate::codex_tui::{
-    codex_screen_ready_for_input, detect_directory_trust_prompt, parse_codex_screen_messages,
-    ScreenMessage,
-};
 use crate::workspace::{SessionHarnessOptions, SessionKind, WorkspaceStore};
 
 pub trait HarnessController: Send + Sync {
@@ -17,7 +13,6 @@ pub trait HarnessController: Send + Sync {
     ) -> Result<crate::workspace::SessionLaunch>;
     fn detect_ready(&self, screen: &str) -> bool;
     fn startup_input(&self, screen: &str) -> Option<String>;
-    fn parse_messages(&self, screen: &str) -> Vec<ScreenMessage>;
 }
 
 pub fn controller_for_kind(kind: SessionKind) -> Box<dyn HarnessController> {
@@ -48,16 +43,12 @@ impl HarnessController for CodexHarnessController {
         store.session_launch_with_options(workspace, SessionKind::Codex, harness)
     }
 
-    fn detect_ready(&self, screen: &str) -> bool {
-        codex_screen_ready_for_input(screen)
+    fn detect_ready(&self, _screen: &str) -> bool {
+        false
     }
 
-    fn startup_input(&self, screen: &str) -> Option<String> {
-        detect_directory_trust_prompt(screen).then(|| "1".to_owned())
-    }
-
-    fn parse_messages(&self, screen: &str) -> Vec<ScreenMessage> {
-        parse_codex_screen_messages(screen)
+    fn startup_input(&self, _screen: &str) -> Option<String> {
+        None
     }
 }
 
@@ -88,10 +79,6 @@ impl HarnessController for ClaudeHarnessController {
     fn startup_input(&self, _screen: &str) -> Option<String> {
         None
     }
-
-    fn parse_messages(&self, _screen: &str) -> Vec<ScreenMessage> {
-        Vec::new()
-    }
 }
 
 pub struct ShellHarnessController;
@@ -120,10 +107,6 @@ impl HarnessController for ShellHarnessController {
 
     fn startup_input(&self, _screen: &str) -> Option<String> {
         None
-    }
-
-    fn parse_messages(&self, _screen: &str) -> Vec<ScreenMessage> {
-        Vec::new()
     }
 }
 
@@ -161,10 +144,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_ready_detection_waits_for_boot_completion() {
+    fn codex_harness_does_not_derive_readiness_from_rendered_screen() {
         let controller = CodexHarnessController;
         assert!(!controller.detect_ready("• Booting MCP server\n\n› hi"));
-        assert!(controller.detect_ready("› hi"));
+        assert!(!controller.detect_ready("› hi"));
+        assert_eq!(
+            controller.startup_input("Do you trust this directory?"),
+            None
+        );
     }
 
     #[test]

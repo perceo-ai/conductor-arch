@@ -5810,7 +5810,8 @@ mutation($threadId: ID!) {{
         }
     }
 
-    pub fn persist_codex_screen_delta(
+    /// Legacy PTY screen parser for debug/import paths only.
+    pub fn persist_legacy_codex_screen_delta_for_debug_import(
         &self,
         thread_id: i64,
         process_id: i64,
@@ -5849,7 +5850,8 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
-    pub fn persist_codex_pipeline_update(
+    /// Legacy PTY pipeline parser for debug/import paths only.
+    pub fn persist_legacy_codex_pipeline_update_for_debug_import(
         &self,
         thread_id: i64,
         process_id: i64,
@@ -12096,7 +12098,7 @@ working_directory = "apps/web"
     }
 
     #[test]
-    fn local_chat_history_messages_parse_codex_screen_snapshots() {
+    fn local_chat_history_messages_keep_codex_screen_snapshots_as_raw_diagnostics() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -12145,10 +12147,12 @@ working_directory = "apps/web"
         let messages = store.local_chat_history_messages(session.id).unwrap();
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "run tests");
-        assert_eq!(messages[1].role, "agent");
-        assert_eq!(messages[1].content, "Running now.\nTests passed.");
+        assert!(messages.iter().all(|message| message.role == "agent"));
+        assert!(messages[0].content.contains("[codex screen]"));
+        assert!(messages[0].content.contains("│ run tests"));
+        assert!(messages[0].content.contains("│ Running now."));
+        assert!(messages[1].content.contains("[codex screen]"));
+        assert!(messages[1].content.contains("│ Tests passed."));
     }
 
     #[test]
@@ -14207,7 +14211,7 @@ working_directory = "apps/worker"
             .append_chat_message(thread.id, "user", "run tests", "composer")
             .unwrap();
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "› run tests\n• Running now.\nRan cargo test\nok\n",
@@ -18087,7 +18091,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn persist_codex_screen_delta_persists_structured_agent_messages_for_threads() {
+    fn legacy_codex_screen_delta_debug_import_persists_structured_agent_messages_for_threads() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "Bugfix A", None)
@@ -18113,14 +18117,14 @@ spotlight_testing = true
             .unwrap();
 
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n╰─",
             )
             .unwrap();
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n│ The failure is in parser.rs.\n╰─",
@@ -18139,7 +18143,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn persist_codex_screen_delta_persists_file_reads_as_events_only() {
+    fn legacy_codex_screen_delta_debug_import_persists_file_reads_as_events_only() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "Bugfix A", None)
@@ -18150,7 +18154,7 @@ spotlight_testing = true
             .append_chat_message(thread.id, "user", "Read the README", "user_send")
             .unwrap();
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "› Read the README\nRead README.md\n# Project\nDetails.\n",
@@ -18193,7 +18197,7 @@ spotlight_testing = true
 ";
 
         store
-            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .persist_legacy_codex_screen_delta_for_debug_import(thread.id, process.id, screen)
             .unwrap();
 
         let messages = store.list_chat_messages(thread.id).unwrap();
@@ -18235,10 +18239,10 @@ spotlight_testing = true
 
         let screen = include_str!("../tests/fixtures/codex_replay_duplicate_screen.txt");
         store
-            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .persist_legacy_codex_screen_delta_for_debug_import(thread.id, process.id, screen)
             .unwrap();
         store
-            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .persist_legacy_codex_screen_delta_for_debug_import(thread.id, process.id, screen)
             .unwrap();
 
         let messages = store.list_chat_messages(thread.id).unwrap();

@@ -3,20 +3,22 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::chat_store::ChatStore;
-use crate::session_pipeline::{PtyChunkInput, SessionPipelineOutput};
-use crate::session_state::AgentSessionState;
+use crate::provider_events::{ProviderEventDraft, ProviderEventRecord, ProviderEventStore};
+use crate::session_pipeline::PtyChunkInput;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
 #[derive(Debug, Clone)]
 pub struct RuntimeSessionStore {
     db_path: PathBuf,
     chat_store: ChatStore,
+    provider_event_store: ProviderEventStore,
 }
 
 impl RuntimeSessionStore {
     pub fn new(db_path: PathBuf) -> Self {
         Self {
             chat_store: ChatStore::new(db_path.clone()),
+            provider_event_store: ProviderEventStore::new(db_path.clone()),
             db_path,
         }
     }
@@ -67,21 +69,8 @@ impl RuntimeSessionStore {
             .append_session_process_output(process_id, &format_session_screen_output(kind, screen))
     }
 
-    pub fn persist_codex_pipeline_update(
-        &self,
-        thread_id: i64,
-        process_id: i64,
-        chunks: Vec<PtyChunkInput>,
-        screen: &str,
-        previous_state: AgentSessionState,
-    ) -> Result<SessionPipelineOutput> {
-        self.chat_store.persist_codex_pipeline_update(
-            thread_id,
-            process_id,
-            chunks,
-            screen,
-            previous_state,
-        )
+    pub fn append_provider_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
+        self.provider_event_store.upsert_event(draft)
     }
 
     pub fn resolve_codex_native_thread_id_for_process(
@@ -127,16 +116,26 @@ mod tests {
     fn runtime_session_store_uses_chat_store_boundary_for_chat_and_pipeline_state() {
         let source = include_str!("runtime_session_store.rs");
         let broad_chat_append = concat!("store.", "append_chat_message(");
-        let broad_pipeline_update = concat!("self.open()?.", "persist_codex_pipeline_update(");
 
         assert!(source.contains("ChatStore"));
         assert!(
             !source.contains(broad_chat_append),
             "runtime session persistence should not write chat rows through broad WorkspaceStore"
         );
+    }
+
+    #[test]
+    fn runtime_provider_semantics_use_provider_event_store_not_legacy_codex_pipeline() {
+        let source = include_str!("runtime_session_store.rs");
+        let legacy_pipeline = concat!("persist_codex", "_pipeline_update");
+
         assert!(
-            !source.contains(broad_pipeline_update),
-            "runtime session persistence should not run Codex chat pipeline through broad WorkspaceStore"
+            source.contains("ProviderEventStore"),
+            "runtime semantic provider persistence should use ProviderEventStore"
+        );
+        assert!(
+            !source.contains(legacy_pipeline),
+            "runtime semantic provider persistence must not call the old Codex PTY pipeline"
         );
     }
 }
