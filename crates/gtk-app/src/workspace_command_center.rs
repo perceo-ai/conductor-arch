@@ -3729,6 +3729,15 @@ fn workspace_changes_panel(
     feedback.set_xalign(0.0);
     feedback.set_wrap(true);
 
+    panel.append(&workspace_base_ref_controls(
+        db_path,
+        store,
+        name,
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        &feedback,
+    ));
+
     panel.append(&workspace_git_file_actions_panel(
         db_path,
         store,
@@ -3792,6 +3801,57 @@ fn workspace_changes_panel(
     panel.append(&feedback);
 
     panel
+}
+
+fn workspace_base_ref_controls(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-base-ref-row");
+    let label = Label::new(Some("Base"));
+    label.add_css_class("detail-label");
+    let entry = Entry::new();
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some("main"));
+    if let Ok(base_ref) = store.workspace_base_ref(name) {
+        entry.set_text(&base_ref);
+    }
+    let save_btn = text_button("Set Base");
+    let db_path_for_save = db_path.to_path_buf();
+    let workspace_for_save = name.to_owned();
+    let entry_for_save = entry.clone();
+    let feedback_for_save = feedback.clone();
+    save_btn.connect_clicked(move |_| {
+        let base_ref = entry_for_save.text();
+        let result = WorkspaceStore::open(&db_path_for_save)
+            .and_then(|store| store.set_workspace_base_ref(&workspace_for_save, &base_ref));
+        match result {
+            Ok(workspace) => {
+                apply_action_feedback(
+                    &feedback_for_save,
+                    &toast_overlay,
+                    &format!("Base branch set to {}.", workspace.base_ref),
+                    true,
+                );
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_save,
+                &toast_overlay,
+                &format!("Could not set base branch: {err:#}"),
+                true,
+            ),
+        }
+    });
+    row.append(&label);
+    row.append(&entry);
+    row.append(&save_btn);
+    row
 }
 
 fn workspace_git_file_actions_panel(
@@ -4012,7 +4072,7 @@ fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
     out.push_str("\n\nDiff\n");
     out.push_str(
         &store
-            .unified_diff(name, None)
+            .unified_diff_against_base(name, None)
             .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
     );
     out
@@ -4037,10 +4097,10 @@ fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
 fn workspace_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
     match path {
         Some(path) => store
-            .unified_diff(name, Some(Path::new(path)))
+            .unified_diff_against_base(name, Some(Path::new(path)))
             .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
         None => store
-            .unified_diff(name, None)
+            .unified_diff_against_base(name, None)
             .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
     }
 }

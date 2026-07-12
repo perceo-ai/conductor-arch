@@ -2706,6 +2706,44 @@ impl WorkspaceStore {
         git_output(&workspace.path, ["diff", "--"])
     }
 
+    pub fn unified_diff_against_base(&self, name: &str, path: Option<&Path>) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = workspace_base_ref(&workspace);
+        if let Some(path) = path {
+            let path_value = path.to_string_lossy().to_string();
+            return git_output_dynamic(
+                &workspace.path,
+                &["diff", base_ref, "--", path_value.as_str()],
+            );
+        }
+        git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])
+    }
+
+    pub fn set_workspace_base_ref(&self, name: &str, base_ref: &str) -> Result<Workspace> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = base_ref.trim();
+        validate_branch_name(base_ref)?;
+        let commit_ref = format!("{base_ref}^{{commit}}");
+        git_dynamic(
+            &workspace.path,
+            &["rev-parse", "--verify", commit_ref.as_str()],
+        )
+        .with_context(|| format!("verify base ref {base_ref}"))?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces SET base_ref = ?1, updated_at = ?2 WHERE id = ?3",
+            params![base_ref, now, workspace.id],
+        )?;
+        let updated = self.get_by_name(name)?;
+        self.record_workspace_event(
+            updated.id,
+            &updated.name,
+            "base_ref.updated",
+            &format!("Updated base branch to {base_ref}"),
+        )?;
+        Ok(updated)
+    }
+
     pub fn revert_workspace_file(&self, name: &str, relative_path: &str) -> Result<()> {
         let workspace = self.get_by_name(name)?;
         let validated = validate_workspace_relative_path(relative_path)?;
@@ -2831,6 +2869,10 @@ impl WorkspaceStore {
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
         let workspace = self.get_by_name(name)?;
         workspace_diff_stats_against_base(&workspace)
+    }
+
+    pub fn workspace_base_ref(&self, name: &str) -> Result<String> {
+        Ok(self.get_by_name(name)?.base_ref)
     }
 
     pub fn untracked_files(&self, name: &str) -> Result<Vec<String>> {
@@ -6888,11 +6930,7 @@ fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
 }
 
 fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, usize)> {
-    let base_ref = if workspace.base_ref.trim().is_empty() {
-        "main"
-    } else {
-        workspace.base_ref.as_str()
-    };
+    let base_ref = workspace_base_ref(workspace);
     let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])
         .or_else(|err| {
             if base_ref == "main" {
@@ -6921,6 +6959,14 @@ fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, us
     }
 
     Ok((additions, deletions))
+}
+
+fn workspace_base_ref(workspace: &Workspace) -> &str {
+    if workspace.base_ref.trim().is_empty() {
+        "main"
+    } else {
+        workspace.base_ref.as_str()
+    }
 }
 
 fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary> {
@@ -13703,6 +13749,113 @@ general = "Keep changes focused."
             .find(|line| line.workspace.name == "berlin")
             .unwrap();
         assert_eq!((line.diff_additions, line.diff_deletions), (3, 1));
+    }
+
+    #[test]
+    fn set_workspace_base_ref_changes_base_diff_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "-b", "develop"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("README.md"), "develop\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "develop readme",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "feature\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature readme",
+            ])
+            .status()
+            .unwrap();
+
+        let main_diff = store
+            .unified_diff_against_base("berlin", Some(Path::new("README.md")))
+            .unwrap();
+        assert!(main_diff.contains("-demo"));
+
+        let updated = store.set_workspace_base_ref("berlin", "develop").unwrap();
+        assert_eq!(updated.base_ref, "develop");
+        let develop_diff = store
+            .unified_diff_against_base("berlin", Some(Path::new("README.md")))
+            .unwrap();
+
+        assert!(develop_diff.contains("-develop"));
+        assert!(!develop_diff.contains("-demo"));
+        assert_eq!(
+            store
+                .workspace_timeline("berlin", Some("base_ref.updated"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
