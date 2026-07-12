@@ -249,7 +249,7 @@ build_command = "cargo build --workspace"
 
 [customization.agent_profiles.default]
 agent = "codex"
-model = "gpt-5-codex"
+model = "gpt-5.6-sol"
 approval_mode = "on-request"
 reasoning_mode = "medium"
 

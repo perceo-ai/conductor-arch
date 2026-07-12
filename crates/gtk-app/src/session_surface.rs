@@ -266,7 +266,9 @@ pub fn agent_session_panel(
         initial_chat_harness_from_setup(&database_path, _workspace_name, &readiness)
     };
     let selected_harness = Rc::new(RefCell::new(initial_harness));
-    let selected_model = Rc::new(RefCell::new(None::<String>));
+    let selected_model = Rc::new(RefCell::new(default_model_for_session_kind(
+        initial_harness,
+    )));
     let reasoning_mode = Rc::new(RefCell::new(Some("high".to_owned())));
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
     let selected_thread: Rc<RefCell<Option<i64>>> =
@@ -420,7 +422,7 @@ pub fn agent_session_panel(
                 );
                 *selected_model.borrow_mut() = choice.model.clone();
                 if let Some(thread_id) = *selected_thread.borrow() {
-                    if kind == SessionKind::Codex {
+                    if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
                         replace_pending_model_command(
                             &pending_commands,
                             thread_id,
@@ -458,8 +460,6 @@ pub fn agent_session_panel(
                                 }
                             }
                         }
-                    } else {
-                        pending_commands.borrow_mut().remove(&thread_id);
                     }
                 }
                 if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
@@ -1294,7 +1294,8 @@ pub fn agent_session_panel(
         ) {
             Ok(thread_id) => {
                 app_state_for_send.set_selected_chat_thread(Some(thread_id));
-                if selected_kind == SessionKind::Codex && selected_model_for_send.borrow().is_some()
+                if matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
+                    && selected_model_for_send.borrow().is_some()
                 {
                     replace_pending_model_command(
                         &pending_commands_for_send,
@@ -3894,7 +3895,7 @@ impl ProviderModelChoice {
     }
 
     fn model_label(&self) -> &str {
-        self.model.as_deref().unwrap_or("Default")
+        self.model.as_deref().unwrap_or(CODEX_DEFAULT_MODEL)
     }
 
     fn button_label(&self) -> String {
@@ -3922,19 +3923,39 @@ fn provider_model_choices(
 
 fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoice> {
     match launchable_provider_name(provider) {
-        Some("codex") => [None, Some("gpt-5"), Some("gpt-5-mini")]
-            .into_iter()
+        Some("codex") => CODEX_MODEL_CHOICES
+            .iter()
+            .copied()
             .map(|model| ProviderModelChoice {
                 provider: "codex".to_owned(),
-                model: model.map(str::to_owned),
+                model: Some(model.to_owned()),
             })
             .collect(),
-        Some("claude") => vec![ProviderModelChoice {
-            provider: "claude".to_owned(),
-            model: None,
-        }],
+        Some("claude") => CLAUDE_MODEL_CHOICES
+            .iter()
+            .copied()
+            .map(|model| ProviderModelChoice {
+                provider: "claude".to_owned(),
+                model: Some(model.to_owned()),
+            })
+            .collect(),
         _ => Vec::new(),
     }
+}
+
+const CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
+const CODEX_MODEL_CHOICES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+const CLAUDE_MODEL_CHOICES: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-haiku-4-5-20251001",
+];
+
+fn default_model_for_session_kind(kind: SessionKind) -> Option<String> {
+    provider_model_choices_for_provider(session_kind_provider(kind))
+        .first()
+        .and_then(|choice| choice.model.clone())
 }
 
 fn selected_provider_model_choice_index(
@@ -4104,7 +4125,7 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
 fn codex_model_command(model: Option<&str>) -> Option<String> {
     match model.map(str::trim).filter(|model| !model.is_empty()) {
         Some(model) => Some(format!("/model {model}")),
-        None => Some("/model default".to_owned()),
+        None => Some(format!("/model {CODEX_DEFAULT_MODEL}")),
     }
 }
 
@@ -4618,7 +4639,7 @@ fn provider_model_menu_button(
         .cloned()
         .unwrap_or_else(|| ProviderModelChoice {
             provider: "codex".to_owned(),
-            model: None,
+            model: Some(CODEX_DEFAULT_MODEL.to_owned()),
         });
     let button = Button::new();
     button.add_css_class("chat-mode-menu");
@@ -6937,15 +6958,15 @@ mod tests {
             vec![
                 ProviderModelChoice {
                     provider: "codex".to_owned(),
-                    model: None,
+                    model: Some("gpt-5.6-sol".to_owned()),
                 },
                 ProviderModelChoice {
                     provider: "codex".to_owned(),
-                    model: Some("gpt-5".to_owned()),
+                    model: Some("gpt-5.6-terra".to_owned()),
                 },
                 ProviderModelChoice {
                     provider: "codex".to_owned(),
-                    model: Some("gpt-5-mini".to_owned()),
+                    model: Some("gpt-5.6-luna".to_owned()),
                 },
             ]
         );
@@ -6968,25 +6989,48 @@ mod tests {
                 .map(|choice| (choice.provider.as_str(), choice.model.as_deref()))
                 .collect::<Vec<_>>(),
             vec![
-                ("codex", None),
-                ("codex", Some("gpt-5")),
-                ("codex", Some("gpt-5-mini")),
-                ("claude", None),
+                ("codex", Some("gpt-5.6-sol")),
+                ("codex", Some("gpt-5.6-terra")),
+                ("codex", Some("gpt-5.6-luna")),
+                ("claude", Some("claude-fable-5")),
+                ("claude", Some("claude-opus-4-8")),
+                ("claude", Some("claude-sonnet-5")),
+                ("claude", Some("claude-haiku-4-5-20251001")),
             ]
         );
     }
 
     #[test]
-    fn default_model_choice_queues_codex_model_reset() {
+    fn provider_model_choices_do_not_include_synthetic_or_stale_models() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        let choices = provider_model_choices(&readiness, SessionKind::Codex);
+        let models = choices
+            .iter()
+            .filter_map(|choice| choice.model.as_deref())
+            .collect::<Vec<_>>();
+
+        assert!(choices.iter().all(|choice| choice.model.is_some()));
+        assert!(!models.contains(&"gpt-5"));
+        assert!(!models.contains(&"gpt-5-mini"));
+    }
+
+    #[test]
+    fn empty_model_choice_queues_explicit_codex_default_model() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 7, "/model gpt-5.6-sol".to_owned());
         queue_thread_command(&pending, 7, "/thinking high".to_owned());
 
         replace_pending_model_command(&pending, 7, None);
 
         assert_eq!(
             pending.borrow().get(&7).cloned().unwrap_or_default(),
-            vec!["/thinking high".to_owned(), "/model default".to_owned()]
+            vec!["/thinking high".to_owned(), "/model gpt-5.6-sol".to_owned()]
         );
     }
 
@@ -7143,14 +7187,14 @@ fix it
     #[test]
     fn pending_control_commands_flush_before_user_message() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 7, "/model gpt-5.6-sol".to_owned());
         queue_thread_command(&pending, 7, "/thinking high".to_owned());
 
         let flushed = flush_pending_commands_for_send(&pending, 7);
 
         assert_eq!(
             flushed,
-            vec!["/model gpt-5".to_owned(), "/thinking high".to_owned()]
+            vec!["/model gpt-5.6-sol".to_owned(), "/thinking high".to_owned()]
         );
         assert!(flush_pending_commands_for_send(&pending, 7).is_empty());
     }
@@ -7699,16 +7743,19 @@ fix it
     #[test]
     fn queue_thread_command_replaces_prior_model_and_thinking_commands() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 5, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 5, "/model gpt-5.6-sol".to_owned());
         queue_thread_command(&pending, 5, "/thinking medium".to_owned());
-        queue_thread_command(&pending, 5, "/model gpt-5-mini".to_owned());
+        queue_thread_command(&pending, 5, "/model gpt-5.6-luna".to_owned());
         queue_thread_command(&pending, 5, "/thinking high".to_owned());
 
         let flushed = flush_pending_commands_for_send(&pending, 5);
 
         assert_eq!(
             flushed,
-            vec!["/model gpt-5-mini".to_owned(), "/thinking high".to_owned()]
+            vec![
+                "/model gpt-5.6-luna".to_owned(),
+                "/thinking high".to_owned()
+            ]
         );
     }
 

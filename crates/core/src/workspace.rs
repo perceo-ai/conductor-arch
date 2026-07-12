@@ -17434,7 +17434,7 @@ spotlight_testing = true
             .append_chat_message(thread.id, "user", "run tests", "user_send")
             .unwrap();
         store
-            .append_chat_message(thread.id, "system", "/model gpt-5", "control_command")
+            .append_chat_message(thread.id, "system", "/model gpt-5.6-sol", "control_command")
             .unwrap();
         store
             .append_chat_message(thread.id, "agent", "Running now.", "agent_screen_parse")

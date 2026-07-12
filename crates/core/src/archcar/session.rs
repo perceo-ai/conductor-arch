@@ -899,7 +899,7 @@ mod tests {
         assert!(format_input_audit_log(
             "berlin",
             7,
-            "/model gpt-5",
+            "/model gpt-5.6-sol",
             &ArchcarInputKind::ControlCommand
         )
         .is_empty());
