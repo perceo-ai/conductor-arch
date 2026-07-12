@@ -34,6 +34,7 @@ pub enum AsyncArchcarRequestKind {
     SendInput {
         session_id: i64,
         input: String,
+        visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
     ResizeSession {
@@ -170,11 +171,13 @@ impl AsyncArchcarBridge {
         &self,
         session_id: i64,
         input: String,
+        visible_input: Option<String>,
         kind: ArchcarInputKind,
     ) -> Option<u64> {
         self.submit(ArchcarRequest::SendInput {
             session_id,
             input,
+            visible_input,
             kind,
         })
     }
@@ -446,10 +449,12 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         ArchcarRequest::SendInput {
             session_id,
             input,
+            visible_input,
             kind,
         } => AsyncArchcarRequestKind::SendInput {
             session_id: *session_id,
             input: input.clone(),
+            visible_input: visible_input.clone(),
             kind: kind.clone(),
         },
         ArchcarRequest::ResizeSession {
@@ -528,6 +533,7 @@ mod tests {
         let request = ArchcarRequest::SendInput {
             session_id: 9,
             input: "hello".to_owned(),
+            visible_input: Some("visible hello".to_owned()),
             kind: ArchcarInputKind::ReviewPrompt,
         };
 
@@ -536,6 +542,7 @@ mod tests {
             AsyncArchcarRequestKind::SendInput {
                 session_id: 9,
                 input: "hello".to_owned(),
+                visible_input: Some("visible hello".to_owned()),
                 kind: ArchcarInputKind::ReviewPrompt,
             }
         );

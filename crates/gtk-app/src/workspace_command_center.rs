@@ -307,6 +307,7 @@ impl WorkspaceRunConsoleTerminalConnection {
             ArchcarRequest::SendInput {
                 session_id: record.id,
                 input: input.to_owned(),
+                visible_input: None,
                 kind: ArchcarInputKind::ControlCommand,
             },
         );

@@ -555,6 +555,7 @@ fn main() -> Result<()> {
                     print_archcar_response(client.send(ArchcarRequest::SendInput {
                         session_id,
                         input: input.join(" "),
+                        visible_input: None,
                         kind: ArchcarInputKind::User,
                     })?);
                 }

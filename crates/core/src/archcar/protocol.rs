@@ -40,6 +40,8 @@ pub enum ArchcarRequest {
     SendInput {
         session_id: i64,
         input: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
     ResizeSession {
@@ -140,6 +142,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::SendInput {
             session_id,
             input,
+            visible_input: _,
             kind,
         } => format!(
             "send_input session_id={session_id} kind={} chars={}",
@@ -327,6 +330,7 @@ mod tests {
         let request = ArchcarRequest::SendInput {
             session_id: 9,
             input: "run tests".to_owned(),
+            visible_input: None,
             kind: ArchcarInputKind::User,
         };
 

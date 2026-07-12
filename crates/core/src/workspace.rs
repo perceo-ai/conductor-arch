@@ -50,6 +50,9 @@ use tracing::warn;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+const ARCHDUCTOR_METADATA_OPEN: &str = "<archductor_metadata>";
+const ARCHDUCTOR_METADATA_CLOSE: &str = "</archductor_metadata>";
+
 pub use crate::github_pr::{
     parse_github_numbered_stateful_choices, GitHubNumberedChoice, PullRequestCheckRun,
     PullRequestCommentEntry, PullRequestDeployment, PullRequestReadiness, PullRequestReviewEntry,
@@ -5383,6 +5386,114 @@ mutation($threadId: ID!) {{
         self.get_chat_message(self.conn.last_insert_rowid())
     }
 
+    fn append_agent_chat_message_with_metadata(
+        &self,
+        thread_id: i64,
+        content: &str,
+        source: &str,
+    ) -> Result<()> {
+        let (content, directive) = extract_archductor_metadata_directive(content);
+        if let Some(directive) = directive {
+            if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
+                warn!(
+                    thread_id,
+                    error = %err,
+                    "failed to apply archductor metadata directive"
+                );
+            }
+        }
+        if !content.trim().is_empty() {
+            self.append_chat_message(thread_id, "agent", &content, source)?;
+        }
+        Ok(())
+    }
+
+    fn apply_archductor_metadata_directive(
+        &self,
+        thread_id: i64,
+        directive: ArchductorMetadataDirective,
+    ) -> Result<()> {
+        let thread = self.get_chat_thread(thread_id)?;
+        let workspace = self.get_by_id(thread.workspace_id)?;
+        if !self.workspace_has_user_message(thread_id)? {
+            return Ok(());
+        }
+
+        if let Some(chat_title) = directive
+            .chat_title
+            .as_deref()
+            .and_then(normalize_chat_title)
+        {
+            if is_default_chat_thread_title_core(&thread.title) || thread.title == chat_title {
+                self.update_chat_thread_title(thread_id, &chat_title)?;
+            }
+        }
+
+        let mut workspace = workspace;
+        if let Some(branch_name) = directive.branch_name.as_deref() {
+            let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
+            if branch_name != workspace.branch {
+                match self.rename_branch(&workspace.name, &branch_name) {
+                    Ok(updated) => workspace = updated,
+                    Err(err) => warn!(
+                        workspace = %workspace.name,
+                        branch = %branch_name,
+                        error = %err,
+                        "failed to apply archductor branch metadata"
+                    ),
+                }
+            }
+        }
+
+        if let Some(workspace_name) = directive.workspace_name.as_deref() {
+            let repository = self.load_repository_by_id(workspace.repository_id)?;
+            let workspace_name =
+                self.metadata_workspace_name(&repository, workspace.id, workspace_name)?;
+            if workspace_name != workspace.name {
+                self.rename(&workspace.name, &workspace_name)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn metadata_workspace_name(
+        &self,
+        repository: &RepositoryRecord,
+        workspace_id: i64,
+        raw: &str,
+    ) -> Result<String> {
+        let slug = slugify(raw);
+        self.unique_message_workspace_name(repository, workspace_id, &slug)
+    }
+
+    fn metadata_branch_name(&self, workspace: &Workspace, raw: &str) -> Result<String> {
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
+        let raw = raw.trim();
+        let base = if validate_branch_name(raw).is_ok() && raw.contains('/') {
+            raw.to_owned()
+        } else {
+            format!("{prefix}/{}", slugify(raw))
+        };
+        unique_message_branch_name(&repository.root_path, &base, &workspace.branch)
+    }
+
+    fn workspace_has_user_message(&self, thread_id: i64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1 AND role = 'user'",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     fn latest_matching_adjacent_chat_message(
         &self,
         thread_id: i64,
@@ -5681,9 +5792,8 @@ mutation($threadId: ID!) {{
             match item {
                 CodexParsedItem::Message(message) => {
                     if message.role == ScreenMessageRole::Agent {
-                        self.append_chat_message(
+                        self.append_agent_chat_message_with_metadata(
                             thread_id,
-                            "agent",
                             &message.content,
                             "agent_screen_parse",
                         )?;
@@ -5724,9 +5834,8 @@ mutation($threadId: ID!) {{
             match item {
                 CodexParsedItem::Message(message) => {
                     if message.role == ScreenMessageRole::Agent {
-                        self.append_chat_message(
+                        self.append_agent_chat_message_with_metadata(
                             thread_id,
-                            "agent",
                             &message.content,
                             "agent_screen_parse",
                         )?;
@@ -7555,6 +7664,85 @@ fn ensure_tracked_in_head(cwd: &Path, relative_path: &str) -> Result<()> {
         "{relative_path} is not tracked in HEAD and cannot be safely reverted"
     );
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchductorMetadataDirective {
+    workspace_name: Option<String>,
+    branch_name: Option<String>,
+    chat_title: Option<String>,
+}
+
+fn extract_archductor_metadata_directive(
+    content: &str,
+) -> (String, Option<ArchductorMetadataDirective>) {
+    let Some(start) = content.find(ARCHDUCTOR_METADATA_OPEN) else {
+        return (content.to_owned(), None);
+    };
+    let json_start = start + ARCHDUCTOR_METADATA_OPEN.len();
+    let Some(relative_end) = content[json_start..].find(ARCHDUCTOR_METADATA_CLOSE) else {
+        return (trim_metadata_blank_edges(&content[..start]), None);
+    };
+    let end = json_start + relative_end;
+    let json_text = content[json_start..end].trim();
+    let directive = parse_archductor_metadata_directive(json_text);
+    let mut cleaned = String::new();
+    cleaned.push_str(&content[..start]);
+    cleaned.push_str(&content[end + ARCHDUCTOR_METADATA_CLOSE.len()..]);
+    (trim_metadata_blank_edges(&cleaned), directive)
+}
+
+fn parse_archductor_metadata_directive(json_text: &str) -> Option<ArchductorMetadataDirective> {
+    let value = serde_json::from_str::<Value>(json_text).ok()?;
+    Some(ArchductorMetadataDirective {
+        workspace_name: value
+            .get("workspace_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        branch_name: value
+            .get("branch_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        chat_title: value
+            .get("chat_title")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+fn trim_metadata_blank_edges(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+    lines[start..end].join("\n")
+}
+
+fn normalize_chat_title(raw: &str) -> Option<String> {
+    let mut title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.chars().count() > 48 {
+        title = title.chars().take(48).collect::<String>();
+    }
+    let title = title
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ':' | ';' | ',' | '.'))
+        .trim()
+        .to_owned();
+    (!title.is_empty()).then_some(title)
+}
+
+fn is_default_chat_thread_title_core(title: &str) -> bool {
+    let title = title.trim();
+    title == "New Chat"
+        || title
+            .strip_prefix("New Chat ")
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+            .is_some()
 }
 
 fn slugify(text: &str) -> String {
@@ -17710,6 +17898,40 @@ spotlight_testing = true
         let updated = store.get_chat_thread_record(thread.id).unwrap();
         assert_eq!(updated.title, "Fix parser failure");
         assert!(store.list_chat_messages(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_metadata_directive_renames_workspace_branch_and_chat_without_persisting_marker() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing webhook fix\",\"branch_name\":\"lc/billing-webhook-fix\",\"chat_title\":\"Billing Webhook Fix\"}</archductor_metadata>\nI'll inspect the webhook.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let renamed = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(renamed.path, workspace.path);
+        assert_eq!(renamed.branch, "lc/billing-webhook-fix");
+        assert_eq!(
+            git_output(&renamed.path, ["branch", "--show-current"]).trim(),
+            "lc/billing-webhook-fix"
+        );
+        let updated_thread = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(updated_thread.title, "Billing Webhook Fix");
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, "I'll inspect the webhook.");
+        assert!(!messages[1].content.contains("archductor_metadata"));
     }
 
     #[test]
