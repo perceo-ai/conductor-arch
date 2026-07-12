@@ -2658,10 +2658,7 @@ fn inline_event_body_preview(event: &CodexInlineEvent, body: &str) -> InlineEven
 
 fn inline_event_expands_body_by_default(event: &CodexInlineEvent) -> bool {
     let title = event.title.to_ascii_lowercase();
-    let normalized_title = title
-        .trim_start()
-        .trim_start_matches('•')
-        .trim_start();
+    let normalized_title = title.trim_start().trim_start_matches('•').trim_start();
     let body = event
         .body
         .as_deref()
@@ -4894,10 +4891,7 @@ fn collect_session_role_event(
 }
 
 fn raw_tool_event_collects_body(header: &str) -> bool {
-    let trimmed = header
-        .trim_start()
-        .trim_start_matches('•')
-        .trim_start();
+    let trimmed = header.trim_start().trim_start_matches('•').trim_start();
     if trimmed.contains("functions.apply_patch") || trimmed.contains("functions.write_stdin") {
         return true;
     }

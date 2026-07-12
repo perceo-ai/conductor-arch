@@ -300,8 +300,8 @@ fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> 
         .iter()
         .enumerate()
         .map(|(position, (index, chunk))| {
-            let text = redacted_prefixes[position + 1][redacted_prefixes[position].len()..]
-                .to_owned();
+            let text =
+                redacted_prefixes[position + 1][redacted_prefixes[position].len()..].to_owned();
             let normalized_text = normalize_pty_text(&text);
             let raw_normalized_text = normalize_pty_text(chunk);
             let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
