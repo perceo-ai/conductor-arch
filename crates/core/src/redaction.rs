@@ -57,13 +57,14 @@ fn redact_structured_secrets(value: &str) -> String {
             break;
         };
         let key = &value[key_start + 1..key_end];
+        let decoded_key = decode_json_string_key(key);
         let after_key = key_end + 1;
         let Some(colon_index) = skip_ascii_whitespace(value, after_key) else {
             output.push_str(&value[key_start..after_key]);
             index = after_key;
             continue;
         };
-        if !value[colon_index..].starts_with(':') || !is_sensitive_key_or_flag(key) {
+        if !value[colon_index..].starts_with(':') || !is_sensitive_key_or_flag(&decoded_key) {
             output.push_str(&value[key_start..after_key]);
             index = after_key;
             continue;
@@ -93,6 +94,10 @@ fn quoted_string_end(value: &str, quote_index: usize) -> Option<usize> {
     None
 }
 
+fn decode_json_string_key(key: &str) -> String {
+    serde_json::from_str::<String>(&format!("\"{key}\"")).unwrap_or_else(|_| key.to_owned())
+}
+
 fn skip_ascii_whitespace(value: &str, mut index: usize) -> Option<usize> {
     while index < value.len() {
         let ch = value[index..].chars().next()?;
@@ -113,9 +118,32 @@ fn structured_value_end(value: &str, value_start: usize) -> usize {
             .map(|end| end + 1)
             .unwrap_or(value.len());
     }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
     for (offset, ch) in value[value_start..].char_indices() {
-        if matches!(ch, ',' | '}' | ']' | '\n' | '\r') {
-            return value_start + offset;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return value_start + offset + ch.len_utf8();
+                }
+            }
+            ',' | '}' | ']' | '\n' | '\r' if depth == 0 => return value_start + offset,
+            _ => {}
         }
     }
     value.len()
@@ -144,6 +172,9 @@ fn split_preserving_whitespace(value: &str) -> Vec<&str> {
 }
 
 fn redact_assignment_secret(part: &str) -> Option<String> {
+    if part.contains('{') || part.contains('[') || part.contains(',') {
+        return redact_embedded_assignment_secret(part);
+    }
     for separator in ['=', ':'] {
         let Some((key, value)) = part.split_once(separator) else {
             continue;
@@ -151,6 +182,38 @@ fn redact_assignment_secret(part: &str) -> Option<String> {
         if !value.is_empty() && is_sensitive_key_or_flag(key) {
             return Some(format!("{key}{separator}[redacted]"));
         }
+    }
+    None
+}
+
+fn redact_embedded_assignment_secret(part: &str) -> Option<String> {
+    for (index, separator) in part.char_indices() {
+        if !matches!(separator, '=' | ':') {
+            continue;
+        }
+        let key_start = part[..index]
+            .rfind(['"', '\'', ' ', ',', '{', '['])
+            .map(|offset| offset + 1)
+            .unwrap_or(0);
+        let key = &part[key_start..index];
+        if key.is_empty()
+            || !is_sensitive_key_or_flag(key)
+            || index + separator.len_utf8() >= part.len()
+        {
+            continue;
+        }
+        let value_start = index + separator.len_utf8();
+        let value_end = part[value_start..]
+            .find(['"', '\'', ',', '}', ']'])
+            .map(|offset| value_start + offset)
+            .unwrap_or(part.len());
+        let mut redacted = String::new();
+        redacted.push_str(&part[..key_start]);
+        redacted.push_str(key);
+        redacted.push(separator);
+        redacted.push_str("[redacted]");
+        redacted.push_str(&part[value_end..]);
+        return Some(redacted);
     }
     None
 }
@@ -238,5 +301,40 @@ mod tests {
             redacted,
             r#"{"ok":true,"api_key":[redacted],"nested":{"refresh_token":[redacted]}}"#
         );
+    }
+
+    #[test]
+    fn redacts_json_escaped_sensitive_keys() {
+        let raw = r#"{"api\u005fkey":"escaped-secret","safe":"visible"}"#;
+
+        let redacted = redact_sensitive_text(raw);
+
+        assert!(!redacted.contains("escaped-secret"));
+        assert_eq!(redacted, r#"{"api\u005fkey":[redacted],"safe":"visible"}"#);
+    }
+
+    #[test]
+    fn redacts_complete_structured_secret_values() {
+        let raw = r#"{"token":["first","second"],"secret":{"a":"one","b":"two"},"safe":"visible"}"#;
+
+        let redacted = redact_sensitive_text(raw);
+
+        for leaked in ["first", "second", "one", "two"] {
+            assert!(!redacted.contains(leaked), "{leaked} leaked in {redacted}");
+        }
+        assert_eq!(
+            redacted,
+            r#"{"token":[redacted],"secret":[redacted],"safe":"visible"}"#
+        );
+    }
+
+    #[test]
+    fn redacts_embedded_assignment_inside_json_string_value() {
+        let raw = r#"{"input":"OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish"}"#;
+
+        let redacted = redact_sensitive_text(raw);
+
+        assert!(!redacted.contains("sk-secret"));
+        assert!(redacted.contains("OPENAI_API_KEY=[redacted]"));
     }
 }

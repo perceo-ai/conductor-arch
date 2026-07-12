@@ -5323,12 +5323,19 @@ mutation($threadId: ID!) {{
                 COALESCE(e.event_bytes, 0)
              FROM chat_threads t
              LEFT JOIN (
-                SELECT thread_id, COUNT(*) AS message_count, SUM(LENGTH(content)) AS message_bytes
+                SELECT thread_id, COUNT(*) AS message_count, SUM(LENGTH(CAST(content AS BLOB))) AS message_bytes
                 FROM chat_messages
                 GROUP BY thread_id
              ) m ON m.thread_id = t.id
              LEFT JOIN (
-                SELECT thread_id, COUNT(*) AS event_count, SUM(LENGTH(payload_json)) AS event_bytes
+                SELECT
+                    thread_id,
+                    COUNT(*) AS event_count,
+                    SUM(
+                        LENGTH(CAST(title AS BLOB)) +
+                        LENGTH(CAST(body AS BLOB)) +
+                        LENGTH(CAST(payload_json AS BLOB))
+                    ) AS event_bytes
                 FROM chat_events
                 GROUP BY thread_id
              ) e ON e.thread_id = t.id
@@ -5392,7 +5399,12 @@ mutation($threadId: ID!) {{
         content: &str,
         source: &str,
     ) -> Result<()> {
-        let (content, directive) = extract_archductor_metadata_directive(content);
+        let accepts_metadata = !self.thread_has_agent_message(thread_id)?;
+        let (content, directive) = if accepts_metadata {
+            extract_archductor_metadata_directive(content)
+        } else {
+            (content.to_owned(), None)
+        };
         if let Some(directive) = directive {
             if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
                 warn!(
@@ -5478,7 +5490,11 @@ mutation($threadId: ID!) {{
             .unwrap_or("lc");
         let raw = raw.trim();
         let base = if validate_branch_name(raw).is_ok() && raw.contains('/') {
-            raw.to_owned()
+            if let Some(suffix) = raw.strip_prefix("lc/") {
+                format!("{prefix}/{}", slugify(suffix))
+            } else {
+                raw.to_owned()
+            }
         } else {
             format!("{prefix}/{}", slugify(raw))
         };
@@ -5488,6 +5504,15 @@ mutation($threadId: ID!) {{
     fn workspace_has_user_message(&self, thread_id: i64) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1 AND role = 'user'",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    fn thread_has_agent_message(&self, thread_id: i64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1 AND role = 'agent'",
             [thread_id],
             |row| row.get(0),
         )?;
@@ -7681,7 +7706,7 @@ fn extract_archductor_metadata_directive(
     };
     let json_start = start + ARCHDUCTOR_METADATA_OPEN.len();
     let Some(relative_end) = content[json_start..].find(ARCHDUCTOR_METADATA_CLOSE) else {
-        return (trim_metadata_blank_edges(&content[..start]), None);
+        return (content.to_owned(), None);
     };
     let end = json_start + relative_end;
     let json_text = content[json_start..end].trim();
@@ -17935,6 +17960,91 @@ spotlight_testing = true
     }
 
     #[test]
+    fn agent_metadata_directive_uses_configured_prefix_for_lc_placeholder() {
+        let (temp, store) = test_workspace_store();
+        let settings_dir = temp.path().join("demo/.archductor");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::write(
+            settings_dir.join("settings.toml"),
+            "[customization.workspace_defaults]\nbranch_prefix = \"team\"\n",
+        )
+        .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"branch_name\":\"lc/billing-webhook-fix\"}</archductor_metadata>\nI'll inspect the webhook.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let workspace = store.get_by_name("berlin").unwrap();
+        assert_eq!(workspace.branch, "team/billing-webhook-fix");
+    }
+
+    #[test]
+    fn incomplete_agent_metadata_marker_preserves_original_content() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing webhook fix\"}\nI'll inspect the webhook.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert!(store.get_by_name("billing-webhook-fix").is_err());
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(
+            messages[1].content,
+            "<archductor_metadata>{\"workspace_name\":\"billing webhook fix\"}\nI'll inspect the webhook."
+        );
+    }
+
+    #[test]
+    fn later_agent_metadata_directives_do_not_rename_workspace() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "First response.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"workspace_name\":\"late rename\",\"branch_name\":\"lc/late-rename\"}</archductor_metadata>\nContinuing.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert!(store.get_by_name("late-rename").is_err());
+        let workspace = store.get_by_name("berlin").unwrap();
+        assert_eq!(workspace.branch, "lc/berlin");
+    }
+
+    #[test]
     fn chat_thread_close_and_reopen_preserves_history_and_resume_id() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -18225,6 +18335,40 @@ spotlight_testing = true
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].content, "tests failed");
+    }
+
+    #[test]
+    fn chat_thread_context_summaries_count_utf8_message_and_event_bytes() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let message = store
+            .append_chat_message(thread.id, "user", "hé", "user_send")
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let event = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "é".to_owned(),
+                },
+            )
+            .unwrap();
+
+        let summaries = store.chat_thread_context_summaries("berlin").unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.title == "Bugfix A")
+            .unwrap();
+        let expected_bytes =
+            message.content.len() + event.title.len() + event.body.len() + event.payload_json.len();
+
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.event_count, 1);
+        assert_eq!(summary.transcript_bytes, expected_bytes);
     }
 
     #[test]

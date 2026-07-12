@@ -240,6 +240,7 @@ pub fn agent_session_panel(
     root.add_css_class("chat-surface");
     root.set_vexpand(true);
     root.set_hexpand(true);
+    let current_workspace_name = Rc::new(RefCell::new(_workspace_name.to_owned()));
 
     if include_header {
         root.append(&session_header_row(
@@ -381,7 +382,7 @@ pub fn agent_session_panel(
         ),
         {
             let database_path = database_path.to_path_buf();
-            let workspace_name = _workspace_name.to_owned();
+            let current_workspace_name = current_workspace_name.clone();
             let selected_harness = selected_harness.clone();
             let reasoning_mode = reasoning_mode.clone();
             let refresh_chat_surface = refresh_chat_surface.clone();
@@ -397,6 +398,7 @@ pub fn agent_session_panel(
                 let Some(choice) = provider_model_choices.get(index).cloned() else {
                     return;
                 };
+                let workspace_name = current_workspace_name.borrow().clone();
                 let kind = session_kind_from_provider(&choice.provider);
                 persist_selected_provider(&database_path, &workspace_name, &choice.provider);
                 select_harness_and_dispatch(
@@ -603,7 +605,7 @@ pub fn agent_session_panel(
 
     let refresh_view = {
         let database_path = database_path.clone();
-        let workspace = _workspace_name.to_owned();
+        let current_workspace_name = current_workspace_name.clone();
         let messages = messages.clone();
         let scroll = scroll.clone();
         let thread_row = thread_row.clone();
@@ -632,6 +634,7 @@ pub fn agent_session_panel(
         let context_usage = context_usage.clone();
         let toast_manager = toast_manager.clone();
         Rc::new(move || {
+            let workspace = current_workspace_name.borrow().clone();
             debug!(workspace = %workspace, "chat refresh_view start");
             let chat_scroll = capture_chat_scroll(&scroll);
             let (workspace_name, loaded, loaded_threads) = match WorkspaceStore::open(
@@ -659,6 +662,7 @@ pub fn agent_session_panel(
                             if new_workspace != workspace {
                                 app_state
                                     .rename_workspace_in_navigation(&workspace, &new_workspace);
+                                *current_workspace_name.borrow_mut() = new_workspace.clone();
                             }
                             (new_workspace, sessions, threads)
                         } else {
@@ -1177,7 +1181,7 @@ pub fn agent_session_panel(
     refresh_session_surface();
 
     let db_for_send = database_path.clone();
-    let workspace_for_send = _workspace_name.to_owned();
+    let current_workspace_name_for_send = current_workspace_name.clone();
     let selected_harness_for_send = selected_harness.clone();
     let selected_model_for_send = selected_model.clone();
     let thread_state_for_send = thread_state.clone();
@@ -1203,9 +1207,9 @@ pub fn agent_session_panel(
     let send_text = Rc::new(move |text: String, staged_review: bool| {
         let command = text.trim().to_owned();
         if command.is_empty() {
-            return;
+            return false;
         }
-        let workspace_for_send = workspace_for_send.clone();
+        let workspace_for_send = current_workspace_name_for_send.borrow().clone();
         let selected_kind = *selected_harness_for_send.borrow();
         if let Some(message) =
             selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
@@ -1217,7 +1221,7 @@ pub fn agent_session_panel(
             error.set_wrap(true);
             error.set_xalign(0.0);
             append_revealed(&messages_for_send, &error);
-            return;
+            return false;
         }
         info!(
             workspace = %workspace_for_send,
@@ -1280,7 +1284,7 @@ pub fn agent_session_panel(
                 error.set_wrap(true);
                 error.set_xalign(0.0);
                 append_revealed(&messages_for_send, &error);
-                return;
+                return false;
             }
         };
         debug!(
@@ -1302,7 +1306,7 @@ pub fn agent_session_panel(
                 error.set_wrap(true);
                 error.set_xalign(0.0);
                 append_revealed(&messages_for_send, &error);
-                return;
+                return false;
             }
         };
         let should_request_agent_metadata = !staged_review
@@ -1424,7 +1428,7 @@ pub fn agent_session_panel(
                             &messages_for_send,
                             "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
                         );
-                        return;
+                        return false;
                     }
                     note_archcar_ready(
                         &mut archcar_ready_cache_for_send.borrow_mut(),
@@ -1446,7 +1450,7 @@ pub fn agent_session_panel(
                     );
                     refresh_view_for_send();
                     refresh_for_send();
-                    return;
+                    return true;
                 }
             }
 
@@ -1497,7 +1501,7 @@ pub fn agent_session_panel(
                     &messages_for_send,
                     "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
                 );
-                return;
+                return false;
             }
             info!(
                 workspace = %workspace_for_send,
@@ -1512,7 +1516,7 @@ pub fn agent_session_panel(
             }
             refresh_view_for_send();
             refresh_for_send();
-            return;
+            return true;
         }
         let running_record = thread_records
             .iter()
@@ -1525,21 +1529,37 @@ pub fn agent_session_panel(
         let Some(record) = running_record else {
             let token =
                 archcar_bridge_for_send.spawn_session(workspace_for_send.clone(), selected_kind);
-            if let Some(token) = token {
-                inflight_archcar_actions_for_send.borrow_mut().insert(
-                    token,
-                    PendingArchcarAction::EnsureWorkspace {
-                        workspace: workspace_for_send.clone(),
-                        thread_id: Some(thread_id),
-                    },
+            let Some(token) = token else {
+                append_session_status_message(
+                    &messages_for_send,
+                    "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
                 );
-            }
+                return false;
+            };
+            inflight_archcar_actions_for_send.borrow_mut().insert(
+                token,
+                PendingArchcarAction::EnsureWorkspace {
+                    workspace: workspace_for_send.clone(),
+                    thread_id: Some(thread_id),
+                },
+            );
             if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
                 let _ =
                     writer.append_chat_message(thread_id, "user", &command, "queued_before_spawn");
             }
+            queue_archcar_input(
+                &pending_archcar_inputs_for_send,
+                thread_id,
+                send_input.clone(),
+                visible_input.clone(),
+                if staged_review {
+                    ArchcarInputKind::ReviewPrompt
+                } else {
+                    ArchcarInputKind::User
+                },
+            );
             let queued = Label::new(Some(
-                "[session start] Runtime session requested through archcar. Send again once the session is ready.",
+                "[session start] Runtime session requested through archcar. Queued message will send when the session is ready.",
             ));
             queued.add_css_class("chat-agent-text");
             queued.set_selectable(true);
@@ -1548,7 +1568,7 @@ pub fn agent_session_panel(
             append_revealed(&messages_for_send, &queued);
             refresh_view_for_send();
             refresh_for_send();
-            return;
+            return true;
         };
 
         let process_id = record.id;
@@ -1597,7 +1617,7 @@ pub fn agent_session_panel(
                 &messages_for_send,
                 "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
             );
-            return;
+            return false;
         }
         note_archcar_ready(
             &mut archcar_ready_cache_for_send.borrow_mut(),
@@ -1609,11 +1629,12 @@ pub fn agent_session_panel(
             app_state_for_send.set_staged_review_prompt(None);
         }
         refresh_view_for_send();
+        true
     });
 
     {
         let db_for_switch = database_path.clone();
-        let workspace_for_switch = _workspace_name.to_owned();
+        let current_workspace_name_for_switch = current_workspace_name.clone();
         let messages_for_switch = messages.clone();
         let selected_session_for_switch = selected_session.clone();
         let record_state_for_switch = record_state.clone();
@@ -1627,6 +1648,7 @@ pub fn agent_session_panel(
         let update_composer_for_switch = update_composer_state.clone();
         let toast_for_switch = toast_manager.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
+            let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
             let (records, threads) =
                 match WorkspaceStore::open(db_for_switch.clone()).map(|store| {
                     (
@@ -1739,7 +1761,7 @@ pub fn agent_session_panel(
 
     let interrupt_current_session = Rc::new({
         let database_path = database_path.clone();
-        let workspace_name = _workspace_name.to_owned();
+        let current_workspace_name = current_workspace_name.clone();
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
@@ -1748,6 +1770,7 @@ pub fn agent_session_panel(
         let archcar_bridge = archcar_bridge.clone();
         let refresh_chat_surface = refresh_chat_surface.clone();
         move || {
+            let workspace_name = current_workspace_name.borrow().clone();
             let Some(thread_id) = *selected_thread.borrow() else {
                 return;
             };
@@ -1843,10 +1866,18 @@ pub fn agent_session_panel(
                         return;
                     };
                     let queued = take_queued_chat_inputs(&queued_chat_inputs, thread_id);
-                    for queued_input in queued {
+                    for (index, queued_input) in queued.iter().enumerate() {
                         let staged_review =
                             matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
-                        (send_text)(queued_input.input, staged_review);
+                        if !(send_text)(queued_input.input.clone(), staged_review) {
+                            requeue_pending_inputs_from(
+                                &queued_chat_inputs,
+                                thread_id,
+                                &queued,
+                                index,
+                            );
+                            break;
+                        }
                     }
                     update_composer_state();
                 }
@@ -1913,7 +1944,7 @@ pub fn agent_session_panel(
     });
     new_chat_btn.connect_clicked({
         let database_path = database_path.clone();
-        let workspace_name = _workspace_name.to_owned();
+        let current_workspace_name = current_workspace_name.clone();
         let selected_harness = selected_harness.clone();
         let thread_state = thread_state.clone();
         let selected_thread = selected_thread.clone();
@@ -1923,6 +1954,7 @@ pub fn agent_session_panel(
         let setup_readiness = setup_readiness.clone();
         let toast_manager = toast_manager.clone();
         move |_| {
+            let workspace_name = current_workspace_name.borrow().clone();
             let kind = *selected_harness.borrow();
             if let Some(message) = selected_provider_blocker_after_refresh(kind, &setup_readiness) {
                 toast_manager.error(message);
@@ -5911,10 +5943,10 @@ fn flush_pending_archcar_inputs(
         let records = WorkspaceStore::open(database_path)
             .and_then(|store| store.list_thread_processes(thread_id))
             .unwrap_or_default();
-        let Some(record) = records.into_iter().find(|record| {
-            record.status == ProcessStatus::Running
-                && session_kind_matches_record(record, SessionKind::Codex)
-        }) else {
+        let Some(record) = records
+            .into_iter()
+            .find(|record| record.status == ProcessStatus::Running)
+        else {
             continue;
         };
         if !ready_cache
@@ -5957,11 +5989,12 @@ fn flush_pending_archcar_inputs(
         }
 
         let queued = pending_inputs
-            .borrow_mut()
-            .remove(&thread_id)
+            .borrow()
+            .get(&thread_id)
+            .cloned()
             .unwrap_or_default();
-        for queued_input in queued {
-            queue_archcar_user_send(
+        for (accepted_count, queued_input) in queued.iter().enumerate() {
+            if !queue_archcar_user_send(
                 bridge,
                 inflight_actions,
                 thread_id,
@@ -5969,7 +6002,15 @@ fn flush_pending_archcar_inputs(
                 queued_input.input.clone(),
                 queued_input.visible_input.clone(),
                 queued_input.kind.clone(),
-            );
+            ) {
+                requeue_pending_inputs_from(pending_inputs, thread_id, &queued, accepted_count);
+                warn!(
+                    thread_id,
+                    process_id = record.id,
+                    "archcar queued input send failed; retained queued inputs"
+                );
+                return flushed_any;
+            }
             debug!(
                 thread_id,
                 process_id = record.id,
@@ -5982,8 +6023,20 @@ fn flush_pending_archcar_inputs(
             }
             flushed_any = true;
         }
+        pending_inputs.borrow_mut().remove(&thread_id);
     }
     flushed_any
+}
+
+fn requeue_pending_inputs_from(
+    pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    thread_id: i64,
+    queued: &[QueuedArchcarInput],
+    start_index: usize,
+) {
+    pending_inputs
+        .borrow_mut()
+        .insert(thread_id, queued[start_index..].to_vec());
 }
 
 fn queue_archcar_control_send(

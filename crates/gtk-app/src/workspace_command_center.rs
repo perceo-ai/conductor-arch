@@ -6154,6 +6154,9 @@ fn connect_force_push_button(
             .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
         {
             Ok(output) => {
+                *force_confirmed_for_click.borrow_mut() = false;
+                force_push_btn_for_click.set_sensitive(true);
+                force_push_btn_for_click.set_label("Force Push");
                 let message = output
                     .lines()
                     .map(str::trim)
@@ -6168,7 +6171,9 @@ fn connect_force_push_button(
                 );
             }
             Err(err) => {
+                *force_confirmed_for_click.borrow_mut() = false;
                 force_push_btn_for_click.set_sensitive(true);
+                force_push_btn_for_click.set_label("Force Push");
                 apply_action_feedback(
                     &feedback_for_force_push,
                     &toast_for_force_push,

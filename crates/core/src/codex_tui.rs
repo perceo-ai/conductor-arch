@@ -1684,10 +1684,7 @@ fn push_message_span(
     start_index: usize,
     end_index: usize,
 ) {
-    let content = match role {
-        ScreenMessageRole::Agent => normalize_agent_screen_message_body(&body),
-        ScreenMessageRole::User => trim_blank_edges(&body.join("\n")),
-    };
+    let content = trim_blank_edges(&body.join("\n"));
     if content.is_empty() {
         return;
     }
@@ -1696,116 +1693,6 @@ fn push_message_span(
         start_index,
         end_index,
     });
-}
-
-fn normalize_agent_screen_message_body(body: &[String]) -> String {
-    let mut content = String::new();
-    let mut previous_line: Option<String> = None;
-    let mut pending_blank = false;
-    let mut in_fence = false;
-
-    for raw_line in body {
-        let line = raw_line.trim_end();
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if !content.is_empty() {
-                pending_blank = true;
-            }
-            previous_line = None;
-            continue;
-        }
-
-        let fence_line = is_fenced_code_boundary(trimmed);
-        let keep_line_break = content.is_empty()
-            || pending_blank
-            || in_fence
-            || fence_line
-            || previous_line
-                .as_deref()
-                .is_some_and(|previous| should_preserve_agent_line_break(previous, trimmed));
-
-        if keep_line_break {
-            if !content.is_empty() {
-                if pending_blank {
-                    content.push_str("\n\n");
-                } else {
-                    content.push('\n');
-                }
-            }
-            content.push_str(trimmed);
-        } else {
-            if previous_line
-                .as_deref()
-                .is_none_or(|previous| should_insert_agent_soft_wrap_space(previous, trimmed))
-            {
-                content.push(' ');
-            }
-            content.push_str(trimmed);
-        }
-
-        if fence_line {
-            in_fence = !in_fence;
-        }
-        pending_blank = false;
-        previous_line = Some(trimmed.to_owned());
-    }
-
-    content
-}
-
-fn should_insert_agent_soft_wrap_space(previous: &str, current: &str) -> bool {
-    !(previous.ends_with('/') || previous.ends_with('-')) || !starts_wordish(current)
-}
-
-fn should_preserve_agent_line_break(previous: &str, current: &str) -> bool {
-    is_markdown_block_boundary(current)
-        || is_markdown_block_boundary(previous)
-        || is_markdown_list_item(current)
-}
-
-fn is_markdown_list_item(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("- ")
-        || trimmed.starts_with("* ")
-        || trimmed.starts_with("+ ")
-        || trimmed.starts_with("• ")
-    {
-        return true;
-    }
-
-    let mut chars = trimmed.char_indices().peekable();
-    let mut saw_digit = false;
-    while let Some((_, ch)) = chars.peek().copied() {
-        if !ch.is_ascii_digit() {
-            break;
-        }
-        saw_digit = true;
-        chars.next();
-    }
-    if !saw_digit {
-        return false;
-    }
-    let Some((_, marker)) = chars.next() else {
-        return false;
-    };
-    if !matches!(marker, '.' | ')') {
-        return false;
-    }
-    chars.next().is_some_and(|(_, ch)| ch.is_whitespace())
-}
-
-fn is_markdown_block_boundary(line: &str) -> bool {
-    line.starts_with('#') || line.starts_with('>') || line.starts_with('|')
-}
-
-fn starts_wordish(line: &str) -> bool {
-    line.chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '/'))
-}
-
-fn is_fenced_code_boundary(line: &str) -> bool {
-    line.starts_with("```") || line.starts_with("~~~")
 }
 
 fn trim_blank_edges(content: &str) -> String {
@@ -2166,7 +2053,7 @@ Do you trust the contents of this directory?
                 },
                 ScreenMessage {
                     role: ScreenMessageRole::Agent,
-                    content: "Ready. Running checks now.".to_owned(),
+                    content: "Ready.\nRunning checks now.".to_owned(),
                 },
             ]
         );
@@ -2242,7 +2129,7 @@ This is the read body.
             delta.items,
             vec![CodexParsedItem::Message(ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "new answer line 1 new answer line 2".to_owned(),
+                content: "new answer line 1\nnew answer line 2".to_owned(),
             })]
         );
     }
@@ -2732,7 +2619,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
     }
 
     #[test]
-    fn rejoins_agent_prose_split_by_pty_soft_wraps() {
+    fn preserves_agent_prose_line_boundaries_without_wrap_metadata() {
         let screen = "\
 ╭─ Codex ───────────────╮
 │ tomorrow speech expresses a bleak vision of life as meaningless
@@ -2747,7 +2634,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "tomorrow speech expresses a bleak vision of life as meaningless repetition. He describes existence as a brief candle, a walking shadow, and a tale told by an idiot.\n\nStill, Macbeth remains courageous. This is part of what makes him tragic rather than merely contemptible.".to_owned(),
+                content: "tomorrow speech expresses a bleak vision of life as meaningless\nrepetition. He describes existence as a brief candle, a walking shadow, and\na tale told by an idiot.\n\nStill, Macbeth remains courageous. This is part of what makes him tragic\nrather than merely contemptible.".to_owned(),
             }]
         );
     }
@@ -2767,7 +2654,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "1. First issue wraps at the terminal edge and continues on the next visual line without becoming a new list item.\n2. Second issue stays separate.\n• Inspect the repo\n• Run the tests".to_owned(),
+                content: "1. First issue wraps at the terminal edge and continues on the next visual\nline without becoming a new list item.\n2. Second issue stays separate.\n• Inspect the repo\n• Run the tests".to_owned(),
             }]
         );
     }
@@ -2819,7 +2706,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
                 },
                 ScreenMessage {
                     role: ScreenMessageRole::Agent,
-                    content: "Fix auth callback continuation line".to_owned(),
+                    content: "Fix auth callback\ncontinuation line".to_owned(),
                 },
             ]
         );
@@ -2866,7 +2753,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
                 },
                 ScreenMessage {
                     role: ScreenMessageRole::Agent,
-                    content: "first agent line continuation line".to_owned(),
+                    content: "first agent line\ncontinuation line".to_owned(),
                 },
             ]
         );
@@ -2903,7 +2790,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "5. Medium: production builds intentionally ignore TypeScript errors. next.config.ts:3 sets typescript.ignoreBuildErrors = true. Impact: type regressions can ship to production instead of blocking CI/build.\n\n6. Low: the repo has test files but no runnable test script. package.json:5 defines no test command, and npm test fails. Impact: there is no standard verification path for the existing tests, which makes regressions easier to miss.\n\nVerification\n\nnpm test fails because there is no test script. npm run typecheck, npm run lint, and npm run build also could not run here because dependencies are not installed in this checkout.\n\nIf you want, I can fix the auth holes and the webhook idempotency issue first.".to_owned(),
+                content: "5. Medium: production builds intentionally ignore TypeScript errors.\nnext.config.ts:3 sets typescript.ignoreBuildErrors = true. Impact: type\nregressions can ship to production instead of blocking CI/build.\n\n6. Low: the repo has test files but no runnable test script. package.json:5\ndefines no test command, and npm test fails. Impact: there is no standard\nverification path for the existing tests, which makes regressions easier to\nmiss.\n\nVerification\n\nnpm test fails because there is no test script. npm run typecheck, npm run\nlint, and npm run build also could not run here because dependencies are not\ninstalled in this checkout.\n\nIf you want, I can fix the auth holes and the webhook idempotency issue first.".to_owned(),
             }]
         );
     }
@@ -3060,7 +2947,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/hoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment split (#14)). There are no tracked file changes. The only uncommitted thing is an untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier Consulting with public marketing pages, admin routes, Supabase, and Stripe APIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
+                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/\nhoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
             }]
         );
     }
@@ -3101,7 +2988,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
                 ScreenMessage {
                     role: ScreenMessageRole::Agent,
                     content:
-                        "I don’t know your name from the context here. If you want, tell me and I’ll use it."
+                        "I don’t know your name from the context here. If you want, tell me and I’ll\nuse it."
                             .to_owned(),
                 },
             ]

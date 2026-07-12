@@ -294,14 +294,14 @@ fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> 
     if raw.is_empty() {
         return Vec::new();
     }
-    let redacted_prefixes = redacted_prefixes_for_chunks(raw, chunks);
+    let redacted = redact_sensitive_text(raw);
+    let redacted_chunks = split_redacted_stream_for_chunks(&redacted, chunks);
     let mut previous = String::new();
     chunks
         .iter()
         .enumerate()
         .map(|(position, (index, chunk))| {
-            let text =
-                redacted_prefixes[position + 1][redacted_prefixes[position].len()..].to_owned();
+            let text = redacted_chunks.get(position).cloned().unwrap_or_default();
             let normalized_text = normalize_pty_text(&text);
             let raw_normalized_text = normalize_pty_text(chunk);
             let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
@@ -319,15 +319,41 @@ fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> 
         .collect()
 }
 
-fn redacted_prefixes_for_chunks(raw: &str, chunks: &[(usize, &str)]) -> Vec<String> {
-    let mut prefixes = Vec::with_capacity(chunks.len() + 1);
-    prefixes.push(String::new());
-    let mut end = 0;
-    for (_, chunk) in chunks {
-        end += chunk.len();
-        prefixes.push(redact_sensitive_text(&raw[..end]));
+fn split_redacted_stream_for_chunks(redacted: &str, chunks: &[(usize, &str)]) -> Vec<String> {
+    let mut output = Vec::with_capacity(chunks.len());
+    let mut cursor = 0;
+    for (position, (_, chunk)) in chunks.iter().enumerate() {
+        let is_last = position + 1 == chunks.len();
+        let newline_count = chunk.matches('\n').count();
+        let end = if is_last {
+            redacted.len()
+        } else if newline_count == 0 {
+            cursor
+        } else {
+            redacted_offset_after_newlines(redacted, cursor, newline_count)
+                .unwrap_or(redacted.len())
+        };
+        output.push(redacted[cursor..end].to_owned());
+        cursor = end;
     }
-    prefixes
+    output
+}
+
+fn redacted_offset_after_newlines(
+    redacted: &str,
+    start: usize,
+    newline_count: usize,
+) -> Option<usize> {
+    let mut seen = 0;
+    for (offset, ch) in redacted[start..].char_indices() {
+        if ch == '\n' {
+            seen += 1;
+            if seen == newline_count {
+                return Some(start + offset + ch.len_utf8());
+            }
+        }
+    }
+    None
 }
 
 fn normalize_pty_text(raw: &str) -> String {

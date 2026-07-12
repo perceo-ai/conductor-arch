@@ -931,9 +931,8 @@ pub(crate) fn build_settings_page(
     let load_selected_settings_for_recover = load_selected_settings.clone();
     let pending_autosave_recover = pending_autosave.clone();
     let pending_autosave_target_recover = pending_autosave_target.clone();
-    let recover_confirmation: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+    let recover_confirmation_for_click: Rc<RefCell<Option<(String, SettingsLayer)>>> =
         Rc::new(RefCell::new(None));
-    let recover_confirmation_for_click = recover_confirmation.clone();
     recover_defaults_btn.connect_clicked(move |_| {
         let repo_name = selected_repository_name(&settings_repo_select_recover);
         if repo_name.is_empty() {

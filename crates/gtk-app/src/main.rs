@@ -552,6 +552,11 @@ window.lc-custom-colors,
     border-color: @lc-accent;
 }
 
+.lc-custom-colors .suggested-action {
+    background-color: @lc-accent;
+    color: @lc-accent-fg;
+}
+
 .lc-custom-colors .diff-added,
 .lc-custom-colors .status-running,
 .lc-custom-colors .workspace-status-running {
@@ -1725,7 +1730,7 @@ mod tests {
         assert!(!css.contains(".lc-custom-colors-test .chat-mode-selected"));
         assert!(!css.contains(".lc-custom-colors-test .chat-send-btn-active"));
         assert!(!css.contains(".lc-custom-colors-test .chat-user-bubble"));
-        assert!(!css.contains(".lc-custom-colors-test .suggested-action"));
+        assert!(css.contains(".lc-custom-colors-test .suggested-action"));
         assert!(!css.contains(".lc-custom-colors .chat-mode-selected"));
     }
 
