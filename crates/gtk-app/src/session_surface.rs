@@ -373,16 +373,29 @@ pub fn agent_session_panel(
                             if let Some(session_id) =
                                 any_running_archcar_codex_ready(&records, &archcar_ready_cache)
                             {
-                                for control in
-                                    flush_pending_commands_for_send(&pending_commands, thread_id)
-                                {
-                                    queue_archcar_control_send(
+                                let pending_controls =
+                                    flush_pending_commands_for_send(&pending_commands, thread_id);
+                                for (index, control) in pending_controls.iter().enumerate() {
+                                    if !queue_archcar_control_send(
                                         &archcar_bridge,
                                         inflight_archcar_actions.as_ref(),
                                         thread_id,
                                         session_id,
-                                        control,
-                                    );
+                                        control.clone(),
+                                    ) {
+                                        requeue_pending_controls(
+                                            &pending_commands,
+                                            thread_id,
+                                            &pending_controls,
+                                            index,
+                                        );
+                                        warn!(
+                                            thread_id,
+                                            session_id,
+                                            "archcar control send failed; requeued pending controls"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1236,14 +1249,27 @@ pub fn agent_session_panel(
                 {
                     let pending_controls =
                         flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
-                    for control in pending_controls {
-                        queue_archcar_control_send(
+                    for (index, control) in pending_controls.iter().enumerate() {
+                        if !queue_archcar_control_send(
                             &archcar_bridge_for_send,
                             inflight_archcar_actions_for_send.as_ref(),
                             thread_id,
                             record.id,
-                            control,
-                        );
+                            control.clone(),
+                        ) {
+                            requeue_pending_controls(
+                                &pending_commands_for_send,
+                                thread_id,
+                                &pending_controls,
+                                index,
+                            );
+                            warn!(
+                                thread_id,
+                                process_id = record.id,
+                                "archcar control send failed; requeued pending controls"
+                            );
+                            break;
+                        }
                     }
                     let kind = if staged_review {
                         ArchcarInputKind::ReviewPrompt
@@ -1398,14 +1424,28 @@ pub fn agent_session_panel(
         app_state_for_send.set_selected_agent_session(Some(process_id));
         active_sessions_for_send.borrow_mut().insert(process_id);
 
-        for control in flush_pending_commands_for_send(&pending_commands_for_send, thread_id) {
-            queue_archcar_control_send(
+        let pending_controls =
+            flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
+        for (index, control) in pending_controls.iter().enumerate() {
+            if !queue_archcar_control_send(
                 &archcar_bridge_for_send,
                 inflight_archcar_actions_for_send.as_ref(),
                 thread_id,
                 process_id,
-                control,
-            );
+                control.clone(),
+            ) {
+                requeue_pending_controls(
+                    &pending_commands_for_send,
+                    thread_id,
+                    &pending_controls,
+                    index,
+                );
+                warn!(
+                    thread_id,
+                    process_id, "archcar control send failed; requeued pending controls"
+                );
+                break;
+            }
         }
         let input_kind = if staged_review {
             ArchcarInputKind::ReviewPrompt
@@ -3516,7 +3556,6 @@ fn provider_model_menu_popover(
     list.add_css_class("chat-menu-list");
 
     let mut last_provider = None::<String>;
-    let rows = Rc::new(RefCell::new(Vec::<Button>::new()));
     for (index, choice) in choices.iter().enumerate() {
         if last_provider.as_deref() != Some(choice.provider.as_str()) {
             let header = Label::new(Some(choice.provider_label()));
@@ -3545,10 +3584,14 @@ fn provider_model_menu_popover(
         let choice_for_row = choice.clone();
         let popover_for_row = popover.clone();
         let on_selected = on_selected.clone();
-        let rows_for_row = rows.clone();
+        let list_for_row = list.clone();
         row.connect_clicked(move |clicked| {
-            for row in rows_for_row.borrow().iter() {
-                row.remove_css_class("chat-menu-item-selected");
+            let mut child = list_for_row.first_child();
+            while let Some(widget) = child {
+                if let Ok(button) = widget.clone().downcast::<Button>() {
+                    button.remove_css_class("chat-menu-item-selected");
+                }
+                child = widget.next_sibling();
             }
             clicked.add_css_class("chat-menu-item-selected");
             provider_model_menu_set_child(&button_for_row, &choice_for_row);
@@ -3556,7 +3599,6 @@ fn provider_model_menu_popover(
             on_selected(index);
             popover_for_row.popdown();
         });
-        rows.borrow_mut().push(row.clone());
         list.append(&row);
     }
     popover.set_child(Some(&list));
@@ -4983,14 +5025,22 @@ fn flush_pending_archcar_inputs(
         }
 
         let pending_controls = flush_pending_commands_for_send(pending_commands, thread_id);
-        for control in pending_controls {
-            queue_archcar_control_send(
+        for (index, control) in pending_controls.iter().enumerate() {
+            if !queue_archcar_control_send(
                 bridge,
                 inflight_actions,
                 thread_id,
                 record.id,
                 control.clone(),
-            );
+            ) {
+                requeue_pending_controls(pending_commands, thread_id, &pending_controls, index);
+                warn!(
+                    thread_id,
+                    process_id = record.id,
+                    "archcar control send failed; requeued pending controls"
+                );
+                break;
+            }
             debug!(
                 thread_id,
                 process_id = record.id,
@@ -5034,7 +5084,7 @@ fn queue_archcar_control_send(
     thread_id: i64,
     session_id: i64,
     command: String,
-) {
+) -> bool {
     let token = bridge.send_input(
         session_id,
         command.clone(),
@@ -5049,6 +5099,20 @@ fn queue_archcar_control_send(
                 command,
             },
         );
+        true
+    } else {
+        false
+    }
+}
+
+fn requeue_pending_controls(
+    pending_commands: &RefCell<HashMap<i64, Vec<String>>>,
+    thread_id: i64,
+    controls: &[String],
+    start_index: usize,
+) {
+    for control in controls[start_index..].iter().cloned() {
+        queue_thread_command(pending_commands, thread_id, control);
     }
 }
 

@@ -8,7 +8,7 @@ use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::repository::{AddRepository, RepositoryStore};
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
-    load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
+    load_repository_settings_for_layer, save_repository_settings, FilePatternSource, GitSettings,
     ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
@@ -672,14 +672,22 @@ pub(crate) fn build_projects_page(
     let test_fixing_prompt_buffer_load = test_fixing_prompt_view.1.clone();
     let refactor_prompt_buffer_load = refactor_prompt_view.1.clone();
     let customization_buffer_load = customization_view.1.clone();
+    let layer_select_load = layer_select.clone();
     load_settings_btn.connect_clicked(move |_| {
         let repo_name = settings_repo_entry_load.text().trim().to_owned();
         if repo_name.is_empty() {
             settings_result_load.set_text("Repository name is required.");
             return;
         }
+        let layer = match layer_select_load.active_id().as_deref() {
+            Some("local") => SettingsLayer::LocalOverride,
+            _ => SettingsLayer::RepositoryShared,
+        };
         match repository_root(&db_path_load_settings, &repo_name)
-            .and_then(|repo_path| load_repository_settings(&repo_path).map(|settings| (repo_path, settings)))
+            .and_then(|repo_path| {
+                load_repository_settings_for_layer(&repo_path, layer)
+                    .map(|settings| (repo_path, settings))
+            })
             .and_then(|(repo_path, settings)| {
                 inspect_repository_settings(&repo_path).map(|inspection| (repo_path, settings, inspection))
             }) {
@@ -742,13 +750,14 @@ pub(crate) fn build_projects_page(
     });
 
     let db_path_save_settings = paths.database_path.clone();
+    let layer_select_save = layer_select.clone();
     save_settings_btn.connect_clicked(move |_| {
         let repo_name = settings_repo_entry.text().trim().to_owned();
         if repo_name.is_empty() {
             settings_result.set_text("Repository name is required.");
             return;
         }
-        let layer = match layer_select.active_id().as_deref() {
+        let layer = match layer_select_save.active_id().as_deref() {
             Some("local") => SettingsLayer::LocalOverride,
             _ => SettingsLayer::RepositoryShared,
         };
@@ -759,7 +768,13 @@ pub(crate) fn build_projects_page(
                 return;
             }
         };
-        let current_settings = load_repository_settings(&repo_path).unwrap_or_default();
+        let current_settings = match load_repository_settings_for_layer(&repo_path, layer) {
+            Ok(settings) => settings,
+            Err(err) => {
+                settings_result.set_text(&format!("Save failed: {err:#}"));
+                return;
+            }
+        };
         let current_file_globs = current_settings.file_include_globs.clone();
         let customization =
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
@@ -816,7 +831,11 @@ pub(crate) fn build_projects_page(
                 codex_provider: optional_entry_text(&codex_provider_entry),
                 bedrock_region: optional_entry_text(&bedrock_region_entry),
                 vertex_project_id: optional_entry_text(&vertex_project_entry),
-                ssh_key_path: None,
+                ssh_key_path: if matches!(layer, SettingsLayer::LocalOverride) {
+                    current_settings.providers.ssh_key_path.clone()
+                } else {
+                    None
+                },
             },
             git: GitSettings {
                 delete_branch_on_archive: Some(delete_branch_check.is_active()),

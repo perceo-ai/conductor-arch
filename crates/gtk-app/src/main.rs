@@ -438,9 +438,7 @@ fn view_colors_css(scope_class: &str, colors: &BTreeMap<String, String>) -> Stri
             "@define-color {css_name}-{color_suffix} {value};\n"
         ));
     }
-    let mut scoped_css = CUSTOM_COLOR_CSS
-        .replace("window.lc-custom-colors", &format!("window.{scope_class}"))
-        .replace(".lc-custom-colors", &format!(".{scope_class}"));
+    let mut scoped_css = CUSTOM_COLOR_CSS.replace(".lc-custom-colors", &format!(".{scope_class}"));
     let mut color_names = VIEW_COLOR_TOKENS
         .iter()
         .map(|(_, css_name, _)| *css_name)
@@ -448,8 +446,8 @@ fn view_colors_css(scope_class: &str, colors: &BTreeMap<String, String>) -> Stri
     color_names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     for css_name in color_names {
         scoped_css = scoped_css.replace(
-            &format!("@{css_name}"),
-            &format!("@{css_name}-{color_suffix}"),
+            &format!("@{css_name};"),
+            &format!("@{css_name}-{color_suffix};"),
         );
     }
     css.push_str(&scoped_css);

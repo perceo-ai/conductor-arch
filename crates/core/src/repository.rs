@@ -1,6 +1,10 @@
 use crate::settings::ensure_repository_config;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -223,10 +227,25 @@ fn resolve_git_repository_root(path: &Path) -> Result<PathBuf> {
         "{} is not a Git repository",
         path.display()
     );
-    let root = String::from_utf8(output.stdout).context("parse git repository root")?;
-    let root = PathBuf::from(root.trim());
+    let root = path_from_git_stdout(output.stdout)?;
     root.canonicalize()
         .with_context(|| format!("resolve repository root {}", root.display()))
+}
+
+fn path_from_git_stdout(stdout: Vec<u8>) -> Result<PathBuf> {
+    let stdout = stdout
+        .strip_suffix(b"\n")
+        .or_else(|| stdout.strip_suffix(b"\r\n"))
+        .unwrap_or(&stdout);
+    #[cfg(unix)]
+    {
+        Ok(PathBuf::from(OsString::from_vec(stdout.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        let root = String::from_utf8(stdout.to_vec()).context("parse git repository root")?;
+        Ok(PathBuf::from(root.trim()))
+    }
 }
 
 fn detect_default_branch(root_path: &Path, remote_name: &str) -> String {

@@ -197,6 +197,19 @@ pub fn load_repository_settings(repo_path: &Path) -> Result<RepositorySettings> 
     Ok(settings)
 }
 
+pub fn load_repository_settings_for_layer(
+    repo_path: &Path,
+    layer: SettingsLayer,
+) -> Result<RepositorySettings> {
+    let path = match layer {
+        SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
+        SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
+    };
+    let settings = load_optional_settings(&path)?.into_settings();
+    validate_repository_settings(&settings)?;
+    Ok(settings)
+}
+
 pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettingsLoadReport {
     let shared_path = repo_path.join(".archductor/settings.toml");
     let local_path = repo_path.join(".archductor/settings.local.toml");

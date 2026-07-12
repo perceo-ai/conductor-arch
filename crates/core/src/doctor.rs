@@ -287,7 +287,8 @@ fn readiness_for_tool(tool: &ToolSpec) -> SetupCheck {
     if !command_exists(program) {
         return SetupCheck::missing(format!("Install {}.", tool.display_name));
     }
-    if command_succeeds(program, &tool.readiness_probe[1..]) {
+    let readiness_args = tool.readiness_probe.get(1..).unwrap_or_default();
+    if command_succeeds(program, readiness_args) {
         SetupCheck::ready(format!("{} is ready.", tool.display_name))
     } else {
         SetupCheck::blocked(tool.auth_guidance)

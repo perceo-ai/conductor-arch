@@ -2,13 +2,13 @@ use crate::buttons::text_button;
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
-    ScrolledWindow, Stack, TextView,
+    ScrolledWindow, Stack, TextView, ToggleButton,
 };
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, ensure_repository_config,
-    inspect_repository_settings, load_repository_settings, save_repository_settings,
+    inspect_repository_settings, load_repository_settings_for_layer, save_repository_settings,
     AgentProfileSettings, FilePatternSource, GitSettings, PromptSettings, ProviderSettings,
     RepositorySettings, ScriptSettings, SettingsLayer,
 };
@@ -52,45 +52,45 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     scroll.set_child(Some(&body));
     root.append(&scroll);
 
-    let settings_shell = GBox::new(Orientation::Vertical, 14);
-    settings_shell.add_css_class("settings-shell");
-    body.append(&settings_shell);
-
-    let settings_toolbar = GBox::new(Orientation::Vertical, 10);
-    settings_toolbar.add_css_class("settings-toolbar");
-    let settings_top = GBox::new(Orientation::Horizontal, 8);
-    settings_top.add_css_class("settings-toolbar-row");
-    let settings_repo_entry = Entry::new();
-    settings_repo_entry.set_placeholder_text(Some("repository name"));
-    settings_repo_entry.set_hexpand(true);
-    let layer_select = ComboBoxText::new();
-    layer_select.append(Some("shared"), "Shared");
-    layer_select.append(Some("local"), "Local");
-    layer_select.set_active_id(Some("shared"));
-    let init_settings_btn = text_button("Initialize");
-    let load_settings_btn = text_button("Load");
-    let save_settings_btn = text_button("Save");
-    save_settings_btn.add_css_class("suggested-action");
-    settings_top.append(&settings_repo_entry);
-    settings_top.append(&layer_select);
-    settings_top.append(&init_settings_btn);
-    settings_top.append(&load_settings_btn);
-    settings_top.append(&save_settings_btn);
-    settings_toolbar.append(&settings_top);
-
+    let settings_tabs_row = GBox::new(Orientation::Horizontal, 10);
+    settings_tabs_row.add_css_class("settings-tabs-row");
+    let shared_tab = ToggleButton::with_label("Shared");
+    shared_tab.add_css_class("settings-tab");
+    shared_tab.set_active(true);
+    let local_tab = ToggleButton::with_label("Local");
+    local_tab.add_css_class("settings-tab");
     let settings_result = Label::new(Some(
         "Shared settings are commit-safe. Use Local for machine secrets and per-machine overrides.",
     ));
     settings_result.add_css_class("settings-status");
     settings_result.add_css_class("card-meta");
     settings_result.set_xalign(0.0);
+    settings_result.set_hexpand(true);
     settings_result.set_wrap(true);
-    settings_toolbar.append(&settings_result);
-    settings_shell.append(&settings_toolbar);
+    settings_tabs_row.append(&shared_tab);
+    settings_tabs_row.append(&local_tab);
+    settings_tabs_row.append(&settings_result);
+    body.append(&settings_tabs_row);
+
+    let settings_toolbar = GBox::new(Orientation::Vertical, 10);
+    settings_toolbar.add_css_class("settings-toolbar");
+    let settings_top = GBox::new(Orientation::Horizontal, 8);
+    settings_top.add_css_class("settings-toolbar-row");
+    let settings_repo_select = ComboBoxText::new();
+    settings_repo_select.set_hexpand(true);
+    let init_settings_btn = text_button("Initialize");
+    let load_settings_btn = text_button("Load");
+    let save_settings_btn = text_button("Save");
+    save_settings_btn.add_css_class("suggested-action");
+    refresh_repository_select(&settings_repo_select, &paths.database_path, None);
+    settings_top.append(&settings_repo_select);
+    settings_top.append(&init_settings_btn);
+    settings_toolbar.append(&settings_top);
+    body.append(&settings_toolbar);
 
     let inspector = GBox::new(Orientation::Horizontal, 16);
     inspector.add_css_class("settings-inspector");
-    settings_shell.append(&inspector);
+    body.append(&inspector);
 
     let settings_rail = GBox::new(Orientation::Vertical, 6);
     settings_rail.add_css_class("settings-rail");
@@ -520,10 +520,10 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
 
     let db_path_load_settings = paths.database_path.clone();
     let db_path_init_settings = paths.database_path.clone();
-    let settings_repo_entry_init = settings_repo_entry.clone();
+    let settings_repo_select_init = settings_repo_select.clone();
     let settings_result_init = settings_result.clone();
     init_settings_btn.connect_clicked(move |_| {
-        let repo_name = settings_repo_entry_init.text().trim().to_owned();
+        let repo_name = selected_repository_name(&settings_repo_select_init);
         if repo_name.is_empty() {
             settings_result_init.set_text("Repository name is required.");
             return;
@@ -552,13 +552,22 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     "{status}{prompt_pack_status}{gitignore_status} {}",
                     repo_path.display()
                 ));
+                refresh_repository_select(
+                    &settings_repo_select_init,
+                    &db_path_init_settings,
+                    Some(&repo_name),
+                );
             }
             Err(err) => settings_result_init.set_text(&format!("Initialize failed: {err:#}")),
         }
     });
 
-    let settings_repo_entry_load = settings_repo_entry.clone();
+    let settings_repo_select_load = settings_repo_select.clone();
+    let shared_tab_load = shared_tab.clone();
+    let local_tab_load = local_tab.clone();
     let settings_result_load = settings_result.clone();
+    let loading_settings_load = Rc::new(RefCell::new(false));
+    let loading_settings_for_load = loading_settings_load.clone();
     let setup_entry_load = setup_entry.clone();
     let run_entry_load = run_entry.clone();
     let archive_entry_load = archive_entry.clone();
@@ -595,229 +604,359 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         .iter()
         .map(|(_, buffer, _)| buffer.clone())
         .collect::<Vec<_>>();
-    load_settings_btn.connect_clicked(move |_| {
-        let repo_name = settings_repo_entry_load.text().trim().to_owned();
-        if repo_name.is_empty() {
-            settings_result_load.set_text("Repository name is required.");
-            return;
-        }
-        match repository_root(&db_path_load_settings, &repo_name)
-            .and_then(|repo_path| {
-                load_repository_settings(&repo_path).map(|settings| (repo_path, settings))
-            })
-            .and_then(|(repo_path, settings)| {
-                inspect_repository_settings(&repo_path)
-                    .map(|inspection| (repo_path, settings, inspection))
-            }) {
-            Ok((repo_path, settings, inspection)) => {
-                setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
-                run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
-                archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
-                test_entry_load.set_text(
-                    settings
-                        .scripts
-                        .test
-                        .as_deref()
-                        .or(settings.customization.automation.test_command.as_deref())
-                        .unwrap_or(""),
-                );
-                lint_entry_load.set_text(
-                    settings
-                        .scripts
-                        .lint
-                        .as_deref()
-                        .or(settings.customization.automation.lint_command.as_deref())
-                        .unwrap_or(""),
-                );
-                typecheck_entry_load.set_text(
-                    settings
-                        .scripts
-                        .typecheck
-                        .as_deref()
-                        .or(settings
+    let load_selected_settings = {
+        let db_path_load_settings = db_path_load_settings.clone();
+        let settings_repo_select_load = settings_repo_select_load.clone();
+        let settings_result_load = settings_result_load.clone();
+        let shared_tab_load = shared_tab_load.clone();
+        let local_tab_load = local_tab_load.clone();
+        let loading_settings_for_load = loading_settings_for_load.clone();
+        let setup_entry_load = setup_entry_load.clone();
+        let run_entry_load = run_entry_load.clone();
+        let archive_entry_load = archive_entry_load.clone();
+        let test_entry_load = test_entry_load.clone();
+        let lint_entry_load = lint_entry_load.clone();
+        let typecheck_entry_load = typecheck_entry_load.clone();
+        let build_entry_load = build_entry_load.clone();
+        let run_mode_entry_load = run_mode_entry_load.clone();
+        let spotlight_check_load = spotlight_check_load.clone();
+        let privacy_check_load = privacy_check_load.clone();
+        let archive_on_merge_check_load = archive_on_merge_check_load.clone();
+        let delete_branch_check_load = delete_branch_check_load.clone();
+        let auto_upstream_check_load = auto_upstream_check_load.clone();
+        let claude_path_entry_load = claude_path_entry_load.clone();
+        let codex_path_entry_load = codex_path_entry_load.clone();
+        let claude_provider_entry_load = claude_provider_entry_load.clone();
+        let codex_provider_entry_load = codex_provider_entry_load.clone();
+        let bedrock_region_entry_load = bedrock_region_entry_load.clone();
+        let vertex_project_entry_load = vertex_project_entry_load.clone();
+        let default_agent_entry_load = default_agent_entry_load.clone();
+        let default_model_entry_load = default_model_entry_load.clone();
+        let branch_prefix_type_entry_load = branch_prefix_type_entry_load.clone();
+        let branch_prefix_entry_load = branch_prefix_entry_load.clone();
+        let terminal_font_entry_load = terminal_font_entry_load.clone();
+        let terminal_scrollback_entry_load = terminal_scrollback_entry_load.clone();
+        let keybindings_entry_load = keybindings_entry_load.clone();
+        let command_presets_buffer_load = command_presets_buffer_load.clone();
+        let notifications_buffer_load = notifications_buffer_load.clone();
+        let file_globs_buffer_load = file_globs_buffer_load.clone();
+        let file_globs_text_load = file_globs_text_load.clone();
+        let env_buffer_load = env_buffer_load.clone();
+        let customization_buffer_load = customization_buffer_load.clone();
+        let prompt_buffers_load = prompt_buffers_load.clone();
+        Rc::new(move || {
+            let repo_name = selected_repository_name(&settings_repo_select_load);
+            if repo_name.is_empty() {
+                settings_result_load.set_text("Select a repository.");
+                return;
+            }
+            *loading_settings_for_load.borrow_mut() = true;
+            let layer = if local_tab_load.is_active() {
+                SettingsLayer::LocalOverride
+            } else {
+                SettingsLayer::RepositoryShared
+            };
+            shared_tab_load.set_active(matches!(layer, SettingsLayer::RepositoryShared));
+            local_tab_load.set_active(matches!(layer, SettingsLayer::LocalOverride));
+            match repository_root(&db_path_load_settings, &repo_name)
+                .and_then(|repo_path| {
+                    load_repository_settings_for_layer(&repo_path, layer)
+                        .map(|settings| (repo_path, settings))
+                })
+                .and_then(|(repo_path, settings)| {
+                    inspect_repository_settings(&repo_path)
+                        .map(|inspection| (repo_path, settings, inspection))
+                }) {
+                Ok((repo_path, settings, inspection)) => {
+                    setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
+                    run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
+                    archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
+                    test_entry_load.set_text(
+                        settings
+                            .scripts
+                            .test
+                            .as_deref()
+                            .or(settings.customization.automation.test_command.as_deref())
+                            .unwrap_or(""),
+                    );
+                    lint_entry_load.set_text(
+                        settings
+                            .scripts
+                            .lint
+                            .as_deref()
+                            .or(settings.customization.automation.lint_command.as_deref())
+                            .unwrap_or(""),
+                    );
+                    typecheck_entry_load.set_text(
+                        settings
+                            .scripts
+                            .typecheck
+                            .as_deref()
+                            .or(settings
+                                .customization
+                                .automation
+                                .typecheck_command
+                                .as_deref())
+                            .unwrap_or(""),
+                    );
+                    build_entry_load.set_text(
+                        settings
+                            .scripts
+                            .build
+                            .as_deref()
+                            .or(settings.customization.automation.build_command.as_deref())
+                            .unwrap_or(""),
+                    );
+                    run_mode_entry_load
+                        .set_text(settings.scripts.run_mode.as_deref().unwrap_or("concurrent"));
+                    spotlight_check_load.set_active(settings.spotlight_testing.unwrap_or(false));
+                    privacy_check_load
+                        .set_active(settings.enterprise_data_privacy.unwrap_or(false));
+                    archive_on_merge_check_load
+                        .set_active(settings.git.archive_on_merge.unwrap_or(false));
+                    delete_branch_check_load
+                        .set_active(settings.git.delete_branch_on_archive.unwrap_or(false));
+                    auto_upstream_check_load.set_active(
+                        settings
+                            .git
+                            .worktree_push_auto_setup_remote
+                            .unwrap_or(false),
+                    );
+                    claude_path_entry_load.set_text(
+                        settings
+                            .providers
+                            .claude_code_executable_path
+                            .as_deref()
+                            .unwrap_or(""),
+                    );
+                    codex_path_entry_load.set_text(
+                        settings
+                            .providers
+                            .codex_executable_path
+                            .as_deref()
+                            .unwrap_or(""),
+                    );
+                    claude_provider_entry_load
+                        .set_text(settings.providers.claude_provider.as_deref().unwrap_or(""));
+                    codex_provider_entry_load
+                        .set_text(settings.providers.codex_provider.as_deref().unwrap_or(""));
+                    bedrock_region_entry_load
+                        .set_text(settings.providers.bedrock_region.as_deref().unwrap_or(""));
+                    vertex_project_entry_load.set_text(
+                        settings
+                            .providers
+                            .vertex_project_id
+                            .as_deref()
+                            .unwrap_or(""),
+                    );
+                    default_agent_entry_load.set_text(
+                        settings
                             .customization
                             .automation
-                            .typecheck_command
-                            .as_deref())
-                        .unwrap_or(""),
-                );
-                build_entry_load.set_text(
-                    settings
-                        .scripts
-                        .build
-                        .as_deref()
-                        .or(settings.customization.automation.build_command.as_deref())
-                        .unwrap_or(""),
-                );
-                run_mode_entry_load
-                    .set_text(settings.scripts.run_mode.as_deref().unwrap_or("concurrent"));
-                spotlight_check_load.set_active(settings.spotlight_testing.unwrap_or(false));
-                privacy_check_load.set_active(settings.enterprise_data_privacy.unwrap_or(false));
-                archive_on_merge_check_load
-                    .set_active(settings.git.archive_on_merge.unwrap_or(false));
-                delete_branch_check_load
-                    .set_active(settings.git.delete_branch_on_archive.unwrap_or(false));
-                auto_upstream_check_load.set_active(
-                    settings
-                        .git
-                        .worktree_push_auto_setup_remote
-                        .unwrap_or(false),
-                );
-                claude_path_entry_load.set_text(
-                    settings
-                        .providers
-                        .claude_code_executable_path
-                        .as_deref()
-                        .unwrap_or(""),
-                );
-                codex_path_entry_load.set_text(
-                    settings
-                        .providers
-                        .codex_executable_path
-                        .as_deref()
-                        .unwrap_or(""),
-                );
-                claude_provider_entry_load
-                    .set_text(settings.providers.claude_provider.as_deref().unwrap_or(""));
-                codex_provider_entry_load
-                    .set_text(settings.providers.codex_provider.as_deref().unwrap_or(""));
-                bedrock_region_entry_load
-                    .set_text(settings.providers.bedrock_region.as_deref().unwrap_or(""));
-                vertex_project_entry_load.set_text(
-                    settings
-                        .providers
-                        .vertex_project_id
-                        .as_deref()
-                        .unwrap_or(""),
-                );
-                default_agent_entry_load.set_text(
-                    settings
-                        .customization
-                        .automation
-                        .auto_start_agent
-                        .as_deref()
-                        .unwrap_or(""),
-                );
-                default_model_entry_load.set_text(
-                    settings
-                        .customization
-                        .agent_profiles
-                        .get("default")
-                        .and_then(|profile| profile.model.as_deref())
-                        .unwrap_or(""),
-                );
-                branch_prefix_type_entry_load
-                    .set_text(settings.git.branch_prefix_type.as_deref().unwrap_or(""));
-                branch_prefix_entry_load
-                    .set_text(settings.git.branch_prefix.as_deref().unwrap_or(""));
-                terminal_font_entry_load.set_text(
-                    settings
-                        .customization
-                        .view
-                        .terminal_font
-                        .as_deref()
-                        .unwrap_or(""),
-                );
-                terminal_scrollback_entry_load.set_text(
-                    &settings
-                        .customization
-                        .view
-                        .terminal_scrollback
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                );
-                keybindings_entry_load.set_text(
-                    settings
-                        .customization
-                        .view
-                        .keybindings
-                        .as_deref()
-                        .unwrap_or(""),
-                );
-                command_presets_buffer_load.set_text(
-                    &settings
-                        .customization
-                        .view
-                        .command_palette_presets
-                        .join("\n"),
-                );
-                notifications_buffer_load
-                    .set_text(&settings.customization.view.notification_rules.join("\n"));
-                if inspection.worktreeinclude_exists {
-                    file_globs_text_load.set_editable(false);
-                    file_globs_buffer_load.set_text(&inspection.active_file_patterns.join("\n"));
-                } else {
-                    file_globs_text_load.set_editable(true);
-                    file_globs_buffer_load.set_text(&settings.file_include_globs.join("\n"));
+                            .auto_start_agent
+                            .as_deref()
+                            .unwrap_or(""),
+                    );
+                    default_model_entry_load.set_text(
+                        settings
+                            .customization
+                            .agent_profiles
+                            .get("default")
+                            .and_then(|profile| profile.model.as_deref())
+                            .unwrap_or(""),
+                    );
+                    branch_prefix_type_entry_load
+                        .set_text(settings.git.branch_prefix_type.as_deref().unwrap_or(""));
+                    branch_prefix_entry_load
+                        .set_text(settings.git.branch_prefix.as_deref().unwrap_or(""));
+                    terminal_font_entry_load.set_text(
+                        settings
+                            .customization
+                            .view
+                            .terminal_font
+                            .as_deref()
+                            .unwrap_or(""),
+                    );
+                    terminal_scrollback_entry_load.set_text(
+                        &settings
+                            .customization
+                            .view
+                            .terminal_scrollback
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                    );
+                    keybindings_entry_load.set_text(
+                        settings
+                            .customization
+                            .view
+                            .keybindings
+                            .as_deref()
+                            .unwrap_or(""),
+                    );
+                    command_presets_buffer_load.set_text(
+                        &settings
+                            .customization
+                            .view
+                            .command_palette_presets
+                            .join("\n"),
+                    );
+                    notifications_buffer_load
+                        .set_text(&settings.customization.view.notification_rules.join("\n"));
+                    if inspection.worktreeinclude_exists {
+                        file_globs_text_load.set_editable(false);
+                        file_globs_buffer_load
+                            .set_text(&inspection.active_file_patterns.join("\n"));
+                    } else {
+                        file_globs_text_load.set_editable(true);
+                        file_globs_buffer_load.set_text(&settings.file_include_globs.join("\n"));
+                    }
+                    env_buffer_load.set_text(
+                        &settings
+                            .environment_variables
+                            .iter()
+                            .map(|(key, value)| format!("{key}={value}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                    let prompts = settings.prompts.unwrap_or_default();
+                    let prompt_values = [
+                        prompts.new_workspace,
+                        prompts.general,
+                        prompts.continue_work,
+                        prompts.summarize_session,
+                        prompts.handoff,
+                        prompts.code_review,
+                        prompts.create_pr,
+                        prompts.fix_errors,
+                        prompts.resolve_merge_conflicts,
+                        prompts.rename_branch,
+                        prompts.commit_generation,
+                        prompts.test_fixing,
+                        prompts.refactor_style,
+                        prompts.setup_script,
+                        prompts.run_script,
+                    ];
+                    for (buffer, value) in prompt_buffers_load.iter().zip(prompt_values.iter()) {
+                        buffer.set_text(value.as_deref().unwrap_or(""));
+                    }
+                    customization_buffer_load.set_text(
+                        &customization_settings_to_toml(&settings.customization)
+                            .unwrap_or_default(),
+                    );
+                    let source = match inspection.active_file_patterns_source {
+                        FilePatternSource::Worktreeinclude => {
+                            ".worktreeinclude wins; file rules are read-only here."
+                        }
+                        FilePatternSource::RepositorySettings => {
+                            "Repository settings define file copy rules."
+                        }
+                        FilePatternSource::BuiltInDefault => {
+                            "Built-in `.env*` defaults apply until custom rules are saved."
+                        }
+                    };
+                    settings_result_load.set_text(&format!(
+                            "Loaded {} ({:?}). Shared={} Local={} Worktreeinclude={} Active files: {} ({})",
+                            repo_path.display(),
+                            layer,
+                            inspection.shared_settings_exists,
+                            inspection.local_settings_exists,
+                            inspection.worktreeinclude_exists,
+                            inspection.active_file_patterns.join(", "),
+                            source
+                        ));
                 }
-                env_buffer_load.set_text(
-                    &settings
-                        .environment_variables
-                        .iter()
-                        .map(|(key, value)| format!("{key}={value}"))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                let prompts = settings.prompts.unwrap_or_default();
-                let prompt_values = [
-                    prompts.new_workspace,
-                    prompts.general,
-                    prompts.continue_work,
-                    prompts.summarize_session,
-                    prompts.handoff,
-                    prompts.code_review,
-                    prompts.create_pr,
-                    prompts.fix_errors,
-                    prompts.resolve_merge_conflicts,
-                    prompts.rename_branch,
-                    prompts.commit_generation,
-                    prompts.test_fixing,
-                    prompts.refactor_style,
-                    prompts.setup_script,
-                    prompts.run_script,
-                ];
-                for (buffer, value) in prompt_buffers_load.iter().zip(prompt_values.iter()) {
-                    buffer.set_text(value.as_deref().unwrap_or(""));
-                }
-                customization_buffer_load.set_text(
-                    &customization_settings_to_toml(&settings.customization).unwrap_or_default(),
-                );
-                let source = match inspection.active_file_patterns_source {
-                    FilePatternSource::Worktreeinclude => {
-                        ".worktreeinclude wins; file rules are read-only here."
-                    }
-                    FilePatternSource::RepositorySettings => {
-                        "Repository settings define file copy rules."
-                    }
-                    FilePatternSource::BuiltInDefault => {
-                        "Built-in `.env*` defaults apply until custom rules are saved."
-                    }
-                };
-                settings_result_load.set_text(&format!(
-                    "Loaded {}. Shared={} Local={} Worktreeinclude={} Active files: {} ({})",
-                    repo_path.display(),
-                    inspection.shared_settings_exists,
-                    inspection.local_settings_exists,
-                    inspection.worktreeinclude_exists,
-                    inspection.active_file_patterns.join(", "),
-                    source
-                ));
+                Err(err) => settings_result_load.set_text(&format!("Load failed: {err:#}")),
             }
-            Err(err) => settings_result_load.set_text(&format!("Load failed: {err:#}")),
+            *loading_settings_for_load.borrow_mut() = false;
+        })
+    };
+    load_settings_btn.connect_clicked({
+        let load_selected_settings = load_selected_settings.clone();
+        move |_| load_selected_settings()
+    });
+
+    let load_selected_settings_for_repo = load_selected_settings.clone();
+    let loading_settings_for_repo = loading_settings_for_load.clone();
+    settings_repo_select.connect_changed(move |_| {
+        if !*loading_settings_for_repo.borrow() {
+            load_selected_settings_for_repo();
+        }
+    });
+    let load_selected_settings_for_shared = load_selected_settings.clone();
+    let local_tab_for_shared = local_tab.clone();
+    let loading_settings_for_shared = loading_settings_for_load.clone();
+    shared_tab.connect_toggled(move |button| {
+        if !*loading_settings_for_shared.borrow() && button.is_active() {
+            local_tab_for_shared.set_active(false);
+            load_selected_settings_for_shared();
+        }
+    });
+    let load_selected_settings_for_local = load_selected_settings.clone();
+    let shared_tab_for_local = shared_tab.clone();
+    let loading_settings_for_local = loading_settings_for_load.clone();
+    local_tab.connect_toggled(move |button| {
+        if !*loading_settings_for_local.borrow() && button.is_active() {
+            shared_tab_for_local.set_active(false);
+            load_selected_settings_for_local();
         }
     });
 
+    let autosave = {
+        let save_settings_btn = save_settings_btn.clone();
+        let loading_settings = loading_settings_for_load.clone();
+        Rc::new(move || {
+            if !*loading_settings.borrow() {
+                save_settings_btn.emit_clicked();
+            }
+        })
+    };
+    connect_entry_autosave(&setup_entry, autosave.clone());
+    connect_entry_autosave(&run_entry, autosave.clone());
+    connect_entry_autosave(&archive_entry, autosave.clone());
+    connect_entry_autosave(&test_entry, autosave.clone());
+    connect_entry_autosave(&lint_entry, autosave.clone());
+    connect_entry_autosave(&typecheck_entry, autosave.clone());
+    connect_entry_autosave(&build_entry, autosave.clone());
+    connect_entry_autosave(&run_mode_entry, autosave.clone());
+    connect_check_autosave(&spotlight_check, autosave.clone());
+    connect_check_autosave(&privacy_check, autosave.clone());
+    connect_check_autosave(&archive_on_merge_check, autosave.clone());
+    connect_check_autosave(&delete_branch_check, autosave.clone());
+    connect_check_autosave(&auto_upstream_check, autosave.clone());
+    connect_entry_autosave(&claude_path_entry, autosave.clone());
+    connect_entry_autosave(&codex_path_entry, autosave.clone());
+    connect_entry_autosave(&claude_provider_entry, autosave.clone());
+    connect_entry_autosave(&codex_provider_entry, autosave.clone());
+    connect_entry_autosave(&bedrock_region_entry, autosave.clone());
+    connect_entry_autosave(&vertex_project_entry, autosave.clone());
+    connect_entry_autosave(&default_agent_entry, autosave.clone());
+    connect_entry_autosave(&default_model_entry, autosave.clone());
+    connect_entry_autosave(&branch_prefix_type_entry, autosave.clone());
+    connect_entry_autosave(&branch_prefix_entry, autosave.clone());
+    connect_entry_autosave(&terminal_font_entry, autosave.clone());
+    connect_entry_autosave(&terminal_scrollback_entry, autosave.clone());
+    connect_entry_autosave(&keybindings_entry, autosave.clone());
+    connect_buffer_autosave(&command_presets_view.1, autosave.clone());
+    connect_buffer_autosave(&notifications_view.1, autosave.clone());
+    connect_buffer_autosave(&file_globs_view.1, autosave.clone());
+    connect_buffer_autosave(&env_view.1, autosave.clone());
+    connect_buffer_autosave(&customization_view.1, autosave.clone());
+    for (_, buffer, _) in &prompt_views {
+        connect_buffer_autosave(buffer, autosave.clone());
+    }
+
+    if !selected_repository_name(&settings_repo_select).is_empty() {
+        load_selected_settings();
+    }
+
     let db_path_save_settings = paths.database_path.clone();
     save_settings_btn.connect_clicked(move |_| {
-        let repo_name = settings_repo_entry.text().trim().to_owned();
+        let repo_name = selected_repository_name(&settings_repo_select);
         if repo_name.is_empty() {
             settings_result.set_text("Repository name is required.");
             return;
         }
-        let layer = match layer_select.active_id().as_deref() {
-            Some("local") => SettingsLayer::LocalOverride,
-            _ => SettingsLayer::RepositoryShared,
-        };
+        let layer = selected_settings_layer(&shared_tab, &local_tab);
         let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
             Ok(path) => path,
             Err(err) => {
@@ -825,7 +964,13 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 return;
             }
         };
-        let current_settings = load_repository_settings(&repo_path).unwrap_or_default();
+        let current_settings = match load_repository_settings_for_layer(&repo_path, layer) {
+            Ok(settings) => settings,
+            Err(err) => {
+                settings_result.set_text(&format!("Save failed: {err:#}"));
+                return;
+            }
+        };
         let current_file_globs = current_settings.file_include_globs.clone();
         let mut customization =
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
@@ -873,11 +1018,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         }
         customization.view.terminal_font = optional_entry_text(&terminal_font_entry);
         customization.view.terminal_scrollback = terminal_scrollback;
-        customization.view.transcript_display = current_settings
-            .customization
-            .view
-            .transcript_display
-            .clone();
         customization.view.keybindings = optional_entry_text(&keybindings_entry);
         customization.view.command_palette_presets =
             parse_text_lines(&text_buffer_text(&command_presets_view.1));
@@ -1118,6 +1258,57 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
+}
+
+fn selected_repository_name(select: &ComboBoxText) -> String {
+    select
+        .active_id()
+        .or_else(|| select.active_text())
+        .map(|value| value.to_string())
+        .unwrap_or_default()
+}
+
+fn selected_settings_layer(_shared: &ToggleButton, local: &ToggleButton) -> SettingsLayer {
+    if local.is_active() {
+        SettingsLayer::LocalOverride
+    } else {
+        SettingsLayer::RepositoryShared
+    }
+}
+
+fn refresh_repository_select(
+    select: &ComboBoxText,
+    db_path: &PathBuf,
+    selected_name: Option<&str>,
+) {
+    select.remove_all();
+    if let Ok(store) = RepositoryStore::open(db_path) {
+        if let Ok(repositories) = store.list() {
+            for repository in repositories {
+                select.append(Some(&repository.name), &repository.name);
+            }
+        }
+    }
+    if let Some(name) = selected_name {
+        if select.set_active_id(Some(name)) {
+            return;
+        }
+    }
+    if select.active_id().is_none() {
+        select.set_active(Some(0));
+    }
+}
+
+fn connect_entry_autosave(entry: &Entry, autosave: Rc<dyn Fn()>) {
+    entry.connect_changed(move |_| autosave());
+}
+
+fn connect_check_autosave(check: &CheckButton, autosave: Rc<dyn Fn()>) {
+    check.connect_toggled(move |_| autosave());
+}
+
+fn connect_buffer_autosave(buffer: &gtk::TextBuffer, autosave: Rc<dyn Fn()>) {
+    buffer.connect_changed(move |_| autosave());
 }
 
 fn optional_entry_text(entry: &Entry) -> Option<String> {
