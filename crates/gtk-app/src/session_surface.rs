@@ -1,8 +1,8 @@
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey, GestureClick,
-    Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow,
-    Spinner, TextBuffer, TextView, ToggleButton, Widget,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry, EventControllerKey,
+    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
+    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use linux_archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
@@ -27,6 +27,7 @@ use std::any::Any;
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::f64::consts::TAU;
 use std::fs;
 use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -55,7 +56,9 @@ const DEFAULT_CHAT_TITLE_PREFIX: &str = "New Chat";
 const REVEAL_EXISTING_CHAT_REFRESH_ROWS: bool = false;
 const CONTEXT_WARNING_PERCENT: u8 = 70;
 const CONTEXT_COMPACTION_RISK_PERCENT: u8 = 90;
+#[cfg(test)]
 const CONTEXT_DETAIL_HISTORY_LIMIT: usize = 6;
+#[cfg(test)]
 const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
@@ -130,15 +133,24 @@ fn live_chat_source() -> LiveChatSource {
 struct ContextUsageDisplayState {
     percent_label: String,
     css_class: &'static str,
-    tooltip: String,
 }
 
+#[derive(Clone)]
+struct ContextUsageWidget {
+    container: GBox,
+    donut: DrawingArea,
+    label: Label,
+    percent: Rc<RefCell<Option<u8>>>,
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContextUsageHistoryPoint {
     label: String,
     usage: CodexContextUsage,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContextDetailSummary {
     usage: Option<CodexContextUsage>,
@@ -479,25 +491,12 @@ pub fn agent_session_panel(
     let new_chat_btn = session_secondary_button("New Chat");
     new_chat_btn.set_tooltip_text(Some("Create a new chat thread"));
     let context_usage = context_usage_widget();
-    context_usage.connect_clicked({
-        let database_path = database_path.clone();
-        let selected_thread = selected_thread.clone();
-        let input_view = input_view.clone();
-        move |button| {
-            show_context_details_popover(
-                button,
-                &database_path,
-                *selected_thread.borrow(),
-                &input_view,
-            );
-        }
-    });
     let send_btn = icon_button("send-symbolic", "Send message");
     send_btn.add_css_class("chat-send-btn");
     send_btn.set_tooltip_text(Some("Send message"));
 
     right_group.append(&new_chat_btn);
-    right_group.append(&context_usage);
+    right_group.append(&context_usage.container);
     right_group.append(&send_btn);
 
     toolbar.append(&left_group);
@@ -3163,6 +3162,7 @@ fn latest_context_usage_from_messages(messages: &[ChatMessageRecord]) -> Option<
         .find_map(|message| parse_codex_context_usage_local(&message.content))
 }
 
+#[cfg(test)]
 fn context_detail_summary(
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
@@ -3203,10 +3203,12 @@ fn context_detail_summary(
     }
 }
 
+#[cfg(test)]
 fn stable_token_estimate_from_bytes(bytes: usize) -> u64 {
     (bytes as u64).div_ceil(4)
 }
 
+#[cfg(test)]
 fn context_usage_history(messages: &[ChatMessageRecord]) -> Vec<ContextUsageHistoryPoint> {
     let mut history = messages
         .iter()
@@ -3225,6 +3227,7 @@ fn context_usage_history(messages: &[ChatMessageRecord]) -> Vec<ContextUsageHist
     history
 }
 
+#[cfg(test)]
 fn context_recent_growth_label(history: &[ContextUsageHistoryPoint]) -> String {
     let Some(latest) = history.last() else {
         return "No prior context reports.".to_owned();
@@ -3250,6 +3253,7 @@ fn context_recent_growth_label(history: &[ContextUsageHistoryPoint]) -> String {
     }
 }
 
+#[cfg(test)]
 fn signed_token_delta(delta: i64) -> String {
     if delta >= 0 {
         format!("+{}", format_token_count(delta as u64))
@@ -3258,6 +3262,7 @@ fn signed_token_delta(delta: i64) -> String {
     }
 }
 
+#[cfg(test)]
 fn context_compaction_events(
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
@@ -3291,6 +3296,7 @@ fn context_compaction_events(
     detections
 }
 
+#[cfg(test)]
 fn is_compaction_like_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("compaction")
@@ -3301,6 +3307,7 @@ fn is_compaction_like_text(text: &str) -> bool {
         || lower.contains("summary instead of the full thread")
 }
 
+#[cfg(test)]
 fn first_non_empty_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
@@ -3311,6 +3318,7 @@ fn first_non_empty_line(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn context_top_contributors(
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
@@ -3350,6 +3358,7 @@ fn context_top_contributors(
         .collect()
 }
 
+#[cfg(test)]
 fn format_context_detail_summary(summary: &ContextDetailSummary) -> String {
     let context_line = match summary.usage {
         Some(usage) => format!(
@@ -3420,6 +3429,7 @@ fn format_context_detail_summary(summary: &ContextDetailSummary) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn context_risk_label(usage: CodexContextUsage) -> &'static str {
     if usage.percent < CONTEXT_WARNING_PERCENT {
         "normal"
@@ -3430,6 +3440,7 @@ fn context_risk_label(usage: CodexContextUsage) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn context_usage_token_label(usage: CodexContextUsage) -> String {
     match (usage.used_tokens, usage.max_tokens) {
         (Some(used), Some(max)) => format!(
@@ -3441,93 +3452,9 @@ fn context_usage_token_label(usage: CodexContextUsage) -> String {
     }
 }
 
+#[cfg(test)]
 fn context_usage_percent_suffix(usage: CodexContextUsage) -> String {
     format!(" ({}%)", usage.percent)
-}
-
-fn load_context_detail_summary(
-    db_path: &Path,
-    thread_id: Option<i64>,
-) -> anyhow::Result<ContextDetailSummary> {
-    let Some(thread_id) = thread_id else {
-        anyhow::bail!("No chat thread selected");
-    };
-    let store = WorkspaceStore::open(db_path)?;
-    let messages = store.list_chat_messages(thread_id)?;
-    let events = store.list_chat_events(thread_id)?;
-    Ok(context_detail_summary(&messages, &events))
-}
-
-fn show_context_details_popover(
-    anchor: &Button,
-    db_path: &Path,
-    thread_id: Option<i64>,
-    input_view: &TextView,
-) {
-    let summary_text = load_context_detail_summary(db_path, thread_id)
-        .map(|summary| format_context_detail_summary(&summary))
-        .unwrap_or_else(|err| format!("Context details unavailable: {err:#}"));
-
-    let popover = Popover::new();
-    popover.set_has_arrow(true);
-    popover.set_parent(anchor);
-
-    let body = GBox::new(Orientation::Vertical, 8);
-    body.add_css_class("chat-context-details");
-
-    let title = Label::new(Some("Context Details"));
-    title.add_css_class("chat-inline-event-title");
-    title.set_xalign(0.0);
-    body.append(&title);
-
-    let detail = Label::new(Some(&summary_text));
-    detail.add_css_class("chat-agent-text");
-    detail.set_selectable(true);
-    detail.set_wrap(true);
-    detail.set_xalign(0.0);
-    body.append(&detail);
-
-    let actions = GBox::new(Orientation::Horizontal, 8);
-    let summarize = session_secondary_button("Summarize");
-    summarize.connect_clicked({
-        let input_view = input_view.clone();
-        move |_| {
-            input_view.buffer().set_text(
-                "Summarize this thread with decisions, changed files, open risks, and next steps.",
-            );
-            input_view.grab_focus();
-        }
-    });
-    let handoff = session_secondary_button("Handoff");
-    handoff.connect_clicked({
-        let input_view = input_view.clone();
-        let summary_text = summary_text.clone();
-        move |_| {
-            input_view.buffer().set_text(&format!(
-                "Create a compact handoff for the next agent. Include goal, current branch, completed work, verification, blockers, and next steps.\n\nCurrent context details:\n{summary_text}"
-            ));
-            input_view.grab_focus();
-        }
-    });
-    let copy = session_secondary_button("Copy");
-    copy.connect_clicked({
-        let summary_text = summary_text.clone();
-        move |_| {
-            if let Some(display) = gtk::gdk::Display::default() {
-                display.clipboard().set_text(&summary_text);
-            }
-        }
-    });
-    actions.append(&summarize);
-    actions.append(&handoff);
-    actions.append(&copy);
-    body.append(&actions);
-
-    popover.set_child(Some(&body));
-    popover.connect_closed(|popover| {
-        popover.unparent();
-    });
-    popover.popup();
 }
 
 fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsageDisplayState {
@@ -3535,9 +3462,9 @@ fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsage
         return ContextUsageDisplayState {
             percent_label: "--".to_owned(),
             css_class: "chat-context-usage-empty",
-            tooltip: "Context usage unknown. Click for details.".to_owned(),
         };
     };
+    let remaining = CONTEXT_COMPACTION_RISK_PERCENT.saturating_sub(usage.percent);
     let css_class = if usage.percent < CONTEXT_WARNING_PERCENT {
         "chat-context-usage-normal"
     } else if usage.percent < CONTEXT_COMPACTION_RISK_PERCENT {
@@ -3545,27 +3472,13 @@ fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsage
     } else {
         "chat-context-usage-danger"
     };
-    let tooltip = match (usage.used_tokens, usage.max_tokens) {
-        (Some(used), Some(max)) => format!(
-            "Context usage: {} / {} tokens ({}%). Warn at {}%, compaction risk at {}%. Click for details.",
-            format_token_count(used),
-            format_token_count(max),
-            usage.percent,
-            CONTEXT_WARNING_PERCENT,
-            CONTEXT_COMPACTION_RISK_PERCENT
-        ),
-        _ => format!(
-            "Context usage: {}%. Warn at {}%, compaction risk at {}%. Click for details.",
-            usage.percent, CONTEXT_WARNING_PERCENT, CONTEXT_COMPACTION_RISK_PERCENT
-        ),
-    };
     ContextUsageDisplayState {
-        percent_label: format!("{}%", usage.percent),
+        percent_label: format!("{remaining}%"),
         css_class,
-        tooltip,
     }
 }
 
+#[cfg(test)]
 fn format_token_count(value: u64) -> String {
     let raw = value.to_string();
     let mut out = String::new();
@@ -3578,27 +3491,100 @@ fn format_token_count(value: u64) -> String {
     out.chars().rev().collect()
 }
 
-fn context_usage_widget() -> Button {
-    let button = Button::with_label("--");
-    button.add_css_class("chat-context-usage");
-    button.set_tooltip_text(Some("Context usage unknown. Click for details."));
-    apply_context_usage_state(&button, None);
-    button
+fn context_usage_widget() -> ContextUsageWidget {
+    let container = GBox::new(Orientation::Horizontal, 6);
+    container.add_css_class("chat-context-usage");
+    container.set_valign(Align::Center);
+    container.set_halign(Align::Center);
+    container.set_can_target(false);
+
+    let percent = Rc::new(RefCell::new(None));
+    let donut = DrawingArea::new();
+    donut.add_css_class("chat-context-usage-donut");
+    donut.set_content_width(18);
+    donut.set_content_height(18);
+    donut.set_can_target(false);
+    donut.set_draw_func({
+        let percent = percent.clone();
+        move |_, cr, width, height| {
+            draw_context_usage_donut(cr, width, height, *percent.borrow());
+        }
+    });
+
+    let label = Label::new(Some("--"));
+    label.add_css_class("chat-context-usage-label");
+    label.set_can_target(false);
+
+    container.append(&donut);
+    container.append(&label);
+
+    let widget = ContextUsageWidget {
+        container,
+        donut,
+        label,
+        percent,
+    };
+    apply_context_usage_state(&widget, None);
+    widget
 }
 
-fn apply_context_usage_state(button: &Button, usage: Option<CodexContextUsage>) {
+fn draw_context_usage_donut(
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    percent: Option<u8>,
+) {
+    let size = f64::from(width.min(height));
+    if size <= 0.0 {
+        return;
+    }
+    let center_x = f64::from(width) / 2.0;
+    let center_y = f64::from(height) / 2.0;
+    let radius = (size / 2.0 - 2.0).max(1.0);
+    cr.set_line_width(3.0);
+    cr.set_source_rgba(0.22, 0.22, 0.22, 1.0);
+    cr.arc(center_x, center_y, radius, 0.0, TAU);
+    let _ = cr.stroke();
+
+    let Some(percent) = percent else {
+        return;
+    };
+    let progress = f64::from(percent.min(CONTEXT_COMPACTION_RISK_PERCENT))
+        / f64::from(CONTEXT_COMPACTION_RISK_PERCENT);
+    if progress <= 0.0 {
+        return;
+    }
+    let (red, green, blue) = context_usage_donut_color(percent);
+    cr.set_source_rgba(red, green, blue, 1.0);
+    let start = -TAU / 4.0;
+    cr.arc(center_x, center_y, radius, start, start + progress * TAU);
+    let _ = cr.stroke();
+}
+
+fn context_usage_donut_color(percent: u8) -> (f64, f64, f64) {
+    if percent < CONTEXT_WARNING_PERCENT {
+        (0.64, 0.64, 0.64)
+    } else if percent < CONTEXT_COMPACTION_RISK_PERCENT {
+        (0.96, 0.62, 0.04)
+    } else {
+        (0.94, 0.27, 0.27)
+    }
+}
+
+fn apply_context_usage_state(widget: &ContextUsageWidget, usage: Option<CodexContextUsage>) {
     for class in [
         "chat-context-usage-normal",
         "chat-context-usage-warning",
         "chat-context-usage-danger",
         "chat-context-usage-empty",
     ] {
-        button.remove_css_class(class);
+        widget.container.remove_css_class(class);
     }
     let state = context_usage_display_state(usage);
-    button.set_label(&state.percent_label);
-    button.set_tooltip_text(Some(&state.tooltip));
-    button.add_css_class(state.css_class);
+    widget.label.set_label(&state.percent_label);
+    *widget.percent.borrow_mut() = usage.map(|usage| usage.percent);
+    widget.donut.queue_draw();
+    widget.container.add_css_class(state.css_class);
 }
 
 fn session_kind_name(kind: SessionKind) -> &'static str {
@@ -7228,39 +7214,34 @@ fix it
     }
 
     #[test]
-    fn context_usage_display_state_maps_percent_and_tooltips() {
+    fn context_usage_display_state_maps_remaining_context_and_thresholds() {
         let empty = context_usage_display_state(None);
         assert_eq!(empty.percent_label, "--");
         assert_eq!(empty.css_class, "chat-context-usage-empty");
-        assert_eq!(empty.tooltip, "Context usage unknown. Click for details.");
 
         let normal = context_usage_display_state(Some(CodexContextUsage {
             used_tokens: Some(68_000),
             max_tokens: Some(100_000),
             percent: 68,
         }));
-        assert_eq!(normal.percent_label, "68%");
+        assert_eq!(normal.percent_label, "22%");
         assert_eq!(normal.css_class, "chat-context-usage-normal");
-        assert!(normal.tooltip.contains("68,000 / 100,000 tokens"));
 
-        assert_eq!(
-            context_usage_display_state(Some(CodexContextUsage {
-                used_tokens: None,
-                max_tokens: None,
-                percent: 70,
-            }))
-            .css_class,
-            "chat-context-usage-warning"
-        );
-        assert_eq!(
-            context_usage_display_state(Some(CodexContextUsage {
-                used_tokens: None,
-                max_tokens: None,
-                percent: 90,
-            }))
-            .css_class,
-            "chat-context-usage-danger"
-        );
+        let warning = context_usage_display_state(Some(CodexContextUsage {
+            used_tokens: None,
+            max_tokens: None,
+            percent: 70,
+        }));
+        assert_eq!(warning.percent_label, "20%");
+        assert_eq!(warning.css_class, "chat-context-usage-warning");
+
+        let danger = context_usage_display_state(Some(CodexContextUsage {
+            used_tokens: None,
+            max_tokens: None,
+            percent: 90,
+        }));
+        assert_eq!(danger.percent_label, "0%");
+        assert_eq!(danger.css_class, "chat-context-usage-danger");
     }
 
     #[test]

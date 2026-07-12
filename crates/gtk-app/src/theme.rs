@@ -2129,15 +2129,19 @@ popover.context-menu-popover arrow {
     padding: 0 6px;
 }
 .chat-context-usage {
-    border: 1px solid #333333;
+    border: 1px solid #2b2b2b;
     border-radius: 8px;
+    background-color: #181818;
     color: #a6a6a6;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     font-weight: 700;
-    min-width: 44px;
+    min-width: 60px;
     min-height: 28px;
     padding: 0 6px;
+}
+.chat-context-usage-label {
+    color: inherit;
 }
 .chat-context-usage-empty {
     background-color: transparent;
