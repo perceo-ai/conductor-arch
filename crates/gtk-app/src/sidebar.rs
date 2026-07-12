@@ -20,6 +20,7 @@ use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
+use crate::toast::{surface_label_error, ToastManager};
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
@@ -30,6 +31,7 @@ pub(crate) fn build_app_sidebar(
     debug_mode: bool,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let app_state = app_state.clone();
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
@@ -170,6 +172,7 @@ pub(crate) fn build_app_sidebar(
         let hub_hdr = refresh_hub.clone();
         let rw_hdr = refresh_workspace.clone();
         let rvp_hdr = refresh_view_preferences.clone();
+        let toast_hdr = toast_manager.clone();
         add_workspace_btn.connect_clicked(move |button| {
             show_project_creation_popover(
                 button,
@@ -185,6 +188,7 @@ pub(crate) fn build_app_sidebar(
                         rvp_hdr();
                     }
                 }),
+                toast_hdr.clone(),
             );
         });
     }
@@ -235,6 +239,7 @@ pub(crate) fn build_app_sidebar(
         let sync_nav_buttons = sync_nav_buttons.clone();
         let db_path_populate = db_path_populate.clone();
         let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+        let toast_populate = toast_manager.clone();
         move || {
             sync_nav_buttons();
             while let Some(child) = list.first_child() {
@@ -290,6 +295,7 @@ pub(crate) fn build_app_sidebar(
                         let stack = stack.clone();
                         let repo_name = repo_name.clone();
                         let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+                        let toast_create = toast_populate.clone();
                         move |add_btn: Button| {
                             if !pending_workspace_creates
                                 .borrow_mut()
@@ -306,6 +312,7 @@ pub(crate) fn build_app_sidebar(
                             let stack = stack.clone();
                             let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
                             let repo_name_for_callback = repo_name.clone();
+                            let toast_create = toast_create.clone();
                             spawn_background_job(
                                 {
                                     let db_path = db_path.clone();
@@ -327,26 +334,30 @@ pub(crate) fn build_app_sidebar(
                                         .remove(&repo_name_for_callback);
                                     add_btn.set_sensitive(true);
                                     add_btn.set_tooltip_text(Some("Create workspace"));
-                                    if let Ok(workspace) = result {
-                                        let default_tab = WorkspaceStore::open(
-                                            app_state.workspace_database_path(),
-                                        )
-                                        .and_then(|store| {
-                                            store.workspace_view_defaults(&workspace.name)
-                                        })
-                                        .ok()
-                                        .and_then(|defaults| defaults.default_visible_tab)
-                                        .and_then(|tab| WorkspaceTab::from_config(&tab));
-                                        app_state.navigate_to_workspace_with_default_tab(
-                                            Some(workspace.name),
-                                            default_tab,
-                                        );
-                                        stack.set_visible_child_name("workspace");
-                                        refresh_hub.refresh(RefreshScope::Projects);
-                                        refresh_hub.refresh(RefreshScope::Sidebar);
-                                        refresh_hub.refresh(RefreshScope::Dashboard);
-                                        refresh_workspace();
-                                        refresh_view_preferences();
+                                    match result {
+                                        Ok(workspace) => {
+                                            let default_tab = WorkspaceStore::open(
+                                                app_state.workspace_database_path(),
+                                            )
+                                            .and_then(|store| {
+                                                store.workspace_view_defaults(&workspace.name)
+                                            })
+                                            .ok()
+                                            .and_then(|defaults| defaults.default_visible_tab)
+                                            .and_then(|tab| WorkspaceTab::from_config(&tab));
+                                            app_state.navigate_to_workspace_with_default_tab(
+                                                Some(workspace.name),
+                                                default_tab,
+                                            );
+                                            stack.set_visible_child_name("workspace");
+                                            refresh_hub.refresh(RefreshScope::Projects);
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            refresh_hub.refresh(RefreshScope::Dashboard);
+                                            refresh_workspace();
+                                            refresh_view_preferences();
+                                        }
+                                        Err(err) => toast_create
+                                            .error(format!("Create workspace failed: {err:#}")),
                                     }
                                 },
                             );
@@ -382,6 +393,7 @@ pub(crate) fn build_app_sidebar(
                                 refresh_hub.clone(),
                                 refresh_workspace.clone(),
                                 refresh_view_preferences.clone(),
+                                toast_populate.clone(),
                             );
                             names.borrow_mut().insert(row_idx, ws.name.clone());
                         }
@@ -472,6 +484,7 @@ pub(crate) fn build_app_sidebar(
         let hub_bar = refresh_hub.clone();
         let rw_bar = refresh_workspace.clone();
         let rvp_bar = refresh_view_preferences.clone();
+        let toast_bar = toast_manager.clone();
         add_repo_btn.connect_clicked(move |button| {
             show_project_creation_popover(
                 button,
@@ -487,6 +500,7 @@ pub(crate) fn build_app_sidebar(
                         rvp_bar();
                     }
                 }),
+                toast_bar.clone(),
             );
         });
     }
@@ -731,6 +745,7 @@ fn attach_workspace_row_context_menu(
     refresh_hub: RefreshHub,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) {
     let popover = Popover::new();
     popover.add_css_class("context-menu-popover");
@@ -747,6 +762,7 @@ fn attach_workspace_row_context_menu(
         let refresh_view_preferences = refresh_view_preferences.clone();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
+        let toast_manager = toast_manager.clone();
         rename_btn.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -760,6 +776,7 @@ fn attach_workspace_row_context_menu(
                 "Workspace name",
                 &workspace_name,
                 "Rename",
+                toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
                     let state = state.clone();
@@ -795,6 +812,7 @@ fn attach_workspace_row_context_menu(
         let stack = stack.clone();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
+        let toast_manager = toast_manager.clone();
         duplicate_btn.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -808,6 +826,7 @@ fn attach_workspace_row_context_menu(
                 "New workspace name",
                 "",
                 "Duplicate",
+                toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
                     let refresh_hub = refresh_hub.clone();
@@ -816,6 +835,7 @@ fn attach_workspace_row_context_menu(
                     let state = state.clone();
                     let stack = stack.clone();
                     let window = window.clone();
+                    let toast_manager = toast_manager.clone();
                     move |new_name| {
                         if new_name.is_empty() {
                             return Ok(());
@@ -826,6 +846,7 @@ fn attach_workspace_row_context_menu(
                         let state = state.clone();
                         let stack = stack.clone();
                         let window = window.clone();
+                        let toast_manager = toast_manager.clone();
                         spawn_background_job(
                             {
                                 let db_path = state.workspace_database_path().to_path_buf();
@@ -852,6 +873,7 @@ fn attach_workspace_row_context_menu(
                                         &window,
                                         "Workspace action failed",
                                         &err,
+                                        &toast_manager,
                                     );
                                 }
                             },
@@ -879,6 +901,7 @@ fn attach_workspace_row_context_menu(
         let row = row.downgrade();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
+        let toast_manager = toast_manager.clone();
         item.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -906,6 +929,7 @@ fn attach_workspace_row_context_menu(
                 &message,
                 label,
                 destructive,
+                toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
                     let refresh_hub = refresh_hub.clone();
@@ -915,6 +939,7 @@ fn attach_workspace_row_context_menu(
                     let stack = stack.clone();
                     let row = row.clone();
                     let window = window.clone();
+                    let toast_manager = toast_manager.clone();
                     move || {
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
@@ -924,6 +949,7 @@ fn attach_workspace_row_context_menu(
                         let row = row.clone();
                         let workspace_name = workspace_name.clone();
                         let window = window.clone();
+                        let toast_manager = toast_manager.clone();
                         spawn_background_job(
                             {
                                 let db_path = state.workspace_database_path().to_path_buf();
@@ -974,6 +1000,7 @@ fn attach_workspace_row_context_menu(
                                                 &window,
                                                 "Workspace action failed",
                                                 &format!("{err:#}"),
+                                                &toast_manager,
                                             );
                                 }
                             },
@@ -1106,6 +1133,7 @@ fn show_workspace_text_dialog(
     placeholder: &str,
     initial: &str,
     action_label: &str,
+    toast_manager: ToastManager,
     on_submit: Rc<dyn Fn(String) -> Result<(), String>>,
 ) {
     let dialog = gtk::Window::builder()
@@ -1148,10 +1176,11 @@ fn show_workspace_text_dialog(
         let dialog = dialog.clone();
         let entry = entry.clone();
         let error_label = error_label.clone();
+        let toast_manager = toast_manager.clone();
         action_btn.connect_clicked(move |_| match on_submit(entry.text().trim().to_owned()) {
             Ok(()) => dialog.close(),
             Err(message) => {
-                error_label.set_text(&message);
+                surface_label_error(&error_label, &toast_manager, message);
                 error_label.set_visible(true);
             }
         });
@@ -1171,6 +1200,7 @@ fn show_workspace_confirm_dialog(
     message: &str,
     action_label: &str,
     destructive: bool,
+    toast_manager: ToastManager,
     on_confirm: Rc<dyn Fn() -> Result<(), String>>,
 ) {
     let dialog = gtk::Window::builder()
@@ -1215,10 +1245,11 @@ fn show_workspace_confirm_dialog(
     {
         let dialog = dialog.clone();
         let error_label = error_label.clone();
+        let toast_manager = toast_manager.clone();
         action_btn.connect_clicked(move |_| match on_confirm() {
             Ok(()) => dialog.close(),
             Err(message) => {
-                error_label.set_text(&message);
+                surface_label_error(&error_label, &toast_manager, message);
                 error_label.set_visible(true);
             }
         });
@@ -1231,7 +1262,13 @@ fn show_workspace_confirm_dialog(
     dialog.present();
 }
 
-fn show_workspace_error_dialog(window: &ApplicationWindow, title: &str, message: &str) {
+fn show_workspace_error_dialog(
+    window: &ApplicationWindow,
+    title: &str,
+    message: &str,
+    toast_manager: &ToastManager,
+) {
+    toast_manager.error(message.to_owned());
     let dialog = gtk::Window::builder()
         .title(title)
         .modal(true)

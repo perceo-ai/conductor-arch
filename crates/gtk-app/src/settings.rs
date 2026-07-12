@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::toast::{surface_label_error, ToastManager};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SettingsSection {
     id: &'static str,
@@ -25,7 +27,10 @@ struct SettingsSection {
     description: &'static str,
 }
 
-pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone + 'static) {
+pub(crate) fn build_settings_page(
+    paths: &AppPaths,
+    toast_manager: ToastManager,
+) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
@@ -529,10 +534,15 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let db_path_init_settings = paths.database_path.clone();
     let settings_repo_select_init = settings_repo_select.clone();
     let settings_result_init = settings_result.clone();
+    let toast_init = toast_manager.clone();
     init_settings_btn.connect_clicked(move |_| {
         let repo_name = selected_repository_name(&settings_repo_select_init);
         if repo_name.is_empty() {
-            settings_result_init.set_text("Repository name is required.");
+            surface_label_error(
+                &settings_result_init,
+                &toast_init,
+                "Repository name is required.",
+            );
             return;
         }
         match repository_root(&db_path_init_settings, &repo_name).and_then(|repo_path| {
@@ -565,7 +575,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     Some(&repo_name),
                 );
             }
-            Err(err) => settings_result_init.set_text(&format!("Initialize failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &settings_result_init,
+                &toast_init,
+                format!("Initialize failed: {err:#}"),
+            ),
         }
     });
 
@@ -613,6 +627,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         .iter()
         .map(|(_, buffer, _)| buffer.clone())
         .collect::<Vec<_>>();
+    let toast_load = toast_manager.clone();
     let load_selected_settings = {
         let db_path_load_settings = db_path_load_settings.clone();
         let settings_repo_select_load = settings_repo_select_load.clone();
@@ -655,10 +670,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         let env_buffer_load = env_buffer_load.clone();
         let customization_buffer_load = customization_buffer_load.clone();
         let prompt_buffers_load = prompt_buffers_load.clone();
+        let toast_load = toast_load.clone();
         Rc::new(move || {
             let repo_name = selected_repository_name(&settings_repo_select_load);
             if repo_name.is_empty() {
-                settings_result_load.set_text("Select a repository.");
+                surface_label_error(&settings_result_load, &toast_load, "Select a repository.");
                 *loaded_settings_target_load.borrow_mut() = None;
                 return;
             }
@@ -888,7 +904,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                             source
                         ));
                 }
-                Err(err) => settings_result_load.set_text(&format!("Load failed: {err:#}")),
+                Err(err) => surface_label_error(
+                    &settings_result_load,
+                    &toast_load,
+                    format!("Load failed: {err:#}"),
+                ),
             }
             *loading_settings_for_load.borrow_mut() = false;
         })
@@ -1051,6 +1071,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let forced_save_target_for_save = forced_save_target.clone();
     let loaded_settings_target_for_save = loaded_settings_target.clone();
     let bool_edits_for_save = bool_edits.clone();
+    let toast_save = toast_manager.clone();
     save_settings_btn.connect_clicked(move |_| {
         let save_target = forced_save_target_for_save
             .borrow_mut()
@@ -1063,20 +1084,32 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             )
         });
         if repo_name.is_empty() {
-            settings_result.set_text("Repository name is required.");
+            surface_label_error(
+                &settings_result,
+                &toast_save,
+                "Repository name is required.",
+            );
             return;
         }
         let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
             Ok(path) => path,
             Err(err) => {
-                settings_result.set_text(&format!("Save failed: {err:#}"));
+                surface_label_error(
+                    &settings_result,
+                    &toast_save,
+                    format!("Save failed: {err:#}"),
+                );
                 return;
             }
         };
         let current_settings = match load_repository_settings_for_layer(&repo_path, layer) {
             Ok(settings) => settings,
             Err(err) => {
-                settings_result.set_text(&format!("Save failed: {err:#}"));
+                surface_label_error(
+                    &settings_result,
+                    &toast_save,
+                    format!("Save failed: {err:#}"),
+                );
                 return;
             }
         };
@@ -1085,8 +1118,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
                 Err(err) => {
-                    settings_result
-                        .set_text(&format!("Save failed: customization TOML invalid: {err:#}"));
+                    surface_label_error(
+                        &settings_result,
+                        &toast_save,
+                        format!("Save failed: customization TOML invalid: {err:#}"),
+                    );
                     return;
                 }
             };
@@ -1094,9 +1130,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             Some(value) => match value.parse::<u32>() {
                 Ok(parsed) => Some(parsed),
                 Err(err) => {
-                    settings_result.set_text(&format!(
-                        "Save failed: terminal scrollback must be a number: {err}"
-                    ));
+                    surface_label_error(
+                        &settings_result,
+                        &toast_save,
+                        format!("Save failed: terminal scrollback must be a number: {err}"),
+                    );
                     return;
                 }
             },
@@ -1228,7 +1266,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 bool_edits_for_save.borrow_mut().clear();
                 settings_result.set_text(&format!("Saved settings for {}", repo_path.display()))
             }
-            Err(err) => settings_result.set_text(&format!("Save failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &settings_result,
+                &toast_save,
+                format!("Save failed: {err:#}"),
+            ),
         }
     });
 

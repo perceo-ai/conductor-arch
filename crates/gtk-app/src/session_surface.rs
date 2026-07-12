@@ -47,6 +47,7 @@ use crate::buttons::{
 use crate::motion::{append_revealed, clear_box};
 use crate::state::AppState;
 use crate::terminal::terminal_display_text;
+use crate::toast::ToastManager;
 
 const SESSION_SCROLLBACK_LINES: usize = 2_000;
 const SESSION_TAIL_HISTORY: usize = 120;
@@ -189,6 +190,7 @@ pub fn agent_session_panel(
     include_header: bool,
     setup_readiness: Option<Rc<RefCell<SetupReadiness>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
+    toast_manager: ToastManager,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("chat-surface");
@@ -555,6 +557,7 @@ pub fn agent_session_panel(
         let update_composer_for_view = update_composer_state.clone();
         let external_chat_tabs = external_chat_tabs.clone();
         let context_usage = context_usage.clone();
+        let toast_manager = toast_manager.clone();
         Rc::new(move || {
             debug!(workspace = %workspace, "chat refresh_view start");
             let (loaded, loaded_threads) = match WorkspaceStore::open(database_path.clone())
@@ -569,8 +572,9 @@ pub fn agent_session_panel(
                     clear_box(&thread_row);
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
-                    let label =
-                        Label::new(Some(&session_refresh_error_text("load sessions", &err)));
+                    let message = session_refresh_error_text("load sessions", &err);
+                    toast_manager.error(message.clone());
+                    let label = Label::new(Some(&message));
                     label.add_css_class("chat-agent-text");
                     label.set_selectable(true);
                     label.set_wrap(true);
@@ -621,6 +625,7 @@ pub fn agent_session_panel(
                             selected_thread_id,
                             codex_ready.as_ref(),
                             update_composer_for_view.as_ref(),
+                            &toast_manager,
                         );
                         archcar_changed = true;
                     }
@@ -637,6 +642,7 @@ pub fn agent_session_panel(
                             working_threads.as_ref(),
                             codex_ready.as_ref(),
                             update_composer_for_view.as_ref(),
+                            &toast_manager,
                         );
                     }
                     AsyncArchcarMessage::BridgeError { message } => {
@@ -644,6 +650,7 @@ pub fn agent_session_panel(
                             bridge_error_state.borrow_mut().record(&message)
                         {
                             warn!(workspace = %workspace, error = %visible_message, "archcar bridge error");
+                            toast_manager.error(visible_message.clone());
                             if current_kind == SessionKind::Codex {
                                 if let Some(thread_id) = selected_thread_id {
                                     apply_codex_startup_signal(
@@ -880,10 +887,10 @@ pub fn agent_session_panel(
                                 Ok(timeline) => timeline,
                                 Err(err) => {
                                     error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
-                                    let label = Label::new(Some(&session_refresh_error_text(
-                                        "load chat timeline",
-                                        &err,
-                                    )));
+                                    let message =
+                                        session_refresh_error_text("load chat timeline", &err);
+                                    toast_manager.error(message.clone());
+                                    let label = Label::new(Some(&message));
                                     label.add_css_class("chat-agent-text");
                                     label.set_selectable(true);
                                     label.set_wrap(true);
@@ -1070,6 +1077,7 @@ pub fn agent_session_panel(
     let codex_startup_states_for_send = codex_startup_states.clone();
     let update_composer_for_send = update_composer_state.clone();
     let setup_readiness_for_send = setup_readiness.clone();
+    let toast_for_send = toast_manager.clone();
     let send_text = Rc::new(move |text: String, staged_review: bool| {
         let command = text.trim().to_owned();
         if command.is_empty() {
@@ -1107,6 +1115,7 @@ pub fn agent_session_panel(
         if let Some(message) =
             selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
         {
+            toast_for_send.error(message.clone());
             let error = Label::new(Some(&message));
             error.add_css_class("chat-agent-text");
             error.set_selectable(true);
@@ -1168,7 +1177,9 @@ pub fn agent_session_panel(
                 thread_id
             }
             Err(err) => {
-                let error = Label::new(Some(&format!("[chat thread] {err:#}")));
+                let message = format!("[chat thread] {err:#}");
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
                 error.add_css_class("chat-agent-text");
                 error.set_selectable(true);
                 error.set_wrap(true);
@@ -1188,7 +1199,9 @@ pub fn agent_session_panel(
         {
             Ok(thread) => thread,
             Err(err) => {
-                let error = Label::new(Some(&format!("[chat thread] {err:#}")));
+                let message = format!("[chat thread] {err:#}");
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
                 error.add_css_class("chat-agent-text");
                 error.set_selectable(true);
                 error.set_wrap(true);
@@ -1490,6 +1503,7 @@ pub fn agent_session_panel(
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
         let update_composer_for_switch = update_composer_state.clone();
+        let toast_for_switch = toast_manager.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let (records, threads) =
                 match WorkspaceStore::open(db_for_switch.clone()).map(|store| {
@@ -1504,7 +1518,9 @@ pub fn agent_session_panel(
                 }) {
                     Ok(result) => result,
                     Err(err) => {
-                        let error = Label::new(Some(&format!("[session switch] {err:#}")));
+                        let message = format!("[session switch] {err:#}");
+                        toast_for_switch.error(message.clone());
+                        let error = Label::new(Some(&message));
                         error.add_css_class("chat-agent-text");
                         error.set_selectable(true);
                         error.set_wrap(true);
@@ -1661,9 +1677,11 @@ pub fn agent_session_panel(
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
         let setup_readiness = setup_readiness.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             let kind = *selected_harness.borrow();
-            if selected_provider_blocker_after_refresh(kind, &setup_readiness).is_some() {
+            if let Some(message) = selected_provider_blocker_after_refresh(kind, &setup_readiness) {
+                toast_manager.error(message);
                 error!(workspace = %workspace_name, harness = ?kind, "refusing to create chat for unready provider");
                 return;
             }
@@ -1687,6 +1705,7 @@ pub fn agent_session_panel(
                     refresh_view();
                 }
                 Err(err) => {
+                    toast_manager.error(format!("Create chat thread failed: {err:#}"));
                     error!(workspace = %workspace_name, error = %err, "failed to create chat thread");
                 }
             }
@@ -5220,6 +5239,7 @@ fn handle_archcar_event(
     selected_thread_id: Option<i64>,
     codex_ready: &RefCell<bool>,
     update_composer_state: &dyn Fn(),
+    toast_manager: &ToastManager,
 ) {
     match event {
         ArchcarEvent::SessionSpawnQueued { workspace, kind } => {
@@ -5300,6 +5320,7 @@ fn handle_archcar_event(
                 selected_harness,
                 selected_thread_id,
             ) {
+                toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
                     CodexStartupSignal::Error {
@@ -5324,6 +5345,7 @@ fn handle_archcar_response(
     working_threads: &RefCell<HashMap<i64, Instant>>,
     codex_ready: &RefCell<bool>,
     update_composer_state: &dyn Fn(),
+    toast_manager: &ToastManager,
 ) -> bool {
     let mut changed = false;
     let Some(action) = inflight_actions.borrow_mut().remove(&response.token) else {
@@ -5348,12 +5370,11 @@ fn handle_archcar_response(
             Ok(other) => {
                 warn!(%workspace, token = response.token, ?other, "unexpected archcar ensure response");
                 if let Some(thread_id) = thread_id {
+                    let message = format!("Unexpected archcar ensure response: {other:?}");
+                    toast_manager.error(message.clone());
                     apply_codex_startup_signal(
                         &mut startup_states.borrow_mut(),
-                        CodexStartupSignal::Error {
-                            thread_id,
-                            message: format!("Unexpected archcar ensure response: {other:?}"),
-                        },
+                        CodexStartupSignal::Error { thread_id, message },
                     );
                     clear_thread_working(working_threads, thread_id);
                 }
@@ -5362,6 +5383,7 @@ fn handle_archcar_response(
             Err(err) => {
                 warn!(%workspace, token = response.token, error = %err, "archcar ensure failed");
                 if let Some(thread_id) = thread_id {
+                    toast_manager.error(err.clone());
                     apply_codex_startup_signal(
                         &mut startup_states.borrow_mut(),
                         CodexStartupSignal::Error {
@@ -5386,12 +5408,11 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, control = %command, ?other, "unexpected archcar control response");
                 queue_thread_command(pending_commands, thread_id, command);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar control response: {other:?}");
+                toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
-                    CodexStartupSignal::Error {
-                        thread_id,
-                        message: format!("Unexpected archcar control response: {other:?}"),
-                    },
+                    CodexStartupSignal::Error { thread_id, message },
                 );
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
@@ -5406,6 +5427,7 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, control = %command, error = %err, "archcar control send failed");
                 queue_thread_command(pending_commands, thread_id, command);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
                     CodexStartupSignal::Error {
@@ -5442,12 +5464,11 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, kind = ?kind, ?other, "unexpected archcar input response");
                 queue_archcar_input(pending_inputs, thread_id, input, kind);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar input response: {other:?}");
+                toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
-                    CodexStartupSignal::Error {
-                        thread_id,
-                        message: format!("Unexpected archcar input response: {other:?}"),
-                    },
+                    CodexStartupSignal::Error { thread_id, message },
                 );
                 clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
@@ -5463,6 +5484,7 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, kind = ?kind, error = %err, "archcar input send failed");
                 queue_archcar_input(pending_inputs, thread_id, input, kind);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
                     CodexStartupSignal::Error {

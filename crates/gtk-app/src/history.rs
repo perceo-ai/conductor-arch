@@ -15,8 +15,12 @@ use std::time::Duration;
 use tracing::error;
 
 use crate::motion::{append_revealed_to_list, clear_list};
+use crate::toast::ToastManager;
 
-pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + Clone + 'static) {
+pub(crate) fn build_history_page(
+    database_path: PathBuf,
+    toast_manager: ToastManager,
+) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
@@ -65,6 +69,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
         let workspace_rows = Rc::clone(&workspace_rows);
         let database_path = database_path.clone();
         let refresh_generation = Rc::clone(&refresh_generation);
+        let toast_manager = toast_manager.clone();
         move || {
             clear_list(&list);
             workspace_rows.borrow_mut().clear();
@@ -90,6 +95,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
             let list = list.clone();
             let workspace_rows = Rc::clone(&workspace_rows);
             let refresh_generation = Rc::clone(&refresh_generation);
+            let toast_manager = toast_manager.clone();
             // PER-190: temporary worker-result poll for DB/import history load;
             // remove when this page switches to a GLib main-context future.
             glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
@@ -118,8 +124,9 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
                 Ok(Err(err)) => {
                     if *refresh_generation.borrow() == generation {
                         clear_list(&list);
-                        let empty =
-                            Label::new(Some(&format!("Could not load workspace history: {err:#}")));
+                        let message = format!("Could not load workspace history: {err:#}");
+                        toast_manager.error(message.clone());
+                        let empty = Label::new(Some(&message));
                         empty.add_css_class("empty-label");
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);
@@ -133,7 +140,9 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if *refresh_generation.borrow() == generation {
                         clear_list(&list);
-                        let empty = Label::new(Some("Could not load workspace history."));
+                        let message = "Could not load workspace history.";
+                        toast_manager.error(message);
+                        let empty = Label::new(Some(message));
                         empty.add_css_class("empty-label");
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);

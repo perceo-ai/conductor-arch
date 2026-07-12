@@ -705,15 +705,19 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
-    let (projects_page, refresh_projects) =
-        projects::build_projects_page(&app_state.paths, refresh_dashboard.clone(), {
+    let (projects_page, refresh_projects) = projects::build_projects_page(
+        &app_state.paths,
+        refresh_dashboard.clone(),
+        {
             let refresh_workspace_detail = refresh_workspace_detail.clone();
             let refresh_hub = refresh_hub.clone();
             move || {
                 refresh_workspace_detail();
                 refresh_hub.refresh(RefreshScope::Sidebar);
             }
-        });
+        },
+        toast_manager.clone(),
+    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: projects page built"
@@ -722,7 +726,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building settings page"
     );
-    let (settings_page, refresh_settings) = settings::build_settings_page(&app_state.paths);
+    let (settings_page, refresh_settings) =
+        settings::build_settings_page(&app_state.paths, toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: settings page built"
@@ -732,7 +737,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: building history page"
     );
     let (history_page, refresh_history) =
-        history::build_history_page(app_state.workspace_database_path());
+        history::build_history_page(app_state.workspace_database_path(), toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: history page built"
@@ -793,6 +798,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         debug_mode,
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
+        toast_manager.clone(),
     );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),

@@ -21,12 +21,14 @@ use std::rc::Rc;
 use crate::archcar_async::spawn_background_job;
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
+use crate::toast::{surface_label_error, ToastManager};
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
 
 pub(crate) fn build_projects_page(
     paths: &AppPaths,
     refresh_dashboard: impl Fn() + Clone + 'static,
     refresh_workspace: impl Fn() + Clone + 'static,
+    toast_manager: ToastManager,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
@@ -380,11 +382,16 @@ pub(crate) fn build_projects_page(
     let repo_name_add = repo_name_entry.clone();
     let repo_entry_after_add = repo_entry.clone();
     let settings_repo_after_add = settings_repo_entry.clone();
+    let toast_add = toast_manager.clone();
     add_repo_btn.connect_clicked(move |_| {
         let path = repo_path_add.text().trim().to_owned();
         let name = repo_name_add.text().trim().to_owned();
         if path.is_empty() {
-            repo_result_add.set_text("Local repository path is required.");
+            surface_label_error(
+                &repo_result_add,
+                &toast_add,
+                "Local repository path is required.",
+            );
             return;
         }
         match RepositoryStore::open(db_path_repo.clone()).and_then(|store| {
@@ -407,7 +414,9 @@ pub(crate) fn build_projects_page(
                 ));
                 refresh_after_repo();
             }
-            Err(err) => repo_result_add.set_text(&format!("Add failed: {err:#}")),
+            Err(err) => {
+                surface_label_error(&repo_result_add, &toast_add, format!("Add failed: {err:#}"))
+            }
         }
     });
 
@@ -415,11 +424,12 @@ pub(crate) fn build_projects_page(
     let refresh_after_clone = refresh.clone();
     let repo_entry_after_clone = repo_entry.clone();
     let settings_repo_after_clone = settings_repo_entry.clone();
+    let toast_clone = toast_manager.clone();
     clone_repo_btn.connect_clicked(move |_| {
         let url = repo_path_entry.text().trim().to_owned();
         let explicit_name = repo_name_entry.text().trim().to_owned();
         if url.is_empty() {
-            repo_result.set_text("Git URL is required.");
+            surface_label_error(&repo_result, &toast_clone, "Git URL is required.");
             return;
         }
         let name = if explicit_name.is_empty() {
@@ -470,7 +480,9 @@ pub(crate) fn build_projects_page(
                 ));
                 refresh_after_clone();
             }
-            Err(err) => repo_result.set_text(&format!("Clone failed: {err:#}")),
+            Err(err) => {
+                surface_label_error(&repo_result, &toast_clone, format!("Clone failed: {err:#}"))
+            }
         }
     });
 
@@ -486,52 +498,66 @@ pub(crate) fn build_projects_page(
     });
     let db_path_modal_add = paths.database_path.clone();
     let quick_add_refresh_for_folder = quick_add_refresh.clone();
+    let toast_modal_add = toast_manager.clone();
     open_add_local_btn.connect_clicked(move |_| {
         show_repository_quick_add_dialog(
             db_path_modal_add.clone(),
             quick_add_refresh_for_folder.clone(),
             Some("folder"),
+            toast_modal_add.clone(),
         );
     });
 
     let db_path_modal_clone = paths.database_path.clone();
     let quick_add_refresh_for_clone = quick_add_refresh.clone();
+    let toast_modal_clone = toast_manager.clone();
     open_clone_btn.connect_clicked(move |_| {
         show_repository_quick_add_dialog(
             db_path_modal_clone.clone(),
             quick_add_refresh_for_clone.clone(),
             Some("clone"),
+            toast_modal_clone.clone(),
         );
     });
 
     let db_path_modal_new = paths.database_path.clone();
     let quick_add_refresh_for_new = quick_add_refresh.clone();
+    let toast_modal_new = toast_manager.clone();
     open_new_project_btn.connect_clicked(move |_| {
         show_repository_quick_add_dialog(
             db_path_modal_new.clone(),
             quick_add_refresh_for_new.clone(),
             Some("new"),
+            toast_modal_new.clone(),
         );
     });
 
     let db_path_check_sources = paths.database_path.clone();
     let result_for_check_sources = result.clone();
+    let toast_check_sources = toast_manager.clone();
     check_sources_btn.connect_clicked(move |_| {
         match WorkspaceStore::open(db_path_check_sources.clone()) {
             Ok(store) => {
                 result_for_check_sources.set_text(&source_preflight_text(&store.source_preflight()))
             }
-            Err(err) => {
-                result_for_check_sources.set_text(&format!("Source preflight failed: {err:#}"))
-            }
+            Err(err) => surface_label_error(
+                &result_for_check_sources,
+                &toast_check_sources,
+                format!("Source preflight failed: {err:#}"),
+            ),
         }
     });
 
     let db_path_modal_check_sources = paths.database_path.clone();
+    let toast_modal_check_sources = toast_manager.clone();
     open_source_check_btn.connect_clicked(move |_| {
         let message = match WorkspaceStore::open(db_path_modal_check_sources.clone()) {
             Ok(store) => source_preflight_text(&store.source_preflight()),
-            Err(err) => format!("Source preflight failed: {err:#}"),
+            Err(err) => {
+                let message = format!("Source preflight failed: {err:#}");
+                toast_modal_check_sources.error(message.clone());
+                message
+            }
         };
         let dialog = gtk::Window::builder()
             .title("Source Readiness")
@@ -558,6 +584,7 @@ pub(crate) fn build_projects_page(
     let refresh_workspace_inline = refresh_workspace.clone();
     let create_btn_inline = create_btn.clone();
     let result_inline = result.clone();
+    let toast_create_inline = toast_manager.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
         let typed_name = name_entry.text().trim().to_owned();
@@ -569,7 +596,7 @@ pub(crate) fn build_projects_page(
             .unwrap_or_else(|| "branch".to_owned());
         let source_value = source_entry.text().trim().to_owned();
         if repo.is_empty() {
-            result.set_text("Repository is required.");
+            surface_label_error(&result, &toast_create_inline, "Repository is required.");
             return;
         }
         result.set_text("Creating workspace...");
@@ -585,7 +612,11 @@ pub(crate) fn build_projects_page(
             Ok(request) => request,
             Err(err) => {
                 create_btn_inline.set_sensitive(true);
-                result.set_text(&format!("Create failed: {err:#}"));
+                surface_label_error(
+                    &result,
+                    &toast_create_inline,
+                    format!("Create failed: {err:#}"),
+                );
                 return;
             }
         };
@@ -595,6 +626,7 @@ pub(crate) fn build_projects_page(
         let refresh_after_create = refresh_after_create.clone();
         let refresh_dashboard_inline = refresh_dashboard_inline.clone();
         let refresh_workspace_inline = refresh_workspace_inline.clone();
+        let toast_create_inline = toast_create_inline.clone();
         spawn_background_job(
             {
                 let db_path_create = db_path_create.clone();
@@ -605,7 +637,12 @@ pub(crate) fn build_projects_page(
                 }
             },
             move |create_result| {
-                result.set_text(&workspace_source_create_feedback(&source, create_result));
+                let feedback = workspace_source_create_feedback(&source, create_result);
+                if feedback.starts_with("Create failed") {
+                    surface_label_error(&result, &toast_create_inline, feedback);
+                } else {
+                    result.set_text(&feedback);
+                }
                 create_btn.set_sensitive(true);
                 refresh_after_create();
                 refresh_dashboard_inline();
@@ -618,6 +655,7 @@ pub(crate) fn build_projects_page(
     let refresh_after_modal_workspace = refresh.clone();
     let refresh_dashboard_modal_workspace = refresh_dashboard.clone();
     let refresh_workspace_modal_workspace = refresh_workspace.clone();
+    let toast_modal_workspace = toast_manager.clone();
     open_workspace_modal_btn.connect_clicked(move |_| {
         show_create_workspace_dialog(
             db_path_modal_workspace.clone(),
@@ -625,6 +663,7 @@ pub(crate) fn build_projects_page(
             Rc::new(refresh_dashboard_modal_workspace.clone()),
             Rc::new(refresh_workspace_modal_workspace.clone()),
             None,
+            toast_modal_workspace.clone(),
         );
     });
 
@@ -662,10 +701,15 @@ pub(crate) fn build_projects_page(
     let refactor_prompt_buffer_load = refactor_prompt_view.1.clone();
     let customization_buffer_load = customization_view.1.clone();
     let layer_select_load = layer_select.clone();
+    let toast_settings_load = toast_manager.clone();
     load_settings_btn.connect_clicked(move |_| {
         let repo_name = settings_repo_entry_load.text().trim().to_owned();
         if repo_name.is_empty() {
-            settings_result_load.set_text("Repository name is required.");
+            surface_label_error(
+                &settings_result_load,
+                &toast_settings_load,
+                "Repository name is required.",
+            );
             return;
         }
         let layer = match layer_select_load.active_id().as_deref() {
@@ -734,16 +778,25 @@ pub(crate) fn build_projects_page(
                     source
                 ));
             }
-            Err(err) => settings_result_load.set_text(&format!("Load failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &settings_result_load,
+                &toast_settings_load,
+                format!("Load failed: {err:#}"),
+            ),
         }
     });
 
     let db_path_save_settings = paths.database_path.clone();
     let layer_select_save = layer_select.clone();
+    let toast_settings_save = toast_manager.clone();
     save_settings_btn.connect_clicked(move |_| {
         let repo_name = settings_repo_entry.text().trim().to_owned();
         if repo_name.is_empty() {
-            settings_result.set_text("Repository name is required.");
+            surface_label_error(
+                &settings_result,
+                &toast_settings_save,
+                "Repository name is required.",
+            );
             return;
         }
         let layer = match layer_select_save.active_id().as_deref() {
@@ -753,14 +806,22 @@ pub(crate) fn build_projects_page(
         let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
             Ok(path) => path,
             Err(err) => {
-                settings_result.set_text(&format!("Save failed: {err:#}"));
+                surface_label_error(
+                    &settings_result,
+                    &toast_settings_save,
+                    format!("Save failed: {err:#}"),
+                );
                 return;
             }
         };
         let current_settings = match load_repository_settings_for_layer(&repo_path, layer) {
             Ok(settings) => settings,
             Err(err) => {
-                settings_result.set_text(&format!("Save failed: {err:#}"));
+                surface_label_error(
+                    &settings_result,
+                    &toast_settings_save,
+                    format!("Save failed: {err:#}"),
+                );
                 return;
             }
         };
@@ -769,8 +830,11 @@ pub(crate) fn build_projects_page(
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
                 Err(err) => {
-                    settings_result
-                        .set_text(&format!("Save failed: customization TOML invalid: {err:#}"));
+                    surface_label_error(
+                        &settings_result,
+                        &toast_settings_save,
+                        format!("Save failed: customization TOML invalid: {err:#}"),
+                    );
                     return;
                 }
             };
@@ -835,7 +899,11 @@ pub(crate) fn build_projects_page(
                 settings_result.set_text(&format!("Saved settings for {}", repo_path.display()));
                 refresh_after_settings_save();
             }
-            Err(err) => settings_result.set_text(&format!("Save failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &settings_result,
+                &toast_settings_save,
+                format!("Save failed: {err:#}"),
+            ),
         }
     });
 
@@ -849,6 +917,7 @@ pub(crate) fn show_create_workspace_dialog(
     refresh_dashboard: Rc<dyn Fn()>,
     refresh_workspace: Rc<dyn Fn()>,
     preselected_repo: Option<String>,
+    toast_manager: ToastManager,
 ) {
     let dialog = gtk::Window::builder()
         .title("Create Workspace")
@@ -1238,9 +1307,14 @@ pub(crate) fn show_create_workspace_dialog(
         }
     });
     let confirm_for_create = confirm.clone();
+    let toast_create = toast_manager.clone();
     confirm.connect_clicked(move |_| {
         let Some(repo) = repo_select_for_create.active_id().map(|id| id.to_string()) else {
-            feedback_for_create.set_text("Add a repository first.");
+            surface_label_error(
+                &feedback_for_create,
+                &toast_create,
+                "Add a repository first.",
+            );
             return;
         };
         let typed_name = name_entry_for_create.text().trim().to_owned();
@@ -1297,7 +1371,11 @@ pub(crate) fn show_create_workspace_dialog(
             Ok(request) => request,
             Err(err) => {
                 confirm_for_create.set_sensitive(true);
-                feedback_for_create.set_text(&format!("Create failed: {err:#}"));
+                surface_label_error(
+                    &feedback_for_create,
+                    &toast_create,
+                    format!("Create failed: {err:#}"),
+                );
                 return;
             }
         };
@@ -1307,6 +1385,7 @@ pub(crate) fn show_create_workspace_dialog(
         let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
         let refresh_workspace_for_create = refresh_workspace_for_create.clone();
         let dialog_for_create = dialog_for_create.clone();
+        let toast_create = toast_create.clone();
         spawn_background_job(
             {
                 let db_path_for_create = db_path_for_create.clone();
@@ -1323,7 +1402,11 @@ pub(crate) fn show_create_workspace_dialog(
                 refresh_workspace_for_create();
                 match create_result {
                     Ok(_) => dialog_for_create.close(),
-                    Err(err) => feedback.set_text(&format!("Create failed: {err:#}")),
+                    Err(err) => surface_label_error(
+                        &feedback,
+                        &toast_create,
+                        format!("Create failed: {err:#}"),
+                    ),
                 }
             },
         );
@@ -1701,11 +1784,12 @@ pub(crate) fn show_repository_quick_add_dialog(
     database_path: PathBuf,
     refresh: Rc<dyn Fn()>,
     initial_mode: Option<&str>,
+    toast_manager: ToastManager,
 ) {
     match initial_mode.unwrap_or("folder") {
-        "clone" => show_github_project_dialog(database_path, refresh),
-        "new" => show_quick_start_dialog(database_path, refresh),
-        _ => show_open_project_dialog(database_path, refresh),
+        "clone" => show_github_project_dialog(database_path, refresh, toast_manager),
+        "new" => show_quick_start_dialog(database_path, refresh, toast_manager),
+        _ => show_open_project_dialog(database_path, refresh, toast_manager),
     }
 }
 
@@ -1713,6 +1797,7 @@ pub(crate) fn show_project_creation_popover(
     anchor: &Button,
     database_path: PathBuf,
     refresh: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) {
     let popover = Popover::new();
     popover.add_css_class("project-create-menu");
@@ -1733,25 +1818,40 @@ pub(crate) fn show_project_creation_popover(
         let popover = popover.clone();
         let database_path = database_path.clone();
         let refresh = refresh.clone();
+        let toast_manager = toast_manager.clone();
         open_project.connect_clicked(move |_| {
             popover.popdown();
-            show_open_project_dialog(database_path.clone(), refresh.clone());
+            show_open_project_dialog(
+                database_path.clone(),
+                refresh.clone(),
+                toast_manager.clone(),
+            );
         });
     }
     {
         let popover = popover.clone();
         let database_path = database_path.clone();
         let refresh = refresh.clone();
+        let toast_manager = toast_manager.clone();
         open_github.connect_clicked(move |_| {
             popover.popdown();
-            show_github_project_dialog(database_path.clone(), refresh.clone());
+            show_github_project_dialog(
+                database_path.clone(),
+                refresh.clone(),
+                toast_manager.clone(),
+            );
         });
     }
     {
         let popover = popover.clone();
+        let toast_manager = toast_manager.clone();
         quick_start.connect_clicked(move |_| {
             popover.popdown();
-            show_quick_start_dialog(database_path.clone(), refresh.clone());
+            show_quick_start_dialog(
+                database_path.clone(),
+                refresh.clone(),
+                toast_manager.clone(),
+            );
         });
     }
 
@@ -1779,7 +1879,11 @@ fn project_create_menu_row(icon: &str, label: &str) -> Button {
     button
 }
 
-fn show_open_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
+fn show_open_project_dialog(
+    database_path: PathBuf,
+    refresh: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
+) {
     let dialog = gtk::Window::builder()
         .title("Open Project")
         .modal(true)
@@ -1834,7 +1938,11 @@ fn show_open_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                 refresh();
                 dialog_for_confirm.close();
             }
-            Err(err) => feedback.set_text(&format!("Open project failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &feedback,
+                &toast_manager,
+                format!("Open project failed: {err:#}"),
+            ),
         }
     });
     body.append(&actions.0);
@@ -1842,7 +1950,11 @@ fn show_open_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
     dialog.present();
 }
 
-fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
+fn show_github_project_dialog(
+    database_path: PathBuf,
+    refresh: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
+) {
     let dialog = gtk::Window::builder()
         .title("Open GitHub Project")
         .modal(true)
@@ -1900,9 +2012,14 @@ fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
         let repo_list = repo_list.clone();
         let selected_repos = selected_repos.clone();
         let feedback = feedback.clone();
+        let toast_manager = toast_manager.clone();
         load_github_btn.connect_clicked(move |_| match load_github_repo_choices() {
             Ok(repos) if repos.is_empty() => {
-                feedback.set_text("No GitHub repos returned by gh repo list.");
+                surface_label_error(
+                    &feedback,
+                    &toast_manager,
+                    "No GitHub repos returned by gh repo list.",
+                );
             }
             Ok(repos) => {
                 clear_list(&repo_list);
@@ -1928,13 +2045,18 @@ fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                 }
                 feedback.set_text("Loaded GitHub repos.");
             }
-            Err(err) => feedback.set_text(&format!("GitHub repo load failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &feedback,
+                &toast_manager,
+                format!("GitHub repo load failed: {err:#}"),
+            ),
         });
     }
 
     let actions = dialog_actions(&dialog, "Clone");
     let confirm = actions.1.clone();
     let dialog_for_confirm = dialog.clone();
+    let toast_manager = toast_manager.clone();
     confirm.connect_clicked(move |_| {
         let url = clone_url_entry.text().trim().to_owned();
         let explicit_name = optional_entry_text(&clone_name_entry);
@@ -1944,7 +2066,9 @@ fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                 refresh();
                 dialog_for_confirm.close();
             }
-            Err(err) => feedback.set_text(&format!("Clone failed: {err:#}")),
+            Err(err) => {
+                surface_label_error(&feedback, &toast_manager, format!("Clone failed: {err:#}"))
+            }
         }
     });
     body.append(&actions.0);
@@ -1952,7 +2076,11 @@ fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
     dialog.present();
 }
 
-fn show_quick_start_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
+fn show_quick_start_dialog(
+    database_path: PathBuf,
+    refresh: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
+) {
     let dialog = gtk::Window::builder()
         .title("Quick Start")
         .modal(true)
@@ -2028,7 +2156,11 @@ fn show_quick_start_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                 refresh();
                 dialog_for_confirm.close();
             }
-            Err(err) => feedback.set_text(&format!("Quick start failed: {err:#}")),
+            Err(err) => surface_label_error(
+                &feedback,
+                &toast_manager,
+                format!("Quick start failed: {err:#}"),
+            ),
         }
     });
     body.append(&actions.0);

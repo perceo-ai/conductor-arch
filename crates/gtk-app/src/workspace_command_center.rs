@@ -33,7 +33,7 @@ type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
-use crate::toast::{show_toast as emit_toast, ToastMessage};
+use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::spawn_archcar_request,
     buttons::{menu_text_button, resolve_icon_name, text_button},
@@ -177,6 +177,7 @@ fn simple_workspace_shell(
         state,
         refresh_hub.clone(),
         collapse_right_panel,
+        ToastManager::new(&toast_overlay),
     );
     split.set_start_child(Some(&center));
 
@@ -407,6 +408,7 @@ fn ws_center_panel(
     state: &AppState,
     refresh_hub: RefreshHub,
     collapse_sidebar: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) -> (GBox, WorkspaceTabSelector) {
     let panel = GBox::new(Orientation::Vertical, 0);
     panel.add_css_class("ws-center");
@@ -724,6 +726,7 @@ fn ws_center_panel(
             on_threads_changed: on_threads_changed.clone(),
             selection_controller: external_thread_selection.clone(),
         }),
+        toast_manager,
     );
     content.add_named(&chat_widget, Some("chat"));
     {
@@ -2290,6 +2293,7 @@ fn agents_panel(
     app_state: &AppState,
     refresh_hub: RefreshHub,
     collapse_sidebar: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 10);
     panel.add_css_class("command-panel");
@@ -2364,6 +2368,7 @@ fn agents_panel(
         false,
         None,
         None,
+        toast_manager.clone(),
     ));
     panel.append(&session_box);
     panel
@@ -2893,6 +2898,7 @@ fn work_tabs(
             state.clone(),
             refresh_hub.clone(),
             collapse_sidebar.clone(),
+            ToastManager::new(&toast_overlay),
         ),
         Some("chat-terminal"),
         "Chat",
@@ -2906,6 +2912,7 @@ fn work_tabs(
             refresh_hub.clone(),
             terminal_preferences,
             terminal_command_presets,
+            ToastManager::new(&toast_overlay),
         ),
         Some("terminal"),
         "Terminal",
@@ -3324,6 +3331,7 @@ fn chat_terminal_split(
     terminal_preferences: terminal::TerminalPreferences,
     terminal_command_presets: Vec<terminal::TerminalCommandPreset>,
     collapse_sidebar: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) -> Paned {
     let split = Paned::new(Orientation::Horizontal);
     split.set_wide_handle(true);
@@ -3353,6 +3361,7 @@ fn chat_terminal_split(
         false,
         None,
         None,
+        toast_manager.clone(),
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -3364,6 +3373,7 @@ fn chat_terminal_split(
         db_path,
         &ws.name,
         refresh_hub.clone(),
+        toast_manager.clone(),
     ));
 
     let terminal_box = GBox::new(Orientation::Vertical, 8);
@@ -3378,6 +3388,7 @@ fn chat_terminal_split(
         refresh_hub,
         terminal_preferences,
         terminal_command_presets,
+        toast_manager,
     ));
 
     split.set_start_child(Some(&chat_box));
@@ -3391,6 +3402,7 @@ fn parallel_agents_panel(
     app_state: AppState,
     refresh_hub: RefreshHub,
     collapse_sidebar: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) -> Paned {
     let split = Paned::new(Orientation::Horizontal);
     split.set_wide_handle(true);
@@ -3421,6 +3433,7 @@ fn parallel_agents_panel(
         false,
         None,
         None,
+        toast_manager.clone(),
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
@@ -3428,7 +3441,12 @@ fn parallel_agents_panel(
     {
         chat_box.append(&history::session_summary_row(&chat));
     }
-    chat_box.append(&linked_directories_panel(db_path, &ws.name, refresh_hub));
+    chat_box.append(&linked_directories_panel(
+        db_path,
+        &ws.name,
+        refresh_hub,
+        toast_manager.clone(),
+    ));
 
     let right = GBox::new(Orientation::Vertical, 0);
     right.add_css_class("command-panel");
@@ -3478,7 +3496,12 @@ fn parallel_agents_panel(
     split
 }
 
-fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub) -> GBox {
+fn linked_directories_panel(
+    db_path: &Path,
+    name: &str,
+    refresh_hub: RefreshHub,
+    toast_manager: ToastManager,
+) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 6);
     panel.append(&section_title("Linked Directories"));
 
@@ -3512,10 +3535,13 @@ fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub)
     let target_for_link = target_entry.clone();
     let buffer_for_link = links_view.buffer();
     let hub_for_link = refresh_hub.clone();
+    let toast_for_link = toast_manager.clone();
     link_btn.connect_clicked(move |_| {
         let target = target_for_link.text().trim().to_owned();
         if target.is_empty() {
-            buffer_for_link.set_text("Enter a target workspace name to link.\n");
+            let message = "Enter a target workspace name to link.\n";
+            toast_for_link.error(message.trim().to_owned());
+            buffer_for_link.set_text(message);
             return;
         }
         match WorkspaceStore::open(db_for_link.clone())
@@ -3526,7 +3552,11 @@ fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub)
                     .set_text(&linked_directories_text(&db_for_link, &workspace_for_link));
                 hub_for_link.refresh(RefreshScope::Workspace);
             }
-            Err(err) => buffer_for_link.set_text(&format!("Could not link directory: {err:#}\n")),
+            Err(err) => {
+                let message = format!("Could not link directory: {err:#}\n");
+                toast_for_link.error(message.trim().to_owned());
+                buffer_for_link.set_text(&message);
+            }
         }
     });
 
@@ -3535,10 +3565,13 @@ fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub)
     let target_for_unlink = target_entry;
     let buffer_for_unlink = links_view.buffer();
     let hub_for_unlink = refresh_hub;
+    let toast_for_unlink = toast_manager.clone();
     unlink_btn.connect_clicked(move |_| {
         let target = target_for_unlink.text().trim().to_owned();
         if target.is_empty() {
-            buffer_for_unlink.set_text("Enter a target workspace name to unlink.\n");
+            let message = "Enter a target workspace name to unlink.\n";
+            toast_for_unlink.error(message.trim().to_owned());
+            buffer_for_unlink.set_text(message);
             return;
         }
         match WorkspaceStore::open(db_for_unlink.clone())
@@ -3552,7 +3585,9 @@ fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub)
                 hub_for_unlink.refresh(RefreshScope::Workspace);
             }
             Err(err) => {
-                buffer_for_unlink.set_text(&format!("Could not unlink directory: {err:#}\n"))
+                let message = format!("Could not unlink directory: {err:#}\n");
+                toast_for_unlink.error(message.trim().to_owned());
+                buffer_for_unlink.set_text(&message);
             }
         }
     });
@@ -5230,6 +5265,7 @@ fn workspace_conflict_resolution_panel(
     name: &str,
     app_state: AppState,
     refresh_hub: RefreshHub,
+    toast_manager: ToastManager,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.add_css_class("command-panel");
@@ -5301,6 +5337,7 @@ fn workspace_conflict_resolution_panel(
         let feedback_for_diff_all = conflict_feedback.clone();
         let diff_buffer_for_diff_all = diff_preview.buffer();
         let db_for_diff_all = db_path.to_path_buf();
+        let toast_for_diff_all = toast_manager.clone();
         diff_all_btn.connect_clicked(move |_| {
             let mut sections = Vec::new();
             for file in &files_for_diff_all {
@@ -5317,8 +5354,11 @@ fn workspace_conflict_resolution_panel(
                         ));
                     }
                     Err(err) => {
-                        feedback_for_diff_all
-                            .set_text(&format!("Could not read diff for {file}: {err:#}"));
+                        surface_label_error(
+                            &feedback_for_diff_all,
+                            &toast_for_diff_all,
+                            format!("Could not read diff for {file}: {err:#}"),
+                        );
                         return;
                     }
                 }
@@ -5336,6 +5376,7 @@ fn workspace_conflict_resolution_panel(
         let db_for_copy_all = db_path.to_path_buf();
         let feedback_for_copy_all = conflict_feedback.clone();
         let refresh_after_copy_all = refresh_hub.clone();
+        let toast_for_copy_all = toast_manager.clone();
         copy_all_btn.connect_clicked(move |_| {
             let mut copied = 0usize;
             let mut failures = Vec::new();
@@ -5354,15 +5395,21 @@ fn workspace_conflict_resolution_panel(
             }
             match (copied, failures.is_empty()) {
                 (0, true) => {
-                    feedback_for_copy_all.set_text(&format!(
-                        "No files available to copy from {source_workspace}."
-                    ));
+                    surface_label_error(
+                        &feedback_for_copy_all,
+                        &toast_for_copy_all,
+                        format!("No files available to copy from {source_workspace}."),
+                    );
                 }
                 (0, false) => {
-                    feedback_for_copy_all.set_text(&format!(
-                        "Failed to copy files from {source_workspace}: {}",
-                        failures.join("; ")
-                    ));
+                    surface_label_error(
+                        &feedback_for_copy_all,
+                        &toast_for_copy_all,
+                        format!(
+                            "Failed to copy files from {source_workspace}: {}",
+                            failures.join("; ")
+                        ),
+                    );
                 }
                 (_, true) => {
                     refresh_after_copy_all.refresh(RefreshScope::Workspace);
@@ -5373,11 +5420,15 @@ fn workspace_conflict_resolution_panel(
                 }
                 (_, false) => {
                     refresh_after_copy_all.refresh(RefreshScope::Workspace);
-                    feedback_for_copy_all.set_text(&format!(
-                        "Copied {copied} file(s) from {source_workspace}, but {} failed: {}",
-                        failures.len(),
-                        failures.join("; ")
-                    ));
+                    surface_label_error(
+                        &feedback_for_copy_all,
+                        &toast_for_copy_all,
+                        format!(
+                            "Copied {copied} file(s) from {source_workspace}, but {} failed: {}",
+                            failures.len(),
+                            failures.join("; ")
+                        ),
+                    );
                 }
             }
         });
@@ -5426,6 +5477,7 @@ fn workspace_conflict_resolution_panel(
             let source_workspace = conflict_workspace.clone();
             let feedback_for_copy = conflict_feedback.clone();
             let refresh_after_copy = refresh_hub.clone();
+            let toast_for_copy = toast_manager.clone();
             copy_btn.connect_clicked(move |_| {
                 let result = WorkspaceStore::open(db_for_copy.clone()).and_then(|store| {
                     store.copy_conflict_file_from_workspace(
@@ -5442,8 +5494,11 @@ fn workspace_conflict_resolution_panel(
                         refresh_after_copy.refresh(RefreshScope::Workspace);
                     }
                     Err(err) => {
-                        feedback_for_copy
-                            .set_text(&format!("Could not copy {file_for_copy}: {err:#}"));
+                        surface_label_error(
+                            &feedback_for_copy,
+                            &toast_for_copy,
+                            format!("Could not copy {file_for_copy}: {err:#}"),
+                        );
                     }
                 }
             });
