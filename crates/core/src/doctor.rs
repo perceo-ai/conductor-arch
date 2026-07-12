@@ -1,5 +1,5 @@
 use crate::agent_tools::{
-    all_tools, launchable_agent_tools, launchable_provider_key, tool_by_provider,
+    all_tools, launchable_agent_tools, launchable_provider_key, tool_by_provider, ToolSpec,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -85,9 +85,9 @@ impl DoctorReport {
 impl SetupReadiness {
     pub fn from_host() -> Self {
         let gh = thread::spawn(gh_readiness);
-        let codex = thread::spawn(codex_readiness);
-        let claude = thread::spawn(claude_readiness);
-        let opencode = thread::spawn(opencode_readiness);
+        let codex = thread::spawn(|| provider_readiness("codex"));
+        let claude = thread::spawn(|| provider_readiness("claude"));
+        let opencode = thread::spawn(|| provider_readiness("opencode"));
 
         Self {
             gh: gh
@@ -271,36 +271,26 @@ fn gh_status_has_active_github_account(stdout: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-fn codex_readiness() -> SetupCheck {
-    if !command_exists("codex") {
-        return SetupCheck::missing("Install Codex CLI.");
-    }
-    if command_succeeds("codex", &["login", "status"]) {
-        SetupCheck::ready("Signed in to Codex.")
-    } else {
-        SetupCheck::blocked("Run `codex login`.")
-    }
+fn provider_readiness(provider: &str) -> SetupCheck {
+    let Some(tool) = tool_by_provider(provider) else {
+        return SetupCheck::missing(format!("Install {provider}."));
+    };
+    readiness_for_tool(tool)
 }
 
-fn claude_readiness() -> SetupCheck {
-    if !command_exists("claude") {
-        return SetupCheck::missing("Install Claude Code.");
+fn readiness_for_tool(tool: &ToolSpec) -> SetupCheck {
+    let program = tool
+        .readiness_probe
+        .first()
+        .copied()
+        .unwrap_or(tool.default_command);
+    if !command_exists(program) {
+        return SetupCheck::missing(format!("Install {}.", tool.display_name));
     }
-    if command_succeeds("claude", &["auth", "status"]) {
-        SetupCheck::ready("Signed in to Claude Code.")
+    if command_succeeds(program, &tool.readiness_probe[1..]) {
+        SetupCheck::ready(format!("{} is ready.", tool.display_name))
     } else {
-        SetupCheck::blocked("Run `claude auth login`.")
-    }
-}
-
-fn opencode_readiness() -> SetupCheck {
-    if !command_exists("opencode") {
-        return SetupCheck::missing("Install OpenCode.");
-    }
-    if command_succeeds("opencode", &["--version"]) {
-        SetupCheck::ready("OpenCode CLI responds to version probe.")
-    } else {
-        SetupCheck::blocked("OpenCode CLI is installed but did not pass a version probe.")
+        SetupCheck::blocked(tool.auth_guidance)
     }
 }
 

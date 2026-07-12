@@ -217,6 +217,18 @@ pub fn spawn_archcar_request(paths: AppPaths, request: ArchcarRequest) {
     });
 }
 
+pub(crate) fn spawn_background_job<F, T>(job: F) -> Receiver<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    rx
+}
+
 fn run_archcar_request_bridge(
     paths: AppPaths,
     request_rx: Receiver<AsyncArchcarRequestEnvelope>,

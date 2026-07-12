@@ -9,8 +9,7 @@ use linux_archductor_core::repository::{AddRepository, RepositoryStore};
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
     load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
-    PromptPackSettings, PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings,
-    SettingsLayer,
+    ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use serde_json::Value;
@@ -21,6 +20,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::archcar_async::spawn_background_job;
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
@@ -616,12 +616,7 @@ pub(crate) fn build_projects_page(
                 refresh_workspace_inline();
                 glib::ControlFlow::Break
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                refresh_after_create();
-                refresh_dashboard_inline();
-                refresh_workspace_inline();
-                glib::ControlFlow::Continue
-            }
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
             Err(mpsc::TryRecvError::Disconnected) => {
                 create_btn.set_sensitive(true);
                 result.set_text("Create failed: worker disconnected.");
@@ -764,9 +759,8 @@ pub(crate) fn build_projects_page(
                 return;
             }
         };
-        let current_file_globs = load_repository_settings(&repo_path)
-            .map(|settings| settings.file_include_globs)
-            .unwrap_or_default();
+        let current_settings = load_repository_settings(&repo_path).unwrap_or_default();
+        let current_file_globs = current_settings.file_include_globs.clone();
         let customization =
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
@@ -793,23 +787,27 @@ pub(crate) fn build_projects_page(
                 setup: optional_entry_text(&setup_entry),
                 run: optional_entry_text(&run_entry),
                 archive: optional_entry_text(&archive_entry),
+                test: current_settings.scripts.test.clone(),
+                lint: current_settings.scripts.lint.clone(),
+                typecheck: current_settings.scripts.typecheck.clone(),
+                build: current_settings.scripts.build.clone(),
                 run_mode: optional_entry_text(&run_mode_entry)
                     .or_else(|| Some("concurrent".to_owned())),
-                ..ScriptSettings::default()
             },
             environment_variables: parse_environment_lines(&text_buffer_text(&env_view.1)),
-            prompt_pack: PromptPackSettings::default(),
-            prompts: Some(PromptSettings {
-                general: optional_buffer_text(&general_prompt_view.1),
-                code_review: optional_buffer_text(&review_prompt_view.1),
-                create_pr: optional_buffer_text(&create_pr_prompt_view.1),
-                fix_errors: optional_buffer_text(&fix_errors_prompt_view.1),
-                resolve_merge_conflicts: optional_buffer_text(&conflicts_prompt_view.1),
-                rename_branch: optional_buffer_text(&rename_branch_prompt_view.1),
-                commit_generation: optional_buffer_text(&commit_prompt_view.1),
-                test_fixing: optional_buffer_text(&test_fixing_prompt_view.1),
-                refactor_style: optional_buffer_text(&refactor_prompt_view.1),
-                ..PromptSettings::default()
+            prompt_pack: current_settings.prompt_pack,
+            prompts: Some({
+                let mut prompts = current_settings.prompts.unwrap_or_default();
+                prompts.general = optional_buffer_text(&general_prompt_view.1);
+                prompts.code_review = optional_buffer_text(&review_prompt_view.1);
+                prompts.create_pr = optional_buffer_text(&create_pr_prompt_view.1);
+                prompts.fix_errors = optional_buffer_text(&fix_errors_prompt_view.1);
+                prompts.resolve_merge_conflicts = optional_buffer_text(&conflicts_prompt_view.1);
+                prompts.rename_branch = optional_buffer_text(&rename_branch_prompt_view.1);
+                prompts.commit_generation = optional_buffer_text(&commit_prompt_view.1);
+                prompts.test_fixing = optional_buffer_text(&test_fixing_prompt_view.1);
+                prompts.refactor_style = optional_buffer_text(&refactor_prompt_view.1);
+                prompts
             }),
             providers: ProviderSettings {
                 claude_code_executable_path: optional_entry_text(&claude_path_entry),
@@ -1328,12 +1326,7 @@ pub(crate) fn show_create_workspace_dialog(
                 }
                 glib::ControlFlow::Break
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                refresh_for_create();
-                refresh_dashboard_for_create();
-                refresh_workspace_for_create();
-                glib::ControlFlow::Continue
-            }
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
             Err(mpsc::TryRecvError::Disconnected) => {
                 create_btn.set_sensitive(true);
                 feedback.set_text("Create failed: worker disconnected.");
@@ -1354,18 +1347,6 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
-}
-
-fn spawn_background_job<F, T>(job: F) -> mpsc::Receiver<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(job());
-    });
-    rx
 }
 
 fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {

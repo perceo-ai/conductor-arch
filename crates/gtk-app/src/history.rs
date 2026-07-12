@@ -93,7 +93,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
             // PER-190: temporary worker-result poll for DB/import history load;
             // remove when this page switches to a GLib main-context future.
             glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-                Ok(workspaces) => {
+                Ok(Ok(workspaces)) => {
                     if *refresh_generation.borrow() != generation {
                         return glib::ControlFlow::Break;
                     }
@@ -111,6 +111,20 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);
                         empty.set_margin_top(24);
+                        append_revealed_to_list(&list, &empty);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(err)) => {
+                    if *refresh_generation.borrow() == generation {
+                        clear_list(&list);
+                        let empty =
+                            Label::new(Some(&format!("Could not load workspace history: {err:#}")));
+                        empty.add_css_class("empty-label");
+                        empty.set_xalign(0.0);
+                        empty.set_margin_start(24);
+                        empty.set_margin_top(24);
+                        empty.set_wrap(true);
                         append_revealed_to_list(&list, &empty);
                     }
                     glib::ControlFlow::Break
@@ -200,25 +214,21 @@ fn workspace_history_row(workspace: &WorkspaceHistoryEntry) -> GBox {
     row
 }
 
-fn history_recent_workspaces(database_path: &Path) -> Vec<WorkspaceHistoryEntry> {
-    let Ok(store) = WorkspaceStore::open(database_path) else {
-        return Vec::new();
-    };
-    let Ok(mut workspaces) = store.list_status().map(|lines| {
+fn history_recent_workspaces(database_path: &Path) -> anyhow::Result<Vec<WorkspaceHistoryEntry>> {
+    let store = WorkspaceStore::open(database_path)?;
+    let mut workspaces = store.list_status().map(|lines| {
         lines
             .iter()
             .map(workspace_history_entry)
             .collect::<Vec<_>>()
-    }) else {
-        return Vec::new();
-    };
+    })?;
     workspaces.sort_by(|left, right| {
         workspace_history_sort_key(right)
             .cmp(&workspace_history_sort_key(left))
             .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| left.name.cmp(&right.name))
     });
-    workspaces
+    Ok(workspaces)
 }
 
 fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry {
@@ -246,7 +256,13 @@ fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry 
 fn workspace_history_bucket(line: &WorkspaceStatusLine) -> &'static str {
     if line.workspace.status == "archived" {
         "Archived"
-    } else if line.run_running || line.active_sessions > 0 || line.pull_request.is_some() {
+    } else if line.run_running
+        || line.active_sessions > 0
+        || line
+            .pull_request
+            .as_ref()
+            .is_some_and(|pr| pr.state.eq_ignore_ascii_case("open"))
+    {
         "Active"
     } else {
         "Backlog"
@@ -668,6 +684,10 @@ mod workspace_history_tests {
             updated_at: "2".to_owned(),
         });
         assert_eq!(workspace_history_bucket(&review), "Active");
+
+        let mut closed_review = review;
+        closed_review.pull_request.as_mut().unwrap().state = "closed".to_owned();
+        assert_eq!(workspace_history_bucket(&closed_review), "Backlog");
 
         let archived = line("archived");
         assert_eq!(workspace_history_bucket(&archived), "Archived");

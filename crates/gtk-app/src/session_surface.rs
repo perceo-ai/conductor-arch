@@ -342,6 +342,9 @@ pub fn agent_session_panel(
             let pending_commands = pending_commands.clone();
             let selected_thread = selected_thread.clone();
             let sync_live_controls = sync_live_controls.clone();
+            let archcar_bridge = archcar_bridge.clone();
+            let archcar_ready_cache = archcar_ready_cache.clone();
+            let inflight_archcar_actions = inflight_archcar_actions.clone();
             Rc::new(move |index| {
                 let Some(choice) = provider_model_choices.get(index).cloned() else {
                     return;
@@ -364,6 +367,25 @@ pub fn agent_session_panel(
                             thread_id,
                             choice.model.as_deref(),
                         );
+                        if let Ok(records) = WorkspaceStore::open(database_path.clone())
+                            .and_then(|store| store.list_thread_processes(thread_id))
+                        {
+                            if let Some(session_id) =
+                                any_running_archcar_codex_ready(&records, &archcar_ready_cache)
+                            {
+                                for control in
+                                    flush_pending_commands_for_send(&pending_commands, thread_id)
+                                {
+                                    queue_archcar_control_send(
+                                        &archcar_bridge,
+                                        inflight_archcar_actions.as_ref(),
+                                        thread_id,
+                                        session_id,
+                                        control,
+                                    );
+                                }
+                            }
+                        }
                     } else {
                         pending_commands.borrow_mut().remove(&thread_id);
                     }
@@ -1009,6 +1031,7 @@ pub fn agent_session_panel(
     let db_for_send = database_path.clone();
     let workspace_for_send = _workspace_name.to_owned();
     let selected_harness_for_send = selected_harness.clone();
+    let selected_model_for_send = selected_model.clone();
     let thread_state_for_send = thread_state.clone();
     let selected_thread_for_send = selected_thread.clone();
     let pending_commands_for_send = pending_commands.clone();
@@ -1115,6 +1138,14 @@ pub fn agent_session_panel(
         ) {
             Ok(thread_id) => {
                 app_state_for_send.set_selected_chat_thread(Some(thread_id));
+                if selected_kind == SessionKind::Codex && selected_model_for_send.borrow().is_some()
+                {
+                    replace_pending_model_command(
+                        &pending_commands_for_send,
+                        thread_id,
+                        selected_model_for_send.borrow().as_deref(),
+                    );
+                }
                 thread_id
             }
             Err(err) => {
@@ -3055,8 +3086,10 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
 }
 
 fn codex_model_command(model: Option<&str>) -> Option<String> {
-    let model = model?.trim();
-    (!model.is_empty()).then(|| format!("/model {model}"))
+    match model.map(str::trim).filter(|model| !model.is_empty()) {
+        Some(model) => Some(format!("/model {model}")),
+        None => Some("/model default".to_owned()),
+    }
 }
 
 fn replace_pending_model_command(
@@ -3483,6 +3516,7 @@ fn provider_model_menu_popover(
     list.add_css_class("chat-menu-list");
 
     let mut last_provider = None::<String>;
+    let rows = Rc::new(RefCell::new(Vec::<Button>::new()));
     for (index, choice) in choices.iter().enumerate() {
         if last_provider.as_deref() != Some(choice.provider.as_str()) {
             let header = Label::new(Some(choice.provider_label()));
@@ -3511,12 +3545,18 @@ fn provider_model_menu_popover(
         let choice_for_row = choice.clone();
         let popover_for_row = popover.clone();
         let on_selected = on_selected.clone();
-        row.connect_clicked(move |_| {
+        let rows_for_row = rows.clone();
+        row.connect_clicked(move |clicked| {
+            for row in rows_for_row.borrow().iter() {
+                row.remove_css_class("chat-menu-item-selected");
+            }
+            clicked.add_css_class("chat-menu-item-selected");
             provider_model_menu_set_child(&button_for_row, &choice_for_row);
             button_for_row.set_tooltip_text(Some(&choice_for_row.button_label()));
             on_selected(index);
             popover_for_row.popdown();
         });
+        rows.borrow_mut().push(row.clone());
         list.append(&row);
     }
     popover.set_child(Some(&list));
@@ -5638,7 +5678,7 @@ mod tests {
     }
 
     #[test]
-    fn default_model_choice_clears_pending_codex_model_command() {
+    fn default_model_choice_queues_codex_model_reset() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
         queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
         queue_thread_command(&pending, 7, "/thinking high".to_owned());
@@ -5647,7 +5687,7 @@ mod tests {
 
         assert_eq!(
             pending.borrow().get(&7).cloned().unwrap_or_default(),
-            vec!["/thinking high".to_owned()]
+            vec!["/thinking high".to_owned(), "/model default".to_owned()]
         );
     }
 

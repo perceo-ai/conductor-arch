@@ -303,7 +303,7 @@ pub fn inspect_repository_settings(repo_path: &Path) -> Result<RepositorySetting
     } else {
         Vec::new()
     };
-    let settings = load_repository_settings(repo_path)?;
+    let settings = load_repository_settings_recovering(repo_path).settings;
     let (active_file_patterns_source, active_file_patterns) =
         if !worktreeinclude_patterns.is_empty() {
             (
@@ -1723,7 +1723,8 @@ fn ensure_default_prompt_pack_files(
     let prompt_pack_dir = conductor_dir.join("prompt-packs");
     let prompt_pack_dir_created = ensure_real_directory(&prompt_pack_dir)?;
     let default_path = prompt_pack_dir.join("default.toml");
-    let default_prompt_pack_created = ensure_prompt_pack_file(&default_path)?;
+    let default_prompt_pack_created =
+        ensure_prompt_pack_file(&default_path, "default", Some("v1"))?;
 
     let active_prompt_pack_created = settings
         .prompt_pack
@@ -1732,7 +1733,14 @@ fn ensure_default_prompt_pack_files(
         .and_then(active_prompt_pack_path)
         .map(|relative_path| repo_path.join(relative_path))
         .filter(|active_path| active_path != &default_path)
-        .map(|active_path| ensure_prompt_pack_file(&active_path))
+        .map(|active_path| {
+            let active = settings.prompt_pack.active.as_deref().unwrap_or("default");
+            ensure_prompt_pack_file(
+                &active_path,
+                active,
+                settings.prompt_pack.version.as_deref(),
+            )
+        })
         .transpose()?
         .unwrap_or(false);
 
@@ -1755,12 +1763,22 @@ fn ensure_context_gitignored(repo_path: &Path) -> Result<bool> {
     let had_context = lines
         .iter()
         .any(|line| gitignore_pattern_key(line).as_deref() == Some(".context"));
+    let had_local_settings = lines.iter().any(|line| {
+        matches!(
+            gitignore_pattern_key(line).as_deref(),
+            Some(".archductor/settings.local.toml" | ".archductor/settings.local.toml*")
+        )
+    });
     let original_len = lines.len();
     lines.retain(|line| gitignore_pattern_key(line).as_deref() != Some(".archductor"));
     let mut changed = lines.len() != original_len;
 
     if !had_context {
         lines.push(".context/".to_owned());
+        changed = true;
+    }
+    if !had_local_settings {
+        lines.push(".archductor/settings.local.toml*".to_owned());
         changed = true;
     }
 
@@ -1770,12 +1788,12 @@ fn ensure_context_gitignored(repo_path: &Path) -> Result<bool> {
 
     let mut contents = lines.join("\n");
     contents.push('\n');
-    fs::write(&gitignore_path, contents)
+    atomic_write_no_symlink(&gitignore_path, contents.as_bytes())
         .with_context(|| format!("write {}", gitignore_path.display()))?;
     Ok(true)
 }
 
-fn gitignore_pattern_key(line: &str) -> Option<String> {
+pub(crate) fn gitignore_pattern_key(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
         return None;
@@ -1791,7 +1809,7 @@ fn active_prompt_pack_path(path: &str) -> Option<&Path> {
         .then_some(path)
 }
 
-fn ensure_prompt_pack_file(path: &Path) -> Result<bool> {
+fn ensure_prompt_pack_file(path: &Path, name: &str, version: Option<&str>) -> Result<bool> {
     reject_symlink_file(path)?;
     match fs::read(path) {
         Ok(_) => Ok(false),
@@ -1800,12 +1818,26 @@ fn ensure_prompt_pack_file(path: &Path) -> Result<bool> {
                 .parent()
                 .with_context(|| format!("resolve parent for {}", path.display()))?;
             ensure_real_directory(parent)?;
-            let contents = default_prompt_pack_toml()?;
+            let contents = prompt_pack_toml(name, version.unwrap_or("v1"))?;
             atomic_write_no_symlink(path, contents.as_bytes())?;
             Ok(true)
         }
         Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
     }
+}
+
+fn prompt_pack_toml(name: &str, version: &str) -> Result<String> {
+    let mut raw: toml::Value =
+        toml::from_str(&default_prompt_pack_toml()?).context("parse default prompt pack")?;
+    let table = raw
+        .as_table_mut()
+        .context("default prompt pack must be a TOML table")?;
+    table.insert("name".to_owned(), toml::Value::String(name.to_owned()));
+    table.insert(
+        "version".to_owned(),
+        toml::Value::String(version.to_owned()),
+    );
+    toml::to_string_pretty(&raw).context("serialize prompt pack")
 }
 
 fn ensure_real_directory(path: &Path) -> Result<bool> {
@@ -2184,7 +2216,8 @@ LOCAL_ONLY = "1"
         assert!(shared_path.exists());
         let gitignore = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
         assert!(gitignore.contains(".context/"));
-        assert!(!gitignore.contains(".archductor/"));
+        assert!(gitignore.contains(".archductor/settings.local.toml*"));
+        assert!(!gitignore.lines().any(|line| line.trim() == ".archductor/"));
         let prompt_pack_path = temp.path().join(".archductor/prompt-packs/default.toml");
         assert!(prompt_pack_path.exists());
         assert!(fs::read_to_string(prompt_pack_path)
@@ -2224,7 +2257,8 @@ LOCAL_ONLY = "1"
         let gitignore = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
         assert!(gitignore.contains("target/"));
         assert!(gitignore.contains(".context/"));
-        assert!(!gitignore.contains(".archductor/"));
+        assert!(gitignore.contains(".archductor/settings.local.toml*"));
+        assert!(!gitignore.lines().any(|line| line.trim() == ".archductor/"));
     }
 
     #[test]
@@ -2249,7 +2283,23 @@ path = ".archductor/prompt-packs/review.toml"
         assert!(report.default_prompt_pack_created);
         assert!(report.active_prompt_pack_created);
         assert!(conductor_dir.join("prompt-packs/default.toml").exists());
-        assert!(conductor_dir.join("prompt-packs/review.toml").exists());
+        let review_pack =
+            fs::read_to_string(conductor_dir.join("prompt-packs/review.toml")).unwrap();
+        assert!(review_pack.contains("name = \"review\""));
+        assert!(review_pack.contains("version = \"v1\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_gitignore_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("outside-gitignore");
+        fs::write(&external, "target/\n").unwrap();
+        std::os::unix::fs::symlink(&external, temp.path().join(".gitignore")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("symlink"));
     }
 
     #[cfg(unix)]

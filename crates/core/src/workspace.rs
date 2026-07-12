@@ -25,8 +25,8 @@ use crate::session_pipeline::{
 };
 use crate::session_state::AgentSessionState;
 use crate::settings::{
-    ensure_repository_config, load_repository_settings, save_local_default_agent_provider,
-    RepositorySettings,
+    ensure_repository_config, gitignore_pattern_key, load_repository_settings,
+    save_local_default_agent_provider, RepositorySettings,
 };
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
@@ -1038,13 +1038,6 @@ impl WorkspaceStore {
             .unwrap_or(&repository.default_branch)
             .to_owned();
         let base_ref = if let Some(base_ref) = input.base_ref {
-            if remote_available {
-                sync_repository_default_branch(
-                    &repository.root_path,
-                    &repository.remote_name,
-                    &repository.default_branch,
-                )?;
-            }
             base_ref
         } else if remote_available {
             sync_repository_default_branch(
@@ -1413,6 +1406,10 @@ impl WorkspaceStore {
 
         self.stop_workspace_processes(workspace.id)?;
 
+        if remove_worktree {
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
+        }
+
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
             self.record_workspace_event(
@@ -1434,10 +1431,6 @@ impl WorkspaceStore {
             }
         }
 
-        if remove_worktree {
-            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
-        }
-
         if delete_branch {
             let _ = git_dynamic(
                 &repository.root_path,
@@ -1454,22 +1447,6 @@ impl WorkspaceStore {
         let settings = load_repository_settings(&repository.root_path)?;
 
         self.stop_workspace_processes(workspace.id)?;
-
-        let now = timestamp();
-        let changed = self.conn.execute(
-            "UPDATE workspaces
-             SET status = 'archived', archived_at = ?1, updated_at = ?2
-             WHERE name = ?3",
-            params![now, now, name],
-        )?;
-        anyhow::ensure!(changed > 0, "workspace {name} not found");
-        let archived = self.get_by_name(name)?;
-        self.record_workspace_event(
-            archived.id,
-            &archived.name,
-            "workspace.archived",
-            "Archived workspace",
-        )?;
 
         if let Some(archive_script) = &settings.scripts.archive {
             if workspace.path.exists() {
@@ -1494,6 +1471,22 @@ impl WorkspaceStore {
                 ],
             )?;
         }
+
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE workspaces
+             SET status = 'archived', archived_at = ?1, updated_at = ?2
+             WHERE name = ?3",
+            params![now, now, name],
+        )?;
+        anyhow::ensure!(changed > 0, "workspace {name} not found");
+        let archived = self.get_by_name(name)?;
+        self.record_workspace_event(
+            archived.id,
+            &archived.name,
+            "workspace.archived",
+            "Archived workspace",
+        )?;
 
         Ok(archived)
     }
@@ -6811,6 +6804,20 @@ fn sync_repository_default_branch(
         return Ok(default_branch.to_owned());
     }
     let local_ref = format!("refs/heads/{default_branch}");
+    if git_dynamic(root_path, &["rev-parse", "--verify", &local_ref]).is_ok()
+        && git_dynamic(
+            root_path,
+            &["merge-base", "--is-ancestor", &local_ref, &remote_ref],
+        )
+        .is_err()
+    {
+        warn!(
+            repository = %root_path.display(),
+            branch = default_branch,
+            "local default branch is ahead or diverged; using remote branch as workspace base"
+        );
+        return Ok(format!("{remote_name}/{default_branch}"));
+    }
     match git_dynamic(root_path, &["update-ref", &local_ref, &remote_ref]) {
         Ok(()) => Ok(default_branch.to_owned()),
         Err(err) => {
@@ -6966,9 +6973,58 @@ fn spotlight_meaningful_patch(patch: &str) -> String {
 }
 
 fn patch_path_from_diff_line(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("diff --git a/")?;
-    let (_, path) = rest.split_once(" b/")?;
-    Some(path.to_owned())
+    let rest = line.strip_prefix("diff --git ")?;
+    let (_old_path, rest) = parse_diff_path_token(rest)?;
+    let (new_path, _) = parse_diff_path_token(rest.trim_start())?;
+    new_path.strip_prefix("b/").map(str::to_owned)
+}
+
+fn parse_diff_path_token(input: &str) -> Option<(String, &str)> {
+    if let Some(rest) = input.strip_prefix('"') {
+        let mut escaped = false;
+        for (index, ch) in rest.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                let token = &rest[..index];
+                let remaining = &rest[index + ch.len_utf8()..];
+                return Some((unescape_git_quoted_path(token), remaining));
+            }
+        }
+        return None;
+    }
+    let (token, remaining) = input.split_once(' ').unwrap_or((input, ""));
+    Some((token.to_owned(), remaining))
+}
+
+fn unescape_git_quoted_path(path: &str) -> String {
+    let mut result = String::new();
+    let mut chars = path.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            result.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => result.push('\n'),
+            Some('t') => result.push('\t'),
+            Some('r') => result.push('\r'),
+            Some('\\') => result.push('\\'),
+            Some('"') => result.push('"'),
+            Some(other) => {
+                result.push('\\');
+                result.push(other);
+            }
+            None => result.push('\\'),
+        }
+    }
+    result
 }
 
 fn patch_file_chunks(patch: &str) -> Vec<(String, String)> {
@@ -7005,8 +7061,9 @@ fn gitignore_patch_is_managed(chunk: &str) -> bool {
             continue;
         }
         let pattern = line[1..].trim();
-        match (prefix, gitignore_managed_pattern_key(pattern).as_deref()) {
-            ('+', Some(".context")) | ('-', Some(".archductor")) => changed = true,
+        match (prefix, gitignore_pattern_key(pattern).as_deref()) {
+            ('+', Some(".context" | ".archductor/settings.local.toml*"))
+            | ('-', Some(".archductor")) => changed = true,
             _ => return false,
         }
     }
@@ -7024,25 +7081,12 @@ fn gitignore_without_managed_patterns(contents: &str) -> Vec<String> {
         .lines()
         .filter(|line| {
             !matches!(
-                gitignore_managed_pattern_key(line).as_deref(),
-                Some(".context" | ".archductor")
+                gitignore_pattern_key(line).as_deref(),
+                Some(".context" | ".archductor" | ".archductor/settings.local.toml*")
             )
         })
         .map(str::to_owned)
         .collect()
-}
-
-fn gitignore_managed_pattern_key(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
-        return None;
-    }
-    Some(
-        trimmed
-            .trim_start_matches('/')
-            .trim_end_matches('/')
-            .to_owned(),
-    )
 }
 
 fn apply_git_patch(cwd: &Path, patch: &str) -> Result<()> {
@@ -8901,6 +8945,69 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn archive_failure_leaves_workspace_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "[scripts]\narchive = \"false\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add archive script",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let err = store.archive("berlin", false).unwrap_err();
+
+        assert!(err.to_string().contains("script failed"));
+        let workspace = store.get_by_name("berlin").unwrap();
+        assert_eq!(workspace.status, "active");
+        assert!(workspace.archived_at.is_none());
+    }
+
+    #[test]
     fn delete_workspace_removes_record_dependents_and_keeps_worktree_by_default() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -8978,6 +9085,89 @@ CUSTOM_VALUE = "from-settings"
             .unwrap();
         assert_eq!(orphan_pty_chunks, 0);
         assert_eq!(orphan_session_events, 0);
+    }
+
+    #[test]
+    fn delete_worktree_failure_keeps_workspace_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let not_a_worktree = temp.path().join("not-a-worktree");
+        fs::create_dir(&not_a_worktree).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET path = ?1 WHERE id = ?2",
+                params![not_a_worktree.to_string_lossy(), workspace.id],
+            )
+            .unwrap();
+
+        assert!(store.delete("berlin", true, false).is_err());
+        assert!(store.get_by_name("berlin").is_ok());
+    }
+
+    #[test]
+    fn create_with_explicit_base_ref_skips_default_branch_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("missing-default".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(workspace.base_ref, "main");
     }
 
     #[test]
@@ -9066,6 +9256,85 @@ CUSTOM_VALUE = "from-settings"
             .output()
             .unwrap();
         assert!(!String::from_utf8_lossy(&worktrees.stdout).contains("berlin"));
+    }
+
+    #[test]
+    fn sync_default_branch_preserves_local_commits() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+        let local_head_before = git_output(&repo_path, ["rev-parse", "main"]);
+        fs::write(repo_path.join("local.txt"), "local\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "local.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local only",
+            ])
+            .status()
+            .unwrap();
+        let local_head_after_commit = git_output(&repo_path, ["rev-parse", "main"]);
+        assert_ne!(local_head_before, local_head_after_commit);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "-b", "work"])
+            .status()
+            .unwrap();
+
+        let base = sync_repository_default_branch(&repo_path, "origin", "main").unwrap();
+
+        assert_eq!(base, "origin/main");
+        assert_eq!(
+            git_output(&repo_path, ["rev-parse", "main"]),
+            local_head_after_commit
+        );
+    }
+
+    #[test]
+    fn patch_changed_paths_handles_quoted_diff_paths() {
+        let patch = "diff --git \"a/path with spaces.txt\" \"b/path with spaces.txt\"\n\
+--- \"a/path with spaces.txt\"\n\
++++ \"b/path with spaces.txt\"\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n";
+
+        let paths = patch_changed_paths(patch);
+
+        assert!(paths.contains("path with spaces.txt"));
     }
 
     #[test]

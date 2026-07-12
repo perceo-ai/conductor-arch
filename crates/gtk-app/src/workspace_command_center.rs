@@ -1136,7 +1136,7 @@ fn default_launchable_chat_provider_for_workspace(
 }
 
 fn provider_is_ready_launchable(provider: &str, readiness: &SetupReadiness) -> bool {
-    launchable_provider_key(provider).is_some() && readiness.launchable_provider_ready(provider)
+    readiness.launchable_provider_ready(provider)
 }
 
 fn persist_default_chat_provider(db_path: &Path, workspace_name: &str, provider: &str) {

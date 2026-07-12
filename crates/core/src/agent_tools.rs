@@ -44,7 +44,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         kind: ToolKind::ChatAgent,
         chat_launchable: true,
         launch_owner: LaunchOwner::ArchcarManaged,
-        readiness_probe: &["codex", "--version"],
+        readiness_probe: &["codex", "login", "status"],
         auth_guidance: "Run `codex login`.",
     },
     ToolSpec {
@@ -56,7 +56,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         kind: ToolKind::ChatAgent,
         chat_launchable: true,
         launch_owner: LaunchOwner::LocalWorkspace,
-        readiness_probe: &["claude", "--version"],
+        readiness_probe: &["claude", "auth", "status"],
         auth_guidance: "Run `claude auth login`.",
     },
     ToolSpec {

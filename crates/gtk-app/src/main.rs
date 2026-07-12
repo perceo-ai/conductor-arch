@@ -44,11 +44,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
+static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchTarget {
@@ -399,6 +401,7 @@ fn apply_view_preferences(
     window: &ApplicationWindow,
     preferences: &ViewPreferences,
     colors_css: &CssProvider,
+    color_scope_class: &str,
 ) {
     let style_manager = StyleManager::default();
     match preferences.theme {
@@ -406,29 +409,50 @@ fn apply_view_preferences(
         Some(ViewTheme::Dark) => style_manager.set_color_scheme(ColorScheme::ForceDark),
         Some(ViewTheme::System) | None => style_manager.set_color_scheme(ColorScheme::Default),
     }
-    colors_css.load_from_data(&view_colors_css(&preferences.colors));
+    colors_css.load_from_data(&view_colors_css(color_scope_class, &preferences.colors));
     for class_name in VIEW_PREFERENCE_CLASSES {
         window.remove_css_class(class_name);
     }
+    window.remove_css_class(color_scope_class);
     for class_name in preferences.css_classes() {
         window.add_css_class(class_name);
     }
+    if !preferences.colors.is_empty() {
+        window.add_css_class(color_scope_class);
+    }
 }
 
-fn view_colors_css(colors: &BTreeMap<String, String>) -> String {
+fn view_colors_css(scope_class: &str, colors: &BTreeMap<String, String>) -> String {
     if colors.is_empty() {
         return String::new();
     }
     let mut css = String::new();
+    let color_suffix = scope_class.replace('-', "_");
     for (key, css_name, default) in VIEW_COLOR_TOKENS {
         let value = colors
             .get(*key)
             .filter(|value| is_config_hex_color(value))
             .map(String::as_str)
             .unwrap_or(default);
-        css.push_str(&format!("@define-color {css_name} {value};\n"));
+        css.push_str(&format!(
+            "@define-color {css_name}-{color_suffix} {value};\n"
+        ));
     }
-    css.push_str(CUSTOM_COLOR_CSS);
+    let mut scoped_css = CUSTOM_COLOR_CSS
+        .replace("window.lc-custom-colors", &format!("window.{scope_class}"))
+        .replace(".lc-custom-colors", &format!(".{scope_class}"));
+    let mut color_names = VIEW_COLOR_TOKENS
+        .iter()
+        .map(|(_, css_name, _)| *css_name)
+        .collect::<Vec<_>>();
+    color_names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    for css_name in color_names {
+        scoped_css = scoped_css.replace(
+            &format!("@{css_name}"),
+            &format!("@{css_name}-{color_suffix}"),
+        );
+    }
+    css.push_str(&scoped_css);
     css
 }
 
@@ -618,12 +642,21 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
     let view_colors_css = CssProvider::new();
+    let color_scope_class = format!(
+        "lc-custom-colors-{}",
+        NEXT_COLOR_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
+    );
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().unwrap(),
         &view_colors_css,
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    apply_view_preferences(&window, &initial_view_preferences, &view_colors_css);
+    apply_view_preferences(
+        &window,
+        &initial_view_preferences,
+        &view_colors_css,
+        &color_scope_class,
+    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: styles applied"
@@ -735,13 +768,19 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let state_for_view = app_state.clone();
         let window_for_view = window.clone();
         let colors_css_for_view = view_colors_css.clone();
+        let color_scope_class = color_scope_class.clone();
         let db_path_for_view = app_state.workspace_database_path();
         let keybindings_for_view = Rc::clone(&current_keybindings);
         Rc::new(move || {
             let workspace = state_for_view.selected_workspace();
             let preferences =
                 resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
-            apply_view_preferences(&window_for_view, &preferences, &colors_css_for_view);
+            apply_view_preferences(
+                &window_for_view,
+                &preferences,
+                &colors_css_for_view,
+                &color_scope_class,
+            );
             *keybindings_for_view.borrow_mut() =
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
@@ -1678,11 +1717,12 @@ mod tests {
         });
 
         assert_eq!(preferences.css_classes(), vec!["lc-custom-colors"]);
-        let css = view_colors_css(&preferences.colors);
-        assert!(css.contains("@define-color lc-accent #0ea5e9;"));
-        assert!(css.contains("@define-color lc-accent-fg #001018;"));
-        assert!(css.contains("@define-color lc-bg #101820;"));
-        assert!(css.contains(".lc-custom-colors .chat-mode-selected"));
+        let css = view_colors_css("lc-custom-colors-test", &preferences.colors);
+        assert!(css.contains("@define-color lc-accent-lc_custom_colors_test #0ea5e9;"));
+        assert!(css.contains("@define-color lc-accent-fg-lc_custom_colors_test #001018;"));
+        assert!(css.contains("@define-color lc-bg-lc_custom_colors_test #101820;"));
+        assert!(css.contains(".lc-custom-colors-test .chat-mode-selected"));
+        assert!(!css.contains(".lc-custom-colors .chat-mode-selected"));
     }
 
     #[test]

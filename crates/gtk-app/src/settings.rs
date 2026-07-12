@@ -9,8 +9,8 @@ use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, ensure_repository_config,
     inspect_repository_settings, load_repository_settings, save_repository_settings,
-    AgentProfileSettings, FilePatternSource, GitSettings, PromptPackSettings, PromptSettings,
-    ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
+    AgentProfileSettings, FilePatternSource, GitSettings, PromptSettings, ProviderSettings,
+    RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -210,7 +210,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let codex_provider_entry = machine_entry("Codex provider");
     let bedrock_region_entry = machine_entry("Bedrock region");
     let vertex_project_entry = machine_entry("Vertex project id");
-    let ssh_key_entry = machine_entry("SSH key path");
     let default_agent_entry = machine_entry("codex/claude/opencode");
     let default_model_entry = machine_entry("default model label");
 
@@ -272,11 +271,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             "Google Cloud project id used for Vertex provider calls.",
             &vertex_project_entry,
         ),
-    ));
-    provider_platforms.1.append(&settings_field(
-        "SSH key path",
-        "Local SSH key path for provider or Git operations that need an explicit key.",
-        &ssh_key_entry,
     ));
 
     let script_group = settings_group(
@@ -373,7 +367,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
 
     let terminal_font_entry = machine_entry("terminal font");
     let terminal_scrollback_entry = machine_entry("terminal scrollback lines");
-    let transcript_display_entry = machine_entry("structured/plain");
     let terminal_group = settings_group(
         "Terminal",
         "Terminal and transcript display defaults used by workspace surfaces.",
@@ -390,11 +383,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             "Maximum terminal transcript lines retained in the UI.",
             &terminal_scrollback_entry,
         ),
-    ));
-    terminal_group.1.append(&settings_field(
-        "Transcript display",
-        "Display mode for agent transcripts.",
-        &transcript_display_entry,
     ));
 
     let keybindings_entry = machine_entry("vim or action=shortcut list");
@@ -425,32 +413,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         "Notification rules",
         "One rule per line, such as `checks_failed`, `review_requested`, or `agent_stopped`.",
         &notifications_view.0,
-    ));
-
-    let prompt_pack_active_entry = machine_entry("prompt pack name");
-    let prompt_pack_version_entry = machine_entry("prompt pack version");
-    let prompt_pack_path_entry = machine_entry(".archductor/prompt-packs/default.toml");
-    let prompt_pack_group = settings_group(
-        "Prompt pack",
-        "File-backed prompt pack metadata. TODO: import/export and pack switching UI.",
-    );
-    prompts_panel.append(&prompt_pack_group.0);
-    prompt_pack_group.1.append(&settings_field_pair(
-        settings_field(
-            "Active pack",
-            "Logical name of the prompt pack used for this repository.",
-            &prompt_pack_active_entry,
-        ),
-        settings_field(
-            "Version",
-            "Version label for auditing prompt changes.",
-            &prompt_pack_version_entry,
-        ),
-    ));
-    prompt_pack_group.1.append(&settings_field(
-        "Pack path",
-        "Safe relative path under the repository.",
-        &prompt_pack_path_entry,
     ));
 
     let prompt_specs = [
@@ -616,20 +578,15 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let codex_provider_entry_load = codex_provider_entry.clone();
     let bedrock_region_entry_load = bedrock_region_entry.clone();
     let vertex_project_entry_load = vertex_project_entry.clone();
-    let ssh_key_entry_load = ssh_key_entry.clone();
     let default_agent_entry_load = default_agent_entry.clone();
     let default_model_entry_load = default_model_entry.clone();
     let branch_prefix_type_entry_load = branch_prefix_type_entry.clone();
     let branch_prefix_entry_load = branch_prefix_entry.clone();
     let terminal_font_entry_load = terminal_font_entry.clone();
     let terminal_scrollback_entry_load = terminal_scrollback_entry.clone();
-    let transcript_display_entry_load = transcript_display_entry.clone();
     let keybindings_entry_load = keybindings_entry.clone();
     let command_presets_buffer_load = command_presets_view.1.clone();
     let notifications_buffer_load = notifications_view.1.clone();
-    let prompt_pack_active_entry_load = prompt_pack_active_entry.clone();
-    let prompt_pack_version_entry_load = prompt_pack_version_entry.clone();
-    let prompt_pack_path_entry_load = prompt_pack_path_entry.clone();
     let file_globs_buffer_load = file_globs_view.1.clone();
     let file_globs_text_load = file_globs_view.2.clone();
     let env_buffer_load = env_view.1.clone();
@@ -733,8 +690,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                         .as_deref()
                         .unwrap_or(""),
                 );
-                ssh_key_entry_load
-                    .set_text(settings.providers.ssh_key_path.as_deref().unwrap_or(""));
                 default_agent_entry_load.set_text(
                     settings
                         .customization
@@ -771,14 +726,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                         .map(|value| value.to_string())
                         .unwrap_or_default(),
                 );
-                transcript_display_entry_load.set_text(
-                    settings
-                        .customization
-                        .view
-                        .transcript_display
-                        .as_deref()
-                        .unwrap_or(""),
-                );
                 keybindings_entry_load.set_text(
                     settings
                         .customization
@@ -796,12 +743,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 );
                 notifications_buffer_load
                     .set_text(&settings.customization.view.notification_rules.join("\n"));
-                prompt_pack_active_entry_load
-                    .set_text(settings.prompt_pack.active.as_deref().unwrap_or(""));
-                prompt_pack_version_entry_load
-                    .set_text(settings.prompt_pack.version.as_deref().unwrap_or(""));
-                prompt_pack_path_entry_load
-                    .set_text(settings.prompt_pack.path.as_deref().unwrap_or(""));
                 if inspection.worktreeinclude_exists {
                     file_globs_text_load.set_editable(false);
                     file_globs_buffer_load.set_text(&inspection.active_file_patterns.join("\n"));
@@ -884,9 +825,8 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 return;
             }
         };
-        let current_file_globs = load_repository_settings(&repo_path)
-            .map(|settings| settings.file_include_globs)
-            .unwrap_or_default();
+        let current_settings = load_repository_settings(&repo_path).unwrap_or_default();
+        let current_file_globs = current_settings.file_include_globs.clone();
         let mut customization =
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
@@ -933,7 +873,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         }
         customization.view.terminal_font = optional_entry_text(&terminal_font_entry);
         customization.view.terminal_scrollback = terminal_scrollback;
-        customization.view.transcript_display = optional_entry_text(&transcript_display_entry);
+        customization.view.transcript_display = current_settings
+            .customization
+            .view
+            .transcript_display
+            .clone();
         customization.view.keybindings = optional_entry_text(&keybindings_entry);
         customization.view.command_palette_presets =
             parse_text_lines(&text_buffer_text(&command_presets_view.1));
@@ -964,11 +908,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     .or_else(|| Some("concurrent".to_owned())),
             },
             environment_variables: parse_environment_lines(&text_buffer_text(&env_view.1)),
-            prompt_pack: PromptPackSettings {
-                active: optional_entry_text(&prompt_pack_active_entry),
-                version: optional_entry_text(&prompt_pack_version_entry),
-                path: optional_entry_text(&prompt_pack_path_entry),
-            },
+            prompt_pack: current_settings.prompt_pack,
             prompts: Some(PromptSettings {
                 new_workspace: optional_buffer_text(&prompt_views[0].1),
                 general: optional_buffer_text(&prompt_views[1].1),
@@ -993,7 +933,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 codex_provider: optional_entry_text(&codex_provider_entry),
                 bedrock_region: optional_entry_text(&bedrock_region_entry),
                 vertex_project_id: optional_entry_text(&vertex_project_entry),
-                ssh_key_path: optional_entry_text(&ssh_key_entry),
+                ssh_key_path: if matches!(layer, SettingsLayer::LocalOverride) {
+                    current_settings.providers.ssh_key_path.clone()
+                } else {
+                    None
+                },
             },
             git: GitSettings {
                 delete_branch_on_archive: Some(delete_branch_check.is_active()),

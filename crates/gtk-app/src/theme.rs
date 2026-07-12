@@ -271,7 +271,8 @@ textview:disabled {
     background-color: @lc-hover;
 }
 
-.workspace-list row:hover .workspace-row-shell {
+.workspace-list row:hover .workspace-row-shell,
+.workspace-list row:selected .workspace-row-shell {
     background-color: @lc-hover-soft;
     border-color: @lc-border-strong;
     padding-right: 14px;

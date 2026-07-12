@@ -16,7 +16,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tracing::error;
 
-use crate::archcar_async::spawn_archcar_request;
+use crate::archcar_async::{spawn_archcar_request, spawn_background_job};
 use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -340,11 +340,7 @@ pub(crate) fn build_app_sidebar(
                                         }
                                         glib::ControlFlow::Break
                                     }
-                                    Err(mpsc::TryRecvError::Empty) => {
-                                        refresh_hub.refresh(RefreshScope::Projects);
-                                        refresh_hub.refresh(RefreshScope::Sidebar);
-                                        glib::ControlFlow::Continue
-                                    }
+                                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                                     Err(mpsc::TryRecvError::Disconnected) => {
                                         add_btn.set_sensitive(true);
                                         add_btn.set_tooltip_text(Some("Create workspace"));
@@ -931,28 +927,6 @@ fn attach_workspace_row_context_menu(
                     let row = row.clone();
                     let window = window.clone();
                     move || {
-                        let snapshot = state.snapshot();
-                        let was_selected_workspace =
-                            snapshot.selected_workspace.as_deref() == Some(workspace_name.as_str())
-                                && matches!(
-                                    snapshot.active_page,
-                                    AppPage::Workspace | AppPage::Review
-                                );
-                        state.remove_workspace_from_navigation(
-                            &workspace_name,
-                            AppPage::Dashboard,
-                        );
-                        if was_selected_workspace {
-                            stack.set_visible_child_name("dashboard");
-                        }
-                        if let Some(list) = row.parent().and_downcast::<ListBox>() {
-                            list.remove(&row);
-                        }
-                        refresh_view_preferences();
-                        refresh_workspace();
-                        refresh_hub.refresh(RefreshScope::Sidebar);
-                        refresh_hub.refresh(RefreshScope::Dashboard);
-
                         let rx = spawn_background_job({
                             let db_path = state.workspace_database_path().to_path_buf();
                             let workspace_name = workspace_name.clone();
@@ -969,6 +943,10 @@ fn attach_workspace_row_context_menu(
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
+                        let state = state.clone();
+                        let stack = stack.clone();
+                        let row = row.clone();
+                        let workspace_name = workspace_name.clone();
                         let window = window.clone();
                         // PER-190: temporary worker-result poll for workspace lifecycle actions;
                         // remove when sidebar jobs return through a GLib main-context future.
@@ -977,6 +955,26 @@ fn attach_workspace_row_context_menu(
                                 Ok(result) => {
                                     match result {
                                         Ok(()) => {
+                                            let snapshot = state.snapshot();
+                                            let was_selected_workspace =
+                                                snapshot.selected_workspace.as_deref()
+                                                    == Some(workspace_name.as_str())
+                                                    && matches!(
+                                                        snapshot.active_page,
+                                                        AppPage::Workspace | AppPage::Review
+                                                    );
+                                            state.remove_workspace_from_navigation(
+                                                &workspace_name,
+                                                AppPage::Dashboard,
+                                            );
+                                            if was_selected_workspace {
+                                                stack.set_visible_child_name("dashboard");
+                                            }
+                                            if let Some(list) =
+                                                row.parent().and_downcast::<ListBox>()
+                                            {
+                                                list.remove(&row);
+                                            }
                                             refresh_view_preferences();
                                             refresh_workspace();
                                             refresh_hub.refresh(RefreshScope::All);
@@ -1017,7 +1015,7 @@ fn attach_workspace_row_context_menu(
     let menu_btn = icon_button("view-more-symbolic", "Workspace actions");
     menu_btn.add_css_class("workspace-row-menu-button");
     menu_btn.set_margin_start(2);
-    popover.set_parent(&menu_btn);
+    popover.set_parent(row);
     let menu_revealer = Revealer::new();
     menu_revealer.add_css_class("workspace-row-menu-revealer");
     menu_revealer.set_transition_type(RevealerTransitionType::SlideLeft);
@@ -1084,13 +1082,14 @@ fn attach_workspace_row_context_menu(
     let popover_for_click = popover.downgrade();
     let menu_open_for_click = menu_open.clone();
     let sync_revealer_for_click = sync_menu_revealer.clone();
-    gesture.connect_pressed(move |_, _, _x, _y| {
+    gesture.connect_pressed(move |_, _, x, y| {
         let Some(popover_for_click) = popover_for_click.upgrade() else {
             return;
         };
         menu_open_for_click.set(true);
         sync_revealer_for_click();
-        popover_for_click.set_pointing_to(None);
+        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        popover_for_click.set_pointing_to(Some(&rect));
         popover_for_click.popup();
     });
     row.add_controller(gesture);
@@ -1328,18 +1327,6 @@ fn section_header_row(
     row.set_selectable(false);
     row.set_activatable(false);
     row
-}
-
-fn spawn_background_job<F, T>(job: F) -> mpsc::Receiver<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(job());
-    });
-    rx
 }
 
 fn empty_repo_row() -> ListBoxRow {
