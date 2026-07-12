@@ -18,6 +18,7 @@ use linux_archductor_core::codex_tui::{
 use linux_archductor_core::doctor::SetupReadiness;
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
+use linux_archductor_core::settings::load_repository_settings;
 use linux_archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
@@ -894,8 +895,13 @@ pub fn agent_session_panel(
                                     return;
                                 }
                             };
+                            let transcript_display =
+                                transcript_display_for_workspace(&database_path, &workspace);
                             let render_legacy_inline_events =
-                                render_legacy_inline_events_for_thread(&thread_events);
+                                render_legacy_inline_events_for_thread(
+                                    &thread_events,
+                                    &transcript_display,
+                                );
                             debug!(
                                 workspace = %workspace,
                                 thread_id,
@@ -2171,8 +2177,23 @@ fn chat_event_widget(event: &ChatEventRecord) -> Widget {
         })
 }
 
-fn render_legacy_inline_events_for_thread(thread_events: &[ChatEventRecord]) -> bool {
-    thread_events.is_empty()
+fn render_legacy_inline_events_for_thread(
+    thread_events: &[ChatEventRecord],
+    transcript_display: &str,
+) -> bool {
+    match transcript_display.trim().to_ascii_lowercase().as_str() {
+        "raw" | "legacy" => true,
+        _ => thread_events.is_empty(),
+    }
+}
+
+fn transcript_display_for_workspace(database_path: &Path, workspace_name: &str) -> String {
+    WorkspaceStore::open(database_path)
+        .and_then(|store| store.workspace_repository_root(workspace_name))
+        .and_then(|root| load_repository_settings(&root))
+        .ok()
+        .and_then(|settings| settings.customization.view.transcript_display)
+        .unwrap_or_else(|| "structured".to_owned())
 }
 
 fn stored_chat_event_inline_event(event: &ChatEventRecord) -> Option<CodexInlineEvent> {
@@ -6823,8 +6844,7 @@ I summarized the result.
             updated_at: "now".to_owned(),
         };
 
-        let legacy_enabled = render_legacy_inline_events_for_thread(&[]);
-        let legacy_disabled = render_legacy_inline_events_for_thread(&[ChatEventRecord {
+        let persisted_event = ChatEventRecord {
             id: 88,
             thread_id: 7,
             process_id: Some(5),
@@ -6836,12 +6856,21 @@ I summarized the result.
             timeline_seq: 1,
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
-        }]);
+        };
+        let legacy_enabled = render_legacy_inline_events_for_thread(&[], "structured");
+        let legacy_disabled = render_legacy_inline_events_for_thread(
+            std::slice::from_ref(&persisted_event),
+            "structured",
+        );
+        let raw_enabled =
+            render_legacy_inline_events_for_thread(std::slice::from_ref(&persisted_event), "raw");
         let legacy_events = legacy_inline_events_for_message(&message, legacy_enabled);
         let persisted_timeline_events = legacy_inline_events_for_message(&message, legacy_disabled);
+        let raw_events = legacy_inline_events_for_message(&message, raw_enabled);
 
         assert_eq!(legacy_events.len(), 1);
         assert!(persisted_timeline_events.is_empty());
+        assert_eq!(raw_events.len(), 1);
     }
 
     #[test]

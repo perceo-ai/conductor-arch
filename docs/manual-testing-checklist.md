@@ -30,7 +30,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   `linux-archductor repo settings <name> import <file>` and `--local`.
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
   test/lint/typecheck/build commands, environment variables, provider
-  executable fields, SSH key path, prompts, prompt pack metadata, and Git
+  executable fields, prompts, prompt pack metadata, and Git
   behavior.
 - [ ] Confirm all repository action prompts are editable from Settings:
   new workspace, general, continue work, summarize session, handoff, code

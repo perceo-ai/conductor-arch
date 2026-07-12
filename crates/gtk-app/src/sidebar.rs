@@ -9,11 +9,9 @@ use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
 use tracing::error;
 
 use crate::archcar_async::{spawn_archcar_request, spawn_background_job};
@@ -219,6 +217,8 @@ pub(crate) fn build_app_sidebar(
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
     let names: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
+    let pending_workspace_creates: Rc<RefCell<HashSet<String>>> =
+        Rc::new(RefCell::new(HashSet::new()));
     let db_path = app_state.workspace_database_path();
     let db_path_populate = db_path.clone();
 
@@ -234,6 +234,7 @@ pub(crate) fn build_app_sidebar(
         let stack = stack.clone();
         let sync_nav_buttons = sync_nav_buttons.clone();
         let db_path_populate = db_path_populate.clone();
+        let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
         move || {
             sync_nav_buttons();
             while let Some(child) = list.first_child() {
@@ -279,7 +280,8 @@ pub(crate) fn build_app_sidebar(
                         continue;
                     }
 
-                    let header_row = section_header_row(&repo_name, lines.len(), {
+                    let create_pending = pending_workspace_creates.borrow().contains(&repo_name);
+                    let header_row = section_header_row(&repo_name, lines.len(), create_pending, {
                         let db_path = db_path_populate.clone();
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
@@ -287,67 +289,67 @@ pub(crate) fn build_app_sidebar(
                         let app_state = app_state.clone();
                         let stack = stack.clone();
                         let repo_name = repo_name.clone();
+                        let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
                         move |add_btn: Button| {
+                            if !pending_workspace_creates
+                                .borrow_mut()
+                                .insert(repo_name.clone())
+                            {
+                                return;
+                            }
                             add_btn.set_sensitive(false);
                             add_btn.set_tooltip_text(Some("Creating workspace..."));
-                            let rx = spawn_background_job({
-                                let db_path = db_path.clone();
-                                let repo_name = repo_name.clone();
-                                move || {
-                                    WorkspaceStore::open(db_path).and_then(|store| {
-                                        store.create(CreateWorkspace {
-                                            repository_name: repo_name,
-                                            name: String::new(),
-                                            branch: String::new(),
-                                            base_ref: None,
-                                        })
-                                    })
-                                }
-                            });
                             let refresh_hub = refresh_hub.clone();
                             let refresh_workspace = refresh_workspace.clone();
                             let refresh_view_preferences = refresh_view_preferences.clone();
                             let app_state = app_state.clone();
                             let stack = stack.clone();
-                            // PER-190: temporary worker-result poll for workspace
-                            // creation; remove when sidebar jobs return through a
-                            // GLib main-context future.
-                            glib::timeout_add_local(Duration::from_millis(100), move || {
-                                match rx.try_recv() {
-                                    Ok(result) => {
-                                        add_btn.set_sensitive(true);
-                                        add_btn.set_tooltip_text(Some("Create workspace"));
-                                        if let Ok(workspace) = result {
-                                            let default_tab = WorkspaceStore::open(
-                                                app_state.workspace_database_path(),
-                                            )
-                                            .and_then(|store| {
-                                                store.workspace_view_defaults(&workspace.name)
+                            let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+                            let repo_name_for_callback = repo_name.clone();
+                            spawn_background_job(
+                                {
+                                    let db_path = db_path.clone();
+                                    let repo_name = repo_name.clone();
+                                    move || {
+                                        WorkspaceStore::open(db_path).and_then(|store| {
+                                            store.create(CreateWorkspace {
+                                                repository_name: repo_name,
+                                                name: String::new(),
+                                                branch: String::new(),
+                                                base_ref: None,
                                             })
-                                            .ok()
-                                            .and_then(|defaults| defaults.default_visible_tab)
-                                            .and_then(|tab| WorkspaceTab::from_config(&tab));
-                                            app_state.navigate_to_workspace_with_default_tab(
-                                                Some(workspace.name),
-                                                default_tab,
-                                            );
-                                            stack.set_visible_child_name("workspace");
-                                            refresh_hub.refresh(RefreshScope::Projects);
-                                            refresh_hub.refresh(RefreshScope::Sidebar);
-                                            refresh_hub.refresh(RefreshScope::Dashboard);
-                                            refresh_workspace();
-                                            refresh_view_preferences();
-                                        }
-                                        glib::ControlFlow::Break
+                                        })
                                     }
-                                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                    Err(mpsc::TryRecvError::Disconnected) => {
-                                        add_btn.set_sensitive(true);
-                                        add_btn.set_tooltip_text(Some("Create workspace"));
-                                        glib::ControlFlow::Break
+                                },
+                                move |result| {
+                                    pending_workspace_creates
+                                        .borrow_mut()
+                                        .remove(&repo_name_for_callback);
+                                    add_btn.set_sensitive(true);
+                                    add_btn.set_tooltip_text(Some("Create workspace"));
+                                    if let Ok(workspace) = result {
+                                        let default_tab = WorkspaceStore::open(
+                                            app_state.workspace_database_path(),
+                                        )
+                                        .and_then(|store| {
+                                            store.workspace_view_defaults(&workspace.name)
+                                        })
+                                        .ok()
+                                        .and_then(|defaults| defaults.default_visible_tab)
+                                        .and_then(|tab| WorkspaceTab::from_config(&tab));
+                                        app_state.navigate_to_workspace_with_default_tab(
+                                            Some(workspace.name),
+                                            default_tab,
+                                        );
+                                        stack.set_visible_child_name("workspace");
+                                        refresh_hub.refresh(RefreshScope::Projects);
+                                        refresh_hub.refresh(RefreshScope::Sidebar);
+                                        refresh_hub.refresh(RefreshScope::Dashboard);
+                                        refresh_workspace();
+                                        refresh_view_preferences();
                                     }
-                                }
-                            });
+                                },
+                            );
                         }
                     });
                     list.append(&header_row);
@@ -818,55 +820,42 @@ fn attach_workspace_row_context_menu(
                         if new_name.is_empty() {
                             return Ok(());
                         }
-                        let rx = spawn_background_job({
-                            let db_path = state.workspace_database_path().to_path_buf();
-                            let workspace_name = workspace_name.clone();
-                            let new_name = new_name.clone();
-                            move || {
-                                WorkspaceStore::open(db_path)
-                                    .and_then(|store| {
-                                        store.duplicate(&workspace_name, &new_name, None)
-                                    })
-                                    .map_err(|err| format!("{err:#}"))
-                            }
-                        });
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
                         let state = state.clone();
                         let stack = stack.clone();
                         let window = window.clone();
-                        // PER-190: temporary worker-result poll for workspace lifecycle actions;
-                        // remove when sidebar jobs return through a GLib main-context future.
-                        glib::timeout_add_local(Duration::from_millis(100), move || {
-                            match rx.try_recv() {
-                                Ok(Ok(workspace)) => {
+                        spawn_background_job(
+                            {
+                                let db_path = state.workspace_database_path().to_path_buf();
+                                let workspace_name = workspace_name.clone();
+                                let new_name = new_name.clone();
+                                move || {
+                                    WorkspaceStore::open(db_path)
+                                        .and_then(|store| {
+                                            store.duplicate(&workspace_name, &new_name, None)
+                                        })
+                                        .map_err(|err| format!("{err:#}"))
+                                }
+                            },
+                            move |result| match result {
+                                Ok(workspace) => {
                                     state.navigate_to_workspace(Some(workspace.name));
                                     stack.set_visible_child_name("workspace");
                                     refresh_view_preferences();
                                     refresh_workspace();
                                     refresh_hub.refresh(RefreshScope::All);
-                                    glib::ControlFlow::Break
                                 }
-                                Ok(Err(err)) => {
+                                Err(err) => {
                                     show_workspace_error_dialog(
                                         &window,
                                         "Workspace action failed",
                                         &err,
                                     );
-                                    glib::ControlFlow::Break
                                 }
-                                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(mpsc::TryRecvError::Disconnected) => {
-                                    show_workspace_error_dialog(
-                                        &window,
-                                        "Workspace action failed",
-                                        "Background worker disconnected.",
-                                    );
-                                    glib::ControlFlow::Break
-                                }
-                            }
-                        });
+                            },
+                        );
                         Ok(())
                     }
                 }),
@@ -927,19 +916,6 @@ fn attach_workspace_row_context_menu(
                     let row = row.clone();
                     let window = window.clone();
                     move || {
-                        let rx = spawn_background_job({
-                            let db_path = state.workspace_database_path().to_path_buf();
-                            let workspace_name = workspace_name.clone();
-                            move || {
-                                WorkspaceStore::open(db_path).and_then(|store| match action {
-                                    "archive" => store.archive(&workspace_name, false).map(|_| ()),
-                                    "delete" => {
-                                        store.delete(&workspace_name, true, true).map(|_| ())
-                                    }
-                                    _ => unreachable!(),
-                                })
-                            }
-                        });
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
@@ -948,13 +924,24 @@ fn attach_workspace_row_context_menu(
                         let row = row.clone();
                         let workspace_name = workspace_name.clone();
                         let window = window.clone();
-                        // PER-190: temporary worker-result poll for workspace lifecycle actions;
-                        // remove when sidebar jobs return through a GLib main-context future.
-                        glib::timeout_add_local(Duration::from_millis(100), move || {
-                            match rx.try_recv() {
-                                Ok(result) => {
-                                    match result {
-                                        Ok(()) => {
+                        spawn_background_job(
+                            {
+                                let db_path = state.workspace_database_path().to_path_buf();
+                                let workspace_name = workspace_name.clone();
+                                move || {
+                                    WorkspaceStore::open(db_path).and_then(|store| match action {
+                                        "archive" => {
+                                            store.archive(&workspace_name, false).map(|_| ())
+                                        }
+                                        "delete" => {
+                                            store.delete(&workspace_name, true, true).map(|_| ())
+                                        }
+                                        _ => unreachable!(),
+                                    })
+                                }
+                            },
+                            move |result| match result {
+                                Ok(()) => {
                                             let snapshot = state.snapshot();
                                             let was_selected_workspace =
                                                 snapshot.selected_workspace.as_deref()
@@ -978,8 +965,8 @@ fn attach_workspace_row_context_menu(
                                             refresh_view_preferences();
                                             refresh_workspace();
                                             refresh_hub.refresh(RefreshScope::All);
-                                        }
-                                        Err(err) => {
+                                }
+                                Err(err) => {
                                             refresh_view_preferences();
                                             refresh_workspace();
                                             refresh_hub.refresh(RefreshScope::Sidebar);
@@ -988,21 +975,9 @@ fn attach_workspace_row_context_menu(
                                                 "Workspace action failed",
                                                 &format!("{err:#}"),
                                             );
-                                        }
-                                    }
-                                    glib::ControlFlow::Break
                                 }
-                                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(mpsc::TryRecvError::Disconnected) => {
-                                    show_workspace_error_dialog(
-                                        &window,
-                                        "Workspace action failed",
-                                        "Background worker disconnected.",
-                                    );
-                                    glib::ControlFlow::Break
-                                }
-                            }
-                        });
+                            },
+                        );
                         Ok(())
                     }
                 }),
@@ -1307,6 +1282,7 @@ fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
+    create_pending: bool,
     on_add_workspace: impl Fn(Button) + 'static,
 ) -> ListBoxRow {
     let shell = GBox::new(Orientation::Horizontal, 6);
@@ -1325,7 +1301,12 @@ fn section_header_row(
 
     let add_btn = sidebar_icon_button("list-add-symbolic", "Create workspace");
     add_btn.add_css_class("repo-header-add");
-    add_btn.set_tooltip_text(Some("Create workspace"));
+    if create_pending {
+        add_btn.set_sensitive(false);
+        add_btn.set_tooltip_text(Some("Creating workspace..."));
+    } else {
+        add_btn.set_tooltip_text(Some("Create workspace"));
+    }
     add_btn.connect_clicked({
         let add_btn = add_btn.clone();
         move |_| on_add_workspace(add_btn.clone())
@@ -1405,12 +1386,8 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        spawn_background_job,
-    };
+    use super::{primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection};
     use crate::state::AppPage;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn primary_sidebar_nav_labels_gate_pty_inspector_under_history() {
@@ -1436,21 +1413,5 @@ mod tests {
         assert!(!sidebar_should_restore_workspace_selection(
             &AppPage::History
         ));
-    }
-
-    #[test]
-    fn spawn_background_job_returns_before_work_finishes() {
-        let start = Instant::now();
-        let rx = spawn_background_job(|| {
-            std::thread::sleep(Duration::from_millis(150));
-            42
-        });
-
-        assert!(start.elapsed() < Duration::from_millis(50));
-        assert!(matches!(
-            rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
     }
 }

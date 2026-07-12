@@ -73,7 +73,6 @@ pub struct ProviderSettings {
     pub codex_provider: Option<String>,
     pub bedrock_region: Option<String>,
     pub vertex_project_id: Option<String>,
-    pub ssh_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -190,10 +189,21 @@ pub struct ViewSettings {
 }
 
 pub fn load_repository_settings(repo_path: &Path) -> Result<RepositorySettings> {
+    match load_repository_settings_strict(repo_path) {
+        Ok(settings) => Ok(settings),
+        Err(err) if is_recoverable_settings_load_error(&err) => {
+            Ok(load_repository_settings_recovering(repo_path).settings)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn load_repository_settings_strict(repo_path: &Path) -> Result<RepositorySettings> {
     let shared = load_optional_settings(&repo_path.join(".archductor/settings.toml"))?;
     let local = load_optional_settings(&repo_path.join(".archductor/settings.local.toml"))?;
-    let settings = shared.merge(local).into_settings();
+    let mut settings = shared.merge(local).into_settings();
     validate_repository_settings(&settings)?;
+    apply_prompt_pack_prompts(repo_path, &mut settings)?;
     Ok(settings)
 }
 
@@ -205,9 +215,11 @@ pub fn load_repository_settings_for_layer(
         SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
         SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
     };
-    let settings = load_optional_settings(&path)?.into_settings();
-    validate_repository_settings(&settings)?;
-    Ok(settings)
+    match load_optional_settings(&path) {
+        Ok(settings) => Ok(settings.into_settings()),
+        Err(err) if is_recoverable_settings_load_error(&err) => Ok(RepositorySettings::default()),
+        Err(err) => Err(err),
+    }
 }
 
 pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettingsLoadReport {
@@ -228,9 +240,14 @@ pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettin
             RawRepositorySettings::default()
         }
     };
-    let settings = shared.merge(local).into_settings();
+    let mut settings = shared.merge(local).into_settings();
     match validate_repository_settings(&settings) {
-        Ok(()) => RepositorySettingsLoadReport { settings, errors },
+        Ok(()) => {
+            if let Err(err) = apply_prompt_pack_prompts(repo_path, &mut settings) {
+                errors.push(err.to_string());
+            }
+            RepositorySettingsLoadReport { settings, errors }
+        }
         Err(err) => {
             errors.push(err.to_string());
             RepositorySettingsLoadReport {
@@ -239,6 +256,49 @@ pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettin
             }
         }
     }
+}
+
+fn apply_prompt_pack_prompts(repo_path: &Path, settings: &mut RepositorySettings) -> Result<()> {
+    let Some(pack_prompts) = load_prompt_pack_prompts(repo_path, &settings.prompt_pack)? else {
+        return Ok(());
+    };
+    settings.prompts = Some(match settings.prompts.take() {
+        Some(prompts) => merge_prompt_settings(pack_prompts, prompts),
+        None => pack_prompts,
+    });
+    Ok(())
+}
+
+fn load_prompt_pack_prompts(
+    repo_path: &Path,
+    prompt_pack: &PromptPackSettings,
+) -> Result<Option<PromptSettings>> {
+    let Some(relative_path) = prompt_pack
+        .path
+        .as_deref()
+        .and_then(active_prompt_pack_path)
+    else {
+        return Ok(None);
+    };
+    let path = repo_path.join(relative_path);
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("read prompt pack {}", path.display()))?;
+    let raw: RawPromptPackFile = toml::from_str(&contents)
+        .with_context(|| format!("parse prompt pack {}", path.display()))?;
+    Ok(Some(raw.prompts.into_settings()))
+}
+
+fn merge_prompt_settings(base: PromptSettings, overrides: PromptSettings) -> PromptSettings {
+    RawPromptSettings::from_settings(&base)
+        .merge(RawPromptSettings::from_settings(&overrides))
+        .into_settings()
+}
+
+fn is_recoverable_settings_load_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    !(message.contains("must not be a symlink")
+        || message.contains("read settings")
+        || message.contains("inspect "))
 }
 
 pub fn ensure_repository_config(repo_path: &Path) -> Result<RepositoryConfigBootstrap> {
@@ -744,8 +804,6 @@ struct RawProviderSettings {
     bedrock_region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vertex_project_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ssh_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1143,7 +1201,6 @@ impl RawProviderSettings {
             codex_provider: local.codex_provider.or(self.codex_provider),
             bedrock_region: local.bedrock_region.or(self.bedrock_region),
             vertex_project_id: local.vertex_project_id.or(self.vertex_project_id),
-            ssh_key_path: local.ssh_key_path.or(self.ssh_key_path),
         }
     }
 
@@ -1155,7 +1212,6 @@ impl RawProviderSettings {
             codex_provider: self.codex_provider,
             bedrock_region: self.bedrock_region,
             vertex_project_id: self.vertex_project_id,
-            ssh_key_path: self.ssh_key_path,
         }
     }
 
@@ -1167,7 +1223,6 @@ impl RawProviderSettings {
             codex_provider: settings.codex_provider.clone(),
             bedrock_region: settings.bedrock_region.clone(),
             vertex_project_id: settings.vertex_project_id.clone(),
-            ssh_key_path: settings.ssh_key_path.clone(),
         }
     }
 }
@@ -2190,7 +2245,6 @@ LOCAL_ONLY = "1"
                 codex_provider: Some("openai".to_owned()),
                 bedrock_region: None,
                 vertex_project_id: None,
-                ssh_key_path: None,
             },
             git: GitSettings {
                 delete_branch_on_archive: Some(false),
@@ -2302,6 +2356,48 @@ path = ".archductor/prompt-packs/review.toml"
         assert!(review_pack.contains("version = \"v1\""));
     }
 
+    #[test]
+    fn load_repository_settings_uses_configured_prompt_pack_prompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        let prompt_pack_dir = conductor_dir.join("prompt-packs");
+        fs::create_dir_all(&prompt_pack_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[prompt_pack]
+active = "review"
+version = "v7"
+path = ".archductor/prompt-packs/review.toml"
+
+[prompts]
+create_pr = "Use repository override."
+"#,
+        )
+        .unwrap();
+        fs::write(
+            prompt_pack_dir.join("review.toml"),
+            r#"
+name = "review"
+version = "v7"
+
+[prompts]
+general = "Use review pack."
+create_pr = "Use pack PR prompt."
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+        let prompts = settings.prompts.unwrap();
+
+        assert_eq!(prompts.general.as_deref(), Some("Use review pack."));
+        assert_eq!(
+            prompts.create_pr.as_deref(),
+            Some("Use repository override.")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn ensure_repository_config_rejects_gitignore_symlink() {
@@ -2398,7 +2494,10 @@ path = ".archductor/prompt-packs/review.toml"
         assert_eq!(report.settings, RepositorySettings::default());
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("scripts.run_mode"));
-        assert!(load_repository_settings(temp.path()).is_err());
+        assert_eq!(
+            load_repository_settings(temp.path()).unwrap(),
+            RepositorySettings::default()
+        );
     }
 
     #[cfg(unix)]

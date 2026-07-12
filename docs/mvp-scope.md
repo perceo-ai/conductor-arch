@@ -41,7 +41,7 @@ many terminals.
 ### Settings And Customization
 
 - Support scripts, check commands, environment variables, prompts, prompt pack
-  metadata, provider paths, SSH key path, Git defaults, file-copy rules,
+  metadata, provider paths, Git defaults, file-copy rules,
   monorepo working directory, merge rules, workspace defaults, terminal
   preferences, view preferences, shortcuts, notification labels, and import/export where
   implemented.

@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -5,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use gtk::glib;
 use linux_archductor_core::archcar::client::ArchcarClient;
 use linux_archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputKind, ArchcarRequest, ArchcarResponse,
@@ -69,6 +72,14 @@ struct AsyncArchcarRequestEnvelope {
 type BridgeWake = Arc<dyn Fn() + Send + Sync + 'static>;
 type BridgeWakeSlot = Arc<Mutex<Option<BridgeWake>>>;
 type BridgeConnectLock = Arc<Mutex<()>>;
+type BackgroundJobCallback = Box<dyn FnOnce(Box<dyn Any>) + 'static>;
+
+static NEXT_BACKGROUND_JOB_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static BACKGROUND_JOB_CALLBACKS: RefCell<HashMap<u64, BackgroundJobCallback>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Clone)]
 pub struct AsyncArchcarBridge {
@@ -217,16 +228,34 @@ pub fn spawn_archcar_request(paths: AppPaths, request: ArchcarRequest) {
     });
 }
 
-pub(crate) fn spawn_background_job<F, T>(job: F) -> Receiver<T>
+pub(crate) fn spawn_background_job<F, T, C>(job: F, on_complete: C)
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
+    C: FnOnce(T) + 'static,
 {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(job());
+    let id = NEXT_BACKGROUND_JOB_ID.fetch_add(1, Ordering::Relaxed);
+    BACKGROUND_JOB_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |payload| {
+                if let Ok(result) = payload.downcast::<T>() {
+                    on_complete(*result);
+                }
+            }),
+        );
     });
-    rx
+    let main_context = glib::MainContext::default();
+    thread::spawn(move || {
+        let result = job();
+        main_context.invoke(move || {
+            BACKGROUND_JOB_CALLBACKS.with(|callbacks| {
+                if let Some(callback) = callbacks.borrow_mut().remove(&id) {
+                    callback(Box::new(result));
+                }
+            });
+        });
+    });
 }
 
 fn run_archcar_request_bridge(

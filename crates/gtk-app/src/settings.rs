@@ -1107,11 +1107,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 codex_provider: optional_entry_text(&codex_provider_entry),
                 bedrock_region: optional_entry_text(&bedrock_region_entry),
                 vertex_project_id: optional_entry_text(&vertex_project_entry),
-                ssh_key_path: if matches!(layer, SettingsLayer::LocalOverride) {
-                    current_settings.providers.ssh_key_path.clone()
-                } else {
-                    None
-                },
             },
             git: GitSettings {
                 delete_branch_on_archive: bool_setting_for_layer(

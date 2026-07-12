@@ -17,8 +17,6 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
 
 use crate::archcar_async::spawn_background_job;
 use crate::buttons::{resolve_icon_name, text_button};
@@ -583,18 +581,8 @@ pub(crate) fn build_projects_page(
             (!typed_name.is_empty()).then_some(typed_name),
             (!typed_branch.is_empty()).then_some(typed_branch),
         );
-        let rx = request.map(|request| {
-            spawn_background_job({
-                let db_path_create = db_path_create.clone();
-                let repo = repo.clone();
-                move || {
-                    WorkspaceStore::open(db_path_create)
-                        .and_then(|store| request.create_workspace(&store, &repo))
-                }
-            })
-        });
-        let rx = match rx {
-            Ok(rx) => rx,
+        let request = match request {
+            Ok(request) => request,
             Err(err) => {
                 create_btn_inline.set_sensitive(true);
                 result.set_text(&format!("Create failed: {err:#}"));
@@ -607,22 +595,23 @@ pub(crate) fn build_projects_page(
         let refresh_after_create = refresh_after_create.clone();
         let refresh_dashboard_inline = refresh_dashboard_inline.clone();
         let refresh_workspace_inline = refresh_workspace_inline.clone();
-        glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-            Ok(create_result) => {
+        spawn_background_job(
+            {
+                let db_path_create = db_path_create.clone();
+                let repo = repo.clone();
+                move || {
+                    WorkspaceStore::open(db_path_create)
+                        .and_then(|store| request.create_workspace(&store, &repo))
+                }
+            },
+            move |create_result| {
                 result.set_text(&workspace_source_create_feedback(&source, create_result));
                 create_btn.set_sensitive(true);
                 refresh_after_create();
                 refresh_dashboard_inline();
                 refresh_workspace_inline();
-                glib::ControlFlow::Break
-            }
-            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                create_btn.set_sensitive(true);
-                result.set_text("Create failed: worker disconnected.");
-                glib::ControlFlow::Break
-            }
-        });
+            },
+        );
     });
 
     let db_path_modal_workspace = paths.database_path.clone();
@@ -831,11 +820,6 @@ pub(crate) fn build_projects_page(
                 codex_provider: optional_entry_text(&codex_provider_entry),
                 bedrock_region: optional_entry_text(&bedrock_region_entry),
                 vertex_project_id: optional_entry_text(&vertex_project_entry),
-                ssh_key_path: if matches!(layer, SettingsLayer::LocalOverride) {
-                    current_settings.providers.ssh_key_path.clone()
-                } else {
-                    None
-                },
             },
             git: GitSettings {
                 delete_branch_on_archive: Some(delete_branch_check.is_active()),
@@ -1309,18 +1293,8 @@ pub(crate) fn show_create_workspace_dialog(
             (!typed_name.is_empty()).then_some(typed_name),
             (!typed_branch.is_empty()).then_some(typed_branch),
         );
-        let rx = request.map(|request| {
-            spawn_background_job({
-                let db_path_for_create = db_path_for_create.clone();
-                let repo = repo.clone();
-                move || {
-                    WorkspaceStore::open(db_path_for_create)
-                        .and_then(|store| request.create_workspace(&store, &repo))
-                }
-            })
-        });
-        let rx = match rx {
-            Ok(rx) => rx,
+        let request = match request {
+            Ok(request) => request,
             Err(err) => {
                 confirm_for_create.set_sensitive(true);
                 feedback_for_create.set_text(&format!("Create failed: {err:#}"));
@@ -1333,8 +1307,16 @@ pub(crate) fn show_create_workspace_dialog(
         let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
         let refresh_workspace_for_create = refresh_workspace_for_create.clone();
         let dialog_for_create = dialog_for_create.clone();
-        glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-            Ok(create_result) => {
+        spawn_background_job(
+            {
+                let db_path_for_create = db_path_for_create.clone();
+                let repo = repo.clone();
+                move || {
+                    WorkspaceStore::open(db_path_for_create)
+                        .and_then(|store| request.create_workspace(&store, &repo))
+                }
+            },
+            move |create_result| {
                 create_btn.set_sensitive(true);
                 refresh_for_create();
                 refresh_dashboard_for_create();
@@ -1343,15 +1325,8 @@ pub(crate) fn show_create_workspace_dialog(
                     Ok(_) => dialog_for_create.close(),
                     Err(err) => feedback.set_text(&format!("Create failed: {err:#}")),
                 }
-                glib::ControlFlow::Break
-            }
-            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                create_btn.set_sensitive(true);
-                feedback.set_text("Create failed: worker disconnected.");
-                glib::ControlFlow::Break
-            }
-        });
+            },
+        );
     });
     body.append(&feedback);
     body.append(&actions.0);

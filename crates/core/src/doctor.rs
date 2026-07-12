@@ -106,13 +106,16 @@ impl SetupReadiness {
     }
 
     pub fn any_agent_ready(&self) -> bool {
-        self.codex.ready || self.claude.ready || self.opencode.ready
+        launchable_agent_tools().any(|tool| {
+            self.provider_check(tool.provider_key)
+                .is_some_and(|check| check.ready)
+        })
     }
 
     pub fn first_ready_launchable_provider(&self) -> Option<&'static str> {
         launchable_agent_tools()
             .find(|tool| {
-                self.check_for_provider(tool.provider_key)
+                self.provider_check(tool.provider_key)
                     .is_some_and(|check| check.ready)
             })
             .map(|tool| tool.provider_key)
@@ -120,21 +123,22 @@ impl SetupReadiness {
 
     pub fn provider_ready(&self, provider: &str) -> bool {
         tool_by_provider(provider)
-            .and_then(|tool| self.check_for_provider(tool.provider_key))
+            .and_then(|tool| self.provider_check(tool.provider_key))
             .is_some_and(|check| check.ready)
     }
 
     pub fn launchable_provider_ready(&self, provider: &str) -> bool {
         launchable_provider_key(provider)
-            .and_then(|provider| self.check_for_provider(provider))
+            .and_then(|provider| self.provider_check(provider))
             .is_some_and(|check| check.ready)
     }
 
-    fn check_for_provider(&self, provider: &str) -> Option<&SetupCheck> {
+    fn provider_check(&self, provider: &str) -> Option<SetupCheck> {
         match provider {
-            "codex" => Some(&self.codex),
-            "claude" => Some(&self.claude),
-            "opencode" => Some(&self.opencode),
+            "codex" => Some(self.codex.clone()),
+            "claude" => Some(self.claude.clone()),
+            "opencode" => Some(self.opencode.clone()),
+            _ if tool_by_provider(provider).is_some() => Some(provider_readiness(provider)),
             _ => None,
         }
     }

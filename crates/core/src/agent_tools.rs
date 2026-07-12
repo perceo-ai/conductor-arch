@@ -108,7 +108,8 @@ pub fn agent_tools() -> impl Iterator<Item = &'static ToolSpec> {
 }
 
 pub fn launchable_agent_tools() -> impl Iterator<Item = &'static ToolSpec> {
-    agent_tools().filter(|tool| tool.chat_launchable)
+    agent_tools()
+        .filter(|tool| tool.chat_launchable && tool.launch_owner != LaunchOwner::NotSupported)
 }
 
 pub fn tool_by_provider(provider: &str) -> Option<&'static ToolSpec> {
