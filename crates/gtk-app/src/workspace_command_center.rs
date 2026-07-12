@@ -4598,12 +4598,13 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
                 summary.conflicting_workspaces.len(),
             );
             format!(
-                "Changed files: {}\nRun: {}\nSessions: {}\nPR: {}\n{}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
+                "Changed files: {}\nRun: {}\nChecks: {}\nSessions: {}\nPR: {}\n{}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
                 summary.changed_files,
                 summary
                     .run_status
                     .map(|status| status.as_str().to_owned())
                     .unwrap_or_else(|| "none".to_owned()),
+                latest_check_status_line(store, name),
                 summary.active_sessions,
                 pr,
                 blockers,
@@ -4688,6 +4689,122 @@ fn check_status_icon(key: &str, val: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn workspace_check_runner_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    app_state: AppState,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.append(&section_title("Configured Checks"));
+
+    match store.configured_check_commands(name) {
+        Ok(commands) if commands.is_empty() => {
+            panel.append(&detail_row(
+                "Checks",
+                "No test/lint/typecheck/build commands configured.",
+            ));
+        }
+        Ok(commands) => {
+            for command in commands {
+                let row = make_action_row();
+                let label = Label::new(Some(&format!("{}: {}", command.label, command.command)));
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                label.set_hexpand(true);
+                let run_btn = text_button(&format!("Run {}", command.label));
+                run_btn.add_css_class("suggested-action");
+
+                let db_for_run = db_path.to_path_buf();
+                let workspace_for_run = name.to_owned();
+                let key_for_run = command.key.clone();
+                let label_for_run = command.label.clone();
+                let feedback_for_run = feedback.clone();
+                let toast_for_run = toast_overlay.clone();
+                let refresh_after_run = refresh_hub.clone();
+                run_btn.connect_clicked(move |_| {
+                    let result = WorkspaceStore::open(db_for_run.clone()).and_then(|store| {
+                        store.run_workspace_check(&workspace_for_run, &key_for_run)
+                    });
+                    match result {
+                        Ok(process) => {
+                            apply_action_feedback(
+                                &feedback_for_run,
+                                &toast_for_run,
+                                &format!(
+                                    "Started {} check as process #{}.",
+                                    label_for_run, process.id
+                                ),
+                                true,
+                            );
+                            refresh_after_run.refresh(RefreshScope::All);
+                        }
+                        Err(err) => apply_action_feedback(
+                            &feedback_for_run,
+                            &toast_for_run,
+                            &format!("Run {} check failed: {err:#}", label_for_run),
+                            true,
+                        ),
+                    }
+                });
+
+                row.append(&label);
+                row.append(&run_btn);
+                panel.append(&row);
+            }
+        }
+        Err(err) => panel.append(&detail_row(
+            "Checks",
+            &format!("Could not load configured checks: {err:#}"),
+        )),
+    }
+
+    let latest_row = make_action_row();
+    let latest = Label::new(Some(&latest_check_status_line(store, name)));
+    latest.set_xalign(0.0);
+    latest.set_wrap(true);
+    latest.set_hexpand(true);
+    let stage_btn = secondary_button("Queue Latest Check Output");
+    let db_for_stage = db_path.to_path_buf();
+    let workspace_for_stage = name.to_owned();
+    let app_state_for_stage = app_state;
+    let feedback_for_stage = feedback.clone();
+    let toast_for_stage = toast_overlay;
+    stage_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_stage.clone())
+            .and_then(|store| latest_check_agent_prompt(&store, &workspace_for_stage))
+        {
+            Ok(prompt) => {
+                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                apply_action_feedback(
+                    &feedback_for_stage,
+                    &toast_for_stage,
+                    "Latest local check output queued for the selected agent session.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_stage,
+                &toast_for_stage,
+                &format!("Could not queue latest check output: {err:#}"),
+                true,
+            ),
+        }
+    });
+    latest_row.append(&latest);
+    latest_row.append(&stage_btn);
+    panel.append(&latest_row);
+    panel.append(&pull_request_text_section(
+        "Latest Local Check Output",
+        &latest_check_log_line(store, name),
+    ));
+
+    panel
+}
+
 fn workspace_checks_panel(
     db_path: &Path,
     store: &WorkspaceStore,
@@ -4757,6 +4874,15 @@ fn workspace_checks_panel(
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
     feedback.set_wrap(true);
+    header.append(&workspace_check_runner_panel(
+        db_path,
+        store,
+        name,
+        app_state.clone(),
+        refresh_hub.clone(),
+        toast_overlay.clone(),
+        &feedback,
+    ));
 
     match pr {
         Some(pr) => {
@@ -6064,6 +6190,24 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
         }
         Err(err) => out.push_str(&format!("Could not read runs: {err:#}\n")),
     }
+    out.push_str("\nChecks\n");
+    match store.list_checks(name) {
+        Ok(records) if records.is_empty() => out.push_str("No check runs recorded.\n"),
+        Ok(records) => {
+            for record in records {
+                out.push_str(&format!(
+                    "#{} {} pid={} exit={} started={} log={}\n",
+                    record.id,
+                    record.status.as_str(),
+                    record.pid,
+                    exit_code_label(record.exit_code),
+                    record.started_at,
+                    record.log_path.display()
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("Could not read checks: {err:#}\n")),
+    }
     out.push_str("\nSessions\n");
     match store.list_sessions(name) {
         Ok(records) if records.is_empty() => out.push_str("No sessions recorded.\n"),
@@ -6143,6 +6287,25 @@ fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
     }
 }
 
+fn latest_check_status_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.list_checks(name) {
+        Ok(records) => records
+            .into_iter()
+            .next()
+            .map(|record| {
+                format!(
+                    "{} pid={} exit={} log={}",
+                    record.status.as_str(),
+                    record.pid,
+                    exit_code_label(record.exit_code),
+                    record.log_path.display()
+                )
+            })
+            .unwrap_or_else(|| "No local checks recorded.".to_owned()),
+        Err(err) => format!("Could not read local checks: {err:#}"),
+    }
+}
+
 fn spotlight_line(store: &WorkspaceStore, name: &str) -> String {
     match store.spotlight_status(name) {
         Ok(Some(session)) => {
@@ -6182,6 +6345,31 @@ fn latest_run_log_line(store: &WorkspaceStore, name: &str) -> String {
         Ok(log) => tail_lines(&log, 12),
         Err(_) => "No run log yet.".to_owned(),
     }
+}
+
+fn latest_check_log_line(store: &WorkspaceStore, name: &str) -> String {
+    match store.read_latest_check_log(name) {
+        Ok(log) => tail_lines(&log, 16),
+        Err(_) => "No local check output yet.".to_owned(),
+    }
+}
+
+fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Result<String> {
+    let record = store
+        .list_checks(name)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No local check runs recorded"))?;
+    let output = store.read_latest_check_log(name)?;
+    Ok(format!(
+        "Address the latest local check output for workspace {name}. If it failed, make the smallest safe fix and rerun the relevant check.\n\nProcess #{}: {}\nStatus: {}\nExit: {}\nStarted: {}\n\nOutput:\n```text\n{}\n```",
+        record.id,
+        record.command,
+        record.status.as_str(),
+        exit_code_label(record.exit_code),
+        record.started_at,
+        output.trim()
+    ))
 }
 
 fn tail_lines(text: &str, max_lines: usize) -> String {
@@ -6716,6 +6904,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7006,6 +7195,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7052,6 +7242,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,
@@ -7139,6 +7330,7 @@ mod tests {
                 changed_files: 0,
                 run_status: None,
                 session_status: None,
+                check_status: None,
                 active_sessions: 0,
                 pull_request: None,
                 open_todos: 0,

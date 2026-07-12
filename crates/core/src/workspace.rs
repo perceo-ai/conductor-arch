@@ -606,6 +606,7 @@ fn env_key_fragment(value: &str) -> String {
 pub enum ProcessKind {
     Setup,
     Run,
+    Check,
     Session,
     Terminal,
 }
@@ -615,6 +616,7 @@ impl ProcessKind {
         match self {
             Self::Setup => "setup",
             Self::Run => "run",
+            Self::Check => "check",
             Self::Session => "session",
             Self::Terminal => "terminal",
         }
@@ -804,6 +806,61 @@ fn push_script_command_preset(presets: &mut Vec<String>, label: &str, command: O
     }
 }
 
+fn configured_check_commands_from_settings(
+    settings: &RepositorySettings,
+) -> Vec<ConfiguredCheckCommand> {
+    [
+        (
+            "test",
+            "Test",
+            settings.scripts.test.as_deref().or(settings
+                .customization
+                .automation
+                .test_command
+                .as_deref()),
+        ),
+        (
+            "lint",
+            "Lint",
+            settings.scripts.lint.as_deref().or(settings
+                .customization
+                .automation
+                .lint_command
+                .as_deref()),
+        ),
+        (
+            "typecheck",
+            "Typecheck",
+            settings.scripts.typecheck.as_deref().or(settings
+                .customization
+                .automation
+                .typecheck_command
+                .as_deref()),
+        ),
+        (
+            "build",
+            "Build",
+            settings.scripts.build.as_deref().or(settings
+                .customization
+                .automation
+                .build_command
+                .as_deref()),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, label, command)| {
+        command
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(|command| ConfiguredCheckCommand {
+                key: key.to_owned(),
+                label: label.to_owned(),
+                command: command.to_owned(),
+            })
+    })
+    .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffFileSummary {
     pub path: String,
@@ -905,6 +962,7 @@ pub struct ChecksSummary {
     pub workspace: Workspace,
     pub changed_files: usize,
     pub run_status: Option<ProcessStatus>,
+    pub check_status: Option<ProcessStatus>,
     pub session_status: Option<ProcessStatus>,
     pub active_sessions: usize,
     pub pull_request: Option<PullRequest>,
@@ -913,6 +971,13 @@ pub struct ChecksSummary {
     pub branch_push_state: Option<BranchPushState>,
     pub open_review_comments: usize,
     pub conflicting_workspaces: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredCheckCommand {
+    pub key: String,
+    pub label: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1724,6 +1789,37 @@ impl WorkspaceStore {
         })
     }
 
+    pub fn configured_check_commands(&self, name: &str) -> Result<Vec<ConfiguredCheckCommand>> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        Ok(configured_check_commands_from_settings(&settings))
+    }
+
+    pub fn run_workspace_check(&self, name: &str, key: &str) -> Result<ProcessRecord> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let check = configured_check_commands_from_settings(&settings)
+            .into_iter()
+            .find(|check| check.key == key)
+            .with_context(|| format!("workspace {name} has no configured {key} check"))?;
+
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Check,
+            script: &check.command,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &[],
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
+    }
+
     pub fn stop_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let process = self.latest_running_process(workspace.id, ProcessKind::Run)?;
@@ -1751,6 +1847,13 @@ impl WorkspaceStore {
     pub fn read_latest_setup_log(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let process = self.latest_process(workspace.id, ProcessKind::Setup)?;
+        fs::read_to_string(&process.log_path)
+            .with_context(|| format!("read log {}", process.log_path.display()))
+    }
+
+    pub fn read_latest_check_log(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let process = self.latest_process(workspace.id, ProcessKind::Check)?;
         fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))
     }
@@ -3852,6 +3955,7 @@ mutation($threadId: ID!) {{
             0
         };
         let run_status = self.latest_process_status(workspace.id, ProcessKind::Run)?;
+        let check_status = self.latest_process_status(workspace.id, ProcessKind::Check)?;
         let session_status = self.latest_process_status(workspace.id, ProcessKind::Session)?;
         let active_sessions = self.count_running_processes(workspace.id, ProcessKind::Session)?;
         let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
@@ -3873,6 +3977,7 @@ mutation($threadId: ID!) {{
             workspace,
             changed_files,
             run_status,
+            check_status,
             session_status,
             active_sessions,
             pull_request,
@@ -4499,6 +4604,10 @@ mutation($threadId: ID!) {{
 
     pub fn list_runs(&self, name: &str) -> Result<Vec<ProcessRecord>> {
         self.list_processes(name, ProcessKind::Run)
+    }
+
+    pub fn list_checks(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Check)
     }
 
     pub fn list_setups(&self, name: &str) -> Result<Vec<ProcessRecord>> {
@@ -6216,6 +6325,7 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
     let kind = match row.get::<_, String>(3)?.as_str() {
         "setup" => ProcessKind::Setup,
         "run" => ProcessKind::Run,
+        "check" => ProcessKind::Check,
         "session" => ProcessKind::Session,
         "terminal" => ProcessKind::Terminal,
         _ => return Err(rusqlite::Error::InvalidQuery),
@@ -9686,6 +9796,91 @@ run = "printf 'done\n'; exit 3"
         assert_eq!(exited.id, run.id);
         assert_eq!(exited.exit_code, Some(3));
         assert!(exited.ended_at.is_some());
+    }
+
+    #[test]
+    fn run_workspace_check_executes_configured_command_and_records_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts]
+test = "printf 'test ok\n'"
+lint = "printf 'lint failed\n'; exit 7"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add check scripts",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let commands = store.configured_check_commands("berlin").unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test", "lint"]
+        );
+
+        let check = store.run_workspace_check("berlin", "test").unwrap();
+        wait_for_log(&check.log_path, "test ok");
+        let exited =
+            wait_for_process_status(&store, "berlin", ProcessKind::Check, ProcessStatus::Exited);
+
+        assert_eq!(check.kind, ProcessKind::Check);
+        assert_eq!(exited.exit_code, Some(0));
+        assert!(store
+            .read_latest_check_log("berlin")
+            .unwrap()
+            .contains("test ok"));
+        assert_eq!(
+            store.checks_summary("berlin").unwrap().check_status,
+            Some(ProcessStatus::Exited)
+        );
     }
 
     #[test]
@@ -16453,6 +16648,7 @@ spotlight_testing = true
             let records = match kind {
                 ProcessKind::Setup => store.list_setups(workspace).unwrap(),
                 ProcessKind::Run => store.list_runs(workspace).unwrap(),
+                ProcessKind::Check => store.list_checks(workspace).unwrap(),
                 ProcessKind::Session => store.list_sessions(workspace).unwrap(),
                 ProcessKind::Terminal => store.list_terminals(workspace).unwrap(),
             };
