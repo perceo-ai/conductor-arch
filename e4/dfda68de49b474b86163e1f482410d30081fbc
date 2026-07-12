@@ -1,0 +1,48 @@
+crates/gtk-app/src/session_surface.rs
+  s_2fd338f0b53281::t_5f881a08396fc5 18-20,3929,3933,3942
+  s_2fd338f0b53281::t_d6f86333e9754c 5862
+crates/core/src/harness.rs
+  s_2fd338f0b53281::t_c0c2aa0f4778d5 1,104-105,175-176,215-216,279-282,308-311,333-335
+  s_2fd338f0b53281::t_8c242306255760 103
+  s_2fd338f0b53281::t_d6f86333e9754c 396,453
+  s_2fd338f0b53281::t_d0de6376b7b07a 437,487
+  s_2fd338f0b53281::t_261909665da5c1 413-414,474-475,543-544,579-580,618-619,655-656
+  s_2fd338f0b53281::t_b26d8d3abe9b0e 336-337
+crates/core/src/settings.rs
+  s_2fd338f0b53281::t_e67002898cb7ad 2773,2870
+crates/cli/tests/cli_sessions.rs
+  s_2fd338f0b53281::t_d30077ce66ee49 137-200
+crates/core/src/model_registry.rs
+  s_2fd338f0b53281::t_d5098538e45dda 1-37,43-47
+  s_2fd338f0b53281::t_d9770606dc4ab8 38-42
+crates/cli/src/main.rs
+  s_2fd338f0b53281::t_02299b1f644e4a 1995,2013,2018-2031,2035-2053,2057-2061
+  s_2fd338f0b53281::t_b810c5a600e798 2032-2034,2054-2056
+  s_2fd338f0b53281::t_6e6cb18af25e2d 341-342,368-369,1019,1030,1068,1082
+  s_2fd338f0b53281::t_4abc6544c8c90f 2062-2063
+crates/core/src/lib.rs
+  s_2fd338f0b53281::t_d5098538e45dda 14
+crates/core/src/workspace.rs
+  s_2fd338f0b53281::t_b810c5a600e798 473
+  s_2fd338f0b53281::t_d0de6376b7b07a 13709,13784,13914
+  s_2fd338f0b53281::t_d5098538e45dda 431,444,472,474,518-520,561-562
+  s_2fd338f0b53281::t_d6f86333e9754c 13666,13750
+  s_2fd338f0b53281::t_0700c51d706575 13685-13686,13771-13772
+  s_2fd338f0b53281::t_1cf9b66d1b6a4b 563
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "e4dfda68de49b474b86163e1f482410d30081fbc",
+  "prompts": {},
+  "sessions": {
+    "s_2fd338f0b53281": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5852-b907-7720-b006-3980f27dafb1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
