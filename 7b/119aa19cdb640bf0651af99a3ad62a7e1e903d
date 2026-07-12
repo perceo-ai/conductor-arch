@@ -1,0 +1,37 @@
+crates/gtk-app/src/session_surface.rs
+  s_2fd338f0b53281::t_1229c3c2492e0b 6961,6965,6969,6992-6998,7004-7014,7016-7017,7019-7023,7190,7746,7748,7755-7758
+  s_2fd338f0b53281::t_14800e3c9208a8 7026
+  s_2fd338f0b53281::t_c7606c0fd88c9a 269-271,7197
+  s_2fd338f0b53281::t_cfb09f48bba1fc 3898,3926,3931-3934,3937-3939,3946-3953,4642
+  s_2fd338f0b53281::t_f70c82435e0155 3927-3928,3935-3936
+  s_2fd338f0b53281::t_5f73b011e241e3 7015,7018
+  s_2fd338f0b53281::t_debfbc33ce6db0 7033
+  s_2fd338f0b53281::t_a8b9d5da5d253d 4128,7024
+  s_2fd338f0b53281::t_0c7089e571af71 425,1297-1298
+  s_2fd338f0b53281::t_8af52e00c60025 3954-3959
+  s_2fd338f0b53281::t_b8c9c9e5a62040 3960
+crates/core/src/workspace.rs
+  s_2fd338f0b53281::t_14800e3c9208a8 17437
+docs/deploy-and-local-test.md
+  s_2fd338f0b53281::t_14800e3c9208a8 178
+README.md
+  s_2fd338f0b53281::t_14800e3c9208a8 252
+crates/core/src/archcar/session.rs
+  s_2fd338f0b53281::t_14800e3c9208a8 902
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "7b119aa19cdb640bf0651af99a3ad62a7e1e903d",
+  "prompts": {},
+  "sessions": {
+    "s_2fd338f0b53281": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5852-b907-7720-b006-3980f27dafb1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
