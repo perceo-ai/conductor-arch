@@ -3919,7 +3919,37 @@ fn workspace_git_file_actions_panel(
     if let Ok(draft) = store.commit_message_draft(name) {
         message.set_text(&draft);
     }
+    let generate_btn = text_button("Generate");
+    generate_btn.set_sensitive(has_staged);
+    let db_path_for_generate = db_path.to_path_buf();
+    let workspace_for_generate = name.to_owned();
+    let feedback_for_generate = feedback.clone();
+    let toast_for_generate = toast_overlay.clone();
+    let message_for_generate = message.clone();
+    generate_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path_for_generate).and_then(|store| {
+            store.generated_commit_message_from_staged_diff(&workspace_for_generate)
+        });
+        match result {
+            Ok(generated) => {
+                message_for_generate.set_text(&generated);
+                apply_action_feedback(
+                    &feedback_for_generate,
+                    &toast_for_generate,
+                    "Generated commit message from staged diff.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_generate,
+                &toast_for_generate,
+                &git_action_error("Could not generate commit message", &err),
+                true,
+            ),
+        }
+    });
     let commit_btn = text_button("Commit");
+    commit_btn.set_sensitive(has_staged);
     let db_path_for_commit = db_path.to_path_buf();
     let workspace_for_commit = name.to_owned();
     let refresh_for_commit = refresh_hub;
@@ -3945,6 +3975,7 @@ fn workspace_git_file_actions_panel(
         }
     });
     commit_row.append(&message);
+    commit_row.append(&generate_btn);
     commit_row.append(&commit_btn);
     panel.append(&commit_row);
 

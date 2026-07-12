@@ -2852,6 +2852,22 @@ impl WorkspaceStore {
         Ok(commit_message_draft_for_files(&workspace.name, &files))
     }
 
+    pub fn generated_commit_message_from_staged_diff(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let staged = git_output_dynamic(&workspace.path, &["diff", "--cached", "--name-only"])?;
+        let files = staged
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !files.is_empty(),
+            "stage at least one file before generating a commit message"
+        );
+        Ok(commit_message_draft_for_files(&workspace.name, &files))
+    }
+
     pub fn commit_workspace_changes(&self, name: &str, message: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let message = message.trim();
@@ -15641,6 +15657,10 @@ exit 1
 
         let draft = store.commit_message_draft("berlin").unwrap();
         assert_eq!(draft, "chore: update README.md");
+        let generated = store
+            .generated_commit_message_from_staged_diff("berlin")
+            .unwrap();
+        assert_eq!(generated, "chore: update README.md");
         let output = store
             .commit_workspace_changes("berlin", "fix: update readme")
             .unwrap();
@@ -15654,6 +15674,11 @@ exit 1
             git_output(&workspace.path, ["log", "-1", "--pretty=%s"]).trim(),
             "fix: update readme"
         );
+        assert!(store
+            .workspace_timeline("berlin", Some("commit.created"))
+            .unwrap()
+            .iter()
+            .any(|event| event.summary.contains("fix: update readme")));
     }
 
     #[test]
