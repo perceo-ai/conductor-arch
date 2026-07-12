@@ -1,0 +1,22 @@
+crates/core/src/workspace.rs
+  s_d3831e782e31b5::t_6c79ab534f7a04 2762-2769
+  s_d3831e782e31b5::t_f431798439dcaf 15322-15326
+crates/gtk-app/src/workspace_command_center.rs
+  s_d3831e782e31b5::t_60135afcbc8ba2 4042-4044
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "5a88bc7d0e436ef3f65430511ee558c5abe5bf43",
+  "prompts": {},
+  "sessions": {
+    "s_d3831e782e31b5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5490-9ab4-7223-9bda-f63769ad894c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
