@@ -15,6 +15,9 @@ use linux_archductor_core::codex_tui::{
     CodexTranscriptEvent,
 };
 use linux_archductor_core::doctor::SetupReadiness;
+use linux_archductor_core::model_registry::{
+    default_model_for_provider, model_choices_for_provider, CODEX_DEFAULT_MODEL,
+};
 use linux_archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
@@ -3923,19 +3926,11 @@ fn provider_model_choices(
 
 fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoice> {
     match launchable_provider_name(provider) {
-        Some("codex") => CODEX_MODEL_CHOICES
+        Some(provider @ ("codex" | "claude")) => model_choices_for_provider(provider)
             .iter()
             .copied()
             .map(|model| ProviderModelChoice {
-                provider: "codex".to_owned(),
-                model: Some(model.to_owned()),
-            })
-            .collect(),
-        Some("claude") => CLAUDE_MODEL_CHOICES
-            .iter()
-            .copied()
-            .map(|model| ProviderModelChoice {
-                provider: "claude".to_owned(),
+                provider: provider.to_owned(),
                 model: Some(model.to_owned()),
             })
             .collect(),
@@ -3943,19 +3938,8 @@ fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoic
     }
 }
 
-const CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
-const CODEX_MODEL_CHOICES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
-const CLAUDE_MODEL_CHOICES: &[&str] = &[
-    "claude-fable-5",
-    "claude-opus-4-8",
-    "claude-sonnet-5",
-    "claude-haiku-4-5-20251001",
-];
-
 fn default_model_for_session_kind(kind: SessionKind) -> Option<String> {
-    provider_model_choices_for_provider(session_kind_provider(kind))
-        .first()
-        .and_then(|choice| choice.model.clone())
+    default_model_for_provider(session_kind_provider(kind)).map(str::to_owned)
 }
 
 fn selected_provider_model_choice_index(
@@ -5875,6 +5859,7 @@ fn collect_session_harness_options(
     SessionHarnessOptions {
         plan_mode: plan_mode.is_active(),
         fast_mode: fast_mode.is_active(),
+        model: None,
         approval_mode: combo_active_value_or_none(approval_mode, Some("default")),
         reasoning_mode: combo_active_value_or_none(reasoning_mode, Some("default")),
         effort_mode: combo_active_value_or_none(effort_mode, Some("default")),

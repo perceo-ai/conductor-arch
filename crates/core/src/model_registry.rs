@@ -1,0 +1,47 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderModel {
+    pub provider: &'static str,
+    pub model: &'static str,
+}
+
+pub const CODEX_PROVIDER: &str = "codex";
+pub const CLAUDE_PROVIDER: &str = "claude";
+
+pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
+pub const CODEX_MODEL_CHOICES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+
+pub const CLAUDE_DEFAULT_MODEL: &str = "claude-fable-5";
+pub const CLAUDE_MODEL_CHOICES: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-haiku-4-5-20251001",
+];
+
+pub fn default_model_for_provider(provider: &str) -> Option<&'static str> {
+    match provider {
+        CODEX_PROVIDER => Some(CODEX_DEFAULT_MODEL),
+        CLAUDE_PROVIDER => Some(CLAUDE_DEFAULT_MODEL),
+        _ => None,
+    }
+}
+
+pub fn model_choices_for_provider(provider: &str) -> &'static [&'static str] {
+    match provider {
+        CODEX_PROVIDER => CODEX_MODEL_CHOICES,
+        CLAUDE_PROVIDER => CLAUDE_MODEL_CHOICES,
+        _ => &[],
+    }
+}
+
+pub fn provider_model_choices(provider: &str) -> impl Iterator<Item = ProviderModel> {
+    let provider = match provider {
+        CODEX_PROVIDER => CODEX_PROVIDER,
+        CLAUDE_PROVIDER => CLAUDE_PROVIDER,
+        _ => "",
+    };
+    model_choices_for_provider(provider)
+        .iter()
+        .copied()
+        .map(move |model| ProviderModel { provider, model })
+}

@@ -134,6 +134,70 @@ keybindings = "vim"
     assert!(local_settings.contains("keybindings = \"vim\""));
 }
 
+#[test]
+fn cli_session_open_print_command_uses_explicit_provider_models() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    app(temp.path())
+        .args([
+            "session",
+            "open",
+            "berlin",
+            "--kind",
+            "codex",
+            "--print-command",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("exec codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol"));
+
+    app(temp.path())
+        .args([
+            "session",
+            "open",
+            "berlin",
+            "--kind",
+            "claude",
+            "--model",
+            "claude-sonnet-5",
+            "--print-command",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("exec claude --model claude-sonnet-5"));
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("linux-archductor").unwrap();
     command

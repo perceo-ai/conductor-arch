@@ -428,6 +428,7 @@ impl SessionLaunch {
 pub struct SessionHarnessOptions {
     pub plan_mode: bool,
     pub fast_mode: bool,
+    pub model: Option<String>,
     pub approval_mode: Option<String>,
     pub reasoning_mode: Option<String>,
     pub effort_mode: Option<String>,
@@ -440,6 +441,7 @@ impl SessionHarnessOptions {
     pub fn is_empty(&self) -> bool {
         !self.plan_mode
             && !self.fast_mode
+            && self.model.is_none()
             && self.approval_mode.is_none()
             && self.reasoning_mode.is_none()
             && self.effort_mode.is_none()
@@ -466,6 +468,9 @@ impl SessionHarnessOptions {
                 "ARCHDUCTOR_SESSION_APPROVAL_MODE".to_owned(),
                 OsString::from(value),
             ));
+        }
+        if let Some(value) = sanitize_empty_text(self.model.as_deref()) {
+            env.push(("ARCHDUCTOR_SESSION_MODEL".to_owned(), OsString::from(value)));
         }
         if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
             env.push((
@@ -510,6 +515,9 @@ impl SessionHarnessOptions {
         if let Some(value) = sanitize_empty_text(self.approval_mode.as_deref()) {
             entries.push(format!("approvals={value}"));
         }
+        if let Some(value) = sanitize_empty_text(self.model.as_deref()) {
+            entries.push(format!("model={value}"));
+        }
         if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
             entries.push(format!("reasoning={value}"));
         }
@@ -549,6 +557,9 @@ impl SessionHarnessOptions {
                 "fast" => options.fast_mode = value.eq_ignore_ascii_case("true"),
                 "approval" | "approvals" => {
                     options.approval_mode = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "model" => {
+                    options.model = (!value.is_empty()).then(|| value.to_owned());
                 }
                 "reasoning" => {
                     options.reasoning_mode = (!value.is_empty()).then(|| value.to_owned());
@@ -13652,6 +13663,7 @@ working_directory = "apps/worker"
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
+                    model: None,
                     approval_mode: Some("ask".to_owned()),
                     reasoning_mode: Some("high".to_owned()),
                     effort_mode: Some("medium".to_owned()),
@@ -13670,6 +13682,8 @@ working_directory = "apps/worker"
             &vec![
                 "--no-alt-screen",
                 "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-5.6-sol",
                 "-c",
                 "check_for_update_on_startup=false",
                 "-c",
@@ -13692,7 +13706,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;plan=true;fast=true;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
             )
         );
         assert!(launch.session_resume_id.is_none());
@@ -13733,6 +13747,7 @@ working_directory = "apps/worker"
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
+                    model: None,
                     approval_mode: Some("never".to_owned()),
                     reasoning_mode: Some("low".to_owned()),
                     effort_mode: Some("high".to_owned()),
@@ -13753,6 +13768,8 @@ working_directory = "apps/worker"
             &vec![
                 "--permission-mode",
                 "plan",
+                "--model",
+                "claude-fable-5",
                 "--effort",
                 "high",
                 "--session-id",
@@ -13764,7 +13781,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=claude;plan=true;fast=true;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
+                "harness=claude;plan=true;fast=true;model=claude-fable-5;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
             )
         );
         assert!(launch.session_resume_id.is_some());
@@ -13894,7 +13911,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;fast=true;approval=ask;reasoning=high;personality=pragmatic;goals=ship the fix"
+                "harness=codex;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;personality=pragmatic;goals=ship the fix"
             )
         );
         assert!(launch.session_resume_id.is_none());

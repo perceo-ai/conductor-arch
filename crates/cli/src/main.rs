@@ -338,6 +338,8 @@ enum SessionCommand {
         #[arg(long)]
         fast_mode: bool,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         approval_mode: Option<String>,
         #[arg(long)]
         reasoning_mode: Option<String>,
@@ -362,6 +364,8 @@ enum SessionCommand {
         plan_mode: bool,
         #[arg(long)]
         fast_mode: bool,
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long)]
         approval_mode: Option<String>,
         #[arg(long)]
@@ -1012,6 +1016,7 @@ fn main() -> Result<()> {
                     kind,
                     plan_mode,
                     fast_mode,
+                    model,
                     approval_mode,
                     reasoning_mode,
                     effort_mode,
@@ -1022,6 +1027,7 @@ fn main() -> Result<()> {
                     let harness = SessionHarnessOptions {
                         plan_mode,
                         fast_mode,
+                        model,
                         approval_mode,
                         reasoning_mode,
                         effort_mode,
@@ -1059,6 +1065,7 @@ fn main() -> Result<()> {
                     print_command,
                     plan_mode,
                     fast_mode,
+                    model,
                     approval_mode,
                     reasoning_mode,
                     effort_mode,
@@ -1072,6 +1079,7 @@ fn main() -> Result<()> {
                         SessionHarnessOptions {
                             plan_mode,
                             fast_mode,
+                            model,
                             approval_mode,
                             reasoning_mode,
                             effort_mode,
@@ -1984,7 +1992,7 @@ mod tests {
         let launch = SessionLaunch {
             kind: SessionKind::Codex,
             program: PathBuf::from("codex"),
-            args: Vec::new(),
+            args: vec!["--model".to_owned(), "gpt-5.6-sol".to_owned()],
             cwd: PathBuf::from("/tmp/work"),
             env: vec![
                 (
@@ -2002,9 +2010,55 @@ mod tests {
 
         let command = render_manual_session_command(&launch);
         assert!(command.contains("ARCHDUCTOR_SESSION_BOOTSTRAP"));
-        assert!(command.contains("exec codex"));
+        assert!(command.contains("exec codex --model gpt-5.6-sol"));
         assert!(!command.ends_with("'[archductor bootstrap for codex]\n/plan\n'"));
         assert!(!command.contains("exec codex '[archductor bootstrap for codex]"));
+    }
+
+    #[test]
+    fn cli_session_start_and_open_accept_explicit_model() {
+        let start = Cli::try_parse_from([
+            "linux-archductor",
+            "session",
+            "start",
+            "berlin",
+            "--kind",
+            "codex",
+            "--model",
+            "gpt-5.6-luna",
+        ])
+        .unwrap();
+        let Command::Session {
+            command: SessionCommand::Start {
+                model: start_model, ..
+            },
+        } = start.command
+        else {
+            panic!("expected session start");
+        };
+        assert_eq!(start_model.as_deref(), Some("gpt-5.6-luna"));
+
+        let open = Cli::try_parse_from([
+            "linux-archductor",
+            "session",
+            "open",
+            "berlin",
+            "--kind",
+            "claude",
+            "--model",
+            "claude-sonnet-5",
+            "--print-command",
+        ])
+        .unwrap();
+        let Command::Session {
+            command: SessionCommand::Open {
+                model: open_model, ..
+            },
+        } = open.command
+        else {
+            panic!("expected session open");
+        };
+        assert_eq!(open_model.as_deref(), Some("claude-sonnet-5"));
     }
 
     #[test]

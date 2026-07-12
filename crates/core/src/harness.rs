@@ -1,3 +1,4 @@
+use crate::model_registry::default_model_for_provider;
 use crate::workspace::{SessionHarnessOptions, SessionKind};
 use std::ffi::OsString;
 use std::path::Path;
@@ -99,6 +100,9 @@ pub fn build_harness_metadata(
     if harness.fast_mode {
         entries.push("fast=true".to_owned());
     }
+    if let Some(value) = explicit_or_default_model(kind, harness) {
+        entries.push(format!("model={value}"));
+    }
     if let Some(value) = sanitize_text(harness.approval_mode.as_deref()) {
         entries.push(format!("approval={value}"));
     }
@@ -168,6 +172,8 @@ pub fn build_bootstrap_payload(
         }
     }
 
+    let model = explicit_or_default_model(kind, harness);
+    push_line(optional_kv_line("model", model.as_deref()));
     push_line(optional_kv_line(
         "approval mode",
         harness.approval_mode.as_deref(),
@@ -206,6 +212,8 @@ fn build_codex_args(cwd: &Path, _harness: &SessionHarnessOptions) -> Vec<String>
     let mut args = vec![
         "--no-alt-screen".to_owned(),
         "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+        "--model".to_owned(),
+        explicit_or_default_model(SessionKind::Codex, _harness).unwrap_or_default(),
         "-c".to_owned(),
         "check_for_update_on_startup=false".to_owned(),
         "-c".to_owned(),
@@ -268,6 +276,10 @@ fn build_claude_args(
         args.push("--permission-mode".to_owned());
         args.push(value);
     }
+    if let Some(value) = explicit_or_default_model(SessionKind::Claude, harness) {
+        args.push("--model".to_owned());
+        args.push(value);
+    }
     if let Some(value) = claude_effort_mode(harness) {
         args.push("--effort".to_owned());
         args.push(value);
@@ -293,6 +305,10 @@ fn build_claude_resume_args(
         args.push("--permission-mode".to_owned());
         args.push(value);
     }
+    if let Some(value) = explicit_or_default_model(SessionKind::Claude, harness) {
+        args.push("--model".to_owned());
+        args.push(value);
+    }
     if let Some(value) = claude_effort_mode(harness) {
         args.push("--effort".to_owned());
         args.push(value);
@@ -312,6 +328,11 @@ fn build_claude_resume_args(
 
 fn optional_kv_line(label: &str, value: Option<&str>) -> Option<String> {
     sanitize_text(value).map(|value| format!("{label}: {value}"))
+}
+
+fn explicit_or_default_model(kind: SessionKind, harness: &SessionHarnessOptions) -> Option<String> {
+    sanitize_text(harness.model.as_deref())
+        .or_else(|| default_model_for_provider(session_kind_label(kind)).map(str::to_owned))
 }
 
 fn claude_permission_mode(harness: &SessionHarnessOptions) -> Option<String> {
@@ -372,6 +393,7 @@ mod tests {
         let harness = SessionHarnessOptions {
             plan_mode: true,
             fast_mode: true,
+            model: None,
             approval_mode: Some("ask".to_owned()),
             reasoning_mode: Some("high".to_owned()),
             effort_mode: Some("medium".to_owned()),
@@ -388,6 +410,8 @@ mod tests {
             &vec![
                 "--no-alt-screen",
                 "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-5.6-sol",
                 "-c",
                 "check_for_update_on_startup=false",
                 "-c",
@@ -410,7 +434,7 @@ mod tests {
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;plan=true;fast=true;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
             )
         );
         assert!(launch.session_resume_id.is_none());
@@ -426,6 +450,7 @@ mod tests {
         let harness = SessionHarnessOptions {
             plan_mode: true,
             fast_mode: true,
+            model: None,
             approval_mode: Some("never".to_owned()),
             reasoning_mode: Some("low".to_owned()),
             effort_mode: Some("high".to_owned()),
@@ -446,6 +471,8 @@ mod tests {
             &vec![
                 "--permission-mode",
                 "plan",
+                "--model",
+                "claude-fable-5",
                 "--effort",
                 "high",
                 "--session-id",
@@ -457,7 +484,7 @@ mod tests {
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=claude;plan=true;fast=true;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
+                "harness=claude;plan=true;fast=true;model=claude-fable-5;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
             )
         );
         assert!(launch.session_resume_id.is_some());
@@ -513,6 +540,8 @@ mod tests {
             vec![
                 "--no-alt-screen".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "--model".to_owned(),
+                "gpt-5.6-sol".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
@@ -547,6 +576,8 @@ mod tests {
             vec![
                 "--permission-mode".to_owned(),
                 "default".to_owned(),
+                "--model".to_owned(),
+                "claude-fable-5".to_owned(),
                 "--effort".to_owned(),
                 "low".to_owned(),
                 "--resume".to_owned(),
@@ -584,6 +615,8 @@ mod tests {
             vec![
                 "--no-alt-screen".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "--model".to_owned(),
+                "gpt-5.6-sol".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
@@ -619,6 +652,8 @@ mod tests {
             vec![
                 "--no-alt-screen".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "--model".to_owned(),
+                "gpt-5.6-sol".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
