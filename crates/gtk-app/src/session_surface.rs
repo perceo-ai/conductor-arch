@@ -981,22 +981,16 @@ pub fn agent_session_panel(
             );
 
             let preferred_thread = *selected_thread.borrow();
+            let fallback_kind = *selected_harness.borrow();
             let active_thread = {
                 let current = thread_state.borrow();
-                preferred_thread_for_selected_chat(
-                    &current,
-                    preferred_thread,
-                    *selected_harness.borrow(),
-                )
+                preferred_thread_for_selected_chat(&current, preferred_thread, fallback_kind)
             };
             apply_thread_selection(
                 selected_thread.as_ref(),
                 active_thread,
                 |thread_id| app_state.set_selected_chat_thread(thread_id),
-                || {
-                    restore_composer_draft();
-                    update_composer_for_view();
-                },
+                || restore_composer_draft(),
             );
             if let Some(thread_id) = *selected_thread.borrow() {
                 if let Some(thread) = thread_state
@@ -1026,6 +1020,7 @@ pub fn agent_session_panel(
                 }
                 restore_composer_draft();
             }
+            update_composer_for_view();
             let current_kind = *selected_harness.borrow();
             let selected_thread_id = *selected_thread.borrow();
             let mut archcar_changed = false;

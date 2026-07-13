@@ -68,7 +68,7 @@ const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
-const WORKSPACE_PORT_START: u16 = 3000;
+const WORKSPACE_PORT_START: u16 = 42000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -9176,7 +9176,7 @@ mod tests {
         assert_eq!(workspace.name, "berlin");
         assert_eq!(workspace.branch, "lc/berlin");
         assert_eq!(workspace.base_ref, "main");
-        assert_eq!(workspace.port_base, 3000);
+        assert_eq!(workspace.port_base, 42000);
         assert_eq!(workspace.status, "active");
         assert_eq!(workspace.path, workspace_parent.join("berlin"));
         assert!(workspace.path.join(".context").is_dir());
@@ -9946,6 +9946,18 @@ claude_code_executable_path = "/opt/bin/claude-custom"
     }
 
     #[test]
+    fn workspace_port_base_starts_above_common_dev_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open(&db_path).unwrap();
+
+        let port = store.next_port_base_with_checker(10, |_| true).unwrap();
+
+        assert!(port > 8080);
+        assert!(![3000, 5173, 8080].contains(&port));
+    }
+
+    #[test]
     fn workspace_port_base_reuses_lowest_open_port_despite_existing_workspace_rows() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -9974,7 +9986,7 @@ claude_code_executable_path = "/opt/bin/claude-custom"
 
         assert_eq!(
             store.next_port_base_with_checker(10, |_| true).unwrap(),
-            3000
+            42000
         );
     }
 
@@ -10043,9 +10055,9 @@ base_branch = "develop"
         let store = WorkspaceStore::open(&db_path).unwrap();
         assert_eq!(
             store
-                .next_port_base_with_checker(25, |port| port >= 3025)
+                .next_port_base_with_checker(25, |port| port >= 42025)
                 .unwrap(),
-            3025
+            42025
         );
     }
 
@@ -10454,7 +10466,7 @@ CUSTOM_VALUE = "from-settings"
                 workspace.path.to_str().unwrap(),
                 repo_path.canonicalize().unwrap().to_str().unwrap(),
                 "main",
-                "3000",
+                "42000",
                 "1",
                 "from-settings",
             ]
@@ -11116,7 +11128,7 @@ CUSTOM_VALUE = "from-settings"
                 workspace.path.to_str().unwrap(),
                 repo_path.canonicalize().unwrap().to_str().unwrap(),
                 "main",
-                "3000",
+                "42000",
                 "1",
                 "from-settings",
             ]
@@ -11567,7 +11579,7 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(result.command, "pwd; printf '%s:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7");
         assert_eq!(result.cwd, workspace.path);
         assert_eq!(result.exit_code, Some(7));
-        assert!(result.stdout.contains("berlin:3000:from-settings"));
+        assert!(result.stdout.contains("berlin:42000:from-settings"));
         assert!(result.stdout.contains(result.cwd.to_str().unwrap()));
         assert_eq!(result.stderr, "warn\n");
         assert!(!result.started_at.is_empty());
@@ -12721,14 +12733,14 @@ setup = "printf 'setup:%s:%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_POR
             .unwrap();
 
         let setup = store.setup_workspace("berlin").unwrap();
-        wait_for_log(&setup.log_path, "setup:berlin:3000");
+        wait_for_log(&setup.log_path, "setup:berlin:42000");
 
         assert_eq!(setup.kind, ProcessKind::Setup);
         assert_eq!(setup.status, ProcessStatus::Running);
         assert!(store
             .read_latest_setup_log("berlin")
             .unwrap()
-            .contains("setup:berlin:3000"));
+            .contains("setup:berlin:42000"));
     }
 
     #[test]
@@ -13850,7 +13862,7 @@ spotlight_testing = true
             launch.env_value("ARCHDUCTOR_WORKSPACE_NAME"),
             Some("berlin")
         );
-        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("3000"));
+        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));
         assert_eq!(
             launch.env_value("ARCHDUCTOR_ROOT_PATH"),
             repo_path.canonicalize().unwrap().to_str()

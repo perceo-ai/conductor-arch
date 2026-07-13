@@ -631,7 +631,7 @@ fn claude_stream_session_launch(
     Ok(launch)
 }
 
-const PROVIDER_NATIVE_PORT_START: u16 = 3000;
+const PROVIDER_NATIVE_PORT_START: u16 = 43000;
 const PROVIDER_NATIVE_PORT_METADATA_KEY: &str = "port";
 
 fn assign_provider_native_thread_port(
@@ -2409,7 +2409,10 @@ mod tests {
 
         assert_eq!(
             ports,
-            vec!["3000", "3001", "3002", "3003", "3004", "3005", "3006", "3007", "3008", "3009"]
+            vec![
+                "43000", "43001", "43002", "43003", "43004", "43005", "43006", "43007", "43008",
+                "43009"
+            ]
         );
 
         let eleventh = store
@@ -2418,8 +2421,23 @@ mod tests {
         assert_eq!(
             provider_native_thread_port_with_checker(&store, "berlin", eleventh.id, |_| true)
                 .unwrap(),
-            3010
+            43010
         );
+    }
+
+    #[test]
+    fn provider_native_thread_ports_start_above_common_dev_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+
+        let port = provider_native_thread_port_with_checker(&store, "berlin", thread.id, |_| true)
+            .unwrap();
+
+        assert!(port > 8080);
+        assert!(![3000, 5173, 8080].contains(&port));
     }
 
     #[test]
@@ -2432,8 +2450,8 @@ mod tests {
         let second = store
             .create_chat_thread("berlin", "codex", "Second", None)
             .unwrap();
-        let first_process = record_running_thread_session_with_port(&store, &first, 3000);
-        record_running_thread_session_with_port(&store, &second, 3001);
+        let first_process = record_running_thread_session_with_port(&store, &first, 43000);
+        record_running_thread_session_with_port(&store, &second, 43001);
         store
             .mark_session_process_exited(first_process.id, Some(0))
             .unwrap();
@@ -2445,7 +2463,7 @@ mod tests {
         assert_eq!(
             provider_native_thread_port_with_checker(&store, "berlin", replacement.id, |_| true)
                 .unwrap(),
-            3000
+            43000
         );
     }
 
@@ -2456,7 +2474,7 @@ mod tests {
         let stale = store
             .create_chat_thread("berlin", "codex", "Stale", None)
             .unwrap();
-        record_thread_session_with_port_and_pid(&store, &stale, 3000, exited_child_pid());
+        record_thread_session_with_port_and_pid(&store, &stale, 43000, exited_child_pid());
         let replacement = store
             .create_chat_thread("berlin", "claude", "Replacement", None)
             .unwrap();
@@ -2464,7 +2482,7 @@ mod tests {
         assert_eq!(
             provider_native_thread_port_with_checker(&store, "berlin", replacement.id, |_| true)
                 .unwrap(),
-            3000
+            43000
         );
     }
 
@@ -2475,7 +2493,7 @@ mod tests {
         let berlin = store
             .create_chat_thread("berlin", "codex", "Berlin", None)
             .unwrap();
-        record_running_thread_session_with_port(&store, &berlin, 3000);
+        record_running_thread_session_with_port(&store, &berlin, 43000);
         store
             .create(CreateWorkspace {
                 repository_name: "demo".to_owned(),
@@ -2490,7 +2508,7 @@ mod tests {
 
         assert_eq!(
             provider_native_thread_port_with_checker(&store, "tokyo", tokyo.id, |_| true).unwrap(),
-            3001
+            43001
         );
     }
 
@@ -2501,17 +2519,17 @@ mod tests {
         let first = store
             .create_chat_thread("berlin", "codex", "First", None)
             .unwrap();
-        record_running_thread_session_with_port(&store, &first, 3000);
+        record_running_thread_session_with_port(&store, &first, 43000);
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
 
         assert_eq!(
             provider_native_thread_port_with_checker(&store, "berlin", thread.id, |port| {
-                port != 3001
+                port != 43001
             })
             .unwrap(),
-            3002
+            43002
         );
     }
 
