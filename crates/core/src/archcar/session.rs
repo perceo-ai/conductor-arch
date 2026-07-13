@@ -633,6 +633,7 @@ fn claude_stream_session_launch(
 
 const PROVIDER_NATIVE_PORT_START: u16 = 43000;
 const PROVIDER_NATIVE_PORT_METADATA_KEY: &str = "port";
+const PROVIDER_NATIVE_PORT_ENV: &str = "ARCHDUCTOR_PROVIDER_PORT";
 
 fn assign_provider_native_thread_port(
     store: &WorkspaceStore,
@@ -641,7 +642,11 @@ fn assign_provider_native_thread_port(
     launch: &mut SessionLaunch,
 ) -> Result<()> {
     let port = provider_native_thread_port(store, workspace, thread_record.id)?;
-    set_launch_env(launch, "ARCHDUCTOR_PORT", OsString::from(port.to_string()));
+    set_launch_env(
+        launch,
+        PROVIDER_NATIVE_PORT_ENV,
+        OsString::from(port.to_string()),
+    );
     launch.harness_metadata = append_metadata_entry(
         launch.harness_metadata.take(),
         PROVIDER_NATIVE_PORT_METADATA_KEY,
@@ -709,7 +714,7 @@ fn set_launch_env(launch: &mut SessionLaunch, key: &str, value: OsString) {
 }
 
 fn append_metadata_entry(metadata: Option<String>, key: &str, value: &str) -> Option<String> {
-    let entry = format!("{key}={value}");
+    let entry = format!("{key}={}", sanitize_metadata_value(value));
     match metadata {
         Some(metadata) if !metadata.trim().is_empty() => Some(format!("{metadata};{entry}")),
         _ => Some(entry),
@@ -731,13 +736,13 @@ fn non_interactive_harness_metadata(
         entries.push(format!("model={}", sanitize_metadata_value(&value)));
     }
     if let Some(value) = sanitize_harness_text(harness.approval_mode.as_deref()) {
-        entries.push(format!("approval={value}"));
+        entries.push(format!("approval={}", sanitize_metadata_value(&value)));
     }
     if let Some(value) = sanitize_harness_text(harness.reasoning_mode.as_deref()) {
-        entries.push(format!("reasoning={value}"));
+        entries.push(format!("reasoning={}", sanitize_metadata_value(&value)));
     }
     if let Some(value) = sanitize_harness_text(harness.effort_mode.as_deref()) {
-        entries.push(format!("effort={value}"));
+        entries.push(format!("effort={}", sanitize_metadata_value(&value)));
     }
     Some(entries.join(";"))
 }
@@ -795,8 +800,12 @@ fn approval_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
         Some("never") => Some("never".to_owned()),
         Some("untrusted") => Some("untrusted".to_owned()),
         Some(other) => Some(other.to_owned()),
-        None => Some("never".to_owned()),
+        None => None,
     }
+}
+
+fn codex_sandbox_for_approval(approval_policy: Option<&str>) -> Option<&'static str> {
+    matches!(approval_policy, Some("never")).then_some("danger-full-access")
 }
 
 fn metadata_value(metadata: Option<&str>, key: &str) -> Option<String> {
@@ -804,6 +813,13 @@ fn metadata_value(metadata: Option<&str>, key: &str) -> Option<String> {
     metadata?
         .split(';')
         .find_map(|entry| entry.strip_prefix(&prefix).map(ToOwned::to_owned))
+}
+
+fn provider_native_process(metadata: Option<&str>) -> bool {
+    matches!(
+        metadata_value(metadata, "harness").as_deref(),
+        Some("codex-app-server" | "claude-stream-json")
+    )
 }
 
 fn adopt_running_session(
@@ -819,6 +835,7 @@ fn adopt_running_session(
                 && record.chat_thread_id.is_some()
                 && session_kind_from_command(&record.command) == Some(kind)
                 && kind == SessionKind::Codex
+                && !provider_native_process(record.session_harness_metadata.as_deref())
                 && store.owns_process_log_path(&record.log_path)
         })
     {
@@ -882,6 +899,13 @@ pub fn restore_managed_session(
         return Ok(None);
     }
     if !store.owns_process_log_path(&process.log_path) {
+        return Ok(None);
+    }
+    if provider_native_process(process.session_harness_metadata.as_deref()) {
+        if terminal_process_alive(process.pid) {
+            terminate_process(process.pid);
+        }
+        let _ = store.mark_session_process_exited(process.id, None);
         return Ok(None);
     }
     if !terminal_process_alive(process.pid) {
@@ -1518,7 +1542,10 @@ fn run_codex_app_server_session_loop(
                         input: vec![CodexAppServerUserInput::Text { text: input }],
                         cwd: Some(connection.cwd.clone()),
                         approval_policy: connection.approval_policy.clone(),
-                        sandbox_policy: Some(json!({"type": "dangerFullAccess"})),
+                        sandbox_policy: codex_sandbox_for_approval(
+                            connection.approval_policy.as_deref(),
+                        )
+                        .map(|_| json!({"type": "dangerFullAccess"})),
                         model: connection.model.clone(),
                         effort: None,
                         summary: None,
@@ -1745,7 +1772,8 @@ fn start_codex_app_server_lifecycle(
                 model: connection.model.clone(),
                 cwd: Some(connection.cwd.clone()),
                 approval_policy: connection.approval_policy.clone(),
-                sandbox: Some("danger-full-access".to_owned()),
+                sandbox: codex_sandbox_for_approval(connection.approval_policy.as_deref())
+                    .map(str::to_owned),
                 service_name: Some("archductor".to_owned()),
             },
         )?;
@@ -1917,6 +1945,15 @@ fn terminal_process_alive(process_id: u32) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn terminate_process(process_id: u32) {
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(process_id.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
@@ -2171,7 +2208,8 @@ mod tests {
 
         assert_eq!(launch.program, PathBuf::from("codex"));
         assert_eq!(launch.args, vec!["app-server"]);
-        let port = launch.env_value("ARCHDUCTOR_PORT").unwrap();
+        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));
+        let port = launch.env_value(PROVIDER_NATIVE_PORT_ENV).unwrap();
         let expected_metadata = format!(
             "harness=codex-app-server;model=gpt-5.4;approval=never;reasoning=high;port={port}"
         );
@@ -2287,6 +2325,8 @@ mod tests {
         assert_eq!(third["params"]["threadId"], "thr_existing");
         assert_eq!(third["params"]["cwd"], "/tmp/workspace");
         assert_eq!(third["params"]["serviceName"], "archductor");
+        assert!(third["params"].get("approvalPolicy").is_none());
+        assert!(third["params"].get("sandbox").is_none());
 
         let _ = connection.child.kill();
     }
@@ -2322,6 +2362,17 @@ mod tests {
         assert_eq!(connection.model, None);
 
         let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn codex_sandbox_requires_explicit_never_approval() {
+        assert_eq!(approval_from_harness_metadata(None), None);
+        assert_eq!(codex_sandbox_for_approval(None), None);
+        assert_eq!(codex_sandbox_for_approval(Some("on-request")), None);
+        assert_eq!(
+            codex_sandbox_for_approval(Some("never")),
+            Some("danger-full-access")
+        );
     }
 
     #[test]
@@ -2369,7 +2420,8 @@ mod tests {
                 "low",
             ]
         );
-        let port = launch.env_value("ARCHDUCTOR_PORT").unwrap();
+        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));
+        let port = launch.env_value(PROVIDER_NATIVE_PORT_ENV).unwrap();
         let expected_metadata = format!(
             "harness=claude-stream-json;model=claude-sonnet-5;approval=never;reasoning=low;port={port}"
         );
@@ -2825,6 +2877,35 @@ mod tests {
         let unchanged = store.get_process_record(process.id).unwrap();
         assert_eq!(unchanged.status, ProcessStatus::Running);
         assert!(unchanged.ended_at.is_none());
+    }
+
+    #[test]
+    fn restore_managed_session_terminates_provider_native_records_instead_of_pty_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let mut launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
+        let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel();
+
+        let restored = restore_managed_session(
+            temp.path().join("state.db"),
+            temp.path().join("logs"),
+            process.id,
+            event_tx,
+        )
+        .unwrap();
+
+        assert!(restored.is_none());
+        let exited = store.get_process_record(process.id).unwrap();
+        assert_eq!(exited.status, ProcessStatus::Exited);
+        let _ = child.wait();
     }
 
     #[test]

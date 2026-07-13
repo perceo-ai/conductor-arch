@@ -156,7 +156,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ),
         ArchcarRequest::SetSessionModel { session_id, model } => format!(
             "set_session_model session_id={session_id} model={}",
-            model.as_deref().unwrap_or("<default>")
+            if model
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                "set"
+            } else {
+                "default"
+            }
         ),
         ArchcarRequest::ResizeSession {
             session_id,
@@ -358,7 +365,7 @@ mod tests {
 
         assert_eq!(
             archcar_request_summary(&request),
-            "set_session_model session_id=9 model=gpt-5.6-terra"
+            "set_session_model session_id=9 model=set"
         );
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"set_session_model\""));
@@ -371,7 +378,7 @@ mod tests {
         };
         assert_eq!(
             archcar_request_summary(&reset),
-            "set_session_model session_id=9 model=<default>"
+            "set_session_model session_id=9 model=default"
         );
         let json = serde_json::to_string(&reset).unwrap();
         assert!(!json.contains("\"model\""));

@@ -423,15 +423,34 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
             if let Some(index) = persisted_messages.iter().position(|message| {
                 message.role == "user" && message.content.trim() == content.trim()
             }) {
-                messages.push(persisted_messages.remove(index));
+                let matched = persisted_messages.remove(index);
+                messages.extend(persisted_messages.drain(..index));
+                messages.push(matched);
+            } else if !messages.iter().any(|message: &ArchcarMessage| {
+                semantic_roles_match(&message.role, "user")
+                    && message.content.trim() == content.trim()
+            }) {
+                messages.push(ArchcarMessage {
+                    id: next_provider_message_id,
+                    role: "user".to_owned(),
+                    content,
+                    source: "provider_event".to_owned(),
+                    inline_event: None,
+                    context_usage: None,
+                });
+                next_provider_message_id -= 1;
             }
             continue;
         }
-        if messages.iter().any(|message: &ArchcarMessage| {
-            message.source != "provider_event"
-                && message.role == item.render_class.role_label()
-                && message.content.trim() == content.trim()
-        }) {
+        if messages
+            .iter()
+            .chain(persisted_messages.iter())
+            .any(|message: &ArchcarMessage| {
+                message.source != "provider_event"
+                    && semantic_roles_match(&message.role, item.render_class.role_label())
+                    && message.content.trim() == content.trim()
+            })
+        {
             continue;
         }
         messages.push(ArchcarMessage {
@@ -447,6 +466,14 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
     messages.extend(persisted_messages);
 
     Ok(messages)
+}
+
+fn semantic_roles_match(left: &str, right: &str) -> bool {
+    left == right
+        || matches!(
+            (left, right),
+            ("agent", "assistant") | ("assistant", "agent")
+        )
 }
 
 fn ensure_default_session(
@@ -1618,6 +1645,140 @@ mod tests {
     }
 
     #[test]
+    fn session_messages_emit_history_before_matching_provider_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "old prompt", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "old answer", "agent")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "new prompt", "user_send")
+            .unwrap();
+        let event_store = ProviderEventStore::new(&db_path);
+        for (sequence, kind, item_id, body) in [
+            (1, ProviderEventKind::UserInput, "user-1", "new prompt"),
+            (
+                2,
+                ProviderEventKind::AssistantOutput,
+                "assistant-1",
+                "new answer",
+            ),
+        ] {
+            event_store
+                .upsert_event(&provider_event_with_sequence(
+                    thread.id, sequence, kind, item_id, body,
+                ))
+                .unwrap();
+        }
+
+        let rendered = session_messages_for_thread(&db_path, thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|message| format!("{}:{}", message.role, message.content))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "user:old prompt",
+                "agent:old answer",
+                "user:new prompt",
+                "assistant:new answer",
+            ]
+        );
+    }
+
+    #[test]
+    fn session_messages_synthesize_provider_user_without_persisted_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let event_store = ProviderEventStore::new(&db_path);
+        for (sequence, kind, item_id, body) in [
+            (1, ProviderEventKind::UserInput, "user-1", "native prompt"),
+            (
+                2,
+                ProviderEventKind::AssistantOutput,
+                "assistant-1",
+                "native answer",
+            ),
+        ] {
+            event_store
+                .upsert_event(&provider_event_with_sequence(
+                    thread.id, sequence, kind, item_id, body,
+                ))
+                .unwrap();
+        }
+
+        let rendered = session_messages_for_thread(&db_path, thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|message| format!("{}:{}:{}", message.role, message.source, message.content))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "user:provider_event:native prompt",
+                "assistant:provider_event:native answer",
+            ]
+        );
+    }
+
+    #[test]
+    fn session_messages_dedupe_provider_assistant_against_remaining_agent_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "prompt", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "same answer", "agent")
+            .unwrap();
+        let event_store = ProviderEventStore::new(&db_path);
+        for (sequence, kind, item_id, body) in [
+            (1, ProviderEventKind::UserInput, "user-1", "prompt"),
+            (
+                2,
+                ProviderEventKind::AssistantOutput,
+                "assistant-1",
+                "same answer",
+            ),
+        ] {
+            event_store
+                .upsert_event(&provider_event_with_sequence(
+                    thread.id, sequence, kind, item_id, body,
+                ))
+                .unwrap();
+        }
+
+        let rendered = session_messages_for_thread(&db_path, thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|message| format!("{}:{}:{}", message.role, message.source, message.content))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["user:user_send:prompt", "agent:agent:same answer"]
+        );
+    }
+
+    #[test]
     fn persisted_running_session_candidates_preserve_store_descending_order() {
         let records = vec![
             crate::workspace::ProcessRecord {
@@ -1913,6 +2074,39 @@ mod tests {
             occurred_at_ms: 42,
             normalized_payload: json!({"title": title, "body": body}),
             raw_json: json!({"method": subtype, "params": {"body": body}}),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
+        }
+    }
+
+    fn provider_event_with_sequence(
+        thread_id: i64,
+        sequence: u64,
+        kind: ProviderEventKind,
+        item_id: &str,
+        body: &str,
+    ) -> ProviderEventDraft {
+        ProviderEventDraft {
+            provider: "codex".to_owned(),
+            provider_event_id: Some(format!("event-{sequence}")),
+            provider_item_id: Some(item_id.to_owned()),
+            provider_thread_id: Some("thread-1".to_owned()),
+            provider_turn_id: None,
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: None,
+            chat_thread_id: Some(thread_id),
+            process_id: None,
+            phase: ProviderEventPhase::Completed,
+            kind,
+            provider_subtype: Some("test".to_owned()),
+            provider_sequence: Some(sequence as i64),
+            occurred_at_ms: sequence,
+            normalized_payload: json!({
+                "title": if kind == ProviderEventKind::UserInput { "User" } else { "Assistant" },
+                "body": body
+            }),
+            raw_json: json!({"sequence": sequence}),
             schema_version: 1,
             adapter_version: "test".to_owned(),
         }
