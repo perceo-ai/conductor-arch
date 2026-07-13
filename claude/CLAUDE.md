@@ -70,9 +70,33 @@ Practical rule:
 - Implement, verify, and keep going.
 - Fix stale docs when you find them.
 - Do not call a feature done without current evidence from code, tests, CLI
-  smoke, or GUI/runtime verification.
+  smoke, and GTK smoke where applicable.
 - If auth, API keys, display server, network, local tools, or test data are
   missing, say exactly what was not verified.
+
+## Verification Contract
+
+Every behavior change must be verified at the layers it touches:
+
+- Written tests: run the narrowest automated tests that cover the edited core,
+  CLI, and/or GTK code. Use focused tests first and broader package tests when
+  the change crosses boundaries.
+- CLI smoke: run the relevant `archductor` command or CLI test path that proves
+  the behavior reaches the command boundary.
+- GTK smoke: run the relevant `archductor-gtk` test, build, or runtime path that
+  proves the behavior reaches the app surface. For visible UI changes, use GTK
+  smoke tests or a real GTK launch path when the environment supports it.
+
+Keep CLI and GTK inline:
+
+- User-visible core behavior should not land in only one surface. Update CLI and
+  GTK together, or report the missing side as incomplete.
+- Shared parsing, projection, state, and provider behavior should live in core
+  when practical so CLI and GTK render the same semantics.
+- CLI and GTK should use the same names, statuses, filters, and lifecycle
+  assumptions for providers, sessions, workspaces, and runtime events.
+- Before final response, name the written tests, CLI smoke, and GTK smoke that
+  ran. If any layer was skipped, say why.
 
 ## Always-on Project Rules
 
@@ -168,6 +192,6 @@ Default design direction:
 - Do not revert user or other-agent changes unless explicitly asked.
 - Use `rg`/`rg --files` for search.
 - Keep changes scoped to the requested task.
-- Run the narrowest useful verification for the change.
+- Run written tests plus relevant CLI and GTK smoke for the change.
 - If a frontend/GTK change affects visible UI, run or build enough to prove it
   still works.

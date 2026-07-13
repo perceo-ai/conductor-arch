@@ -2,6 +2,10 @@
 
 Read the full Codex instructions in `.codex/AGENTS.md`.
 
+Before calling behavior done, verify with written tests plus relevant CLI smoke
+and GTK smoke. Keep CLI and GTK behavior inline; do not land a user-visible
+change in only one surface unless you report the other as incomplete.
+
 ## Project Context
 
 Archductor work lives in the Linear `Archductor` project on the `Perceo` team.

@@ -44,7 +44,7 @@ Use caveman mode:
 Be real with the user:
 
 - Do not call a phase, feature, connector, or flow "done" unless it has current
-  evidence from code, tests, CLI smoke, or GUI/runtime verification.
+  evidence from code, written tests, CLI smoke, and GTK smoke where applicable.
 - Distinguish clearly between backend support, CLI support, GTK controls, and
   actual end-to-end product behavior. One layer does not prove the others.
 - If auth, API keys, display server, network, local tools, or test data are
@@ -65,6 +65,33 @@ Use Superpowers:
 
 There are enough credits. Optimize for throughput while keeping the codebase
 coherent.
+
+## Verification Contract
+
+Every behavior change must be verified at all three layers that matter for the
+change:
+
+- Written tests: run the narrowest automated tests that cover the edited core,
+  CLI, and/or GTK code. Prefer focused tests first, then broader package tests
+  when the change crosses boundaries.
+- CLI smoke: run the relevant `archductor` command or CLI test path that proves
+  the behavior reaches the command boundary. Do not treat core-only tests as CLI
+  verification.
+- GTK smoke: run the relevant `archductor-gtk` test/build/runtime path that
+  proves the behavior reaches the app surface. For visible UI changes, use GTK
+  smoke tests or a real GTK launch path when the environment supports it.
+
+Keep CLI and GTK inline:
+
+- Core behavior that is visible to users should not land in only one surface.
+  Update the CLI and GTK paths together, or explicitly report the missing side
+  as incomplete.
+- Shared parsing, projection, state, and provider behavior should live in core
+  whenever practical so CLI and GTK render the same semantics.
+- If the CLI renders a provider/session/workspace concept one way, GTK should
+  use the same names, statuses, filtering rules, and lifecycle assumptions.
+- Before final response, name the written tests, CLI smoke, and GTK smoke that
+  ran. If any layer was skipped, say why.
 
 ## Always-on Project Rules
 
@@ -190,7 +217,7 @@ Follow the handoff phases:
 - Use `rg`/`rg --files` for search.
 - Use `apply_patch` for manual file edits.
 - Keep changes scoped to the requested phase/task.
-- Run the narrowest useful verification for the change.
+- Run written tests plus relevant CLI and GTK smoke for the change.
 - If a frontend/GTK change affects visible UI, run or build enough to prove it
   still works.
 
