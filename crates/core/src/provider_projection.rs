@@ -206,8 +206,11 @@ pub fn render_provider_event_projection(
 
     for event in events {
         let id = canonical_projection_id(&event);
-        let item = projection_item_from_event(id.clone(), event);
+        let mut item = projection_item_from_event(id.clone(), event);
         if let Some(index) = positions.get(&id).copied() {
+            if item.body.trim().is_empty() && !items[index].body.trim().is_empty() {
+                item.body = items[index].body.clone();
+            }
             items[index] = ProviderProjectionItem {
                 sequence: items[index].sequence,
                 ..item
@@ -229,10 +232,14 @@ pub fn render_provider_event_projection(
 }
 
 pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjectionItem) -> bool {
-    !matches!(
-        item.render_class,
-        ProjectionRenderClass::FallbackCard | ProjectionRenderClass::StatusCard
-    )
+    match item.render_class {
+        ProjectionRenderClass::FallbackCard => false,
+        ProjectionRenderClass::StatusCard => matches!(
+            item.status,
+            ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
+        ),
+        _ => true,
+    }
 }
 
 pub fn provider_projection_item_text(item: &ProviderProjectionItem) -> String {
@@ -271,7 +278,7 @@ fn provider_projection_event_from_record(record: &ProviderEventRecord) -> Provid
             .to_owned(),
         status: provider_projection_status(record.phase),
         stream_state: provider_projection_stream_state(record.phase),
-        parent_id: record.parent_provider_item_id.clone(),
+        parent_id: provider_projection_parent_id(record),
         nested_thread_id: record.parent_provider_thread_id.clone(),
         raw_payload: Some(record.raw_json.clone()),
     }
@@ -292,6 +299,17 @@ fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
     record.identity_key.clone()
 }
 
+fn provider_projection_parent_id(record: &ProviderEventRecord) -> Option<String> {
+    record.parent_provider_item_id.as_ref().map(|parent| {
+        let thread_id = record
+            .parent_provider_thread_id
+            .as_deref()
+            .or(record.provider_thread_id.as_deref())
+            .unwrap_or("-");
+        format!("{}:{thread_id}:{parent}", record.provider)
+    })
+}
+
 fn provider_projection_category(
     kind: ProviderEventKind,
     provider_subtype: Option<&str>,
@@ -303,6 +321,9 @@ fn provider_projection_category(
     match kind {
         ProviderEventKind::UserInput => ProviderProjectionCategory::UserMessage,
         ProviderEventKind::AssistantOutput => ProviderProjectionCategory::AssistantMessage,
+        ProviderEventKind::PlanningReasoning if subtype.contains("plan") => {
+            ProviderProjectionCategory::Plan
+        }
         ProviderEventKind::PlanningReasoning => ProviderProjectionCategory::Reasoning,
         ProviderEventKind::CommandProcess => ProviderProjectionCategory::Command,
         ProviderEventKind::TerminalRuntime => ProviderProjectionCategory::BackgroundTerminal,
@@ -333,6 +354,9 @@ fn provider_projection_category(
         ProviderEventKind::WebBrowserMedia => ProviderProjectionCategory::Web,
         ProviderEventKind::LimitFailure if subtype_contains_any(&subtype, &["rate", "limit"]) => {
             ProviderProjectionCategory::RateLimit
+        }
+        ProviderEventKind::LimitFailure if subtype.contains("usage") => {
+            ProviderProjectionCategory::Usage
         }
         ProviderEventKind::LimitFailure => ProviderProjectionCategory::Error,
         ProviderEventKind::ThreadSession
@@ -553,7 +577,7 @@ fn redact_json_value(value: &Value) -> Value {
 }
 
 fn secret_like_key(key: &str) -> bool {
-    let key = key.trim().to_ascii_lowercase();
+    let key = key.trim().replace(['-', '.'], "_").to_ascii_lowercase();
     key.contains("token")
         || key.contains("secret")
         || key.contains("password")
@@ -573,4 +597,150 @@ fn secret_like_key(key: &str) -> bool {
                 | "auth_header"
                 | "bearer"
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider_events::{ProviderEventKind, ProviderEventPhase};
+    use serde_json::json;
+
+    fn record(
+        kind: ProviderEventKind,
+        phase: ProviderEventPhase,
+        subtype: &str,
+    ) -> ProviderEventRecord {
+        ProviderEventRecord {
+            id: 1,
+            identity_key: "codex:thread-1:item-1".to_owned(),
+            provider: "codex".to_owned(),
+            provider_event_id: None,
+            provider_item_id: Some("item-1".to_owned()),
+            provider_thread_id: Some("thread-1".to_owned()),
+            provider_turn_id: None,
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: None,
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            phase,
+            kind,
+            provider_subtype: Some(subtype.to_owned()),
+            provider_sequence: Some(1),
+            received_sequence: 1,
+            occurred_at_ms: 1,
+            normalized_payload: json!({
+                "title": "Event",
+                "body": "body"
+            }),
+            raw_json: json!({ "id": 1 }),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
+    #[test]
+    fn completed_empty_update_preserves_previous_streaming_body() {
+        let mut streaming = record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+            "assistant",
+        );
+        streaming.normalized_payload = json!({
+            "title": "Assistant",
+            "body": "streamed answer"
+        });
+        let mut completed = streaming.clone();
+        completed.identity_key = "codex:thread-1:item-1:complete".to_owned();
+        completed.phase = ProviderEventPhase::Completed;
+        completed.received_sequence = 2;
+        completed.normalized_payload = json!({
+            "title": "Assistant",
+            "body": ""
+        });
+
+        let projection = provider_projection_from_records(&[streaming, completed]);
+
+        assert_eq!(projection.items.len(), 1);
+        assert_eq!(projection.items[0].body, "streamed answer");
+        assert_eq!(
+            projection.items[0].status,
+            ProviderProjectionStatus::Complete
+        );
+    }
+
+    #[test]
+    fn projection_canonicalizes_parent_item_ids() {
+        let mut child = record(
+            ProviderEventKind::Tool,
+            ProviderEventPhase::Completed,
+            "tool_call",
+        );
+        child.provider_item_id = Some("tool-1".to_owned());
+        child.parent_provider_item_id = Some("msg-1".to_owned());
+        child.parent_provider_thread_id = Some("thread-parent".to_owned());
+
+        let projection = provider_projection_from_records(&[child]);
+
+        assert_eq!(
+            projection.items[0].parent_id.as_deref(),
+            Some("codex:thread-parent:msg-1")
+        );
+    }
+
+    #[test]
+    fn projection_classifies_plan_and_usage_before_generic_fallbacks() {
+        let plan = record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Completed,
+            "plan_update",
+        );
+        let usage = record(
+            ProviderEventKind::LimitFailure,
+            ProviderEventPhase::Completed,
+            "usage",
+        );
+        let mut usage = usage;
+        usage.identity_key = "codex:thread-1:item-2".to_owned();
+        usage.provider_item_id = Some("item-2".to_owned());
+
+        let projection = provider_projection_from_records(&[plan, usage]);
+
+        assert!(projection
+            .items
+            .iter()
+            .any(|item| item.category == ProviderProjectionCategory::Plan));
+        assert!(projection
+            .items
+            .iter()
+            .any(|item| item.category == ProviderProjectionCategory::Usage));
+    }
+
+    #[test]
+    fn raw_payload_redacts_hyphenated_secret_keys() {
+        let mut raw = record(
+            ProviderEventKind::Unknown,
+            ProviderEventPhase::Completed,
+            "future",
+        );
+        raw.provider_item_id = Some("raw-1".to_owned());
+        raw.raw_json = json!({
+            "api-key": "abc123",
+            "access-key": "def456",
+            "private-key": "ghi789",
+            "Proxy-Authorization": "Bearer proxy-secret",
+            "authorization-url": "https://example.test/auth"
+        });
+
+        let projection = provider_projection_from_records(&[raw]);
+        let payload = projection.items[0].raw_payload.as_deref().unwrap();
+
+        assert!(!payload.contains("abc123"));
+        assert!(!payload.contains("def456"));
+        assert!(!payload.contains("ghi789"));
+        assert!(!payload.contains("proxy-secret"));
+        assert!(payload.contains("authorization-url"));
+    }
 }

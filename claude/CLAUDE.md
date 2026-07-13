@@ -83,7 +83,7 @@ Every behavior change must be verified at the layers it touches:
   the change crosses boundaries.
 - CLI smoke: run the relevant `archductor` command or CLI test path that proves
   the behavior reaches the command boundary.
-- GTK smoke: run the relevant `archductor-gtk` test, build, or runtime path that
+- GTK smoke: run the relevant `archductor-gtk` test or runtime path that
   proves the behavior reaches the app surface. For visible UI changes, use GTK
   smoke tests or a real GTK launch path when the environment supports it.
 

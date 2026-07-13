@@ -11,7 +11,6 @@ mod motion;
 mod projects;
 mod pty_inspector;
 mod refresh;
-mod session_projection;
 mod session_surface;
 mod settings;
 mod setup;
@@ -895,6 +894,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 .unwrap_or_default();
             let commands = palette_commands(
                 state_for_palette.snapshot().selected_workspace.is_some(),
+                debug_mode,
                 &keybindings,
                 &custom_commands,
             );

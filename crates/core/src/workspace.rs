@@ -1512,18 +1512,7 @@ impl WorkspaceStore {
         self.stop_workspace_processes(workspace.id)?;
 
         if remove_worktree {
-            match remove_workspace_worktree(&repository.root_path, &workspace.path) {
-                Ok(()) => {}
-                Err(err) if workspace_allows_best_effort_delete(&workspace) => {
-                    warn!(
-                        workspace = %workspace.name,
-                        path = %workspace.path.display(),
-                        error = %err,
-                        "continuing failed workspace metadata delete after artifact cleanup failed"
-                    );
-                }
-                Err(err) => return Err(err),
-            }
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
         }
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -7932,10 +7921,6 @@ fn validate_branch_name(branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn workspace_allows_best_effort_delete(workspace: &Workspace) -> bool {
-    matches!(workspace.status.as_str(), "creating" | "failed")
-}
-
 fn versioned_workspace_name(base: &str, version: usize) -> String {
     format!("{base}-v{version}")
 }
@@ -10605,7 +10590,7 @@ CUSTOM_VALUE = "from-settings"
                 )],
             )
             .unwrap();
-        crate::provider_events::ProviderEventStore::new(&db_path)
+        let provider_event = crate::provider_events::ProviderEventStore::new(&db_path)
             .upsert_event(&crate::provider_events::ProviderEventDraft {
                 provider: "codex".to_owned(),
                 provider_event_id: Some("event-1".to_owned()),
@@ -10627,6 +10612,15 @@ CUSTOM_VALUE = "from-settings"
                 schema_version: 1,
                 adapter_version: "test".to_owned(),
             })
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE provider_event_raw_payloads
+                 SET chat_thread_id = NULL, process_id = NULL
+                 WHERE identity_key = ?1",
+                [&provider_event.identity_key],
+            )
             .unwrap();
 
         let deleted = store.delete("berlin", false, false).unwrap();
@@ -10711,7 +10705,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn delete_failed_workspace_removes_metadata_when_worktree_cleanup_fails() {
+    fn delete_failed_workspace_keeps_metadata_when_worktree_cleanup_fails() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -10746,10 +10740,9 @@ CUSTOM_VALUE = "from-settings"
             )
             .unwrap();
 
-        let deleted = store.delete("berlin", true, false).unwrap();
-
-        assert_eq!(deleted.status, "failed");
-        assert!(store.get_by_name("berlin").is_err());
+        assert!(store.delete("berlin", true, false).is_err());
+        let remaining = store.get_by_name("berlin").unwrap();
+        assert_eq!(remaining.status, "failed");
     }
 
     #[test]

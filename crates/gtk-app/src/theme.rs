@@ -1273,6 +1273,62 @@ separator {
     border-color: #2a2a2a;
 }
 
+.lc-theme-light .dashboard,
+.lc-theme-light .page-shell,
+.lc-theme-light .history-view {
+    background-color: #f8fafc;
+    color: #1f2937;
+}
+
+.lc-theme-light .page-header {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .workspace-card,
+.lc-theme-light .command-panel,
+.lc-theme-light .metric-card,
+.lc-theme-light .detail-row,
+.lc-theme-light .settings-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .dashboard-title,
+.lc-theme-light .workspace-name,
+.lc-theme-light .card-title,
+.lc-theme-light .metric-value,
+.lc-theme-light .detail-value,
+.lc-theme-light .column-title {
+    color: #111827;
+}
+
+.lc-theme-light .card-meta,
+.lc-theme-light .workspace-meta,
+.lc-theme-light .detail-label,
+.lc-theme-light .project-tab,
+.lc-theme-light .column-count,
+.lc-theme-light .empty-label,
+.lc-theme-light .card-branch,
+.lc-theme-light .card-diff {
+    color: #667085;
+}
+
+.lc-theme-light .composer-bar entry,
+.lc-theme-light entry {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .chrome-button:hover,
+.lc-theme-light .panel-switcher button:hover,
+.lc-theme-light .panel-switcher button:checked {
+    background-color: #edf2f7;
+    border-color: transparent;
+    color: #111827;
+}
+
 /* ── Sidebar status dots ── */
 .status-dot {
     min-width: 8px;
@@ -2653,11 +2709,15 @@ mod tests {
 
         assert!(!css.contains("window.lc-theme-dark"));
         assert!(!css.contains(".lc-theme-dark .sidebar"));
+        assert!(!css.contains(".lc-theme-light .sidebar"));
         assert!(!css.contains(".lc-theme-dark headerbar"));
+        assert!(!css.contains(".lc-theme-light headerbar"));
         assert!(!css.contains(".lc-theme-dark .nav-button"));
         assert!(!css.contains(".lc-theme-dark .nav-row"));
         assert!(!css.contains(".lc-theme-dark .workspace-list"));
         assert!(!css.contains(".lc-theme-dark .sidebar-search"));
+        assert!(!css.contains(".lc-density-compact .sidebar"));
+        assert!(!css.contains(".lc-density-comfortable .sidebar"));
         assert!(!css.contains(".lc-density-compact .nav-button"));
         assert!(!css.contains(".lc-density-compact .nav-row"));
         assert!(!css.contains(".lc-density-comfortable .nav-button"));

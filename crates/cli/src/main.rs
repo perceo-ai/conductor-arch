@@ -17,13 +17,14 @@ use archductor_core::workspace::{
     WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use std::collections::HashSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "archductor")]
@@ -582,9 +583,10 @@ fn main() -> Result<()> {
                     );
                 }
                 ArchcarCommand::Messages { thread_id } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetSessionMessages { thread_id })?,
-                    );
+                    match client.send(ArchcarRequest::GetSessionMessages { thread_id })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
                 }
                 ArchcarCommand::Send {
                     session_id,
@@ -1072,6 +1074,7 @@ fn main() -> Result<()> {
                         codex_skills,
                     };
                     let process = if cli_session_start_uses_archcar(kind) {
+                        let existing_ids = running_session_ids(&store, &workspace)?;
                         let client = ArchcarClient::from_paths(&paths);
                         let kind: SessionKind = kind.into();
                         print_archcar_response(client.send(ArchcarRequest::SpawnSession {
@@ -1079,7 +1082,13 @@ fn main() -> Result<()> {
                             kind,
                             harness: Some(harness.clone()),
                         })?);
-                        wait_for_session_process(&store, &workspace, kind, Duration::from_secs(5))?
+                        wait_for_new_session_process(
+                            &store,
+                            &workspace,
+                            kind,
+                            &existing_ids,
+                            Duration::from_secs(5),
+                        )?
                     } else {
                         store.start_session_with_options(&workspace, kind.into(), harness)?
                     };
@@ -1128,24 +1137,18 @@ fn main() -> Result<()> {
                 }
                 SessionCommand::Stop { workspace } => {
                     let sessions = store.list_sessions(&workspace)?;
-                    let mut provider_native = None;
-                    for record in &sessions {
-                        if record.status == ProcessStatus::Running
-                            && cli_session_stop_uses_archcar(session_kind_from_process_record(
-                                &store, record,
-                            )?)
-                        {
-                            provider_native = Some(record);
-                            break;
-                        }
-                    }
-                    if let Some(record) = provider_native {
+                    let record = latest_running_session(&sessions).with_context(|| {
+                        format!("no running session found for workspace {workspace}")
+                    })?;
+                    if cli_session_stop_uses_archcar(session_kind_from_process_record(
+                        &store, record,
+                    )?) {
                         let client = ArchcarClient::from_paths(&paths);
                         let _ = client.send(ArchcarRequest::KillSession {
                             session_id: record.id,
                         });
                     }
-                    let process = store.stop_session(&workspace)?;
+                    let process = store.stop_session_process(&workspace, record.id)?;
                     println!("Stopped session for {} (pid {})", workspace, process.pid);
                 }
                 SessionCommand::Attach {
@@ -1427,7 +1430,13 @@ fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
     let mut out = String::new();
     for message in messages {
         let label = archcar_role_label(&message.role);
-        let content = archcar_message_content_without_duplicate_title(&label, &message.content);
+        let content = if message.source == "provider_event"
+            && !matches!(message.role.as_str(), "user" | "agent" | "assistant")
+        {
+            archcar_message_content_without_duplicate_title(&label, &message.content)
+        } else {
+            &message.content
+        };
         let content = content.trim();
         if content.is_empty() {
             continue;
@@ -1435,71 +1444,6 @@ fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
         out.push_str(&format!("{label}\n{content}\n\n"));
     }
     out
-}
-
-#[cfg(test)]
-fn render_archcar_messages(
-    items: &[archductor_core::provider_projection::ProviderProjectionItem],
-) -> String {
-    let mut out = String::new();
-    for item in items {
-        if !archcar_projection_item_is_relevant(item) {
-            continue;
-        }
-        let content = item.body.trim();
-        if content.is_empty() {
-            continue;
-        }
-        out.push_str(&format!(
-            "{}{}\n{}\n\n",
-            archcar_projection_title(item),
-            archcar_projection_state_suffix(item.status, item.stream_state),
-            content
-        ));
-    }
-    out
-}
-
-#[cfg(test)]
-fn archcar_projection_item_is_relevant(
-    item: &archductor_core::provider_projection::ProviderProjectionItem,
-) -> bool {
-    use archductor_core::provider_projection::ProjectionRenderClass;
-
-    !matches!(
-        item.render_class,
-        ProjectionRenderClass::FallbackCard | ProjectionRenderClass::StatusCard
-    )
-}
-
-#[cfg(test)]
-fn archcar_projection_title(
-    item: &archductor_core::provider_projection::ProviderProjectionItem,
-) -> String {
-    use archductor_core::provider_projection::ProjectionRenderClass;
-
-    match item.render_class {
-        ProjectionRenderClass::UserChat => "You".to_owned(),
-        ProjectionRenderClass::AssistantChat => "Assistant".to_owned(),
-        _ => item.title.trim().to_owned(),
-    }
-}
-
-#[cfg(test)]
-fn archcar_projection_state_suffix(
-    status: archductor_core::provider_projection::ProviderProjectionStatus,
-    stream_state: archductor_core::provider_projection::ProviderProjectionStreamState,
-) -> String {
-    use archductor_core::provider_projection::{
-        ProviderProjectionStatus, ProviderProjectionStreamState,
-    };
-
-    if status == ProviderProjectionStatus::Complete
-        && stream_state == ProviderProjectionStreamState::Complete
-    {
-        return String::new();
-    }
-    format!(" [{}, {}]", status.as_str(), stream_state.as_str())
 }
 
 fn archcar_role_label(role: &str) -> String {
@@ -1946,11 +1890,44 @@ fn wait_for_session_process(
     kind: SessionKind,
     timeout: Duration,
 ) -> Result<ProcessRecord> {
-    let started = std::time::Instant::now();
+    wait_for_session_process_matching(store, workspace, kind, None, None, timeout)
+}
+
+fn wait_for_new_session_process(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    existing_ids: &HashSet<i64>,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    wait_for_session_process_matching(store, workspace, kind, None, Some(existing_ids), timeout)
+}
+
+fn wait_for_thread_session_process(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    thread_id: i64,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    wait_for_session_process_matching(store, workspace, kind, Some(thread_id), None, timeout)
+}
+
+fn wait_for_session_process_matching(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    thread_id: Option<i64>,
+    excluded_ids: Option<&HashSet<i64>>,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    let started = Instant::now();
     loop {
         for record in store.list_sessions(workspace)? {
             if record.status == ProcessStatus::Running
                 && session_record_matches_kind(store, &record, kind)?
+                && thread_id.is_none_or(|thread_id| record.chat_thread_id == Some(thread_id))
+                && excluded_ids.is_none_or(|ids| !ids.contains(&record.id))
             {
                 return Ok(record);
             }
@@ -1964,6 +1941,22 @@ fn wait_for_session_process(
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn running_session_ids(store: &WorkspaceStore, workspace: &str) -> Result<HashSet<i64>> {
+    Ok(store
+        .list_sessions(workspace)?
+        .into_iter()
+        .filter(|record| record.status == ProcessStatus::Running)
+        .map(|record| record.id)
+        .collect())
+}
+
+fn latest_running_session(sessions: &[ProcessRecord]) -> Option<&ProcessRecord> {
+    sessions
+        .iter()
+        .filter(|session| session.status == ProcessStatus::Running)
+        .max_by_key(|session| session.id)
 }
 
 fn session_record_matches_kind(
@@ -2002,6 +1995,7 @@ fn ensure_session_send_target(
     thread_id: Option<i64>,
     timeout: Duration,
 ) -> Result<(i64, i64)> {
+    let deadline = Instant::now() + timeout;
     let response = if let Some(thread_id) = thread_id {
         client.send(ArchcarRequest::EnsureChatThreadSession {
             workspace: workspace.to_owned(),
@@ -2024,7 +2018,12 @@ fn ensure_session_send_target(
             ..
         } => (session_id, thread_id),
         ArchcarResponse::SessionSpawnQueued { .. } => {
-            let process = wait_for_session_process(store, workspace, kind, timeout)?;
+            let remaining = remaining_duration(deadline)?;
+            let process = if let Some(thread_id) = thread_id {
+                wait_for_thread_session_process(store, workspace, kind, thread_id, remaining)?
+            } else {
+                wait_for_session_process(store, workspace, kind, remaining)?
+            };
             let thread_id = process
                 .chat_thread_id
                 .context("queued provider session did not record a chat thread id")?;
@@ -2033,34 +2032,69 @@ fn ensure_session_send_target(
         ArchcarResponse::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected archcar response: {:?}", other),
     };
-    wait_for_archcar_session_ready(client, target.0, timeout)?;
+    wait_for_archcar_session_ready(client, target.0, deadline)?;
     Ok(target)
 }
 
 fn wait_for_archcar_session_ready(
     client: &ArchcarClient,
     session_id: i64,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<()> {
-    let started = std::time::Instant::now();
     loop {
         match client.send(ArchcarRequest::GetSessionStatus { session_id })? {
             ArchcarResponse::SessionStatus { ready: true, .. } => return Ok(()),
+            ArchcarResponse::SessionStatus {
+                status,
+                runtime_state,
+                ..
+            } if archcar_status_is_terminal(&status, runtime_state) => {
+                anyhow::bail!(
+                    "session {session_id} exited before becoming ready: status={} state={}",
+                    status,
+                    runtime_state.as_str()
+                );
+            }
             ArchcarResponse::SessionStatus { .. } => {}
-            ArchcarResponse::Error { message } if message.contains("unknown session") => {}
+            ArchcarResponse::Error { message } if message.contains("unknown session") => {
+                anyhow::bail!("session {session_id} disappeared before becoming ready: {message}");
+            }
             ArchcarResponse::Error { message } => anyhow::bail!(message),
             other => anyhow::bail!("unexpected archcar response: {:?}", other),
         }
-        if started.elapsed() >= timeout {
+        if Instant::now() >= deadline {
             anyhow::bail!("timed out waiting for session {session_id} to become ready");
         }
         thread::sleep(Duration::from_millis(50));
     }
 }
 
+fn remaining_duration(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .context("timed out waiting for provider session")
+}
+
+fn archcar_status_is_terminal(
+    status: &str,
+    runtime_state: archductor_core::session_state::AgentSessionState,
+) -> bool {
+    !matches!(status, "running")
+        || matches!(
+            runtime_state,
+            archductor_core::session_state::AgentSessionState::Interrupted
+                | archductor_core::session_state::AgentSessionState::Failed
+                | archductor_core::session_state::AgentSessionState::Exited
+                | archductor_core::session_state::AgentSessionState::Archived
+        )
+}
+
 fn message_text_or_stdin(message: Vec<String>) -> Result<String> {
     if !message.is_empty() {
-        return Ok(message.join(" "));
+        let input = message.join(" ");
+        anyhow::ensure!(!input.trim().is_empty(), "message is required");
+        return Ok(input);
     }
     let mut input = String::new();
     io::stdin()
@@ -2547,61 +2581,59 @@ mod tests {
 
     #[test]
     fn archcar_messages_render_projected_provider_events_without_raw_payloads() {
-        use archductor_core::provider_projection::{
-            ProjectionRenderClass, ProviderProjectionItem, ProviderProjectionStatus,
-            ProviderProjectionStreamState,
-        };
-
-        let text = render_archcar_messages(&[
-            ProviderProjectionItem {
-                id: "assistant-1".to_owned(),
-                sequence: 1,
-                category: archductor_core::provider_projection::ProviderProjectionCategory::AssistantMessage,
-                render_class: ProjectionRenderClass::AssistantChat,
-                title: "Assistant".to_owned(),
-                body: "Here is the answer".to_owned(),
-                status: ProviderProjectionStatus::Complete,
-                stream_state: ProviderProjectionStreamState::Complete,
-                parent_id: None,
-                nested_thread_id: None,
-                raw_payload: None,
-                inspectable: false,
+        let text = render_archcar_protocol_messages(&[
+            ArchcarMessage {
+                id: -1,
+                role: "assistant".to_owned(),
+                content: "Here is the answer".to_owned(),
+                source: "provider_event".to_owned(),
+                inline_event: None,
+                context_usage: None,
             },
-            ProviderProjectionItem {
-                id: "reasoning-1".to_owned(),
-                sequence: 2,
-                category: archductor_core::provider_projection::ProviderProjectionCategory::Reasoning,
-                render_class: ProjectionRenderClass::ReasoningCard,
-                title: "Reasoning".to_owned(),
-                body: "Checking constraints".to_owned(),
-                status: ProviderProjectionStatus::Running,
-                stream_state: ProviderProjectionStreamState::Streaming,
-                parent_id: None,
-                nested_thread_id: None,
-                raw_payload: Some("{\"token\":\"secret\"}".to_owned()),
-                inspectable: true,
-            },
-            ProviderProjectionItem {
-                id: "status-1".to_owned(),
-                sequence: 3,
-                category: archductor_core::provider_projection::ProviderProjectionCategory::Status,
-                render_class: ProjectionRenderClass::StatusCard,
-                title: "turn started".to_owned(),
-                body: "raw lifecycle".to_owned(),
-                status: ProviderProjectionStatus::Running,
-                stream_state: ProviderProjectionStreamState::Streaming,
-                parent_id: None,
-                nested_thread_id: None,
-                raw_payload: Some("{\"method\":\"turn/started\"}".to_owned()),
-                inspectable: true,
+            ArchcarMessage {
+                id: -2,
+                role: "reasoning".to_owned(),
+                content: "Reasoning\nChecking constraints".to_owned(),
+                source: "provider_event".to_owned(),
+                inline_event: None,
+                context_usage: None,
             },
         ]);
 
         assert!(text.contains("Assistant\nHere is the answer\n\n"));
-        assert!(text.contains("Reasoning [running, streaming]\nChecking constraints\n\n"));
-        assert!(!text.contains("turn started"));
-        assert!(!text.contains("secret"));
-        assert!(!text.contains("method"));
+        assert!(text.contains("Reasoning\nChecking constraints\n\n"));
+    }
+
+    #[test]
+    fn archcar_message_render_preserves_chat_content_that_starts_with_label() {
+        let text = render_archcar_protocol_messages(&[
+            ArchcarMessage {
+                id: 1,
+                role: "user".to_owned(),
+                content: "You\nshould keep this heading".to_owned(),
+                source: "user_send".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            },
+            ArchcarMessage {
+                id: -1,
+                role: "reasoning".to_owned(),
+                content: "Reasoning\nbut projection titles can be stripped".to_owned(),
+                source: "provider_event".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            },
+        ]);
+
+        assert!(text.contains("You\nYou\nshould keep this heading\n\n"));
+        assert!(text.contains("Reasoning\nbut projection titles can be stripped\n\n"));
+    }
+
+    #[test]
+    fn message_text_or_stdin_rejects_blank_positional_message() {
+        let err = message_text_or_stdin(vec!["   ".to_owned(), "\t".to_owned()]).unwrap_err();
+
+        assert!(err.to_string().contains("message is required"));
     }
 
     #[test]

@@ -609,7 +609,8 @@ impl ProviderEventStore {
                 |row| row.get(0),
             )?;
             if let Some(subtype_max) = subtype_max {
-                let subtype_max = subtype_max as u64;
+                let subtype_max =
+                    u64::try_from(subtype_max).context("provider sequence must be non-negative")?;
                 max_sequence =
                     Some(max_sequence.map_or(subtype_max, |current: u64| current.max(subtype_max)));
             }
@@ -716,8 +717,8 @@ fn streaming_merge_incoming_payload(draft: &ProviderEventDraft) -> Value {
     let Some(delta) = draft
         .raw_json
         .pointer("/params/delta")
-        .or_else(|| draft.raw_json.pointer("/delta"))
         .and_then(Value::as_str)
+        .or_else(|| draft.raw_json.pointer("/delta").and_then(Value::as_str))
     else {
         return incoming;
     };
@@ -944,6 +945,13 @@ mod tests {
             [now],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO processes (
+                id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at
+             ) VALUES (9, 1, 7, 'session', 'codex', 999, '/tmp/session.log', 'running', ?1)",
+            [now],
+        )
+        .unwrap();
     }
 
     fn draft(kind: ProviderEventKind, phase: ProviderEventPhase) -> ProviderEventDraft {
@@ -1095,6 +1103,36 @@ mod tests {
     }
 
     #[test]
+    fn streaming_delta_falls_back_when_params_delta_is_not_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut first = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        first.normalized_payload = json!({"title": "Assistant", "text": "hello"});
+        first.raw_json = json!({
+            "method": "agent/message/delta",
+            "params": {"delta": {"unexpected": true}},
+            "delta": "hello"
+        });
+        let mut second = first.clone();
+        second.provider_event_id = Some("evt-2".to_owned());
+        second.provider_sequence = Some(2);
+        second.raw_json = json!({
+            "method": "agent/message/delta",
+            "params": {"delta": {"unexpected": true}},
+            "delta": " world"
+        });
+
+        store.upsert_event(&first).unwrap();
+        let latest = store.upsert_event(&second).unwrap();
+
+        assert_eq!(latest.normalized_payload["text"], "hello world");
+    }
+
+    #[test]
     fn streaming_deltas_append_prefix_overlapping_chunks() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderEventStore::new(temp.path().join("state.db"));
@@ -1140,6 +1178,30 @@ mod tests {
         let latest = store.upsert_event(&stale).unwrap();
 
         assert_eq!(latest.normalized_payload["text"], "hello world");
+    }
+
+    #[test]
+    fn negative_stored_provider_sequence_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut bad = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        bad.process_id = Some(9);
+        bad.provider_sequence = Some(-1);
+        store.upsert_event(&bad).unwrap();
+
+        let err = store
+            .max_provider_sequence_for_process_subtypes(
+                9,
+                ProviderEventKind::AssistantOutput,
+                &["agent_message_delta"],
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("provider sequence"));
     }
 
     #[test]

@@ -116,6 +116,11 @@ pub fn ensure_thread_for_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::{AddRepository, RepositoryStore};
+    use crate::workspace::CreateWorkspace;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
 
     #[test]
     fn codex_harness_reports_runtime_capabilities_without_screen_hooks() {
@@ -128,13 +133,76 @@ mod tests {
     fn claude_harness_reports_runtime_capabilities() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("test.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
         let store = WorkspaceStore::open(&db).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
         let controller = ClaudeHarnessController;
 
         assert_eq!(controller.kind(), SessionKind::Claude);
         assert!(controller.supports_auto_spawn());
-        assert!(controller
+        let launch = controller
             .build_launch(&store, "berlin", SessionHarnessOptions::default())
-            .is_err());
+            .unwrap();
+        assert_eq!(launch.kind, SessionKind::Claude);
+        assert_eq!(launch.program, PathBuf::from("claude"));
+        assert!(launch.session_resume_id.is_some());
+        assert_eq!(
+            launch.args,
+            vec![
+                "--session-id".to_owned(),
+                launch.session_resume_id.as_deref().unwrap().to_owned(),
+            ]
+        );
+        assert!(launch.cwd.ends_with("berlin"));
+    }
+
+    fn init_repo(path: PathBuf) -> PathBuf {
+        fs::create_dir(&path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        fs::write(path.join("README.md"), "demo\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .status()
+            .unwrap();
+        path
     }
 }

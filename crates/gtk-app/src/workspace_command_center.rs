@@ -216,24 +216,37 @@ fn workspace_creation_status_shell(
                 progress_after_delete.set_text("Check confirm before delete.");
                 return;
             }
-            progress_after_delete.set_text("Deleting...");
-            let result = WorkspaceStore::open(db_delete.clone())
-                .and_then(|store| store.delete(&workspace_delete, true, false));
-            match result {
-                Ok(deleted) => {
-                    progress_after_delete.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
-                    apply_workspace_delete_navigation_result(
-                        &state_after_delete,
-                        &Ok(deleted.clone()),
-                    );
-                }
-                Err(err) => apply_runtime_action_feedback(
-                    &progress_after_delete,
-                    &toast_after_delete,
-                    lifecycle_action_failure_feedback("Delete", &err),
-                ),
-            }
-            refresh_after_delete.refresh(RefreshScope::All);
+            progress_after_delete.set_text("Deleting in background...");
+            let db_delete_job = db_delete.clone();
+            let workspace_delete_job = workspace_delete.clone();
+            let refresh_done = refresh_after_delete.clone();
+            let progress_done = progress_after_delete.clone();
+            let toast_done = toast_after_delete.clone();
+            let state_done = state_after_delete.clone();
+            spawn_background_job(
+                move || {
+                    WorkspaceStore::open(db_delete_job)
+                        .and_then(|store| store.delete(&workspace_delete_job, true, false))
+                        .map_err(|err| format!("{err:#}"))
+                },
+                move |result| {
+                    match result {
+                        Ok(deleted) => {
+                            progress_done.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                            apply_workspace_delete_navigation_result(&state_done, &Ok(deleted));
+                        }
+                        Err(err) => {
+                            let err = anyhow::anyhow!(err);
+                            apply_runtime_action_feedback(
+                                &progress_done,
+                                &toast_done,
+                                lifecycle_action_failure_feedback("Delete", &err),
+                            );
+                        }
+                    }
+                    refresh_done.refresh(RefreshScope::All);
+                },
+            );
         });
 
         let actions = GBox::new(Orientation::Horizontal, 8);

@@ -52,7 +52,19 @@ pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHist
         }
 
         if line == "[codex raw]" {
-            let (_, next) = collect_codex_raw_block(&lines, index + 1);
+            let (_, next) = collect_bracketed_block(&lines, index + 1, "[/codex raw]");
+            index = next;
+            continue;
+        }
+
+        if line == "[codex-app-server jsonl]" {
+            let (_, next) = collect_bracketed_block(&lines, index + 1, "[/codex-app-server jsonl]");
+            index = next;
+            continue;
+        }
+
+        if line == "[claude-stream-json]" {
+            let (_, next) = collect_bracketed_block(&lines, index + 1, "[/claude-stream-json]");
             index = next;
             continue;
         }
@@ -204,11 +216,11 @@ fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, us
     (content.join("\n"), index)
 }
 
-fn collect_codex_raw_block(lines: &[&str], mut index: usize) -> (String, usize) {
+fn collect_bracketed_block(lines: &[&str], mut index: usize, end_marker: &str) -> (String, usize) {
     let mut content = Vec::new();
     while index < lines.len() {
         let line = lines[index].trim_end();
-        if line == "[/codex raw]" {
+        if line == end_marker {
             return (content.join("\n"), index + 1);
         }
         content.push(lines[index]);
@@ -223,6 +235,10 @@ fn is_local_chat_marker(line: &str) -> bool {
         || line == "[staged review prompt]"
         || line == "[codex raw]"
         || line == "[/codex raw]"
+        || line == "[codex-app-server jsonl]"
+        || line == "[/codex-app-server jsonl]"
+        || line == "[claude-stream-json]"
+        || line == "[/claude-stream-json]"
         || is_local_system_marker(line)
 }
 
@@ -238,4 +254,26 @@ fn is_local_system_marker(line: &str) -> bool {
         || line.starts_with("[tool ")
         || line.starts_with("[skill ")
         || line.starts_with("[archductor bootstrap")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_skips_provider_native_raw_output_blocks() {
+        let messages = parse_local_chat_transcript(
+            "[codex-app-server jsonl]\n{\"id\":1,\"secret\":\"raw\"}\n[/codex-app-server jsonl]\n\
+[claude-stream-json]\n{\"type\":\"result\"}\n[/claude-stream-json]\n\
+agent reply\n",
+        );
+
+        assert_eq!(
+            messages,
+            vec![LocalChatHistoryMessage {
+                role: "agent".to_owned(),
+                content: "agent reply".to_owned(),
+            }]
+        );
+    }
 }

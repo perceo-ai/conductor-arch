@@ -13,6 +13,13 @@ use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_
 use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
+use archductor_core::provider_projection::{
+    provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
+    ProjectionRenderClass, ProviderProjectionItem, ProviderProjectionStatus,
+    ProviderProjectionStreamState,
+};
+#[cfg(test)]
+use archductor_core::provider_projection::ProviderProjectionCategory;
 #[cfg(test)]
 use archductor_core::session_state::AgentSessionState;
 use archductor_core::settings::load_repository_settings;
@@ -50,11 +57,6 @@ use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
-use crate::session_projection::{
-    render_provider_event_projection, ProjectionRenderClass, ProviderProjectionCategory,
-    ProviderProjectionEvent, ProviderProjectionItem, ProviderProjectionStatus,
-    ProviderProjectionStreamState,
-};
 use crate::state::{AppPage, AppState, AppStateSnapshot};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
@@ -463,7 +465,15 @@ pub fn agent_session_panel(
                     ModelSelectionRoute::SameProvider => {
                         *selected_model.borrow_mut() = choice.model.clone();
                         if let Some(thread_id) = *selected_thread.borrow() {
-                            let metadata = provider_model_harness_metadata(choice.model.as_deref());
+                            let existing_metadata = thread_state
+                                .borrow()
+                                .iter()
+                                .find(|thread| thread.id == thread_id)
+                                .and_then(|thread| thread.harness_metadata.clone());
+                            let metadata = provider_model_harness_metadata(
+                                existing_metadata.as_deref(),
+                                choice.model.as_deref(),
+                            );
                             match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                                 store.update_chat_thread_harness_metadata(
                                     thread_id,
@@ -532,12 +542,28 @@ pub fn agent_session_panel(
                     }
                     ModelSelectionRoute::CrossProvider(kind) => {
                         let source_provider = session_kind_provider(current_kind);
-                        let source_messages = selected_thread.borrow().and_then(|thread_id| {
-                            WorkspaceStore::open(database_path.clone())
-                                .and_then(|store| store.list_chat_messages(thread_id))
-                                .ok()
-                        });
-                        let metadata = provider_model_harness_metadata(choice.model.as_deref());
+                        let source_messages = match *selected_thread.borrow() {
+                            Some(thread_id) => {
+                                match model_switch_context_items(&database_path, thread_id) {
+                                    Ok(messages) => Some(messages),
+                                    Err(err) => {
+                                        toast_manager.error(format!(
+                                            "Read source chat history failed: {err:#}"
+                                        ));
+                                        warn!(
+                                            workspace = %workspace_name,
+                                            thread_id,
+                                            error = %err,
+                                            "failed to read source chat for provider switch"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
+                        let metadata =
+                            provider_model_harness_metadata(None, choice.model.as_deref());
                         let title = default_chat_thread_title(kind, &thread_state.borrow());
                         match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                             let thread = store.create_chat_thread(
@@ -555,16 +581,24 @@ pub fn agent_session_panel(
                                     )
                                 })
                             {
-                                store.append_chat_message(
+                                if let Err(err) = store.append_chat_message(
                                     thread.id,
                                     "system",
                                     &attachment,
                                     "model_switch_context",
-                                )?;
+                                ) {
+                                    let _ = store.close_chat_thread(thread.id);
+                                    return Err(err);
+                                }
                             }
                             Ok(thread)
                         }) {
                             Ok(thread) => {
+                                persist_selected_provider(
+                                    &database_path,
+                                    &workspace_name,
+                                    &choice.provider,
+                                );
                                 *selected_harness.borrow_mut() = kind;
                                 if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
                                     *reasoning_mode.borrow_mut() = Some("high".to_owned());
@@ -800,15 +834,26 @@ pub fn agent_session_panel(
             {
                 Ok(()) => {}
                 Err(err) if workspace_lookup_returned_no_rows(&err) => {
-                    clear_deleted_workspace_surface(
-                        &app_state,
-                        &workspace,
-                        &thread_row,
-                        &messages,
-                        &context_usage,
-                    );
-                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                    return;
+                    let can_recover_from_selected_thread =
+                        selected_thread.borrow().is_some_and(|thread_id| {
+                            WorkspaceStore::open(database_path.clone())
+                                .and_then(|store| {
+                                    let thread = store.get_chat_thread_record(thread_id)?;
+                                    store.get_workspace_record(thread.workspace_id).map(|_| ())
+                                })
+                                .is_ok()
+                        });
+                    if !can_recover_from_selected_thread {
+                        clear_deleted_workspace_surface(
+                            &app_state,
+                            &workspace,
+                            &thread_row,
+                            &messages,
+                            &context_usage,
+                        );
+                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                        return;
+                    }
                 }
                 Err(_) => {}
             }
@@ -1477,6 +1522,7 @@ pub fn agent_session_panel(
                         session_kind_provider(selected_kind),
                         &title,
                         provider_model_harness_metadata(
+                            None,
                             selected_model_for_send.borrow().as_deref(),
                         )
                         .as_deref(),
@@ -1531,12 +1577,25 @@ pub fn agent_session_panel(
                 return false;
             }
         };
-        let thread_messages_for_send = WorkspaceStore::open(db_for_send.clone())
+        let thread_messages_for_send = match WorkspaceStore::open(db_for_send.clone())
             .and_then(|store| store.list_chat_messages(thread_id))
-            .unwrap_or_default();
+        {
+            Ok(messages) => messages,
+            Err(err) => {
+                let message = format!("[chat history] {err:#}");
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
+                error.add_css_class("chat-agent-text");
+                error.set_selectable(true);
+                error.set_wrap(true);
+                error.set_xalign(0.0);
+                append_revealed(&messages_for_send, &error);
+                return false;
+            }
+        };
         let should_request_agent_metadata = !staged_review
             && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
-            && thread_messages_for_send.is_empty()
+            && !has_real_conversation_messages(&thread_messages_for_send)
             && is_default_chat_thread_title(&thread.title);
         let mut send_input = if should_request_agent_metadata {
             archductor_metadata_injected_prompt(&command, &workspace_for_send)
@@ -1545,7 +1604,8 @@ pub fn agent_session_panel(
         };
         if let Some(attachment) = pending_model_switch_context_attachment(&thread_messages_for_send)
         {
-            send_input = format!("{send_input}\n\n[Attachment: prior chat context]\n{attachment}");
+            send_input =
+                format!("[Attachment: prior chat context]\n{attachment}\n\n[New user message]\n{send_input}");
         }
         let visible_input = (send_input != command).then_some(command.clone());
         debug!(
@@ -2199,7 +2259,8 @@ pub fn agent_session_panel(
                 return;
             }
             let title = default_chat_thread_title(kind, &thread_state.borrow());
-            let metadata = provider_model_harness_metadata(selected_model.borrow().as_deref());
+            let metadata =
+                provider_model_harness_metadata(None, selected_model.borrow().as_deref());
             match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                 store.create_chat_thread(
                     &workspace_name,
@@ -2779,141 +2840,6 @@ fn chat_event_widget(event: &ChatEventRecord) -> Widget {
         })
 }
 
-fn provider_projection_from_records(
-    records: &[ProviderEventRecord],
-) -> crate::session_projection::ProviderProjection {
-    render_provider_event_projection(
-        records
-            .iter()
-            .map(provider_projection_event_from_record)
-            .collect(),
-    )
-}
-
-fn provider_projection_event_from_record(record: &ProviderEventRecord) -> ProviderProjectionEvent {
-    ProviderProjectionEvent {
-        canonical_id: provider_projection_canonical_id(record),
-        sequence: record.received_sequence.max(0) as u64,
-        category: provider_projection_category(record.kind, record.provider_subtype.as_deref()),
-        title: record
-            .normalized_payload
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        body: record
-            .normalized_payload
-            .get("body")
-            .or_else(|| record.normalized_payload.get("text"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        status: provider_projection_status(record.phase),
-        stream_state: provider_projection_stream_state(record.phase),
-        parent_id: record.parent_provider_item_id.clone(),
-        nested_thread_id: record.parent_provider_thread_id.clone(),
-        raw_payload: Some(record.raw_json.clone()),
-    }
-}
-
-fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
-    let thread_id = record
-        .provider_thread_id
-        .as_deref()
-        .or(record.parent_provider_thread_id.as_deref())
-        .unwrap_or("-");
-    if let Some(item_id) = record.provider_item_id.as_deref() {
-        return format!("{}:{thread_id}:{item_id}", record.provider);
-    }
-    if let Some(event_id) = record.provider_event_id.as_deref() {
-        return format!("{}:{thread_id}:event:{event_id}", record.provider);
-    }
-    record.identity_key.clone()
-}
-
-fn provider_projection_category(
-    kind: ProviderEventKind,
-    provider_subtype: Option<&str>,
-) -> ProviderProjectionCategory {
-    let subtype = provider_subtype
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    match kind {
-        ProviderEventKind::UserInput => ProviderProjectionCategory::UserMessage,
-        ProviderEventKind::AssistantOutput => ProviderProjectionCategory::AssistantMessage,
-        ProviderEventKind::PlanningReasoning => ProviderProjectionCategory::Reasoning,
-        ProviderEventKind::CommandProcess => ProviderProjectionCategory::Command,
-        ProviderEventKind::TerminalRuntime => ProviderProjectionCategory::BackgroundTerminal,
-        ProviderEventKind::FileSystem if subtype_contains_any(&subtype, &["write", "create"]) => {
-            ProviderProjectionCategory::FileWrite
-        }
-        ProviderEventKind::FileSystem if subtype_contains_any(&subtype, &["patch", "edit"]) => {
-            ProviderProjectionCategory::FilePatch
-        }
-        ProviderEventKind::FileSystem => ProviderProjectionCategory::FileRead,
-        ProviderEventKind::DiffFileChange => ProviderProjectionCategory::FileDiff,
-        ProviderEventKind::Tool => ProviderProjectionCategory::NativeTool,
-        ProviderEventKind::Mcp => ProviderProjectionCategory::McpTool,
-        ProviderEventKind::SkillPluginHook if subtype.contains("plugin") => {
-            ProviderProjectionCategory::Plugin
-        }
-        ProviderEventKind::SkillPluginHook if subtype.contains("hook") => {
-            ProviderProjectionCategory::Hook
-        }
-        ProviderEventKind::SkillPluginHook => ProviderProjectionCategory::Skill,
-        ProviderEventKind::ApprovalPermission => ProviderProjectionCategory::Approval,
-        ProviderEventKind::SubagentCollaboration => ProviderProjectionCategory::Subagent,
-        ProviderEventKind::WebBrowserMedia
-            if subtype_contains_any(&subtype, &["image", "media"]) =>
-        {
-            ProviderProjectionCategory::Image
-        }
-        ProviderEventKind::WebBrowserMedia => ProviderProjectionCategory::Web,
-        ProviderEventKind::LimitFailure if subtype_contains_any(&subtype, &["rate", "limit"]) => {
-            ProviderProjectionCategory::RateLimit
-        }
-        ProviderEventKind::LimitFailure => ProviderProjectionCategory::Error,
-        ProviderEventKind::ThreadSession
-        | ProviderEventKind::GoalTask
-        | ProviderEventKind::Turn
-        | ProviderEventKind::AccountAuth
-        | ProviderEventKind::EnvironmentConfigModel => ProviderProjectionCategory::Status,
-        ProviderEventKind::Unknown => ProviderProjectionCategory::Unknown,
-    }
-}
-
-fn subtype_contains_any(subtype: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| subtype.contains(needle))
-}
-
-fn provider_projection_status(phase: ProviderEventPhase) -> ProviderProjectionStatus {
-    match phase {
-        ProviderEventPhase::Started | ProviderEventPhase::Progress | ProviderEventPhase::Delta => {
-            ProviderProjectionStatus::Running
-        }
-        ProviderEventPhase::Completed => ProviderProjectionStatus::Complete,
-        ProviderEventPhase::Failed => ProviderProjectionStatus::Failed,
-        ProviderEventPhase::Declined | ProviderEventPhase::Interrupted => {
-            ProviderProjectionStatus::Canceled
-        }
-        ProviderEventPhase::Unknown => ProviderProjectionStatus::Pending,
-    }
-}
-
-fn provider_projection_stream_state(phase: ProviderEventPhase) -> ProviderProjectionStreamState {
-    match phase {
-        ProviderEventPhase::Started | ProviderEventPhase::Progress | ProviderEventPhase::Delta => {
-            ProviderProjectionStreamState::Streaming
-        }
-        ProviderEventPhase::Completed
-        | ProviderEventPhase::Failed
-        | ProviderEventPhase::Declined
-        | ProviderEventPhase::Interrupted => ProviderProjectionStreamState::Complete,
-        ProviderEventPhase::Unknown => ProviderProjectionStreamState::Snapshot,
-    }
-}
-
 fn provider_projection_items_for_render(
     items: Vec<ProviderProjectionItem>,
     messages: &[ChatMessageRecord],
@@ -2923,13 +2849,6 @@ fn provider_projection_items_for_render(
         .filter(provider_projection_item_is_relevant_chat_event)
         .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
         .collect()
-}
-
-fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjectionItem) -> bool {
-    !matches!(
-        item.render_class,
-        ProjectionRenderClass::FallbackCard | ProjectionRenderClass::StatusCard
-    )
 }
 
 fn provider_projection_item_has_persisted_message(
@@ -4248,12 +4167,13 @@ fn model_selection_route(
     }
 }
 
-fn provider_model_harness_metadata(model: Option<&str>) -> Option<String> {
-    SessionHarnessOptions {
-        model: model.map(str::to_owned),
-        ..SessionHarnessOptions::default()
-    }
-    .metadata()
+fn provider_model_harness_metadata(
+    existing_metadata: Option<&str>,
+    model: Option<&str>,
+) -> Option<String> {
+    let mut options = SessionHarnessOptions::from_metadata(existing_metadata);
+    options.model = model.map(str::to_owned);
+    options.metadata()
 }
 
 fn chat_thread_model(thread: &ChatThreadRecord) -> Option<String> {
@@ -4270,22 +4190,79 @@ fn replace_thread_state_record(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelSwitchContextMessage {
+    role: String,
+    content: String,
+}
+
+const MODEL_SWITCH_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+
+fn model_switch_context_items(
+    database_path: &Path,
+    thread_id: i64,
+) -> anyhow::Result<Vec<ModelSwitchContextMessage>> {
+    let store = WorkspaceStore::open(database_path)?;
+    let messages = store.list_chat_messages(thread_id)?;
+    let mut context = messages
+        .iter()
+        .filter_map(|message| model_switch_context_message(&message.role, &message.content))
+        .collect::<Vec<_>>();
+    let provider_records =
+        ProviderEventStore::new(database_path).list_for_chat_thread(thread_id)?;
+    let projection = provider_projection_from_records(&provider_records);
+    for item in provider_projection_items_for_render(projection.items, &messages) {
+        let role = match item.render_class {
+            ProjectionRenderClass::UserChat => "user",
+            ProjectionRenderClass::AssistantChat => "agent",
+            _ => continue,
+        };
+        if let Some(message) = model_switch_context_message(role, &item.body) {
+            context.push(message);
+        }
+    }
+    Ok(context)
+}
+
+fn model_switch_context_message(role: &str, content: &str) -> Option<ModelSwitchContextMessage> {
+    let role = match role {
+        "user" => "user",
+        "agent" | "assistant" => "agent",
+        _ => return None,
+    };
+    let content = content.trim();
+    (!content.is_empty()).then(|| ModelSwitchContextMessage {
+        role: role.to_owned(),
+        content: content.to_owned(),
+    })
+}
+
 fn model_switch_context_attachment(
     source_provider: &str,
     target_provider: &str,
-    messages: &[ChatMessageRecord],
+    messages: &[ModelSwitchContextMessage],
 ) -> Option<String> {
-    let history = messages
+    let mut history = messages
         .iter()
-        .filter_map(|message| match message.role.as_str() {
-            "user" | "agent" => Some((message.role.as_str(), message.content.trim())),
-            _ => None,
-        })
-        .filter(|(_, body)| !body.is_empty())
+        .map(|message| (message.role.as_str(), message.content.trim()))
+        .filter(|(_, content)| !content.is_empty())
         .collect::<Vec<_>>();
     if history.is_empty() {
         return None;
     }
+    let mut budget = MODEL_SWITCH_CONTEXT_MAX_BYTES;
+    let mut truncated = false;
+    let mut retained = Vec::new();
+    while let Some((role, body)) = history.pop() {
+        let cost = role.len() + body.len() + 16;
+        if cost > budget {
+            truncated = true;
+            break;
+        }
+        budget -= cost;
+        retained.push((role, body));
+    }
+    retained.reverse();
 
     let mut attachment = format!(
         "Attached prior chat context from {} to {}.\n\
@@ -4294,7 +4271,10 @@ Do not answer this attachment. Use it only for continuity and wait for the next 
         provider_display_name(source_provider),
         provider_display_name(target_provider)
     );
-    for (role, body) in history {
+    if truncated || !history.is_empty() {
+        attachment.push_str("[Older transcript omitted]\n\n");
+    }
+    for (role, body) in retained {
         attachment.push_str(match role {
             "user" => "## User\n",
             "agent" => "## Agent\n",
@@ -4314,8 +4294,14 @@ fn pending_model_switch_context_attachment(messages: &[ChatMessageRecord]) -> Op
         .find(|(_, message)| message.source == "model_switch_context")?;
     let has_later_real_message = messages[attachment_index + 1..]
         .iter()
-        .any(|message| matches!(message.role.as_str(), "user" | "agent"));
+        .any(|message| matches!(message.role.as_str(), "user" | "agent" | "assistant"));
     (!has_later_real_message).then_some(attachment.content.as_str())
+}
+
+fn has_real_conversation_messages(messages: &[ChatMessageRecord]) -> bool {
+    messages
+        .iter()
+        .any(|message| matches!(message.role.as_str(), "user" | "agent" | "assistant"))
 }
 
 fn provider_model_choices(
@@ -7370,9 +7356,14 @@ mod tests {
     #[test]
     fn model_switch_attachment_keeps_only_user_and_agent_messages() {
         let messages = vec![
-            chat_message_record(1, "user", "Fix auth", "user_send"),
-            chat_message_record(2, "system", "/model gpt-5.6-sol", "control_command"),
-            chat_message_record(3, "agent", "I found the callback bug.", "agent_reply"),
+            ModelSwitchContextMessage {
+                role: "user".to_owned(),
+                content: "Fix auth".to_owned(),
+            },
+            ModelSwitchContextMessage {
+                role: "agent".to_owned(),
+                content: "I found the callback bug.".to_owned(),
+            },
         ];
 
         let attachment = model_switch_context_attachment("codex", "claude", &messages).unwrap();
@@ -7385,6 +7376,26 @@ mod tests {
         assert!(attachment.contains("I found the callback bug."));
         assert!(!attachment.contains("/model gpt-5.6-sol"));
         assert!(!attachment.contains("control_command"));
+    }
+
+    #[test]
+    fn model_switch_attachment_is_bounded_to_recent_messages() {
+        let messages = vec![
+            ModelSwitchContextMessage {
+                role: "user".to_owned(),
+                content: "old".repeat(MODEL_SWITCH_CONTEXT_MAX_BYTES),
+            },
+            ModelSwitchContextMessage {
+                role: "agent".to_owned(),
+                content: "recent answer".to_owned(),
+            },
+        ];
+
+        let attachment = model_switch_context_attachment("codex", "claude", &messages).unwrap();
+
+        assert!(attachment.contains("[Older transcript omitted]"));
+        assert!(attachment.contains("recent answer"));
+        assert!(!attachment.contains(&"old".repeat(512)));
     }
 
     #[test]
@@ -7402,7 +7413,7 @@ mod tests {
 
         let consumed = vec![
             chat_message_record(1, "system", "Attached context", "model_switch_context"),
-            chat_message_record(2, "user", "Continue", "user_send"),
+            chat_message_record(2, "assistant", "Continue", "provider_event"),
         ];
         assert_eq!(pending_model_switch_context_attachment(&consumed), None);
     }

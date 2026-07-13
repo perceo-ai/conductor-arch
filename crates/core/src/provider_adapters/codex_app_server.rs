@@ -657,7 +657,9 @@ impl CodexProviderEventDraft {
             )
         });
         let provider_item_id = if is_mcp_startup_status_event(&self.name) {
-            Some("mcp-startup-status".to_owned())
+            let server = string_at_any(&self.payload, &["/params/name", "/params/serverName"])
+                .unwrap_or_else(|| "unknown".to_owned());
+            Some(format!("mcp-startup-status:{server}"))
         } else {
             string_at_any(
                 &self.payload,
@@ -811,6 +813,7 @@ fn codex_event_title(name: &str, kind: ProviderEventKind, payload: &Value) -> St
 
 fn codex_payload_body(payload: &Value) -> String {
     match string_at_any(payload, &["/params/item/type"]).as_deref() {
+        Some("reasoning") => return reasoning_body_from_payload(payload).unwrap_or_default(),
         Some("commandExecution") => return command_body_from_payload(payload).unwrap_or_default(),
         Some("fileChange") => return file_change_body_from_payload(payload).unwrap_or_default(),
         Some("mcpToolCall") | Some("dynamicToolCall") | Some("webSearch") | Some("imageView") => {
@@ -840,6 +843,16 @@ fn codex_payload_body(payload: &Value) -> String {
     .unwrap_or_default()
 }
 
+fn reasoning_body_from_payload(payload: &Value) -> Option<String> {
+    let parts = ["/params/item/summary", "/params/item/content"]
+        .iter()
+        .filter_map(|pointer| payload.pointer(pointer))
+        .filter_map(display_value)
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 fn command_body_from_payload(payload: &Value) -> Option<String> {
     let command = command_from_payload(payload)?;
     let output = string_at_any(payload, &["/params/item/aggregatedOutput"]);
@@ -850,17 +863,17 @@ fn command_body_from_payload(payload: &Value) -> Option<String> {
 }
 
 fn command_from_payload(payload: &Value) -> Option<String> {
-    payload
-        .pointer("/params/item/command")
-        .and_then(Value::as_array)
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|command| !command.trim().is_empty())
+    let value = payload.pointer("/params/item/command")?;
+    let command = match value {
+        Value::String(command) => command.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    };
+    (!command.trim().is_empty()).then_some(command)
 }
 
 fn file_change_body_from_payload(payload: &Value) -> Option<String> {
@@ -880,16 +893,17 @@ fn file_change_body_from_payload(payload: &Value) -> Option<String> {
 }
 
 fn tool_body_from_payload(payload: &Value) -> Option<String> {
-    string_at_any(
+    value_at_any(
         payload,
         &[
-            "/params/item/arguments",
-            "/params/item/result",
             "/params/item/error",
+            "/params/item/result",
+            "/params/item/arguments",
             "/params/item/query",
             "/params/item/path",
         ],
     )
+    .and_then(display_value)
 }
 
 fn tool_title_from_payload(payload: &Value) -> Option<String> {
@@ -936,6 +950,8 @@ fn codex_mcp_startup_status_phase(payload: &Value) -> ProviderEventPhase {
         || status_contains_any(&status, &["fail", "error", "unavailable"])
     {
         ProviderEventPhase::Failed
+    } else if status_contains_any(&status, &["cancel", "cancelled", "canceled"]) {
+        ProviderEventPhase::Interrupted
     } else if status_contains_any(
         &status,
         &[
@@ -1219,10 +1235,39 @@ fn string_at_any(value: &Value, pointers: &[&str]) -> Option<String> {
             value
                 .as_str()
                 .map(ToOwned::to_owned)
+                .or_else(|| {
+                    value.as_array().and_then(|values| {
+                        let parts = values.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                        (!parts.is_empty()).then(|| parts.join("\n"))
+                    })
+                })
                 .or_else(|| value.as_i64().map(|number| number.to_string()))
                 .or_else(|| value.as_u64().map(|number| number.to_string()))
         })
     })
+}
+
+fn value_at_any<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a Value> {
+    pointers.iter().find_map(|pointer| value.pointer(pointer))
+}
+
+fn display_value(value: &Value) -> Option<String> {
+    let display = match value {
+        Value::Null => return None,
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Array(values) => {
+            let strings = values.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            if strings.len() == values.len() {
+                strings.join("\n")
+            } else {
+                serde_json::to_string_pretty(value).ok()?
+            }
+        }
+        Value::Object(_) => serde_json::to_string_pretty(value).ok()?,
+    };
+    (!display.trim().is_empty()).then_some(display)
 }
 
 fn number_at_any(value: &Value, pointers: &[&str]) -> Option<u64> {
@@ -1254,13 +1299,6 @@ fn split_camel_segments(value: &str) -> String {
 }
 
 fn native_path_string(path: &Path) -> String {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
     path.to_string_lossy().into_owned()
 }
 
@@ -1511,11 +1549,11 @@ mod tests {
             loading.phase,
             crate::provider_events::ProviderEventPhase::Progress
         );
+        assert_eq!(loading.provider_thread_id.as_deref(), Some("thr_1"));
         assert_eq!(
             loading.provider_item_id.as_deref(),
-            Some("mcp-startup-status")
+            Some("mcp-startup-status:github")
         );
-        assert_eq!(loading.provider_thread_id.as_deref(), Some("thr_1"));
         assert_eq!(
             loading.provider_subtype.as_deref(),
             Some("mcpServer/startupStatus/updated")
@@ -1544,7 +1582,7 @@ mod tests {
         );
         assert_eq!(
             loaded.provider_item_id.as_deref(),
-            Some("mcp-startup-status")
+            Some("mcp-startup-status:github")
         );
         assert_eq!(loaded.normalized_payload["title"], "MCP loaded");
         assert_eq!(loaded.normalized_payload["body"], "github: ready");
@@ -1552,6 +1590,86 @@ mod tests {
             loaded.normalized_payload["title"],
             "mcpServer/startupStatus/updated"
         );
+    }
+
+    #[test]
+    fn mcp_startup_status_keeps_each_server_identity_and_canceled_is_terminal() {
+        let github = parse_jsonl_message(
+            r#"{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","name":"github","status":"failed","error":"bad token"}}"#,
+            1,
+        )
+        .unwrap()
+        .to_provider_event_draft()
+        .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            occurred_at_ms: 42,
+            schema_version: 1,
+            adapter_version: "codex-app-server-test".to_owned(),
+        });
+        let linear = parse_jsonl_message(
+            r#"{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","name":"linear","status":"cancelled","error":null}}"#,
+            1,
+        )
+        .unwrap()
+        .to_provider_event_draft()
+        .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            occurred_at_ms: 43,
+            schema_version: 1,
+            adapter_version: "codex-app-server-test".to_owned(),
+        });
+
+        assert_eq!(
+            github.provider_item_id.as_deref(),
+            Some("mcp-startup-status:github")
+        );
+        assert_eq!(
+            linear.provider_item_id.as_deref(),
+            Some("mcp-startup-status:linear")
+        );
+        assert_eq!(
+            linear.phase,
+            crate::provider_events::ProviderEventPhase::Interrupted
+        );
+        assert_eq!(linear.normalized_payload["body"], "linear: cancelled");
+    }
+
+    #[test]
+    fn codex_completed_items_accept_documented_wire_shapes() {
+        let cases = [
+            (
+                r#"{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"reasoning","id":"reason_1","summary":["Checked","constraints"],"content":["line 1","line 2"]}}}"#,
+                "Checked\nconstraints\nline 1\nline 2",
+            ),
+            (
+                r#"{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"cmd_1","command":"cargo test","aggregatedOutput":"ok"}}}"#,
+                "cargo test\nok",
+            ),
+            (
+                r#"{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"tool_1","result":{"ok":true},"arguments":{"secret":"ignored"}}}}"#,
+                "{\n  \"ok\": true\n}",
+            ),
+        ];
+
+        for (raw, body) in cases {
+            let event = parse_jsonl_message(raw, 1)
+                .unwrap()
+                .to_provider_event_draft()
+                .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: Some(1),
+                    chat_thread_id: Some(7),
+                    process_id: Some(9),
+                    occurred_at_ms: 42,
+                    schema_version: 1,
+                    adapter_version: "codex-app-server-test".to_owned(),
+                });
+
+            assert_eq!(event.normalized_payload["body"], body);
+        }
     }
 
     #[test]

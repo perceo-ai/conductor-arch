@@ -984,6 +984,24 @@ fn session_ready_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
     }
 }
 
+fn session_ready_for_visible_screen_after_busy(
+    kind: SessionKind,
+    screen: &str,
+    saw_busy_since_input: bool,
+) -> bool {
+    match kind {
+        SessionKind::Codex => saw_busy_since_input && codex_screen_ready_for_input(screen),
+        _ => session_ready_for_visible_screen(kind, screen),
+    }
+}
+
+fn session_busy_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
+    match kind {
+        SessionKind::Codex => screen.contains("Working ("),
+        _ => false,
+    }
+}
+
 fn write_pty_screen_snapshot(
     logs_dir: &std::path::Path,
     source: &str,
@@ -1056,6 +1074,7 @@ fn run_session_loop(
     let mut last_screen = String::new();
     let mut last_persisted_screen_fingerprint = None;
     let mut native_thread_id_resolved = false;
+    let mut codex_busy_since_input = false;
     let runtime_store = RuntimeSessionStore::new(db_path.clone());
     let mut user_input_sequence =
         match runtime_store.max_runtime_input_provider_sequence(started.session_id) {
@@ -1162,6 +1181,7 @@ fn run_session_loop(
                                         state.ready = false;
                                         state.runtime_state = AgentSessionState::Running;
                                     }
+                                    codex_busy_since_input = false;
                                 }
                                 SessionKind::Shell => {
                                     if let Ok(mut state) = snapshot.lock() {
@@ -1265,9 +1285,19 @@ fn run_session_loop(
                 let _ = event_tx.send(ArchcarEvent::SessionScreenUpdated {
                     session_id: state.session_id,
                 });
-                if !state.ready && session_ready_for_visible_screen(state.kind, &state.screen) {
+                if !state.ready && session_busy_for_visible_screen(state.kind, &state.screen) {
+                    codex_busy_since_input = true;
+                }
+                if !state.ready
+                    && session_ready_for_visible_screen_after_busy(
+                        state.kind,
+                        &state.screen,
+                        codex_busy_since_input,
+                    )
+                {
                     state.ready = true;
                     state.runtime_state = AgentSessionState::WaitingForInput;
+                    codex_busy_since_input = false;
                     Some((state.session_id, state.thread_id))
                 } else {
                     None
@@ -2491,6 +2521,36 @@ mod tests {
         assert!(!session_ready_for_visible_screen(
             SessionKind::Shell,
             ready_screen
+        ));
+    }
+
+    #[test]
+    fn codex_screen_readiness_requires_busy_transition_after_input() {
+        let ready_screen = "\
+› Follow up
+
+  gpt-5.6-sol medium · ~/archductor/workspaces/demo";
+        let working_screen = "\
+› Follow up
+
+• Working (12s • esc to interrupt)
+
+  gpt-5.6-sol medium · ~/archductor/workspaces/demo";
+
+        assert!(!session_ready_for_visible_screen_after_busy(
+            SessionKind::Codex,
+            ready_screen,
+            false
+        ));
+        assert!(!session_ready_for_visible_screen_after_busy(
+            SessionKind::Codex,
+            working_screen,
+            true
+        ));
+        assert!(session_ready_for_visible_screen_after_busy(
+            SessionKind::Codex,
+            ready_screen,
+            true
         ));
     }
 

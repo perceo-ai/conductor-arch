@@ -1,3 +1,7 @@
+use archductor_core::provider_events::{ProviderEventRecord, ProviderEventStore};
+use archductor_core::provider_projection::{
+    provider_projection_from_records, provider_projection_item_text,
+};
 use archductor_core::redaction::redact_sensitive_text;
 use archductor_core::session_event::{SessionEvent, SessionEventPayload};
 use archductor_core::workspace::{ProcessRecord, ProcessStatus, PtyChunkRecord, WorkspaceStore};
@@ -24,6 +28,7 @@ struct InspectorSessionInput {
     raw_output: String,
     raw_chunks: Vec<RawChunk>,
     events: Vec<SessionEvent>,
+    provider_events: Vec<ProviderEventRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,19 +126,31 @@ pub(crate) fn build_pty_inspector_page(db_path: PathBuf) -> GBox {
 }
 
 fn load_session_inputs(db_path: PathBuf) -> anyhow::Result<Vec<InspectorSessionInput>> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open(&db_path)?;
     let mut sessions = Vec::new();
     for status in store.list_status()? {
         for process in store.list_sessions(&status.workspace.name)? {
             let raw_output = std::fs::read_to_string(&process.log_path).unwrap_or_default();
             let chunk_rows = store.list_pty_chunks(process.id).unwrap_or_default();
             let events = store.list_session_events(process.id).unwrap_or_default();
+            let provider_events = process
+                .chat_thread_id
+                .map(|thread_id| {
+                    ProviderEventStore::new(&db_path)
+                        .list_for_chat_thread(thread_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|event| event.process_id == Some(process.id))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             sessions.push(session_input_from_process(
                 &status.workspace.name,
                 process,
                 raw_output,
                 chunk_rows,
                 events,
+                provider_events,
             ));
         }
     }
@@ -151,6 +168,7 @@ fn session_input_from_process(
     raw_output: String,
     chunk_rows: Vec<PtyChunkRecord>,
     events: Vec<SessionEvent>,
+    provider_events: Vec<ProviderEventRecord>,
 ) -> InspectorSessionInput {
     let raw_chunks = if chunk_rows.is_empty() {
         raw_chunks_from_log(&raw_output)
@@ -170,6 +188,7 @@ fn session_input_from_process(
         raw_output,
         raw_chunks,
         events,
+        provider_events,
     }
 }
 
@@ -192,10 +211,13 @@ fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
         session_id: session.id,
         workspace: session.workspace.clone(),
         process_status: session.status.as_str().to_owned(),
-        parser_state: if session.events.is_empty() {
+        parser_state: if session.events.is_empty() && session.provider_events.is_empty() {
             "no parsed events".to_owned()
         } else {
-            format!("{} events", session.events.len())
+            format!(
+                "{} events",
+                session.events.len() + session.provider_events.len()
+            )
         },
         last_activity: session
             .ended_at
@@ -224,6 +246,7 @@ fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
         .events
         .iter()
         .map(|event| event_row(event, &raw_chunks))
+        .chain(provider_event_rows(&session.provider_events))
         .collect::<Vec<_>>();
     InspectorSessionDetail {
         session_id: Some(session.id),
@@ -470,6 +493,55 @@ fn event_row(event: &SessionEvent, chunks: &[RawChunk]) -> InspectorEventRow {
         filter: event_filter(event),
         status: event_status_label(event),
         rendered_text,
+    }
+}
+
+fn provider_event_rows(events: &[ProviderEventRecord]) -> Vec<InspectorEventRow> {
+    let projection = provider_projection_from_records(events);
+    projection
+        .items
+        .iter()
+        .map(|item| InspectorEventRow {
+            sequence: format!("#{}", item.sequence),
+            timestamp: "provider".to_owned(),
+            source_chunk: "provider-event".to_owned(),
+            filter: provider_event_filter(item.category),
+            status: format!("{} / {}", item.status.as_str(), item.stream_state.as_str()),
+            rendered_text: redact_sensitive_text(&provider_projection_item_text(item)),
+        })
+        .collect()
+}
+
+fn provider_event_filter(
+    category: archductor_core::provider_projection::ProviderProjectionCategory,
+) -> EventFilter {
+    use archductor_core::provider_projection::ProviderProjectionCategory as Category;
+    match category {
+        Category::UserMessage | Category::Question | Category::Approval => EventFilter::Prompts,
+        Category::AssistantMessage | Category::Plan | Category::Reasoning => EventFilter::Assistant,
+        Category::Command
+        | Category::Process
+        | Category::FileRead
+        | Category::FileWrite
+        | Category::FilePatch
+        | Category::FileDiff
+        | Category::McpTool
+        | Category::NativeTool
+        | Category::Skill
+        | Category::Plugin
+        | Category::Hook
+        | Category::Subagent
+        | Category::NestedTranscript => EventFilter::ToolOutput,
+        Category::RateLimit | Category::Error => EventFilter::Errors,
+        Category::Status => EventFilter::StateTransitions,
+        Category::BackgroundTerminal
+        | Category::BackgroundTask
+        | Category::Web
+        | Category::Image
+        | Category::Usage
+        | Category::Cost
+        | Category::Context
+        | Category::Unknown => EventFilter::Metadata,
     }
 }
 
@@ -1052,6 +1124,7 @@ mod tests {
                 .with_sequence(2)
                 .with_occurred_at_ms(120),
             ],
+            provider_events: Vec::new(),
         };
 
         let model = build_inspector_model(vec![session]);
@@ -1112,6 +1185,7 @@ mod tests {
                 },
             ],
             events: Vec::new(),
+            provider_events: Vec::new(),
         };
 
         let model = build_inspector_model(vec![session]);
@@ -1149,6 +1223,7 @@ mod tests {
             )
             .with_sequence(1)
             .with_occurred_at_ms(100)],
+            provider_events: Vec::new(),
         };
 
         let model = build_inspector_model(vec![session]);
@@ -1422,6 +1497,7 @@ mod tests {
                 .with_sequence(2)
                 .with_occurred_at_ms(120),
             ],
+            provider_events: Vec::new(),
         };
         let model = build_inspector_model(vec![session]);
 

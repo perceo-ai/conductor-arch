@@ -44,14 +44,16 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
     let store = WorkspaceStore::open(&paths.database_path)?;
     for workspace in store.list()? {
         let records = store.list_sessions(&workspace.name)?;
-        for record in persisted_running_session_candidates(&records, SessionKind::Codex) {
-            if !is_archcar_managed_persisted_session(&record, &paths.logs_dir) {
-                continue;
+        for kind in [SessionKind::Codex, SessionKind::Claude] {
+            for record in persisted_running_session_candidates(&records, kind) {
+                if !is_archcar_managed_persisted_session(&record, &paths.logs_dir) {
+                    continue;
+                }
+                if archcar_process_alive(record.pid) {
+                    continue;
+                }
+                let _ = store.mark_session_process_exited(record.id, None)?;
             }
-            if archcar_process_alive(record.pid) {
-                continue;
-            }
-            let _ = store.mark_session_process_exited(record.id, None)?;
         }
     }
     Ok(())
@@ -349,7 +351,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
 
 fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<ArchcarMessage>> {
     let store = WorkspaceStore::open(db_path)?;
-    let mut messages: Vec<_> = store
+    let mut persisted_messages: Vec<_> = store
         .list_chat_messages(thread_id)?
         .into_iter()
         .map(|message| ArchcarMessage {
@@ -361,22 +363,42 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
             context_usage: None,
         })
         .collect();
+    persisted_messages.sort_by_key(|message| message.id);
 
     let provider_records = ProviderEventStore::new(db_path).list_for_chat_thread(thread_id)?;
     let projection = provider_projection_from_records(&provider_records);
+    let mut messages = Vec::new();
     let mut next_provider_message_id = -1;
-    for item in projection
+    let provider_items = projection
         .items
         .into_iter()
         .filter(provider_projection_item_is_relevant_chat_event)
-    {
+        .collect::<Vec<_>>();
+    let has_provider_user_anchors = provider_items
+        .iter()
+        .any(|item| item.render_class.role_label() == "user");
+    if !has_provider_user_anchors {
+        messages.append(&mut persisted_messages);
+    }
+    for item in provider_items {
         let content = provider_projection_item_text(&item);
         let content = content.trim();
-        if content.is_empty()
-            || messages.iter().any(|message| {
-                message.role == item.render_class.role_label() && message.content == content
-            })
-        {
+        if content.is_empty() {
+            continue;
+        }
+        if item.render_class.role_label() == "user" {
+            if let Some(index) = persisted_messages.iter().position(|message| {
+                message.role == "user" && message.content.trim() == content.trim()
+            }) {
+                messages.push(persisted_messages.remove(index));
+            }
+            continue;
+        }
+        if messages.iter().any(|message: &ArchcarMessage| {
+            message.source != "provider_event"
+                && message.role == item.render_class.role_label()
+                && message.content.trim() == content
+        }) {
             continue;
         }
         messages.push(ArchcarMessage {
@@ -389,6 +411,7 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
         });
         next_provider_message_id -= 1;
     }
+    messages.extend(persisted_messages);
 
     Ok(messages)
 }
@@ -446,7 +469,8 @@ fn ensure_default_session(
     }
 
     let mut guard = state.lock().unwrap();
-    if !guard.queued_defaults.insert(workspace.clone()) {
+    let queue_key = default_queue_key(&workspace, kind);
+    if !guard.queued_defaults.insert(queue_key.clone()) {
         return ArchcarResponse::SessionSpawnQueued { workspace, kind };
     }
     let db_path = guard.db_path.clone();
@@ -478,7 +502,9 @@ fn ensure_default_session(
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
                 guard.sessions.insert(session_id, handle);
-                guard.queued_defaults.remove(&workspace_for_spawn);
+                guard
+                    .queued_defaults
+                    .remove(&default_queue_key(&workspace_for_spawn, kind));
                 drop(guard);
                 while let Ok(event) = event_rx.recv() {
                     let mut guard = state_for_spawn.lock().unwrap();
@@ -492,7 +518,9 @@ fn ensure_default_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, ?kind, error = %detail, "archcar failed to spawn managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
-                guard.queued_defaults.remove(&workspace_for_spawn);
+                guard
+                    .queued_defaults
+                    .remove(&default_queue_key(&workspace_for_spawn, kind));
                 broadcast(
                     &mut guard,
                     ArchcarEvent::SessionError {
@@ -506,6 +534,15 @@ fn ensure_default_session(
     });
 
     ArchcarResponse::SessionSpawnQueued { workspace, kind }
+}
+
+fn default_queue_key(workspace: &str, kind: SessionKind) -> String {
+    let kind = match kind {
+        SessionKind::Shell => "shell",
+        SessionKind::Codex => "codex",
+        SessionKind::Claude => "claude",
+    };
+    format!("{workspace}\0{kind}")
 }
 
 fn ensure_chat_thread_session(
@@ -1054,6 +1091,41 @@ mod tests {
     }
 
     #[test]
+    fn ensure_default_session_queue_is_scoped_by_workspace_and_kind() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::Codex)]),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![event_tx],
+        }));
+
+        let claude = ensure_default_session(
+            &state,
+            "berlin".to_owned(),
+            SessionKind::Claude,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+
+        assert!(matches!(
+            claude,
+            ArchcarResponse::SessionSpawnQueued {
+                kind: SessionKind::Claude,
+                ..
+            }
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ArchcarEvent::SessionSpawnQueued {
+                kind: SessionKind::Claude,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn explicit_spawn_session_accepts_shell_runtime_requests() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("state.db");
@@ -1410,6 +1482,82 @@ mod tests {
     }
 
     #[test]
+    fn session_messages_merge_persisted_inputs_at_provider_user_anchors() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "first", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "second", "user_send")
+            .unwrap();
+        let event_store = ProviderEventStore::new(&db_path);
+        for (sequence, kind, item_id, body) in [
+            (1, ProviderEventKind::UserInput, "user-1", "first"),
+            (
+                2,
+                ProviderEventKind::AssistantOutput,
+                "assistant-1",
+                "answer one",
+            ),
+            (3, ProviderEventKind::UserInput, "user-2", "second"),
+            (
+                4,
+                ProviderEventKind::AssistantOutput,
+                "assistant-2",
+                "answer two",
+            ),
+        ] {
+            event_store
+                .upsert_event(&ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(format!("event-{sequence}")),
+                    provider_item_id: Some(item_id.to_owned()),
+                    provider_thread_id: Some("thread-1".to_owned()),
+                    provider_turn_id: None,
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: None,
+                    chat_thread_id: Some(thread.id),
+                    process_id: None,
+                    phase: ProviderEventPhase::Completed,
+                    kind,
+                    provider_subtype: Some("test".to_owned()),
+                    provider_sequence: Some(sequence),
+                    occurred_at_ms: sequence as u64,
+                    normalized_payload: json!({
+                        "title": if kind == ProviderEventKind::UserInput { "User" } else { "Assistant" },
+                        "body": body
+                    }),
+                    raw_json: json!({"sequence": sequence}),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+
+        let messages = session_messages_for_thread(&db_path, thread.id).unwrap();
+        let rendered = messages
+            .iter()
+            .map(|message| format!("{}:{}", message.role, message.content))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "user:first",
+                "assistant:answer one",
+                "user:second",
+                "assistant:answer two",
+            ]
+        );
+    }
+
+    #[test]
     fn persisted_running_session_candidates_preserve_store_descending_order() {
         let records = vec![
             crate::workspace::ProcessRecord {
@@ -1564,6 +1712,27 @@ mod tests {
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
         let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+
+        let reconciled = store.get_process_record(process.id).unwrap();
+        assert_eq!(reconciled.status, ProcessStatus::Exited);
+        assert!(reconciled.ended_at.is_some());
+        assert!(reconciled.log_path.starts_with(&paths.logs_dir));
+    }
+
+    #[test]
+    fn reconcile_startup_marks_dead_managed_claude_sessions_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Claude).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();

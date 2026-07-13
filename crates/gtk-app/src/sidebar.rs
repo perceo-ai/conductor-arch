@@ -418,6 +418,7 @@ pub(crate) fn build_app_sidebar(
                             attach_workspace_row_context_menu(
                                 &row,
                                 ws.name.clone(),
+                                ws.status.clone(),
                                 app_state.clone(),
                                 stack.clone(),
                                 window.clone(),
@@ -770,6 +771,7 @@ fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
 fn attach_workspace_row_context_menu(
     row: &ListBoxRow,
     workspace_name: String,
+    workspace_status: String,
     state: AppState,
     stack: Stack,
     window: ApplicationWindow,
@@ -933,6 +935,7 @@ fn attach_workspace_row_context_menu(
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
         let toast_manager = toast_manager.clone();
+        let workspace_status_for_action = workspace_status.clone();
         item.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -949,6 +952,8 @@ fn attach_workspace_row_context_menu(
             };
             let message = if action == "archive" {
                 format!("Archive {workspace_name}?")
+            } else if workspace_status_for_action == "failed" {
+                format!("Delete {workspace_name}? This removes failed workspace metadata and any created worktree, but leaves the local branch alone.")
             } else {
                 format!(
                     "Delete {workspace_name}? This removes the worktree, deletes the local branch, and can discard unmerged commits."
@@ -963,6 +968,7 @@ fn attach_workspace_row_context_menu(
                 toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
+                    let workspace_status = workspace_status_for_action.clone();
                     let refresh_hub = refresh_hub.clone();
                     let refresh_workspace = refresh_workspace.clone();
                     let refresh_view_preferences = refresh_view_preferences.clone();
@@ -979,6 +985,7 @@ fn attach_workspace_row_context_menu(
                         let stack = stack.clone();
                         let row = row.clone();
                         let workspace_name = workspace_name.clone();
+                        let delete_branch_after_delete = workspace_status != "failed";
                         let window = window.clone();
                         let toast_manager = toast_manager.clone();
                         if action == "delete" {
@@ -1023,7 +1030,9 @@ fn attach_workspace_row_context_menu(
                                             if let Err(err) =
                                                 WorkspaceStore::open(db_cleanup).and_then(|store| {
                                                     store.cleanup_deleted_workspace_artifacts(
-                                                        &deleted, true, true,
+                                                        &deleted,
+                                                        true,
+                                                        delete_branch_after_delete,
                                                     )
                                                 })
                                             {
