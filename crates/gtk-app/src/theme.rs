@@ -2062,15 +2062,42 @@ popover.context-menu-popover arrow {
     padding: 0;
 }
 .chat-inline-event-chip {
-    background-color: #202020;
+    background-color: #171717;
     border: 1px solid #343434;
-    border-radius: 999px;
+    border-radius: 6px;
     color: #e7e7e7;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 12px;
-    font-weight: 650;
-    min-height: 28px;
-    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    min-height: 24px;
+    padding: 2px 8px;
+}
+.chat-inline-event-tool .chat-inline-event-chip {
+    border-color: #2dd4bf;
+}
+.chat-inline-event-command .chat-inline-event-chip {
+    border-color: #60a5fa;
+}
+.chat-inline-event-file .chat-inline-event-chip {
+    border-color: #4ade80;
+}
+.chat-inline-event-diff .chat-inline-event-chip {
+    border-color: #e879f9;
+}
+.chat-inline-event-skill .chat-inline-event-chip {
+    border-color: #facc15;
+}
+.chat-inline-event-plugin .chat-inline-event-chip {
+    border-color: #a78bfa;
+}
+.chat-inline-event-subagent .chat-inline-event-chip {
+    border-color: #22d3ee;
+}
+.chat-inline-event-nested .chat-inline-event-chip {
+    border-color: #c084fc;
+}
+.chat-inline-event-background .chat-inline-event-chip {
+    border-color: #94a3b8;
 }
 .chat-inline-event-meta {
     color: #8f8f8f;
@@ -2698,6 +2725,11 @@ mod tests {
         ));
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
+        assert!(css.contains("border-radius: 6px;"));
+        assert!(css.contains("font-size: 11px;"));
+        assert!(css.contains(".chat-inline-event-command .chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-subagent .chat-inline-event-chip"));
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-inline-event {\n    background-color: transparent;"));

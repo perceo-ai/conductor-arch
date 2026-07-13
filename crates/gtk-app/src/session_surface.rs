@@ -3631,6 +3631,59 @@ fn inline_event_chip_label(event: &CodexInlineEvent, expanded: bool) -> String {
     format!("{marker} {}", inline_event_chip_name(event))
 }
 
+fn inline_event_chip_markup(event: &CodexInlineEvent, expanded: bool) -> String {
+    let marker = if expanded { "-" } else { "+" };
+    let name = inline_event_chip_name(event);
+    let (verb, rest) = inline_event_chip_name_parts(&name);
+    let accent = inline_event_type_color(event);
+    let marker = pango_escape_text(marker);
+    let verb = pango_escape_text(verb);
+    let rest = pango_escape_text(rest);
+
+    if rest.is_empty() {
+        format!("<span foreground=\"{accent}\" weight=\"700\">{marker} {verb}</span>")
+    } else {
+        format!(
+            "<span foreground=\"{accent}\" weight=\"700\">{marker} {verb}</span> <span foreground=\"#e7e7e7\">{rest}</span>"
+        )
+    }
+}
+
+fn inline_event_chip_name_parts(name: &str) -> (&str, &str) {
+    name.split_once(' ').unwrap_or((name, ""))
+}
+
+fn inline_event_type_css_class(event: &CodexInlineEvent) -> &'static str {
+    match event.subtitle.as_deref().unwrap_or_default() {
+        "Command" | "Command result" => "chat-inline-event-command",
+        "File" | "File preview" => "chat-inline-event-file",
+        "Diff" => "chat-inline-event-diff",
+        "Skill" => "chat-inline-event-skill",
+        "Plugin" => "chat-inline-event-plugin",
+        "Subagent" => "chat-inline-event-subagent",
+        "Nested transcript" => "chat-inline-event-nested",
+        "Background task" => "chat-inline-event-background",
+        _ => match event.kind {
+            CodexInlineEventKind::Skill => "chat-inline-event-skill",
+            CodexInlineEventKind::Tool => "chat-inline-event-tool",
+        },
+    }
+}
+
+fn inline_event_type_color(event: &CodexInlineEvent) -> &'static str {
+    match inline_event_type_css_class(event) {
+        "chat-inline-event-command" => "#93c5fd",
+        "chat-inline-event-file" => "#86efac",
+        "chat-inline-event-diff" => "#f0abfc",
+        "chat-inline-event-skill" => "#fcd34d",
+        "chat-inline-event-plugin" => "#c4b5fd",
+        "chat-inline-event-subagent" => "#67e8f9",
+        "chat-inline-event-nested" => "#d8b4fe",
+        "chat-inline-event-background" => "#cbd5e1",
+        _ => "#a7f3d0",
+    }
+}
+
 fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
     event
         .path
@@ -3905,16 +3958,21 @@ fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
 fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     let root = GBox::new(Orientation::Vertical, 8);
     root.add_css_class("chat-inline-event");
+    root.add_css_class(inline_event_type_css_class(event));
     if let Some(class) = inline_event_status_css_class(event.status) {
         root.add_css_class(class);
     }
     root.set_hexpand(true);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
-    let toggle = ToggleButton::with_label(&inline_event_chip_label(event, expand_by_default));
+    let toggle = ToggleButton::new();
     toggle.add_css_class("chat-inline-event-chip");
     toggle.set_halign(Align::Start);
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
+    let toggle_label = Label::new(None);
+    toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
+    toggle_label.set_xalign(0.0);
+    toggle.set_child(Some(&toggle_label));
     root.append(&toggle);
 
     let body_text = inline_event_body_text(event);
@@ -3940,19 +3998,20 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
         let body_revealer = body_revealer.clone();
         let full = body_preview.full.clone();
         let preview = body_preview.preview.clone();
-        let collapsed_label = inline_event_chip_label(event, false);
-        let expanded_label = inline_event_chip_label(event, true);
+        let toggle_label = toggle_label.clone();
+        let collapsed_label = inline_event_chip_markup(event, false);
+        let expanded_label = inline_event_chip_markup(event, true);
         move |button| {
             if button.is_active() {
                 body.set_markup(&chat_text_markup(&full));
                 body_revealer.set_visible(true);
                 body_revealer.set_reveal_child(true);
-                button.set_label(&expanded_label);
+                toggle_label.set_markup(&expanded_label);
             } else {
                 body.set_markup(&chat_text_markup(&preview));
                 body_revealer.set_reveal_child(false);
                 body_revealer.set_visible(false);
-                button.set_label(&collapsed_label);
+                toggle_label.set_markup(&collapsed_label);
             }
         }
     });
@@ -8528,6 +8587,44 @@ fix it
             inline_event_chip_label(&command_event, false),
             "+ cargo test -p archductor-core codex_tui"
         );
+    }
+
+    #[test]
+    fn inline_event_chip_markup_colors_action_without_coloring_name() {
+        let command_event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Ran cargo test".to_owned(),
+            subtitle: Some("Command".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+        let skill_event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Skill,
+            title: "Read superpowers:test-driven-development".to_owned(),
+            subtitle: Some("Skill".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        let command_markup = inline_event_chip_markup(&command_event, false);
+        let skill_markup = inline_event_chip_markup(&skill_event, false);
+
+        assert_eq!(
+            inline_event_type_css_class(&command_event),
+            "chat-inline-event-command"
+        );
+        assert_eq!(
+            inline_event_type_css_class(&skill_event),
+            "chat-inline-event-skill"
+        );
+        assert!(command_markup.contains("foreground=\"#93c5fd\""));
+        assert!(command_markup.contains("+ Ran"));
+        assert!(command_markup.contains("foreground=\"#e7e7e7\">cargo test"));
+        assert!(skill_markup.contains("foreground=\"#fcd34d\""));
+        assert!(skill_markup.contains("+ Read"));
+        assert!(skill_markup.contains("foreground=\"#e7e7e7\">superpowers:test-driven-development"));
     }
 
     #[test]
