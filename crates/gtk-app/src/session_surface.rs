@@ -126,6 +126,8 @@ struct CodexInlineEvent {
 enum ChatTimelineItem {
     Message(ChatMessageRecord),
     Event(ChatEventRecord),
+    PendingUserInput(String),
+    ProviderProjection(ProviderProjectionItem),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1346,9 +1348,13 @@ pub fn agent_session_panel(
                                     &startup_state,
                                     working_elapsed,
                                 );
-                                let timeline = merge_chat_timeline_for_render(
+                                let provider_projection =
+                                    provider_projection_from_records(&provider_events);
+                                let timeline = chat_structured_items_for_render(
                                     thread_messages.clone(),
                                     thread_events,
+                                    provider_projection.items,
+                                    pending_user_inputs.clone(),
                                 );
                                 for item in timeline {
                                     match item {
@@ -1367,20 +1373,20 @@ pub fn agent_session_panel(
                                                 &chat_event_widget(&event),
                                             );
                                         }
+                                        ChatTimelineItem::PendingUserInput(input) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &chat_user_bubble(&input),
+                                            );
+                                        }
+                                        ChatTimelineItem::ProviderProjection(item) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &provider_projection_item_widget(&item),
+                                            );
+                                        }
                                     }
                                 }
-                                let provider_projection =
-                                    provider_projection_from_records(&provider_events);
-                                for item in provider_projection_items_for_render(
-                                    provider_projection.items,
-                                    &thread_messages,
-                                ) {
-                                    append_chat_refresh_row(
-                                        &messages,
-                                        &provider_projection_item_widget(&item),
-                                    );
-                                }
-                                append_pending_user_input_rows(&messages, &pending_user_inputs);
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
                             }
@@ -2709,7 +2715,44 @@ fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
             (message.timeline_seq.unwrap_or(message.id), 0, message.id)
         }
         ChatTimelineItem::Event(event) => (event.timeline_seq, 1, event.id),
+        ChatTimelineItem::PendingUserInput(_) => (i64::MAX - 1, 2, 0),
+        ChatTimelineItem::ProviderProjection(item) => (
+            i64::MAX,
+            3,
+            i64::try_from(item.sequence).unwrap_or(i64::MAX),
+        ),
     }
+}
+
+fn chat_structured_items_for_render(
+    messages: Vec<ChatMessageRecord>,
+    events: Vec<ChatEventRecord>,
+    provider_projection_items: Vec<ProviderProjectionItem>,
+    pending_inputs: Vec<String>,
+) -> Vec<ChatTimelineItem> {
+    let mut items = merge_chat_timeline_for_render(messages.clone(), events)
+        .into_iter()
+        .filter(|item| match item {
+            ChatTimelineItem::Message(message) => chat_message_is_renderable(message),
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    items.extend(
+        pending_inputs
+            .into_iter()
+            .filter(|input| !input.trim().is_empty())
+            .map(ChatTimelineItem::PendingUserInput),
+    );
+    items.extend(
+        provider_projection_items_for_render(provider_projection_items, &messages)
+            .into_iter()
+            .map(ChatTimelineItem::ProviderProjection),
+    );
+    items
+}
+
+fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
+    message.role != "user" || !message.content.trim().is_empty()
 }
 
 fn chat_render_is_unchanged(
@@ -2822,6 +2865,9 @@ fn chat_message_widget(
     render_raw_message_content: bool,
     render_legacy_inline_events: bool,
 ) -> Option<Widget> {
+    if !chat_message_is_renderable(message) {
+        return None;
+    }
     match message.role.as_str() {
         "user" => Some(chat_user_bubble(&message.content).upcast()),
         "system" => {
@@ -9265,6 +9311,67 @@ I summarized the result.
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
         assert!(matches!(timeline[1], ChatTimelineItem::Event(_)));
         assert!(matches!(timeline[2], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn chat_render_skips_blank_persisted_user_bubbles() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "   ".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), Vec::new(), Vec::new());
+
+        assert!(timeline.is_empty());
+    }
+
+    #[test]
+    fn chat_render_places_pending_user_input_before_provider_events() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "agent".to_owned(),
+            content: "previous answer".to_owned(),
+            source: "agent_reply".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "running tests".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            vec![provider_item],
+            vec!["new user message".to_owned()],
+        );
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(timeline[1], ChatTimelineItem::PendingUserInput(_)));
+        assert!(matches!(
+            timeline[2],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
     }
 
     #[test]
