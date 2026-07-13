@@ -6,7 +6,7 @@
 
 **Architecture:** Introduce `chat_threads` and `chat_messages` as the conversation model, keep `processes` as PTY lifecycle records linked to threads, and migrate Codex transcript parsing from a render-time-only reconstruction into structured persisted messages. GTK and CLI continue using PTY transport for Codex, but they operate against thread/message records instead of implicit session logs.
 
-**Tech Stack:** Rust, rusqlite, GTK4/libadwaita, portable-pty, vt100, existing `linux-archductor-core` workspace/session model
+**Tech Stack:** Rust, rusqlite, GTK4/libadwaita, portable-pty, vt100, existing `archductor-core` workspace/session model
 
 ---
 
@@ -72,7 +72,7 @@ fn chat_messages_persist_user_control_and_agent_rows() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-core chat_thread_crud_persists_multiple_threads_per_workspace_and_provider chat_messages_persist_user_control_and_agent_rows -- --nocapture`
+Run: `cargo test -p archductor-core chat_thread_crud_persists_multiple_threads_per_workspace_and_provider chat_messages_persist_user_control_and_agent_rows -- --nocapture`
 
 Expected: FAIL with missing `chat_threads`/`chat_messages` schema or missing methods on `WorkspaceStore`
 
@@ -154,7 +154,7 @@ Add `chat_thread_id: Option<i64>` to `ProcessRecord`, row mapping, and `record_p
 
 - [ ] **Step 5: Run the targeted tests**
 
-Run: `cargo test -p linux-archductor-core chat_thread_crud_persists_multiple_threads_per_workspace_and_provider chat_messages_persist_user_control_and_agent_rows -- --nocapture`
+Run: `cargo test -p archductor-core chat_thread_crud_persists_multiple_threads_per_workspace_and_provider chat_messages_persist_user_control_and_agent_rows -- --nocapture`
 
 Expected: PASS
 
@@ -215,7 +215,7 @@ fn codex_resume_launch_prefers_stored_native_thread_id() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-core codex_thread_messages_merge_screen_updates_into_chat_messages codex_resume_launch_prefers_stored_native_thread_id -- --nocapture`
+Run: `cargo test -p archductor-core codex_thread_messages_merge_screen_updates_into_chat_messages codex_resume_launch_prefers_stored_native_thread_id -- --nocapture`
 
 Expected: FAIL with missing structured sync helper or incorrect resume behavior
 
@@ -276,7 +276,7 @@ let launch = store.session_launch_with_options_and_resume(
 
 - [ ] **Step 6: Run focused tests**
 
-Run: `cargo test -p linux-archductor-core codex_thread_messages_merge_screen_updates_into_chat_messages codex_resume_launch_prefers_stored_native_thread_id start_session_with_options_uses_real_codex_flags_without_bootstrap_env -- --nocapture`
+Run: `cargo test -p archductor-core codex_thread_messages_merge_screen_updates_into_chat_messages codex_resume_launch_prefers_stored_native_thread_id start_session_with_options_uses_real_codex_flags_without_bootstrap_env -- --nocapture`
 
 Expected: PASS
 
@@ -322,7 +322,7 @@ fn selected_thread_surface_prefers_structured_messages_over_raw_log_noise() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk --bin linux-archductor-gtk thread_list_keeps_multiple_codex_threads_per_workspace selected_thread_surface_prefers_structured_messages_over_raw_log_noise -- --nocapture`
+Run: `cargo test -p archductor-gtk --bin archductor-gtk thread_list_keeps_multiple_codex_threads_per_workspace selected_thread_surface_prefers_structured_messages_over_raw_log_noise -- --nocapture`
 
 Expected: FAIL with missing thread/message view helpers
 
@@ -370,7 +370,7 @@ Use the existing Codex screen helpers to:
 
 - [ ] **Step 6: Run targeted GTK tests**
 
-Run: `cargo test -p linux-archductor-gtk --bin linux-archductor-gtk thread_list_keeps_multiple_codex_threads_per_workspace selected_thread_surface_prefers_structured_messages_over_raw_log_noise transcript_events_parse_codex_screen_blocks_without_raw_duplication -- --nocapture`
+Run: `cargo test -p archductor-gtk --bin archductor-gtk thread_list_keeps_multiple_codex_threads_per_workspace selected_thread_surface_prefers_structured_messages_over_raw_log_noise transcript_events_parse_codex_screen_blocks_without_raw_duplication -- --nocapture`
 
 Expected: PASS
 
@@ -412,7 +412,7 @@ fn unsupported_live_controls_are_filtered_out_of_toolbar() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk --bin linux-archductor-gtk pending_control_commands_flush_before_user_message unsupported_live_controls_are_filtered_out_of_toolbar -- --nocapture`
+Run: `cargo test -p archductor-gtk --bin archductor-gtk pending_control_commands_flush_before_user_message unsupported_live_controls_are_filtered_out_of_toolbar -- --nocapture`
 
 Expected: FAIL with missing pending-command queue and control filtering helpers
 
@@ -463,7 +463,7 @@ session.send_line(&user_text)?;
 
 - [ ] **Step 6: Run focused tests**
 
-Run: `cargo test -p linux-archductor-gtk --bin linux-archductor-gtk pending_control_commands_flush_before_user_message unsupported_live_controls_are_filtered_out_of_toolbar -- --nocapture`
+Run: `cargo test -p archductor-gtk --bin archductor-gtk pending_control_commands_flush_before_user_message unsupported_live_controls_are_filtered_out_of_toolbar -- --nocapture`
 
 Expected: PASS
 
@@ -501,7 +501,7 @@ fn local_chat_history_prefers_thread_messages_for_new_chat_threads() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-core local_chat_history_prefers_thread_messages_for_new_chat_threads -- --nocapture`
+Run: `cargo test -p archductor-core local_chat_history_prefers_thread_messages_for_new_chat_threads -- --nocapture`
 
 Expected: FAIL with missing thread-aware history methods
 
@@ -530,7 +530,7 @@ Do not remove legacy log reads yet. Prefer:
 
 - [ ] **Step 5: Run targeted tests**
 
-Run: `cargo test -p linux-archductor-core local_chat_history_prefers_thread_messages_for_new_chat_threads -- --nocapture`
+Run: `cargo test -p archductor-core local_chat_history_prefers_thread_messages_for_new_chat_threads -- --nocapture`
 
 Expected: PASS
 
@@ -558,15 +558,15 @@ Delete or demote:
 
 - [ ] **Step 2: Run the full targeted suites**
 
-Run: `cargo test -p linux-archductor-core -- --nocapture`
+Run: `cargo test -p archductor-core -- --nocapture`
 
 Expected: PASS
 
-Run: `cargo test -p linux-archductor -- --nocapture`
+Run: `cargo test -p archductor -- --nocapture`
 
 Expected: PASS
 
-Run: `cargo test -p linux-archductor-gtk --bin linux-archductor-gtk -- --nocapture`
+Run: `cargo test -p archductor-gtk --bin archductor-gtk -- --nocapture`
 
 Expected: PASS
 
@@ -575,7 +575,7 @@ Expected: PASS
 Run:
 
 ```bash
-cargo run --bin linux-archductor-gtk
+cargo run --bin archductor-gtk
 ```
 
 Manual checks:

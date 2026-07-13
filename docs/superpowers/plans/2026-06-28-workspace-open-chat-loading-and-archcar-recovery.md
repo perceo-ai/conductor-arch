@@ -20,7 +20,7 @@
   - Run the new reconciliation step before `serve()`.
 - Possibly modify: `crates/core/src/workspace.rs`
   - Only if the existing store API needs a small helper for marking stale session records exited/killed cleanly.
-- Test through existing unit targets in `linux-archductor-core`; add GTK-local state transition tests in `session_surface.rs`.
+- Test through existing unit targets in `archductor-core`; add GTK-local state transition tests in `session_surface.rs`.
 
 ### Task 1: Add Archcar Boot-Time Stale Session Sweep
 
@@ -28,7 +28,7 @@
 - Modify: `crates/core/src/archcar/server.rs`
 - Modify: `crates/archcar/src/main.rs`
 - Possibly modify: `crates/core/src/workspace.rs`
-- Test: `cargo test -p linux-archductor-core archcar::server -- --nocapture`
+- Test: `cargo test -p archductor-core archcar::server -- --nocapture`
 
 - [ ] **Step 1: Write the failing reconciliation tests**
 
@@ -53,7 +53,7 @@ fn reconcile_startup_leaves_non_managed_sessions_untouched() {
 
 - [ ] **Step 2: Run server tests to verify the new cases fail**
 
-Run: `cargo test -p linux-archductor-core archcar::server -- --nocapture`
+Run: `cargo test -p archductor-core archcar::server -- --nocapture`
 
 Expected:
 - New reconciliation tests fail because the sweep does not exist yet.
@@ -90,14 +90,14 @@ Update `crates/archcar/src/main.rs` so startup runs:
 ```rust
 let paths = AppPaths::from_env();
 let _log_guard = init_logger(&paths)?;
-linux_archductor_core::archcar::server::reconcile_managed_sessions_on_startup(&paths)?;
+archductor_core::archcar::server::reconcile_managed_sessions_on_startup(&paths)?;
 let server = ArchcarServer::bind(paths)?;
 server.serve()
 ```
 
 - [ ] **Step 5: Re-run the server test target and verify it passes**
 
-Run: `cargo test -p linux-archductor-core archcar::server -- --nocapture`
+Run: `cargo test -p archductor-core archcar::server -- --nocapture`
 
 Expected:
 - All `archcar::server` tests pass.
@@ -114,7 +114,7 @@ git commit -m "fix(archcar): sweep stale managed sessions on startup"
 
 **Files:**
 - Modify: `crates/gtk-app/src/session_surface.rs`
-- Test: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+- Test: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 - [ ] **Step 1: Write failing local state tests**
 
@@ -140,7 +140,7 @@ fn codex_startup_state_switches_to_error_when_archcar_reports_failure() {
 
 - [ ] **Step 2: Run the GTK session surface tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - New startup-state tests fail because the enum/helpers are not defined yet.
@@ -173,7 +173,7 @@ Also add tiny pure helpers for:
 
 - [ ] **Step 4: Re-run the GTK session surface tests and verify the helper tests pass**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - Startup-state helper tests pass.
@@ -190,7 +190,7 @@ git commit -m "feat(chat): add codex startup state model"
 
 **Files:**
 - Modify: `crates/gtk-app/src/session_surface.rs`
-- Test: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+- Test: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 - [ ] **Step 1: Write failing rendering/state-selection tests**
 
@@ -212,7 +212,7 @@ fn startup_card_is_not_rendered_for_ready_state() {
 
 - [ ] **Step 2: Run GTK tests to verify the rendering-helper cases fail**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - New startup-card tests fail because the helper does not exist yet.
@@ -235,7 +235,7 @@ Render it above transcript content in the existing messages column without block
 
 - [ ] **Step 4: Re-run GTK tests and verify the helper/render selection cases pass**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - Startup-card helper tests pass.
@@ -252,7 +252,7 @@ git commit -m "feat(chat): render inline codex startup status card"
 
 **Files:**
 - Modify: `crates/gtk-app/src/session_surface.rs`
-- Test: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+- Test: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 - [ ] **Step 1: Write failing transition tests for events and responses**
 
@@ -284,7 +284,7 @@ fn session_error_event_surfaces_error_message() {
 
 - [ ] **Step 2: Run GTK tests to verify the transition tests fail**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - New reducer tests fail because the signal/reducer logic is not implemented yet.
@@ -321,7 +321,7 @@ fn reduce_codex_startup_state(
 
 - [ ] **Step 4: Re-run GTK tests and verify the transition tests pass**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - New reducer tests pass.
@@ -341,14 +341,14 @@ git commit -m "fix(chat): surface archcar startup state in panel"
 
 - [ ] **Step 1: Run focused core verification**
 
-Run: `cargo test -p linux-archductor-core archcar::server -- --nocapture`
+Run: `cargo test -p archductor-core archcar::server -- --nocapture`
 
 Expected:
 - All server tests pass, including stale-session sweep coverage.
 
 - [ ] **Step 2: Run focused GTK verification**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected:
 - All session surface tests pass, including startup loading/error state coverage.

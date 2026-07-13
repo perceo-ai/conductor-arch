@@ -516,7 +516,7 @@ impl SessionHarnessOptions {
             entries.push(format!("approvals={value}"));
         }
         if let Some(value) = sanitize_empty_text(self.model.as_deref()) {
-            entries.push(format!("model={value}"));
+            entries.push(format!("model={}", sanitize_metadata_value(&value)));
         }
         if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
             entries.push(format!("reasoning={value}"));
@@ -1663,6 +1663,13 @@ impl WorkspaceStore {
             "DELETE FROM checkpoints WHERE workspace_id = ?1 OR session_id IN (
                SELECT id FROM processes WHERE workspace_id = ?1
              )",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM provider_events
+             WHERE workspace_id = ?1
+                OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
+                OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
             [workspace_id],
         )?;
         self.conn.execute(
@@ -9024,6 +9031,24 @@ mod tests {
     }
 
     #[test]
+    fn session_harness_metadata_sanitizes_model_delimiters() {
+        let metadata = SessionHarnessOptions {
+            model: Some("gpt-5.6-sol;approval=never\nnext".to_owned()),
+            ..SessionHarnessOptions::default()
+        }
+        .metadata()
+        .unwrap();
+
+        assert_eq!(metadata, "model=gpt-5.6-sol approval=never next");
+        let parsed = SessionHarnessOptions::from_metadata(Some(&metadata));
+        assert_eq!(
+            parsed.model.as_deref(),
+            Some("gpt-5.6-sol approval=never next")
+        );
+        assert!(parsed.approval_mode.is_none());
+    }
+
+    #[test]
     fn create_workspace_adds_git_worktree_context_dir_and_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -10458,6 +10483,29 @@ CUSTOM_VALUE = "from-settings"
                 )],
             )
             .unwrap();
+        crate::provider_events::ProviderEventStore::new(&db_path)
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-1".to_owned()),
+                provider_item_id: Some("item-1".to_owned()),
+                provider_thread_id: Some(thread.id.to_string()),
+                provider_turn_id: None,
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::AssistantOutput,
+                provider_subtype: Some("message".to_owned()),
+                provider_sequence: Some(1),
+                occurred_at_ms: 1,
+                normalized_payload: serde_json::json!({"text": "done"}),
+                raw_json: serde_json::json!({"text": "done"}),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
 
         let deleted = store.delete("berlin", false, false).unwrap();
 
@@ -10482,8 +10530,13 @@ CUSTOM_VALUE = "from-settings"
             .conn
             .query_row("SELECT COUNT(*) FROM session_events", [], |row| row.get(0))
             .unwrap();
+        let orphan_provider_events: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM provider_events", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(orphan_pty_chunks, 0);
         assert_eq!(orphan_session_events, 0);
+        assert_eq!(orphan_provider_events, 0);
     }
 
     #[test]
@@ -13661,7 +13714,7 @@ working_directory = "apps/worker"
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
-                    model: None,
+                    model: Some("gpt-5.6-sol".to_owned()),
                     approval_mode: Some("ask".to_owned()),
                     reasoning_mode: Some("high".to_owned()),
                     effort_mode: Some("medium".to_owned()),
@@ -13680,14 +13733,14 @@ working_directory = "apps/worker"
             &vec![
                 "--no-alt-screen",
                 "--dangerously-bypass-approvals-and-sandbox",
-                "--model",
-                "gpt-5.6-sol",
                 "-c",
                 "check_for_update_on_startup=false",
                 "-c",
                 codex_trust_arg.as_str(),
                 "-C",
                 codex_cwd.as_str(),
+                "--model",
+                "gpt-5.6-sol",
                 "-c",
                 r#"model_reasoning_effort="high""#,
                 "-c",
@@ -13745,7 +13798,7 @@ working_directory = "apps/worker"
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
-                    model: None,
+                    model: Some("claude-fable-5".to_owned()),
                     approval_mode: Some("never".to_owned()),
                     reasoning_mode: Some("low".to_owned()),
                     effort_mode: Some("high".to_owned()),
@@ -13824,12 +13877,8 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.args,
             vec![
-                "--model".to_owned(),
-                "claude-fable-5".to_owned(),
                 "--resume".to_owned(),
                 "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned(),
-                "--append-system-prompt".to_owned(),
-                "[archductor bootstrap for claude]\nmodel: claude-fable-5".to_owned(),
             ]
         );
         assert_eq!(
@@ -13886,8 +13935,6 @@ working_directory = "apps/worker"
             vec![
                 "--no-alt-screen".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
-                "--model".to_owned(),
-                "gpt-5.6-sol".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
@@ -13915,7 +13962,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;personality=pragmatic;goals=ship the fix"
+                "harness=codex;fast=true;approval=ask;reasoning=high;personality=pragmatic;goals=ship the fix"
             )
         );
         assert!(launch.session_resume_id.is_none());

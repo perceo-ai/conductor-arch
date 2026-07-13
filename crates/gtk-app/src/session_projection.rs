@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use archductor_core::redaction::redact_sensitive_text;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -336,6 +337,7 @@ fn redact_json_value(value: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(values) => Value::Array(values.iter().map(redact_json_value).collect()),
+        Value::String(value) => Value::String(redact_sensitive_text(value)),
         other => other.clone(),
     }
 }
@@ -348,6 +350,11 @@ fn secret_like_key(key: &str) -> bool {
         || key.contains("api_key")
         || key.contains("apikey")
         || key.contains("access_key")
+        || key.contains("private_key")
+        || key.contains("client_secret")
+        || key.contains("refresh_token")
+        || key.contains("authorization")
+        || key.contains("bearer")
         || key.contains("credential")
         || key == "auth"
         || key.ends_with("_auth")
@@ -694,6 +701,34 @@ mod tests {
         assert!(!item.raw_payload.as_ref().unwrap().contains("sk-secret"));
         assert!(!item.raw_payload.as_ref().unwrap().contains("tok-secret"));
         assert!(item.raw_payload.as_ref().unwrap().contains("visible"));
+    }
+
+    #[test]
+    fn raw_payload_redaction_uses_project_rules_for_strings_and_secret_keys() {
+        let mut unknown = event("unknown-2", 1, ProviderProjectionCategory::Unknown, "", "");
+        unknown.raw_payload = Some(json!({
+            "type": "future_event",
+            "authorization": "Bearer auth-secret",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----",
+            "safe": "TOKEN=embedded-secret bearer bearer-secret client_secret=client-secret refresh_token=refresh-secret",
+            "nested": {
+                "safe": "visible",
+                "client_secret": "nested-client-secret"
+            }
+        }));
+
+        let projection = render_provider_event_projection(vec![unknown]);
+        let payload = projection.items[0].raw_payload.as_deref().unwrap();
+
+        assert!(payload.contains("[redacted]"));
+        assert!(payload.contains("visible"));
+        assert!(!payload.contains("auth-secret"));
+        assert!(!payload.contains("private-secret"));
+        assert!(!payload.contains("embedded-secret"));
+        assert!(!payload.contains("bearer-secret"));
+        assert!(!payload.contains("client-secret"));
+        assert!(!payload.contains("refresh-secret"));
+        assert!(!payload.contains("nested-client-secret"));
     }
 
     #[test]

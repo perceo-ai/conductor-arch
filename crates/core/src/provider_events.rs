@@ -379,11 +379,13 @@ impl ProviderEventDraft {
             return format!("{}:event:{event_id}", self.provider);
         }
         format!(
-            "{}:raw:{}:{}:{}",
+            "{}:raw:{}:{}:{}:{}:{}",
             self.provider,
             self.provider_thread_id.as_deref().unwrap_or("-"),
             self.provider_sequence.unwrap_or(0),
-            self.provider_subtype.as_deref().unwrap_or("unknown")
+            self.provider_subtype.as_deref().unwrap_or("unknown"),
+            self.occurred_at_ms,
+            stable_text_hash(&self.raw_json.to_string())
         )
     }
 }
@@ -459,12 +461,13 @@ impl ProviderEventStore {
     pub fn upsert_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
         let mut conn = self.open()?;
         let identity_key = draft.identity_key();
-        let normalized_payload_json = serde_json::to_string(&draft.normalized_payload)?;
         let raw_json = serde_json::to_string(&draft.raw_json)?;
         let now = timestamp();
         let tx = conn.transaction()?;
         let received_sequence = next_received_sequence(&tx)?;
         let raw_sequence = next_raw_sequence(&tx)?;
+        let normalized_payload = merge_existing_streaming_payload(&tx, &identity_key, draft)?;
+        let normalized_payload_json = serde_json::to_string(&normalized_payload)?;
         tx.execute(
             "INSERT INTO provider_events (
                 identity_key, provider, provider_event_id, provider_item_id,
@@ -542,7 +545,7 @@ impl ProviderEventStore {
             ],
         )?;
         tx.commit()?;
-        self.get_by_identity_key(&draft.identity_key())?
+        self.get_by_identity_key(&identity_key)?
             .ok_or_else(|| anyhow!("provider event upsert did not return a row"))
     }
 
@@ -628,18 +631,91 @@ fn project_timeline_item(event: ProviderEventRecord) -> ProviderTimelineItem {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let canonical_id = provider_record_canonical_id(&event);
+    let parent_canonical_id = event.parent_provider_item_id.as_ref().map(|parent| {
+        provider_canonical_id(
+            &event.provider,
+            event
+                .parent_provider_thread_id
+                .as_deref()
+                .or(event.provider_thread_id.as_deref()),
+            parent,
+        )
+    });
     ProviderTimelineItem {
-        canonical_id: event.identity_key,
+        canonical_id,
         kind: event.kind,
         phase: event.phase,
         title,
         body,
         provider_subtype: event.provider_subtype,
-        parent_canonical_id: event
-            .parent_provider_item_id
-            .map(|parent| format!("{}:{}", event.provider, parent)),
+        parent_canonical_id,
         raw_json: event.raw_json,
     }
+}
+
+fn merge_existing_streaming_payload(
+    tx: &Connection,
+    identity_key: &str,
+    draft: &ProviderEventDraft,
+) -> Result<Value> {
+    if !matches!(
+        draft.phase,
+        ProviderEventPhase::Started | ProviderEventPhase::Delta | ProviderEventPhase::Progress
+    ) {
+        return Ok(draft.normalized_payload.clone());
+    }
+
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT normalized_payload_json FROM provider_events WHERE identity_key = ?1",
+            [identity_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let Some(existing) = existing else {
+        return Ok(draft.normalized_payload.clone());
+    };
+    let existing = serde_json::from_str(&existing).unwrap_or(Value::Null);
+    Ok(merge_streaming_payload(
+        existing,
+        draft.normalized_payload.clone(),
+    ))
+}
+
+fn merge_streaming_payload(existing: Value, mut incoming: Value) -> Value {
+    for key in ["body", "text"] {
+        let Some(existing_text) = existing.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(incoming_text) = incoming.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if incoming_text.starts_with(existing_text) {
+            continue;
+        }
+        if existing_text.ends_with(incoming_text) {
+            incoming[key] = Value::String(existing_text.to_owned());
+        } else {
+            incoming[key] = Value::String(format!("{existing_text}{incoming_text}"));
+        }
+    }
+    incoming
+}
+
+fn provider_record_canonical_id(event: &ProviderEventRecord) -> String {
+    event
+        .provider_item_id
+        .as_ref()
+        .map(|item| {
+            provider_canonical_id(&event.provider, event.provider_thread_id.as_deref(), item)
+        })
+        .unwrap_or_else(|| event.identity_key.clone())
+}
+
+fn provider_canonical_id(provider: &str, thread_id: Option<&str>, item_id: &str) -> String {
+    format!("{}:{}:{}", provider, thread_id.unwrap_or("-"), item_id)
 }
 
 fn open_migrated_connection(path: &Path) -> Result<Connection> {
@@ -772,6 +848,12 @@ fn unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn stable_text_hash(value: &str) -> u64 {
+    value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 #[cfg(test)]
@@ -918,6 +1000,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].identity_key, first.identity_key());
         assert_eq!(rows[0].raw_json["params"]["tokens"], 12);
+        assert_eq!(rows[0].normalized_payload["text"], "hello world");
 
         let raw_payloads = store
             .list_raw_payloads_for_identity(&latest.identity_key)
@@ -926,6 +1009,56 @@ mod tests {
         assert_eq!(raw_payloads[0].raw_json["params"]["delta"], "hello");
         assert_eq!(raw_payloads[1].raw_json["params"]["delta"], " world");
         assert_eq!(raw_payloads[2].raw_json["params"]["tokens"], 12);
+    }
+
+    #[test]
+    fn idless_raw_events_do_not_collapse_when_sequence_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut first = draft(ProviderEventKind::Unknown, ProviderEventPhase::Unknown);
+        first.provider_event_id = None;
+        first.provider_item_id = None;
+        first.provider_sequence = None;
+        first.provider_subtype = Some("status".to_owned());
+        first.occurred_at_ms = 10;
+        first.raw_json = json!({"method": "status", "params": {"message": "one"}});
+        let mut second = first.clone();
+        second.occurred_at_ms = 11;
+        second.raw_json = json!({"method": "status", "params": {"message": "two"}});
+
+        store.upsert_event(&first).unwrap();
+        store.upsert_event(&second).unwrap();
+
+        let rows = store.list_for_chat_thread(7).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn projected_parent_ids_match_projected_item_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let parent = draft(ProviderEventKind::Tool, ProviderEventPhase::Started);
+        let mut child = draft(ProviderEventKind::Tool, ProviderEventPhase::Completed);
+        child.provider_item_id = Some("child-1".to_owned());
+        child.parent_provider_item_id = Some("item-1".to_owned());
+
+        store.upsert_event(&parent).unwrap();
+        store.upsert_event(&child).unwrap();
+
+        let timeline = store.project_timeline_for_chat_thread(7).unwrap();
+        let parent_id = timeline
+            .iter()
+            .find(|item| item.body == "hello")
+            .map(|item| item.canonical_id.clone())
+            .unwrap();
+        let child_parent = timeline
+            .iter()
+            .find(|item| item.canonical_id.ends_with(":child-1"))
+            .and_then(|item| item.parent_canonical_id.clone())
+            .unwrap();
+        assert_eq!(child_parent, parent_id);
     }
 
     #[test]

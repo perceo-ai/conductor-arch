@@ -19,7 +19,7 @@
 - [ ] Add tests for icon aliases: `send-symbolic`, `focus-windows-symbolic`, `code-symbolic`, `zed-symbolic`, and `sidebar-hide-symbolic`.
 - [ ] Implement `resolve_icon_name`.
 - [ ] Use `resolve_icon_name` in `icon_button` and direct `Image::from_icon_name` calls in `session_surface.rs`.
-- [ ] Run `cargo test -p linux-archductor-gtk buttons session_surface::tests::editor_choices_use_resolvable_icons -- --nocapture`.
+- [ ] Run `cargo test -p archductor-gtk buttons session_surface::tests::editor_choices_use_resolvable_icons -- --nocapture`.
 
 ### Task 2: Dark Slate Theme Refresh
 
@@ -28,7 +28,7 @@
 
 - [ ] Add a focused CSS test that asserts the refreshed theme includes the new surface, text, accent, and focus colors.
 - [ ] Append a theme override section with dark-slate surfaces, modern font stacks, clearer hover/focus states, and upgraded chat/tool/context styling.
-- [ ] Run `cargo test -p linux-archductor-gtk theme -- --nocapture`.
+- [ ] Run `cargo test -p archductor-gtk theme -- --nocapture`.
 
 ### Task 3: Verification
 
@@ -36,6 +36,6 @@
 - No new files beyond this plan.
 
 - [ ] Run `cargo fmt --all`.
-- [ ] Run `cargo test -p linux-archductor-gtk buttons theme session_surface -- --nocapture` using valid individual filters if Cargo rejects multiple filters.
+- [ ] Run `cargo test -p archductor-gtk buttons theme session_surface -- --nocapture` using valid individual filters if Cargo rejects multiple filters.
 - [ ] Run `cargo check --workspace`.
 - [ ] Run `git diff --check`.

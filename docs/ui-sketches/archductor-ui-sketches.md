@@ -1,6 +1,6 @@
 # Archductor UI Sketches
 
-These sketches define a fast MVP interface for a Archductor
+These sketches define a fast MVP interface for an Archductor
 workflow. They are inspired by the public Conductor product layout and the
 official Conductor docs: dark app chrome, a narrow workspace sidebar, central
 agent session surface, bottom composer, embedded terminal mode, project

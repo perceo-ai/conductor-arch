@@ -85,7 +85,7 @@ fn github_source_choices_parse_number_title_and_state() {
 
 - [ ] **Step 2: Run the focused core test to verify it fails**
 
-Run: `cargo test -p linux-archductor-core pull_request_panel_state_collects_pr_readiness_and_review_text -- --nocapture`
+Run: `cargo test -p archductor-core pull_request_panel_state_collects_pr_readiness_and_review_text -- --nocapture`
 
 Expected: FAIL with missing `pull_request_panel_state` / parser symbol.
 
@@ -145,7 +145,7 @@ pub fn pull_request_panel_state(&self, name: &str) -> Result<PullRequestPanelSta
 
 - [ ] **Step 4: Run the focused tests to verify they pass**
 
-Run: `cargo test -p linux-archductor-core pull_request_panel_state_collects_pr_readiness_and_review_text github_source_choices_parse_number_title_and_state -- --nocapture`
+Run: `cargo test -p archductor-core pull_request_panel_state_collects_pr_readiness_and_review_text github_source_choices_parse_number_title_and_state -- --nocapture`
 
 Expected: PASS
 
@@ -183,7 +183,7 @@ fn workspace_source_preview_mentions_github_stateful_selection() {
 
 - [ ] **Step 2: Run the focused GTK tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk parse_github_numbered_stateful_choices_reads_number_state_and_title workspace_source_preview_mentions_github_stateful_selection -- --nocapture`
+Run: `cargo test -p archductor-gtk parse_github_numbered_stateful_choices_reads_number_state_and_title workspace_source_preview_mentions_github_stateful_selection -- --nocapture`
 
 Expected: FAIL with missing helper functions.
 
@@ -196,7 +196,7 @@ struct GithubNumberedChoice {
 }
 
 fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
-    linux_archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
+    archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
         .into_iter()
         .map(|choice| GithubNumberedChoice {
             value: format!("#{}", choice.number),
@@ -220,7 +220,7 @@ Use `gh issue list --json number,state,title --template ...` and `gh pr list --j
 
 - [ ] **Step 4: Run GTK source-form tests to verify they pass**
 
-Run: `cargo test -p linux-archductor-gtk projects::tests -- --nocapture`
+Run: `cargo test -p archductor-gtk projects::tests -- --nocapture`
 
 Expected: PASS
 
@@ -264,7 +264,7 @@ fn dashboard_meta_includes_pr_attention_state() {
 
 - [ ] **Step 2: Run the focused GTK tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk workspace_badge_prefers_failed_github_state_over_pr_number dashboard_meta_includes_pr_attention_state -- --nocapture`
+Run: `cargo test -p archductor-gtk workspace_badge_prefers_failed_github_state_over_pr_number dashboard_meta_includes_pr_attention_state -- --nocapture`
 
 Expected: FAIL with missing helpers.
 
@@ -305,7 +305,7 @@ Use `pull_request_state_summary(...)` output when a PR exists so the dashboard/s
 
 - [ ] **Step 4: Run the GTK tests to verify they pass**
 
-Run: `cargo test -p linux-archductor-gtk sidebar -- --nocapture`
+Run: `cargo test -p archductor-gtk sidebar -- --nocapture`
 
 Expected: PASS
 
@@ -343,7 +343,7 @@ fn pull_request_actions_include_summary_and_review_controls_for_open_prs() {
 
 - [ ] **Step 2: Run the focused GTK tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk pull_request_actions_include_summary_and_review_controls_for_open_prs -- --nocapture`
+Run: `cargo test -p archductor-gtk pull_request_actions_include_summary_and_review_controls_for_open_prs -- --nocapture`
 
 Expected: FAIL with missing helper function / mismatched action set.
 
@@ -395,7 +395,7 @@ Render three sections below the header:
 
 - [ ] **Step 4: Run the GTK checks-panel tests to verify they pass**
 
-Run: `cargo test -p linux-archductor-gtk workspace_command_center::tests -- --nocapture`
+Run: `cargo test -p archductor-gtk workspace_command_center::tests -- --nocapture`
 
 Expected: PASS
 
@@ -438,7 +438,7 @@ fn review_tab_sections_include_github_threads_before_local_comments() {
 
 - [ ] **Step 2: Run the focused GTK tests to verify they fail**
 
-Run: `cargo test -p linux-archductor-gtk review_thread_action_feedback_reports_thread_location review_tab_sections_include_github_threads_before_local_comments -- --nocapture`
+Run: `cargo test -p archductor-gtk review_thread_action_feedback_reports_thread_location review_tab_sections_include_github_threads_before_local_comments -- --nocapture`
 
 Expected: FAIL with missing helper.
 
@@ -491,7 +491,7 @@ Keep existing local add/resolve review comment form intact below the GitHub area
 
 - [ ] **Step 4: Run the GTK review-tab tests to verify they pass**
 
-Run: `cargo test -p linux-archductor-gtk workspace_command_center::tests -- --nocapture`
+Run: `cargo test -p archductor-gtk workspace_command_center::tests -- --nocapture`
 
 Expected: PASS
 
@@ -541,7 +541,7 @@ fn file_inline_comments_text_filters_to_selected_path() {
 
 - [ ] **Step 2: Run the focused GTK tests to verify they fail or cover the old behavior**
 
-Run: `cargo test -p linux-archductor-gtk diff_summary_label_shows_add_delete_counts file_inline_comments_text_filters_to_selected_path -- --nocapture`
+Run: `cargo test -p archductor-gtk diff_summary_label_shows_add_delete_counts file_inline_comments_text_filters_to_selected_path -- --nocapture`
 
 Expected: PASS or FAIL; if PASS, keep them and add one new failing test below:
 
@@ -577,7 +577,7 @@ Keep the existing unified diff renderer. Do not build inline review widgets yet.
 
 - [ ] **Step 4: Run the GTK changes-tab tests to verify they pass**
 
-Run: `cargo test -p linux-archductor-gtk workspace_command_center::tests -- --nocapture`
+Run: `cargo test -p archductor-gtk workspace_command_center::tests -- --nocapture`
 
 Expected: PASS
 
@@ -609,7 +609,7 @@ fn github_status_classes_are_listed_in_theme_source() {
 
 - [ ] **Step 2: Run the smallest relevant test/build command**
 
-Run: `cargo test -p linux-archductor-gtk github_status_classes_are_listed_in_theme_source -- --nocapture`
+Run: `cargo test -p archductor-gtk github_status_classes_are_listed_in_theme_source -- --nocapture`
 
 Expected: FAIL if helper is missing, otherwise skip and move to the next step.
 
@@ -656,19 +656,19 @@ git commit -m "docs: update github integration coverage"
 
 - [ ] **Step 1: Run focused core verification**
 
-Run: `cargo test -p linux-archductor-core workspace::tests -- --nocapture`
+Run: `cargo test -p archductor-core workspace::tests -- --nocapture`
 
 Expected: PASS
 
 - [ ] **Step 2: Run focused GTK verification**
 
-Run: `cargo test -p linux-archductor-gtk projects::tests workspace_command_center::tests sidebar::tests -- --nocapture`
+Run: `cargo test -p archductor-gtk projects::tests workspace_command_center::tests sidebar::tests -- --nocapture`
 
 Expected: PASS
 
 - [ ] **Step 3: Run the crate-level GTK suite**
 
-Run: `cargo test -p linux-archductor-gtk -- --nocapture`
+Run: `cargo test -p archductor-gtk -- --nocapture`
 
 Expected: PASS
 

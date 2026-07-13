@@ -49,6 +49,7 @@ pub struct CodexAppServerClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_request_id: u64,
+    next_read_line: usize,
 }
 
 impl CodexAppServerClient {
@@ -58,7 +59,7 @@ impl CodexAppServerClient {
             .args(&launch.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::inherit());
 
         if let Some(cwd) = &launch.cwd {
             command.current_dir(cwd);
@@ -84,6 +85,7 @@ impl CodexAppServerClient {
             stdin,
             stdout: BufReader::new(stdout),
             next_request_id: 1,
+            next_read_line: 0,
         })
     }
 
@@ -121,8 +123,33 @@ impl CodexAppServerClient {
         )
     }
 
+    pub fn send_response(&mut self, id: Value, result: Value) -> Result<()> {
+        write_jsonl(
+            &mut self.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result,
+            }),
+        )
+    }
+
+    pub fn send_error_response(&mut self, id: Value, code: i64, message: &str) -> Result<()> {
+        write_jsonl(
+            &mut self.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": code,
+                    "message": message,
+                },
+            }),
+        )
+    }
+
     pub fn read_message(&mut self) -> Result<Option<CodexAppServerMessage>> {
-        read_jsonl_message(&mut self.stdout)
+        read_jsonl_message(&mut self.stdout, &mut self.next_read_line)
     }
 
     pub fn process_id(&self) -> u32 {
@@ -130,7 +157,13 @@ impl CodexAppServerClient {
     }
 
     pub fn kill(&mut self) -> Result<()> {
-        self.child.kill().context("failed to kill codex app-server")
+        self.child
+            .kill()
+            .context("failed to kill codex app-server")?;
+        self.child
+            .wait()
+            .context("failed to reap killed codex app-server")?;
+        Ok(())
     }
 }
 
@@ -162,10 +195,7 @@ fn write_initialize_request_with_id<W: Write>(
                 "clientInfo": {
                     "name": params.client_name.clone(),
                 },
-                "capabilities": {
-                    "providerEvents": true,
-                    "rawJson": true,
-            },
+                "capabilities": {},
         },
     });
 
@@ -269,7 +299,10 @@ pub fn read_jsonl_messages<R: BufRead>(mut reader: R) -> Result<Vec<CodexAppServ
     Ok(messages)
 }
 
-fn read_jsonl_message<R: BufRead>(reader: &mut R) -> Result<Option<CodexAppServerMessage>> {
+fn read_jsonl_message<R: BufRead>(
+    reader: &mut R,
+    next_line_number: &mut usize,
+) -> Result<Option<CodexAppServerMessage>> {
     let mut line = String::new();
     loop {
         line.clear();
@@ -279,11 +312,12 @@ fn read_jsonl_message<R: BufRead>(reader: &mut R) -> Result<Option<CodexAppServe
         if bytes == 0 {
             return Ok(None);
         }
+        *next_line_number += 1;
         let raw = line.trim_end_matches(['\r', '\n']).to_owned();
         if raw.trim().is_empty() {
             continue;
         }
-        return parse_jsonl_message(&raw, 1).map(Some);
+        return parse_jsonl_message(&raw, *next_line_number).map(Some);
     }
 }
 
@@ -559,18 +593,13 @@ impl CodexProviderEventDraft {
 
 pub fn classify_codex_method(
     method: &str,
-    message_kind: CodexAppServerMessageKind,
+    _message_kind: CodexAppServerMessageKind,
 ) -> CodexProviderEventCategory {
     if method.is_empty() {
-        return match message_kind {
-            CodexAppServerMessageKind::Response => CodexProviderEventCategory::Turns,
-            CodexAppServerMessageKind::Unknown
-            | CodexAppServerMessageKind::Notification
-            | CodexAppServerMessageKind::Request => CodexProviderEventCategory::Unknown,
-        };
+        return CodexProviderEventCategory::Unknown;
     }
 
-    let normalized = method.to_ascii_lowercase();
+    let normalized = split_camel_segments(method).to_ascii_lowercase();
     let tokens: Vec<_> = normalized
         .split(|ch: char| !(ch.is_ascii_alphanumeric()))
         .filter(|token| !token.is_empty())
@@ -614,6 +643,18 @@ pub fn classify_codex_method(
         CodexProviderEventCategory::PlanningReasoning
     } else if has_any(
         &tokens,
+        &[
+            "approval",
+            "approvals",
+            "permission",
+            "permissions",
+            "sandbox",
+            "policy",
+        ],
+    ) {
+        CodexProviderEventCategory::ApprovalsPermissions
+    } else if has_any(
+        &tokens,
         &["command", "exec", "execution", "process", "subprocess"],
     ) {
         CodexProviderEventCategory::CommandProcessExecution
@@ -641,18 +682,6 @@ pub fn classify_codex_method(
         &["skill", "skills", "plugin", "plugins", "hook", "hooks"],
     ) {
         CodexProviderEventCategory::SkillsPluginsHooks
-    } else if has_any(
-        &tokens,
-        &[
-            "approval",
-            "approvals",
-            "permission",
-            "permissions",
-            "sandbox",
-            "policy",
-        ],
-    ) {
-        CodexProviderEventCategory::ApprovalsPermissions
     } else if has_any(
         &tokens,
         &[
@@ -796,8 +825,41 @@ fn json_rpc_id_to_string(id: &Value) -> String {
     }
 }
 
+fn split_camel_segments(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() && previous_lower_or_digit {
+            output.push('_');
+        }
+        previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        output.push(ch);
+    }
+    output
+}
+
 fn file_uri(path: &Path) -> String {
-    format!("file://{}", path.to_string_lossy())
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    format!("file://{}", percent_encode_path(&path.to_string_lossy()))
+}
+
+fn percent_encode_path(path: &str) -> String {
+    let mut encoded = String::new();
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -867,6 +929,7 @@ mod tests {
         assert_eq!(lines[0]["id"], 1);
         assert_eq!(lines[0]["method"], "initialize");
         assert_eq!(lines[0]["params"]["clientInfo"]["name"], "archductor-test");
+        assert_eq!(lines[0]["params"]["capabilities"], json!({}));
         assert_eq!(
             lines[0]["params"]["workspaceFolders"][0]["uri"],
             "file:///tmp/workspace"
@@ -915,6 +978,50 @@ mod tests {
         assert_eq!(drafts[2].message_kind, CodexAppServerMessageKind::Request);
         assert_eq!(drafts[2].correlation_id.as_deref(), Some("7"));
         assert_eq!(drafts[2].raw_json, messages[2].raw_json);
+    }
+
+    #[test]
+    fn response_messages_remain_unknown_without_request_method_context() {
+        let message =
+            parse_jsonl_message(r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#, 1).unwrap();
+
+        let draft = message.to_provider_event_draft();
+
+        assert_eq!(draft.message_kind, CodexAppServerMessageKind::Response);
+        assert_eq!(draft.category, CodexProviderEventCategory::Unknown);
+    }
+
+    #[test]
+    fn camel_case_item_methods_classify_to_core_categories() {
+        assert_eq!(
+            classify_codex_method(
+                "item/agentMessage/delta",
+                CodexAppServerMessageKind::Notification
+            ),
+            CodexProviderEventCategory::AssistantOutput
+        );
+        assert_eq!(
+            classify_codex_method(
+                "approval/commandApproval/request",
+                CodexAppServerMessageKind::Request
+            ),
+            CodexProviderEventCategory::ApprovalsPermissions
+        );
+    }
+
+    #[test]
+    fn json_rpc_responses_are_written_with_original_ids() {
+        let mut output = Vec::new();
+        write_jsonl(
+            &mut output,
+            &json!({"jsonrpc": "2.0", "id": "req-1", "result": {"approved": true}}),
+        )
+        .unwrap();
+
+        let line: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(line["id"], "req-1");
+        assert_eq!(line["result"]["approved"], true);
+        assert!(line.get("method").is_none());
     }
 
     #[test]
@@ -982,6 +1089,14 @@ mod tests {
         let error = read_jsonl_messages(input).unwrap_err().to_string();
 
         assert!(error.contains("line 3"), "{error}");
+    }
+
+    #[test]
+    fn file_uri_percent_encodes_reserved_path_characters() {
+        assert_eq!(
+            file_uri(Path::new("/tmp/work space/branch#1")),
+            "file:///tmp/work%20space/branch%231"
+        );
     }
 
     #[test]

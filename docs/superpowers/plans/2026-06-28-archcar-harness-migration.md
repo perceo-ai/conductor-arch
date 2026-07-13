@@ -24,7 +24,7 @@
 - Create: `crates/core/src/archcar/server.rs`
 - Create: `crates/core/src/archcar/session.rs`
 - Create: `crates/core/src/archcar/harness.rs`
-- Test: `cargo test -p linux-archductor-core archcar -- --nocapture`
+- Test: `cargo test -p archductor-core archcar -- --nocapture`
 
 - [ ] Write the failing module-shape tests
 - [ ] Run the focused core test command and confirm it fails
@@ -36,8 +36,8 @@
 **Files:**
 - Modify: `crates/core/src/archcar/protocol.rs`
 - Modify: `crates/core/src/archcar/harness.rs`
-- Test: `cargo test -p linux-archductor-core archcar::protocol -- --nocapture`
-- Test: `cargo test -p linux-archductor-core archcar::harness -- --nocapture`
+- Test: `cargo test -p archductor-core archcar::protocol -- --nocapture`
+- Test: `cargo test -p archductor-core archcar::harness -- --nocapture`
 
 - [ ] Write failing tests for protocol serialization, Codex readiness detection, and Claude stub unsupported responses
 - [ ] Run the focused test commands and confirm they fail for the right reasons
@@ -50,7 +50,7 @@
 - Modify: `crates/core/src/archcar/server.rs`
 - Modify: `crates/core/src/archcar/session.rs`
 - Modify: `crates/core/src/archcar/client.rs`
-- Test: `cargo test -p linux-archductor-core archcar::server -- --nocapture`
+- Test: `cargo test -p archductor-core archcar::server -- --nocapture`
 
 - [ ] Write failing tests for immediate spawn ack, workspace debounce, and subscriber event delivery
 - [ ] Run the focused server test command and confirm it fails
@@ -64,7 +64,7 @@
 - Modify: `crates/gtk-app/src/session_surface.rs`
 - Modify: `crates/gtk-app/src/sidebar.rs`
 - Modify: `crates/gtk-app/src/workspace_command_center.rs`
-- Test: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+- Test: `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 - [ ] Write a failing GTK regression test covering “workspace selection does not directly spawn PTY on the UI path”
 - [ ] Run the focused GTK test command and confirm it fails
@@ -77,7 +77,7 @@
 - Modify: `crates/cli/Cargo.toml`
 - Modify: `crates/cli/src/main.rs`
 - Modify: `crates/archcar/src/main.rs`
-- Test: `cargo test -p linux-archductor archcar -- --nocapture`
+- Test: `cargo test -p archductor archcar -- --nocapture`
 
 - [ ] Write failing CLI tests for basic controller-backed status or send flow
 - [ ] Run the focused CLI test command and confirm it fails

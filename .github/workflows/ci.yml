@@ -72,8 +72,8 @@ jobs:
       - name: Package debug binaries
         run: |
           mkdir -p ci-artifacts/bin
-          cp target/debug/linux-archductor ci-artifacts/bin/
-          cp target/debug/linux-archductor-gtk ci-artifacts/bin/
+          cp target/debug/archductor ci-artifacts/bin/
+          cp target/debug/archductor-gtk ci-artifacts/bin/
           cp target/debug/archcar ci-artifacts/bin/
 
       - name: Upload debug binaries

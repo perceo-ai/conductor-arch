@@ -438,35 +438,16 @@ pub(crate) fn build_projects_page(
         let refresh_workspace_inline = refresh_workspace_inline.clone();
         let toast_create_inline = toast_create_inline.clone();
         let navigate_created_workspace_inline = navigate_created_workspace_inline.clone();
-        let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
-        spawn_background_job_with_progress(
-            {
-                let db_path_create = db_path_create.clone();
-                let repo = repo.clone();
-                let inserted_workspace_name = inserted_workspace_name.clone();
-                move |progress| {
-                    WorkspaceStore::open(db_path_create).and_then(|store| {
-                        request.create_workspace_with_progress(&store, &repo, |workspace| {
-                            if let Ok(mut name) = inserted_workspace_name.lock() {
-                                *name = Some(workspace.name.clone());
-                            }
-                            progress();
-                        })
-                    })
-                }
-            },
+        spawn_workspace_create_with_navigation(
+            db_path_create.clone(),
+            repo.clone(),
+            request,
+            navigate_created_workspace_inline,
             {
                 let refresh_after_create = refresh_after_create.clone();
                 let refresh_dashboard_inline = refresh_dashboard_inline.clone();
                 let refresh_workspace_inline = refresh_workspace_inline.clone();
-                let inserted_workspace_name = inserted_workspace_name.clone();
-                let navigate_created_workspace_inline = navigate_created_workspace_inline.clone();
                 move || {
-                    if let Ok(name) = inserted_workspace_name.lock() {
-                        if let Some(name) = name.clone() {
-                            navigate_created_workspace_inline(name);
-                        }
-                    }
                     refresh_after_create();
                     refresh_dashboard_inline();
                     refresh_workspace_inline();
@@ -986,35 +967,16 @@ pub(crate) fn show_create_workspace_dialog(
         let dialog_for_create = dialog_for_create.clone();
         let toast_create = toast_create.clone();
         let navigate_created_workspace = navigate_created_workspace.clone();
-        let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
-        spawn_background_job_with_progress(
-            {
-                let db_path_for_create = db_path_for_create.clone();
-                let repo = repo.clone();
-                let inserted_workspace_name = inserted_workspace_name.clone();
-                move |progress| {
-                    WorkspaceStore::open(db_path_for_create).and_then(|store| {
-                        request.create_workspace_with_progress(&store, &repo, |workspace| {
-                            if let Ok(mut name) = inserted_workspace_name.lock() {
-                                *name = Some(workspace.name.clone());
-                            }
-                            progress();
-                        })
-                    })
-                }
-            },
+        spawn_workspace_create_with_navigation(
+            db_path_for_create.clone(),
+            repo.clone(),
+            request,
+            navigate_created_workspace,
             {
                 let refresh_for_create = refresh_for_create.clone();
                 let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
                 let refresh_workspace_for_create = refresh_workspace_for_create.clone();
-                let inserted_workspace_name = inserted_workspace_name.clone();
-                let navigate_created_workspace = navigate_created_workspace.clone();
                 move || {
-                    if let Ok(name) = inserted_workspace_name.lock() {
-                        if let Some(name) = name.clone() {
-                            navigate_created_workspace(name);
-                        }
-                    }
                     refresh_for_create();
                     refresh_dashboard_for_create();
                     refresh_workspace_for_create();
@@ -1049,6 +1011,47 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
+}
+
+fn spawn_workspace_create_with_navigation<P, C>(
+    db_path: PathBuf,
+    repository_name: String,
+    request: WorkspaceSourceRequest,
+    navigate_created_workspace: Rc<dyn Fn(String)>,
+    on_inserted_progress: P,
+    on_complete: C,
+) where
+    P: Fn() + 'static,
+    C: FnOnce(anyhow::Result<archductor_core::workspace::Workspace>) + 'static,
+{
+    let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
+    spawn_background_job_with_progress(
+        {
+            let inserted_workspace_name = inserted_workspace_name.clone();
+            move |progress| {
+                WorkspaceStore::open(db_path).and_then(|store| {
+                    request.create_workspace_with_progress(&store, &repository_name, |workspace| {
+                        if let Ok(mut name) = inserted_workspace_name.lock() {
+                            *name = Some(workspace.name.clone());
+                        }
+                        progress();
+                    })
+                })
+            }
+        },
+        {
+            let inserted_workspace_name = inserted_workspace_name.clone();
+            move || {
+                if let Ok(mut name) = inserted_workspace_name.lock() {
+                    if let Some(name) = name.take() {
+                        navigate_created_workspace(name);
+                    }
+                }
+                on_inserted_progress();
+            }
+        },
+        on_complete,
+    );
 }
 
 fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {

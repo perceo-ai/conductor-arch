@@ -1,9 +1,3 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProviderModel {
-    pub provider: &'static str,
-    pub model: &'static str,
-}
-
 pub const CODEX_PROVIDER: &str = "codex";
 pub const CLAUDE_PROVIDER: &str = "claude";
 
@@ -32,16 +26,4 @@ pub fn model_choices_for_provider(provider: &str) -> &'static [&'static str] {
         CLAUDE_PROVIDER => CLAUDE_MODEL_CHOICES,
         _ => &[],
     }
-}
-
-pub fn provider_model_choices(provider: &str) -> impl Iterator<Item = ProviderModel> {
-    let provider = match provider {
-        CODEX_PROVIDER => CODEX_PROVIDER,
-        CLAUDE_PROVIDER => CLAUDE_PROVIDER,
-        _ => "",
-    };
-    model_choices_for_provider(provider)
-        .iter()
-        .copied()
-        .map(move |model| ProviderModel { provider, model })
 }

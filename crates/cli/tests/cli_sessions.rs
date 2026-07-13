@@ -176,11 +176,16 @@ fn cli_session_open_print_command_uses_explicit_provider_models() {
             "berlin",
             "--kind",
             "codex",
+            "--model",
+            "gpt-5.6-sol",
             "--print-command",
         ])
         .assert()
         .success()
-        .stdout(contains("exec codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol"));
+        .stdout(contains(
+            "exec codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox",
+        ))
+        .stdout(contains("--model gpt-5.6-sol"));
 
     app(temp.path())
         .args([

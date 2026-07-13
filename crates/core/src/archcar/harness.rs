@@ -11,8 +11,6 @@ pub trait HarnessController: Send + Sync {
         workspace: &str,
         harness: SessionHarnessOptions,
     ) -> Result<crate::workspace::SessionLaunch>;
-    fn detect_ready(&self, screen: &str) -> bool;
-    fn startup_input(&self, screen: &str) -> Option<String>;
 }
 
 pub fn controller_for_kind(kind: SessionKind) -> Box<dyn HarnessController> {
@@ -42,14 +40,6 @@ impl HarnessController for CodexHarnessController {
     ) -> Result<crate::workspace::SessionLaunch> {
         store.session_launch_with_options(workspace, SessionKind::Codex, harness)
     }
-
-    fn detect_ready(&self, _screen: &str) -> bool {
-        false
-    }
-
-    fn startup_input(&self, _screen: &str) -> Option<String> {
-        None
-    }
 }
 
 pub struct ClaudeHarnessController;
@@ -71,14 +61,6 @@ impl HarnessController for ClaudeHarnessController {
     ) -> Result<crate::workspace::SessionLaunch> {
         Err(anyhow!("claude harness not implemented in archcar yet"))
     }
-
-    fn detect_ready(&self, _screen: &str) -> bool {
-        false
-    }
-
-    fn startup_input(&self, _screen: &str) -> Option<String> {
-        None
-    }
 }
 
 pub struct ShellHarnessController;
@@ -99,14 +81,6 @@ impl HarnessController for ShellHarnessController {
         harness: SessionHarnessOptions,
     ) -> Result<crate::workspace::SessionLaunch> {
         store.session_launch_with_options(workspace, SessionKind::Shell, harness)
-    }
-
-    fn detect_ready(&self, _screen: &str) -> bool {
-        true
-    }
-
-    fn startup_input(&self, _screen: &str) -> Option<String> {
-        None
     }
 }
 
@@ -144,14 +118,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_harness_does_not_derive_readiness_from_rendered_screen() {
+    fn codex_harness_reports_runtime_capabilities_without_screen_hooks() {
         let controller = CodexHarnessController;
-        assert!(!controller.detect_ready("• Booting MCP server\n\n› hi"));
-        assert!(!controller.detect_ready("› hi"));
-        assert_eq!(
-            controller.startup_input("Do you trust this directory?"),
-            None
-        );
+        assert_eq!(controller.kind(), SessionKind::Codex);
+        assert!(controller.supports_auto_spawn());
     }
 
     #[test]

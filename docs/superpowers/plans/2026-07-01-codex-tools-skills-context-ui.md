@@ -24,7 +24,7 @@ Add tests that cover:
 - expandable file references from skill/tool output paths
 - context usage text such as `Context window: 42%` and `128k / 200k tokens`
 
-Run: `cargo test -p linux-archductor-core codex_tui -- --nocapture`
+Run: `cargo test -p archductor-core codex_tui -- --nocapture`
 Expected: FAIL until the parser types and functions exist.
 
 - [ ] **Step 2: Implement the minimal parser**
@@ -53,7 +53,7 @@ Use `#[serde(default, skip_serializing_if = "Option::is_none")]` so older snapsh
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p linux-archductor-core codex_tui archcar::protocol -- --nocapture`
+Run: `cargo test -p archductor-core codex_tui archcar::protocol -- --nocapture`
 Expected: PASS.
 
 ### Task 2: GTK Inline Event Rendering
@@ -69,7 +69,7 @@ Add pure helper tests for:
 - deciding whether a path can be loaded for inline preview
 - truncating long event bodies without losing expandability
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 Expected: FAIL until helpers exist.
 
 - [ ] **Step 2: Render expandable inline tool/skill rows**
@@ -98,7 +98,7 @@ Match the existing dark chat surface, keep radius at or under the local style, a
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 Expected: PASS.
 
 ### Task 3: Context Usage Ring Beside Send
@@ -116,7 +116,7 @@ Add tests for:
 - 90+ is danger
 - tooltip text includes exact token counts when available
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 Expected: FAIL until helpers exist.
 
 - [ ] **Step 2: Add send-adjacent usage widget**
@@ -140,7 +140,7 @@ Ensure the widget has stable dimensions and does not shift the send button.
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+Run: `cargo test -p archductor-gtk session_surface -- --nocapture`
 Expected: PASS.
 
 ### Task 4: Integration And Regression Pass
@@ -159,8 +159,8 @@ Confirm user messages, staged review sends, archcar Codex sends, and non-Codex s
 - [ ] **Step 3: Run focused tests**
 
 Run:
-- `cargo test -p linux-archductor-core codex_tui archcar::protocol -- --nocapture`
-- `cargo test -p linux-archductor-gtk session_surface -- --nocapture`
+- `cargo test -p archductor-core codex_tui archcar::protocol -- --nocapture`
+- `cargo test -p archductor-gtk session_surface -- --nocapture`
 
 Expected: PASS.
 

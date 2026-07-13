@@ -701,14 +701,21 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
+    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
     let navigate_created_workspace: Rc<dyn Fn(String)> = {
         let app_state = app_state.clone();
         let main_stack_handle = main_stack_handle.clone();
+        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
         Rc::new(move |workspace_name| {
             app_state.navigate_to_workspace_with_default_tab(
                 Some(workspace_name),
                 Some(WorkspaceTab::Chats),
             );
+            if let Some(refresh_view_preferences) =
+                refresh_view_preferences_handle.borrow().as_ref()
+            {
+                refresh_view_preferences();
+            }
             if let Some(stack) = main_stack_handle.borrow().as_ref() {
                 stack.set_visible_child_name("workspace");
             }
@@ -798,6 +805,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
     };
+    *refresh_view_preferences_handle.borrow_mut() = Some(refresh_view_preferences.clone());
 
     let (sidebar, refresh_sidebar) = sidebar::build_app_sidebar(
         &app_state,

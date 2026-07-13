@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Restyle the GTK app so the shell feels much closer to `conductor.build/docs` while keeping workspace tool panes denser and Linux-native.
+**Goal:** Restyle the GTK app so the shell feels much closer to `conductor.build/docs` while keeping workspace tool panes denser and Archductor.
 
 **Architecture:** Keep the current GTK layout and state model. Extract the large inline CSS into a dedicated theme module, introduce a small set of visual tokens, then restyle shared shell primitives first and dense workspace panes second so the whole app reads as one system without a product rewrite.
 
@@ -36,7 +36,7 @@
 **Files:**
 - Create: `crates/gtk-app/src/theme.rs`
 - Modify: `crates/gtk-app/src/main.rs`
-- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
 
 - [ ] **Step 1: Add a focused theme module**
 
@@ -77,7 +77,7 @@ const APP_CSS: &str = r#"... "#;
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -97,7 +97,7 @@ git commit -m "refactor(gtk): extract app theme module"
 
 **Files:**
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
 
 - [ ] **Step 1: Write the new token block inside `theme.rs`**
 
@@ -186,7 +186,7 @@ Preserve Linux utility contrast with a dedicated group instead of mixing many un
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -208,7 +208,7 @@ git commit -m "feat(gtk): define docs-inspired shell theme"
 - Modify: `crates/gtk-app/src/sidebar.rs`
 - Modify: `crates/gtk-app/src/main.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
 
 - [ ] **Step 1: Add structural classes for the top nav group**
 
@@ -281,7 +281,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -304,7 +304,7 @@ git commit -m "feat(gtk): restyle shared shell primitives"
 - Modify: `crates/gtk-app/src/projects.rs`
 - Modify: `crates/gtk-app/src/history.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
 
 - [ ] **Step 1: Add shell container classes where missing**
 
@@ -372,7 +372,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -394,7 +394,7 @@ git commit -m "feat(gtk): restyle top-level app pages"
 - Modify: `crates/gtk-app/src/workspace_command_center.rs`
 - Modify: `crates/gtk-app/src/session_surface.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
 
 - [ ] **Step 1: Add shared page-shell classes to the workspace root**
 
@@ -457,7 +457,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -478,7 +478,7 @@ git commit -m "feat(gtk): align workspace command center with shell theme"
 **Files:**
 - Modify: `crates/gtk-app/src/terminal.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
 
 - [ ] **Step 1: Add stable classes for dense tool panes**
 
@@ -531,7 +531,7 @@ Update related classes in `theme.rs`:
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -552,8 +552,8 @@ git commit -m "feat(gtk): polish dense workspace tool panes"
 **Files:**
 - Modify: `crates/gtk-app/src/theme.rs` (only if needed after visual verification)
 - Test: `cargo fmt --all -- --check`
-- Test: `cargo test -p linux-archductor-gtk`
-- Test: `cargo build -p linux-archductor-gtk`
+- Test: `cargo test -p archductor-gtk`
+- Test: `cargo build -p archductor-gtk`
 
 - [ ] **Step 1: Run formatting check**
 
@@ -574,7 +574,7 @@ no output and exit code 0
 Run:
 
 ```bash
-cargo test -p linux-archductor-gtk
+cargo test -p archductor-gtk
 ```
 
 Expected:
@@ -588,7 +588,7 @@ test result: ok
 Run:
 
 ```bash
-cargo build -p linux-archductor-gtk
+cargo build -p archductor-gtk
 ```
 
 Expected:
@@ -602,7 +602,7 @@ Finished
 Run:
 
 ```bash
-cargo run -p linux-archductor-gtk
+cargo run -p archductor-gtk
 ```
 
 Review:

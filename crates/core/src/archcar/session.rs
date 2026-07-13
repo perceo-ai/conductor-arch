@@ -247,6 +247,7 @@ struct RuntimeProviderEventInput<'a> {
     kind: SessionKind,
     session_id: i64,
     thread_id: i64,
+    identity_suffix: Option<&'a str>,
     phase: ProviderEventPhase,
     event_kind: ProviderEventKind,
     subtype: &'a str,
@@ -255,12 +256,19 @@ struct RuntimeProviderEventInput<'a> {
 }
 
 fn runtime_provider_event(input: RuntimeProviderEventInput<'_>) -> ProviderEventDraft {
+    let identity_suffix = input
+        .identity_suffix
+        .map(|suffix| format!(":{suffix}"))
+        .unwrap_or_default();
     ProviderEventDraft {
         provider: provider_name(input.kind).to_owned(),
-        provider_event_id: Some(format!("archcar:{}:{}", input.session_id, input.subtype)),
+        provider_event_id: Some(format!(
+            "archcar:{}:{}{}",
+            input.session_id, input.subtype, identity_suffix
+        )),
         provider_item_id: Some(format!(
-            "archcar-session-{}-{}",
-            input.session_id, input.subtype
+            "archcar-session-{}-{}{}",
+            input.session_id, input.subtype, identity_suffix
         )),
         provider_thread_id: Some(input.thread_id.to_string()),
         provider_turn_id: None,
@@ -288,6 +296,7 @@ fn runtime_provider_event(input: RuntimeProviderEventInput<'_>) -> ProviderEvent
             "source": "archcar",
             "session_id": input.session_id,
             "thread_id": input.thread_id,
+            "identity_suffix": input.identity_suffix,
             "kind": format!("{:?}", input.kind),
             "phase": input.phase.as_str(),
             "event_kind": input.event_kind.as_str(),
@@ -297,6 +306,30 @@ fn runtime_provider_event(input: RuntimeProviderEventInput<'_>) -> ProviderEvent
         }),
         schema_version: 1,
         adapter_version: "archcar-runtime".to_owned(),
+    }
+}
+
+fn append_runtime_provider_event(
+    runtime_store: &RuntimeSessionStore,
+    event: ProviderEventDraft,
+    context: &str,
+) {
+    let session_id = event.process_id;
+    let thread_id = event.chat_thread_id;
+    let provider = event.provider.clone();
+    let subtype = event.provider_subtype.clone();
+    let phase = event.phase.as_str();
+    if let Err(err) = runtime_store.append_provider_event(&event) {
+        warn!(
+            session_id,
+            thread_id,
+            provider = %provider,
+            subtype = subtype.as_deref().unwrap_or("unknown"),
+            phase,
+            error = %format!("{err:#}"),
+            context,
+            "archcar runtime provider event persistence failed"
+        );
     }
 }
 
@@ -539,16 +572,35 @@ fn format_input_audit_log(
 }
 
 fn should_persist_screen_output(
-    _kind: SessionKind,
+    kind: SessionKind,
     last_fingerprint: &mut Option<String>,
     screen: &str,
 ) -> bool {
-    let fingerprint = screen.to_owned();
+    let fingerprint = screen_persistence_fingerprint(kind, screen);
     if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return false;
     }
     *last_fingerprint = Some(fingerprint);
     true
+}
+
+fn screen_persistence_fingerprint(kind: SessionKind, screen: &str) -> String {
+    if kind != SessionKind::Codex {
+        return screen.to_owned();
+    }
+
+    screen
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.contains("Working (") && trimmed.contains("esc to interrupt") {
+                "codex:working-status".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn write_pty_screen_snapshot(
@@ -587,7 +639,7 @@ fn run_session_loop(
     db_path: std::path::PathBuf,
     logs_dir: std::path::PathBuf,
     snapshot: Arc<Mutex<SessionSnapshot>>,
-    controller: Box<dyn HarnessController>,
+    _controller: Box<dyn HarnessController>,
     mut pty: ManagedSessionConnection,
     command_rx: Receiver<SessionCommand>,
     event_tx: Sender<ArchcarEvent>,
@@ -606,22 +658,26 @@ fn run_session_loop(
             thread_id: started.thread_id,
         });
     }
-    let mut trust_answered = false;
     let mut last_screen = String::new();
     let mut last_persisted_screen_fingerprint = None;
     let mut native_thread_id_resolved = false;
+    let mut user_input_sequence = 0_u64;
     let runtime_store = RuntimeSessionStore::new(db_path.clone());
-    let _ =
-        runtime_store.append_provider_event(&runtime_provider_event(RuntimeProviderEventInput {
+    append_runtime_provider_event(
+        &runtime_store,
+        runtime_provider_event(RuntimeProviderEventInput {
             kind: started.kind,
             session_id: started.session_id,
             thread_id: started.thread_id,
+            identity_suffix: None,
             phase: ProviderEventPhase::Started,
             event_kind: ProviderEventKind::ThreadSession,
             subtype: "session_started",
             title: "Session started",
             body: provider_name(started.kind),
-        }));
+        }),
+        "session_started",
+    );
     loop {
         while let Ok(command) = command_rx.try_recv() {
             match command {
@@ -659,11 +715,15 @@ fn run_session_loop(
                         source,
                         &log_text,
                     );
-                    let _ = runtime_store.append_provider_event(&runtime_provider_event(
-                        RuntimeProviderEventInput {
+                    user_input_sequence += 1;
+                    let user_input_identity = format!("input-{user_input_sequence}");
+                    append_runtime_provider_event(
+                        &runtime_store,
+                        runtime_provider_event(RuntimeProviderEventInput {
                             kind: current.kind,
                             session_id: current.session_id,
                             thread_id: current.thread_id,
+                            identity_suffix: Some(&user_input_identity),
                             phase: ProviderEventPhase::Started,
                             event_kind: ProviderEventKind::UserInput,
                             subtype: match kind {
@@ -677,31 +737,16 @@ fn run_session_loop(
                                 ArchcarInputKind::ControlCommand => "Control command",
                             },
                             body: persisted_input,
-                        },
-                    ));
+                        }),
+                        "user_input",
+                    );
                     match pty.send_line(&input) {
                         Ok(()) => {
                             if matches!(current.kind, SessionKind::Codex | SessionKind::Shell) {
                                 if let Ok(mut state) = snapshot.lock() {
-                                    state.ready = true;
-                                    state.runtime_state = AgentSessionState::WaitingForInput;
+                                    state.ready = false;
+                                    state.runtime_state = AgentSessionState::Running;
                                 }
-                                let _ = runtime_store.append_provider_event(
-                                    &runtime_provider_event(RuntimeProviderEventInput {
-                                        kind: current.kind,
-                                        session_id: current.session_id,
-                                        thread_id: current.thread_id,
-                                        phase: ProviderEventPhase::Completed,
-                                        event_kind: ProviderEventKind::ThreadSession,
-                                        subtype: "session_ready",
-                                        title: "Session ready",
-                                        body: provider_name(current.kind),
-                                    }),
-                                );
-                                let _ = event_tx.send(ArchcarEvent::SessionReady {
-                                    session_id: current.session_id,
-                                    thread_id: current.thread_id,
-                                });
                             }
                             info!(
                                 session_id = current.session_id,
@@ -771,12 +816,6 @@ fn run_session_loop(
 
         let screen = pty.visible_screen_text();
         if !screen.is_empty() && screen != last_screen {
-            if !trust_answered {
-                if let Some(input) = controller.startup_input(&screen) {
-                    let _ = pty.send_line(&input);
-                    trust_answered = true;
-                }
-            }
             let current = snapshot.lock().unwrap().clone();
             let persist_screen = should_persist_screen_output(
                 current.kind,
@@ -796,15 +835,6 @@ fn run_session_loop(
             {
                 let mut state = snapshot.lock().unwrap();
                 state.screen = screen.clone();
-                let ready_for_input = controller.detect_ready(&screen);
-                if !state.ready && ready_for_input {
-                    state.ready = true;
-                    state.runtime_state = AgentSessionState::WaitingForInput;
-                    let _ = event_tx.send(ArchcarEvent::SessionReady {
-                        session_id: state.session_id,
-                        thread_id: state.thread_id,
-                    });
-                }
                 let _ = event_tx.send(ArchcarEvent::SessionScreenUpdated {
                     session_id: state.session_id,
                 });
@@ -824,6 +854,21 @@ fn run_session_loop(
         match pty.has_exited() {
             Ok(true) => {
                 let current = snapshot.lock().unwrap().clone();
+                append_runtime_provider_event(
+                    &runtime_store,
+                    runtime_provider_event(RuntimeProviderEventInput {
+                        kind: current.kind,
+                        session_id: current.session_id,
+                        thread_id: current.thread_id,
+                        identity_suffix: None,
+                        phase: ProviderEventPhase::Completed,
+                        event_kind: ProviderEventKind::ThreadSession,
+                        subtype: "session_started",
+                        title: "Session exited",
+                        body: provider_name(current.kind),
+                    }),
+                    "session_exited",
+                );
                 let _ = runtime_store.mark_session_process_exited(current.session_id, None);
                 if let Ok(mut state) = snapshot.lock() {
                     state.status = ProcessStatus::Exited;
@@ -840,6 +885,22 @@ fn run_session_loop(
             Ok(false) => {}
             Err(err) => {
                 let current = snapshot.lock().unwrap().clone();
+                let error_body = err.to_string();
+                append_runtime_provider_event(
+                    &runtime_store,
+                    runtime_provider_event(RuntimeProviderEventInput {
+                        kind: current.kind,
+                        session_id: current.session_id,
+                        thread_id: current.thread_id,
+                        identity_suffix: None,
+                        phase: ProviderEventPhase::Failed,
+                        event_kind: ProviderEventKind::ThreadSession,
+                        subtype: "session_started",
+                        title: "Session error",
+                        body: &error_body,
+                    }),
+                    "session_error",
+                );
                 let _ = event_tx.send(ArchcarEvent::SessionError {
                     session_id: Some(current.session_id),
                     thread_id: Some(current.thread_id),
@@ -944,6 +1005,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_provider_input_events_use_discrete_identities() {
+        let first = runtime_provider_event(RuntimeProviderEventInput {
+            kind: SessionKind::Codex,
+            session_id: 7,
+            thread_id: 11,
+            identity_suffix: Some("input-1"),
+            phase: ProviderEventPhase::Started,
+            event_kind: ProviderEventKind::UserInput,
+            subtype: "user_input",
+            title: "User input",
+            body: "first",
+        });
+        let second = runtime_provider_event(RuntimeProviderEventInput {
+            kind: SessionKind::Codex,
+            session_id: 7,
+            thread_id: 11,
+            identity_suffix: Some("input-2"),
+            phase: ProviderEventPhase::Started,
+            event_kind: ProviderEventKind::UserInput,
+            subtype: "user_input",
+            title: "User input",
+            body: "second",
+        });
+
+        assert_ne!(first.provider_event_id, second.provider_event_id);
+        assert_ne!(first.provider_item_id, second.provider_item_id);
+    }
+
+    #[test]
     fn archcar_loop_keeps_pty_screens_out_of_normal_semantic_pipeline() {
         let source = include_str!("session.rs");
         let old_pipeline = concat!("persist_codex", "_pipeline_update");
@@ -989,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_persistence_dedupes_exact_snapshots_without_codex_semantic_parsing() {
+    fn screen_persistence_ignores_codex_timer_repaints_without_semantic_parsing() {
         let first_screen = "\
 › Explain this codebase
 
@@ -1025,7 +1115,7 @@ mod tests {
             &mut last_persisted,
             first_screen
         ));
-        assert!(should_persist_screen_output(
+        assert!(!should_persist_screen_output(
             SessionKind::Codex,
             &mut last_persisted,
             timer_repaint

@@ -1120,7 +1120,10 @@ pub fn agent_session_panel(
                                 }
                                 let provider_projection =
                                     provider_projection_from_records(&provider_events);
-                                for item in provider_projection.items {
+                                for item in provider_projection_items_for_render(
+                                    provider_projection.items,
+                                    &thread_messages,
+                                ) {
                                     append_chat_refresh_row(
                                         &messages,
                                         &provider_projection_item_widget(&item),
@@ -2597,9 +2600,9 @@ fn provider_projection_from_records(
 
 fn provider_projection_event_from_record(record: &ProviderEventRecord) -> ProviderProjectionEvent {
     ProviderProjectionEvent {
-        canonical_id: record.identity_key.clone(),
+        canonical_id: provider_projection_canonical_id(record),
         sequence: record.received_sequence.max(0) as u64,
-        category: provider_projection_category(record.kind),
+        category: provider_projection_category(record.kind, record.provider_subtype.as_deref()),
         title: record
             .normalized_payload
             .get("title")
@@ -2621,21 +2624,63 @@ fn provider_projection_event_from_record(record: &ProviderEventRecord) -> Provid
     }
 }
 
-fn provider_projection_category(kind: ProviderEventKind) -> ProviderProjectionCategory {
+fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
+    let thread_id = record
+        .provider_thread_id
+        .as_deref()
+        .or(record.parent_provider_thread_id.as_deref())
+        .unwrap_or("-");
+    if let Some(item_id) = record.provider_item_id.as_deref() {
+        return format!("{}:{thread_id}:{item_id}", record.provider);
+    }
+    if let Some(event_id) = record.provider_event_id.as_deref() {
+        return format!("{}:{thread_id}:event:{event_id}", record.provider);
+    }
+    record.identity_key.clone()
+}
+
+fn provider_projection_category(
+    kind: ProviderEventKind,
+    provider_subtype: Option<&str>,
+) -> ProviderProjectionCategory {
+    let subtype = provider_subtype
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     match kind {
         ProviderEventKind::UserInput => ProviderProjectionCategory::UserMessage,
         ProviderEventKind::AssistantOutput => ProviderProjectionCategory::AssistantMessage,
         ProviderEventKind::PlanningReasoning => ProviderProjectionCategory::Reasoning,
         ProviderEventKind::CommandProcess => ProviderProjectionCategory::Command,
         ProviderEventKind::TerminalRuntime => ProviderProjectionCategory::BackgroundTerminal,
+        ProviderEventKind::FileSystem if subtype_contains_any(&subtype, &["write", "create"]) => {
+            ProviderProjectionCategory::FileWrite
+        }
+        ProviderEventKind::FileSystem if subtype_contains_any(&subtype, &["patch", "edit"]) => {
+            ProviderProjectionCategory::FilePatch
+        }
         ProviderEventKind::FileSystem => ProviderProjectionCategory::FileRead,
         ProviderEventKind::DiffFileChange => ProviderProjectionCategory::FileDiff,
         ProviderEventKind::Tool => ProviderProjectionCategory::NativeTool,
         ProviderEventKind::Mcp => ProviderProjectionCategory::McpTool,
+        ProviderEventKind::SkillPluginHook if subtype.contains("plugin") => {
+            ProviderProjectionCategory::Plugin
+        }
+        ProviderEventKind::SkillPluginHook if subtype.contains("hook") => {
+            ProviderProjectionCategory::Hook
+        }
         ProviderEventKind::SkillPluginHook => ProviderProjectionCategory::Skill,
         ProviderEventKind::ApprovalPermission => ProviderProjectionCategory::Approval,
         ProviderEventKind::SubagentCollaboration => ProviderProjectionCategory::Subagent,
+        ProviderEventKind::WebBrowserMedia
+            if subtype_contains_any(&subtype, &["image", "media"]) =>
+        {
+            ProviderProjectionCategory::Image
+        }
         ProviderEventKind::WebBrowserMedia => ProviderProjectionCategory::Web,
+        ProviderEventKind::LimitFailure if subtype_contains_any(&subtype, &["rate", "limit"]) => {
+            ProviderProjectionCategory::RateLimit
+        }
         ProviderEventKind::LimitFailure => ProviderProjectionCategory::Error,
         ProviderEventKind::ThreadSession
         | ProviderEventKind::GoalTask
@@ -2644,6 +2689,10 @@ fn provider_projection_category(kind: ProviderEventKind) -> ProviderProjectionCa
         | ProviderEventKind::EnvironmentConfigModel => ProviderProjectionCategory::Status,
         ProviderEventKind::Unknown => ProviderProjectionCategory::Unknown,
     }
+}
+
+fn subtype_contains_any(subtype: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| subtype.contains(needle))
 }
 
 fn provider_projection_status(phase: ProviderEventPhase) -> ProviderProjectionStatus {
@@ -2673,30 +2722,96 @@ fn provider_projection_stream_state(phase: ProviderEventPhase) -> ProviderProjec
     }
 }
 
+fn provider_projection_items_for_render(
+    items: Vec<ProviderProjectionItem>,
+    messages: &[ChatMessageRecord],
+) -> Vec<ProviderProjectionItem> {
+    items
+        .into_iter()
+        .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
+        .collect()
+}
+
+fn provider_projection_item_has_persisted_message(
+    item: &ProviderProjectionItem,
+    messages: &[ChatMessageRecord],
+) -> bool {
+    item.render_class == ProjectionRenderClass::UserChat
+        && messages
+            .iter()
+            .any(|message| message.role == "user" && message.content.trim() == item.body.trim())
+}
+
 fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
     match item.render_class {
         ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
         ProjectionRenderClass::AssistantChat => provider_projection_text_widget(&item.body),
         _ => {
-            let mut text = item.title.clone();
-            if !item.body.trim().is_empty() {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(&item.body);
-            }
-            if item.inspectable {
-                if let Some(raw) = &item.raw_payload {
-                    if !raw.trim().is_empty() {
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str(raw);
-                    }
-                }
-            }
-            provider_projection_text_widget(&text)
+            let container = GBox::new(Orientation::Vertical, 4);
+            container.set_hexpand(true);
+            let status = Label::new(Some(&provider_projection_status_line(item)));
+            status.add_css_class("card-meta");
+            status.add_css_class(provider_projection_status_css_class(item.status));
+            status.set_xalign(0.0);
+            status.set_wrap(true);
+            container.append(&status);
+            container.append(&provider_projection_text_widget(
+                &provider_projection_card_text(item),
+            ));
+            container.upcast()
         }
+    }
+}
+
+fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
+    let mut text = item.title.clone();
+    if !item.body.trim().is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&item.body);
+    }
+    if text.trim().is_empty() && item.inspectable {
+        text.push_str("Provider details available for inspection.");
+    }
+    text
+}
+
+fn provider_projection_status_line(item: &ProviderProjectionItem) -> String {
+    format!(
+        "{} · {}",
+        provider_projection_status_label(item.status),
+        provider_projection_stream_state_label(item.stream_state)
+    )
+}
+
+fn provider_projection_status_label(status: ProviderProjectionStatus) -> &'static str {
+    match status {
+        ProviderProjectionStatus::Pending => "Pending",
+        ProviderProjectionStatus::Running => "Running",
+        ProviderProjectionStatus::Complete => "Complete",
+        ProviderProjectionStatus::Failed => "Failed",
+        ProviderProjectionStatus::Canceled => "Canceled",
+    }
+}
+
+fn provider_projection_stream_state_label(
+    stream_state: ProviderProjectionStreamState,
+) -> &'static str {
+    match stream_state {
+        ProviderProjectionStreamState::Snapshot => "Snapshot",
+        ProviderProjectionStreamState::Streaming => "Streaming",
+        ProviderProjectionStreamState::Complete => "Complete",
+    }
+}
+
+fn provider_projection_status_css_class(status: ProviderProjectionStatus) -> &'static str {
+    match status {
+        ProviderProjectionStatus::Pending => "status-pending",
+        ProviderProjectionStatus::Running => "status-running",
+        ProviderProjectionStatus::Complete => "status-success",
+        ProviderProjectionStatus::Failed => "status-error",
+        ProviderProjectionStatus::Canceled => "status-warning",
     }
 }
 
@@ -8323,6 +8438,133 @@ I summarized the result.
         );
         assert_eq!(projection.items[0].title, "Bash");
         assert_eq!(projection.items[0].body, "cargo test passed");
+    }
+
+    #[test]
+    fn provider_projection_uses_provider_item_identity_across_phase_updates() {
+        let mut streaming = provider_event_record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        streaming.identity_key = "codex:thread-7:msg-1:delta".to_owned();
+        streaming.provider_item_id = Some("msg-1".to_owned());
+        streaming.normalized_payload = serde_json::json!({
+            "title": "Assistant",
+            "body": "partial"
+        });
+        let mut completed = streaming.clone();
+        completed.identity_key = "codex:thread-7:msg-1:completed".to_owned();
+        completed.phase = ProviderEventPhase::Completed;
+        completed.received_sequence = 4;
+        completed.normalized_payload = serde_json::json!({
+            "title": "Assistant",
+            "body": "complete"
+        });
+
+        let projection = provider_projection_from_records(&[streaming, completed]);
+
+        assert_eq!(projection.items.len(), 1);
+        assert_eq!(projection.items[0].id, "codex:thread-7:msg-1");
+        assert_eq!(projection.items[0].body, "complete");
+        assert_eq!(
+            projection.items[0].status,
+            ProviderProjectionStatus::Complete
+        );
+    }
+
+    #[test]
+    fn provider_projection_maps_subtype_specific_render_classes() {
+        let cases = [
+            (
+                ProviderEventKind::FileSystem,
+                "file_write",
+                ProviderProjectionCategory::FileWrite,
+                ProjectionRenderClass::FileCard,
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                "plugin",
+                ProviderProjectionCategory::Plugin,
+                ProjectionRenderClass::PluginCard,
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                "hook",
+                ProviderProjectionCategory::Hook,
+                ProjectionRenderClass::HookCard,
+            ),
+            (
+                ProviderEventKind::WebBrowserMedia,
+                "image",
+                ProviderProjectionCategory::Image,
+                ProjectionRenderClass::ImageCard,
+            ),
+            (
+                ProviderEventKind::LimitFailure,
+                "rate_limit",
+                ProviderProjectionCategory::RateLimit,
+                ProjectionRenderClass::WarningCard,
+            ),
+        ];
+
+        for (kind, subtype, category, render_class) in cases {
+            let mut record = provider_event_record(kind, ProviderEventPhase::Completed);
+            record.provider_subtype = Some(subtype.to_owned());
+            let projection = provider_projection_from_records(&[record]);
+
+            assert_eq!(projection.items[0].category, category);
+            assert_eq!(projection.items[0].render_class, render_class);
+        }
+    }
+
+    #[test]
+    fn provider_projection_normal_card_text_shows_status_without_raw_payload() {
+        let mut record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Failed,
+        );
+        record.raw_json = serde_json::json!({
+            "type": "command",
+            "secret": "raw-secret"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let status = provider_projection_status_line(&projection.items[0]);
+        let text = provider_projection_card_text(&projection.items[0]);
+
+        assert!(status.contains("Failed"));
+        assert!(status.contains("Complete"));
+        assert_eq!(
+            provider_projection_status_css_class(projection.items[0].status),
+            "status-error"
+        );
+        assert!(!text.contains("raw-secret"));
+        assert!(!text.contains("\"type\""));
+    }
+
+    #[test]
+    fn provider_user_chat_rows_are_skipped_when_persisted_message_exists() {
+        let mut user_event =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
+        user_event.normalized_payload = serde_json::json!({
+            "title": "User",
+            "body": "run tests"
+        });
+        let projection = provider_projection_from_records(&[user_event]);
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "run tests".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+
+        let items = provider_projection_items_for_render(projection.items, &messages);
+
+        assert!(items.is_empty());
     }
 
     #[test]

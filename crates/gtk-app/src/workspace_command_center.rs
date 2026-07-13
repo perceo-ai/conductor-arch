@@ -2823,9 +2823,6 @@ fn lifecycle_panel(
             }
             progress_action.set_text(&format!("{action} in progress..."));
             if action == "delete" {
-                state_after_action
-                    .remove_workspace_from_navigation(&workspace, crate::state::AppPage::Dashboard);
-                refresh_after_action.refresh(RefreshScope::Workspace);
                 progress_action.set_text("Deleting in background...");
                 let db_delete = db_action.clone();
                 let workspace_delete = workspace.clone();
@@ -2833,6 +2830,7 @@ fn lifecycle_panel(
                 let progress_after_delete = progress_action.clone();
                 let toast_after_delete = toast_action.clone();
                 let db_cleanup_after_delete = db_action.clone();
+                let state_after_delete = state_after_action.clone();
                 spawn_background_job(
                     move || {
                         WorkspaceStore::open(db_delete)
@@ -2844,6 +2842,10 @@ fn lifecycle_panel(
                             Ok(deleted) => {
                                 progress_after_delete
                                     .set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                                state_after_delete.remove_workspace_from_navigation(
+                                    &deleted.name,
+                                    crate::state::AppPage::Dashboard,
+                                );
                                 let db_cleanup = db_cleanup_after_delete.clone();
                                 std::thread::spawn(move || {
                                     if let Err(err) =
@@ -9328,6 +9330,26 @@ mod tests {
         assert_eq!(
             feedback.toast_text.as_deref(),
             Some("Rename failed: bad name")
+        );
+    }
+
+    #[test]
+    fn workspace_delete_navigation_is_removed_only_after_successful_delete() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let remove_call = "state_after_delete.remove_workspace_from_navigation";
+        let delete_call = "store.delete(&workspace_delete";
+
+        let remove_index = production_source
+            .find(remove_call)
+            .expect("delete success path should remove navigation");
+        let delete_index = production_source
+            .find(delete_call)
+            .expect("delete path should call workspace store delete");
+
+        assert!(
+            remove_index > delete_index,
+            "workspace navigation must not be cleared before store.delete succeeds"
         );
     }
 }
