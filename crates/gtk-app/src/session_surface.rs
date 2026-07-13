@@ -2385,7 +2385,8 @@ fn chat_user_bubble(text: &str) -> GBox {
     row.set_hexpand(true);
     row.add_css_class("chat-user-row");
 
-    let bubble = Label::new(Some(text));
+    let bubble = Label::new(None);
+    bubble.set_markup(&chat_text_markup(text));
     bubble.add_css_class("chat-user-bubble");
     bubble.set_selectable(true);
     bubble.set_wrap(true);
@@ -2578,14 +2579,7 @@ fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
 }
 
 fn session_transcript_label_widget(event: &SessionTranscriptEvent) -> Widget {
-    let label = Label::new(Some(&format!("{}\n{}", event.role.label(), event.body)));
-    label.add_css_class("chat-agent-text");
-    label.set_selectable(true);
-    label.set_wrap(true);
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_margin_bottom(18);
-    label.upcast()
+    chat_text_label(&format!("{}\n{}", event.role.label(), event.body)).upcast()
 }
 
 fn session_transcript_inline_events(event: &SessionTranscriptEvent) -> Vec<CodexInlineEvent> {
@@ -2849,14 +2843,7 @@ fn chat_message_widget(
             if content.trim().is_empty() {
                 return None;
             }
-            let label = Label::new(Some(&content));
-            label.add_css_class("chat-agent-text");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_margin_bottom(18);
-            Some(label.upcast())
+            Some(chat_text_label(&content).upcast())
         }
     }
 }
@@ -2927,16 +2914,7 @@ fn legacy_inline_events_for_message(
 fn chat_event_widget(event: &ChatEventRecord) -> Widget {
     stored_chat_event_inline_event(event)
         .map(|inline| inline_event_widget(&inline))
-        .unwrap_or_else(|| {
-            let label = Label::new(Some(&event.body));
-            label.add_css_class("chat-agent-text");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_margin_bottom(18);
-            label.upcast()
-        })
+        .unwrap_or_else(|| chat_text_label(&event.body).upcast())
 }
 
 fn provider_projection_items_for_render(
@@ -2997,14 +2975,14 @@ fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -
 }
 
 fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
-    let mut text = item.title.clone();
+    let mut text = provider_projection_display_title(item);
     if !item.body.trim().is_empty() {
         if !text.is_empty() {
             text.push('\n');
         }
         text.push_str(&item.body);
     }
-    if item.render_class == ProjectionRenderClass::FallbackCard {
+    if provider_projection_card_shows_raw_details(item) {
         if let Some(raw_payload) = item.raw_payload.as_deref() {
             if !raw_payload.trim().is_empty() {
                 if !text.is_empty() {
@@ -3018,6 +2996,111 @@ fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
         text.push_str("Provider details available for inspection.");
     }
     text
+}
+
+fn provider_projection_display_title(item: &ProviderProjectionItem) -> String {
+    if !provider_projection_title_is_generic_event_name(&item.title) {
+        return item.title.clone();
+    }
+    item.raw_payload
+        .as_deref()
+        .and_then(provider_projection_payload_action_title)
+        .unwrap_or_else(|| item.title.clone())
+}
+
+fn provider_projection_title_is_generic_event_name(title: &str) -> bool {
+    let title = title.trim();
+    title.contains('/')
+        && title
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.'))
+}
+
+fn provider_projection_payload_action_title(raw_payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload).ok()?;
+    provider_projection_payload_value_title(&payload)
+}
+
+fn provider_projection_payload_value_title(payload: &serde_json::Value) -> Option<String> {
+    let tool = provider_projection_string_at_any(
+        payload,
+        &[
+            "/params/item/tool",
+            "/params/tool",
+            "/params/tool_name",
+            "/tool_name",
+            "/params/item/action",
+            "/params/action",
+            "/params/hook/name",
+            "/hook/name",
+            "/params/hook_event_name",
+            "/hook_event_name",
+            "/params/name",
+        ],
+    );
+    if tool.as_deref().is_some_and(|tool| !tool.trim().is_empty()) {
+        return tool;
+    }
+
+    provider_projection_value_at_any(
+        payload,
+        &["/params/item/command", "/params/command", "/command"],
+    )
+    .and_then(provider_projection_display_json_value)
+}
+
+fn provider_projection_string_at_any(
+    value: &serde_json::Value,
+    pointers: &[&str],
+) -> Option<String> {
+    provider_projection_value_at_any(value, pointers)
+        .and_then(provider_projection_display_json_value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_projection_value_at_any<'a>(
+    value: &'a serde_json::Value,
+    pointers: &[&str],
+) -> Option<&'a serde_json::Value> {
+    pointers.iter().find_map(|pointer| value.pointer(pointer))
+}
+
+fn provider_projection_display_json_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(values) => {
+            let parts = values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn provider_projection_card_shows_raw_details(item: &ProviderProjectionItem) -> bool {
+    matches!(
+        item.render_class,
+        ProjectionRenderClass::CommandCard
+            | ProjectionRenderClass::ProcessCard
+            | ProjectionRenderClass::FileCard
+            | ProjectionRenderClass::DiffCard
+            | ProjectionRenderClass::ToolCard
+            | ProjectionRenderClass::SkillCard
+            | ProjectionRenderClass::PluginCard
+            | ProjectionRenderClass::HookCard
+            | ProjectionRenderClass::SubagentCard
+            | ProjectionRenderClass::NestedTranscriptCard
+            | ProjectionRenderClass::BackgroundCard
+            | ProjectionRenderClass::PromptCard
+            | ProjectionRenderClass::WebCard
+            | ProjectionRenderClass::ImageCard
+            | ProjectionRenderClass::ErrorCard
+            | ProjectionRenderClass::FallbackCard
+    )
 }
 
 fn provider_projection_status_line(item: &ProviderProjectionItem) -> String {
@@ -3055,14 +3138,70 @@ fn provider_projection_status_css_class(status: ProviderProjectionStatus) -> &'s
 }
 
 fn provider_projection_text_widget(text: &str) -> Widget {
-    let label = Label::new(Some(text));
+    let label = chat_text_label(text);
+    label.upcast()
+}
+
+fn chat_text_label(text: &str) -> Label {
+    let label = Label::new(None);
+    label.set_markup(&chat_text_markup(text));
     label.add_css_class("chat-agent-text");
     label.set_selectable(true);
     label.set_wrap(true);
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_margin_bottom(18);
-    label.upcast()
+    label
+}
+
+fn chat_text_markup(text: &str) -> String {
+    let mut markup = String::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        if let Some(start) = rest.find('`') {
+            markup.push_str(&pango_escape_text(&rest[..start]));
+            let after_start = &rest[start..];
+            if let Some(stripped) = after_start.strip_prefix("```") {
+                if let Some(end) = stripped.find("```") {
+                    let code = &stripped[..end];
+                    markup.push_str(&chat_code_span_markup(code.trim_matches('\n')));
+                    rest = &stripped[end + 3..];
+                } else {
+                    markup.push_str(&pango_escape_text(after_start));
+                    break;
+                }
+            } else {
+                let stripped = &after_start[1..];
+                if let Some(end) = stripped.find('`') {
+                    let code = &stripped[..end];
+                    markup.push_str(&chat_code_span_markup(code));
+                    rest = &stripped[end + 1..];
+                } else {
+                    markup.push_str(&pango_escape_text(after_start));
+                    break;
+                }
+            }
+        } else {
+            markup.push_str(&pango_escape_text(rest));
+            break;
+        }
+    }
+
+    markup
+}
+
+fn chat_code_span_markup(code: &str) -> String {
+    format!(
+        "<span font_family=\"monospace\" foreground=\"#f2f5f8\">{}</span>",
+        pango_escape_text(code)
+    )
+}
+
+fn pango_escape_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn render_legacy_inline_events_for_thread(
@@ -3313,31 +3452,18 @@ fn raw_tool_event_path(header: &str) -> Option<PathBuf> {
 }
 
 fn inline_event_body_preview(event: &CodexInlineEvent, body: &str) -> InlineEventBodyPreview {
-    if inline_event_expands_body_by_default(event) {
-        let full = body.trim().to_owned();
-        return InlineEventBodyPreview {
-            preview: full.clone(),
-            full,
-            truncated: false,
-        };
+    let _ = event;
+    let full = body.trim().to_owned();
+    InlineEventBodyPreview {
+        preview: full.clone(),
+        full,
+        truncated: false,
     }
-    truncate_inline_event_body(body, 320)
 }
 
 fn inline_event_expands_body_by_default(event: &CodexInlineEvent) -> bool {
-    let title = event.title.to_ascii_lowercase();
-    let normalized_title = title.trim_start().trim_start_matches('•').trim_start();
-    let body = event
-        .body
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    ["write ", "edit ", "create ", "update "]
-        .iter()
-        .any(|marker| normalized_title.starts_with(marker))
-        || ["apply_patch", "write_stdin"]
-            .iter()
-            .any(|marker| title.contains(marker) || body.contains(marker))
+    let _ = event;
+    true
 }
 
 fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
@@ -3563,15 +3689,16 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
 
     let body_text = inline_event_body_text(event);
     let body_preview = inline_event_body_preview(event, &body_text);
-    let body = Label::new(Some(&body_preview.preview));
+    let body = Label::new(None);
+    body.set_markup(&chat_text_markup(&body_preview.preview));
     body.add_css_class("chat-inline-event-body");
     body.set_selectable(true);
     body.set_wrap(true);
     body.set_xalign(0.0);
     body.set_margin_top(2);
     let body_revealer = Revealer::new();
-    body_revealer.set_transition_type(RevealerTransitionType::SlideDown);
-    body_revealer.set_transition_duration(180);
+    body_revealer.set_transition_type(RevealerTransitionType::None);
+    body_revealer.set_transition_duration(0);
     body_revealer.set_reveal_child(expand_by_default);
     body_revealer.set_child(Some(&body));
     root.append(&body_revealer);
@@ -3586,11 +3713,11 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
         let expanded_label = inline_event_chip_label(event, true);
         move |button| {
             if button.is_active() {
-                body.set_text(&full);
+                body.set_markup(&chat_text_markup(&full));
                 body_revealer.set_reveal_child(true);
                 button.set_label(&expanded_label);
             } else {
-                body.set_text(&preview);
+                body.set_markup(&chat_text_markup(&preview));
                 body_revealer.set_reveal_child(false);
                 button.set_label(&collapsed_label);
             }
@@ -9236,7 +9363,7 @@ I summarized the result.
     }
 
     #[test]
-    fn provider_projection_normal_card_text_shows_status_without_raw_payload() {
+    fn provider_projection_action_card_text_shows_status_with_redacted_raw_payload() {
         let mut record = provider_event_record(
             ProviderEventKind::CommandProcess,
             ProviderEventPhase::Failed,
@@ -9258,7 +9385,8 @@ I summarized the result.
             "status-error"
         );
         assert!(!text.contains("raw-secret"));
-        assert!(!text.contains("\"type\""));
+        assert!(text.contains("\"type\": \"command\""));
+        assert!(text.contains("[redacted]"));
     }
 
     #[test]
@@ -9274,10 +9402,41 @@ I summarized the result.
         let item = &projection.items[0];
 
         assert!(!provider_projection_item_shows_status_chrome(item));
-        assert_eq!(
-            provider_projection_card_text(item),
-            "Read\ncrates/core/src/lib.rs"
-        );
+        let text = provider_projection_card_text(item);
+        assert!(text.starts_with("Read\ncrates/core/src/lib.rs"));
+        assert!(text.contains("\"type\": \"tool_result\""));
+        assert!(!text.contains("Running"));
+        assert!(!text.contains("Streaming"));
+    }
+
+    #[test]
+    fn provider_projection_action_cards_include_raw_details_when_body_is_incomplete() {
+        let mut record = provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Started);
+        record.provider_subtype = Some("item/mcpToolCall/started".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "get_wiki_page",
+            "body": ""
+        });
+        record.raw_json = serde_json::json!({
+            "method": "item/mcpToolCall/started",
+            "params": {
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "cubic",
+                    "tool": "get_wiki_page",
+                    "arguments": {
+                        "page": "Project Context"
+                    }
+                }
+            }
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let text = provider_projection_card_text(&projection.items[0]);
+
+        assert!(text.contains("get_wiki_page"));
+        assert!(text.contains("\"page\": \"Project Context\""));
+        assert!(text.contains("\"server\": \"cubic\""));
     }
 
     #[test]
@@ -9309,11 +9468,40 @@ I summarized the result.
         let item = &projection.items[0];
 
         assert_eq!(item.render_class, ProjectionRenderClass::HookCard);
-        assert_eq!(
-            provider_projection_card_text(item),
-            "PreToolUse\nBash: cargo test"
-        );
+        let text = provider_projection_card_text(item);
+        assert!(text.starts_with("PreToolUse\nBash: cargo test"));
+        assert!(text.contains("\"type\": \"tool_result\""));
         assert!(!provider_projection_item_shows_status_chrome(item));
+    }
+
+    #[test]
+    fn chat_text_markup_formats_inline_code_and_escapes_content() {
+        let markup = chat_text_markup("Use `cargo test` before <merge>.");
+
+        assert!(markup.contains("Use "));
+        assert!(markup.contains("font_family=\"monospace\""));
+        assert!(markup.contains("cargo test"));
+        assert!(markup.contains("&lt;merge&gt;"));
+        assert!(!markup.contains("<merge>"));
+    }
+
+    #[test]
+    fn inline_event_body_preview_keeps_live_tool_output_full() {
+        let full = format!("get_wiki_page\n{}", "x".repeat(500));
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "get_wiki_page".to_owned(),
+            subtitle: Some("Tool call".to_owned()),
+            body: Some(full.clone()),
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        let preview = inline_event_body_preview(&event, &full);
+
+        assert_eq!(preview.preview, full);
+        assert_eq!(preview.full, full);
+        assert!(!preview.truncated);
     }
 
     #[test]
