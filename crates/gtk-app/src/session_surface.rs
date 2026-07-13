@@ -2901,11 +2901,20 @@ fn chat_structured_items_for_render(
                     ChatTimelineItem::Message(message) if message.timeline_seq.is_none()
                 )
             });
-    items.extend(
-        provider_projection_items_for_render(provider_projection_items, &messages)
-            .into_iter()
-            .map(ChatTimelineItem::ProviderProjection),
-    );
+    let provider_items =
+        provider_projection_items_for_timeline(provider_projection_items, &messages);
+    if provider_items
+        .iter()
+        .any(|item| item.render_class == ProjectionRenderClass::UserChat)
+    {
+        items = chat_timeline_items_anchored_to_provider_user_events(items, provider_items);
+    } else {
+        items.extend(
+            provider_items
+                .into_iter()
+                .map(ChatTimelineItem::ProviderProjection),
+        );
+    }
     items.append(&mut unsequenced_messages);
     items.extend(
         pending_inputs
@@ -2914,6 +2923,38 @@ fn chat_structured_items_for_render(
             .map(ChatTimelineItem::PendingUserInput),
     );
     items
+}
+
+fn chat_timeline_items_anchored_to_provider_user_events(
+    mut persisted_items: Vec<ChatTimelineItem>,
+    provider_items: Vec<ProviderProjectionItem>,
+) -> Vec<ChatTimelineItem> {
+    let mut items = Vec::new();
+    for provider_item in provider_items {
+        if provider_item.render_class == ProjectionRenderClass::UserChat {
+            if let Some(index) =
+                matching_persisted_user_message_index(&persisted_items, provider_item.body.trim())
+            {
+                items.push(persisted_items.remove(index));
+            } else if !provider_item.body.trim().is_empty() {
+                items.push(ChatTimelineItem::ProviderProjection(provider_item));
+            }
+            continue;
+        }
+        items.push(ChatTimelineItem::ProviderProjection(provider_item));
+    }
+    items.extend(persisted_items);
+    items
+}
+
+fn matching_persisted_user_message_index(items: &[ChatTimelineItem], body: &str) -> Option<usize> {
+    items.iter().position(|item| {
+        matches!(
+            item,
+            ChatTimelineItem::Message(message)
+                if message.role == "user" && message.content.trim() == body
+        )
+    })
 }
 
 fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
@@ -3141,6 +3182,22 @@ fn provider_projection_items_for_render(
         .collect()
 }
 
+fn provider_projection_items_for_timeline(
+    items: Vec<ProviderProjectionItem>,
+    messages: &[ChatMessageRecord],
+) -> Vec<ProviderProjectionItem> {
+    items
+        .into_iter()
+        .filter(provider_projection_item_is_relevant_chat_event)
+        .filter(|item| item.render_class != ProjectionRenderClass::HookCard)
+        .filter(provider_projection_timeline_item_has_renderable_content)
+        .filter(|item| {
+            item.render_class == ProjectionRenderClass::UserChat
+                || !provider_projection_item_has_persisted_message(item, messages)
+        })
+        .collect()
+}
+
 fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
     match item.render_class {
         ProjectionRenderClass::UserChat => false,
@@ -3148,6 +3205,13 @@ fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem
             !item.body.trim().is_empty()
         }
         _ => true,
+    }
+}
+
+fn provider_projection_timeline_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
+    match item.render_class {
+        ProjectionRenderClass::UserChat => !item.body.trim().is_empty(),
+        _ => provider_projection_item_has_renderable_content(item),
     }
 }
 
@@ -10143,6 +10207,104 @@ I summarized the result.
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
         assert!(matches!(
             timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+    }
+
+    #[test]
+    fn chat_render_anchors_persisted_user_messages_to_provider_user_events() {
+        let messages = vec![
+            ChatMessageRecord {
+                id: 30,
+                thread_id: 7,
+                role: "user".to_owned(),
+                content: "first prompt".to_owned(),
+                source: "user_send".to_owned(),
+                timeline_seq: Some(1),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            ChatMessageRecord {
+                id: 31,
+                thread_id: 7,
+                role: "user".to_owned(),
+                content: "second prompt".to_owned(),
+                source: "user_send".to_owned(),
+                timeline_seq: Some(2),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+        ];
+        let provider_items = vec![
+            ProviderProjectionItem {
+                id: "codex:thread-7:input-1".to_owned(),
+                sequence: 1,
+                category: ProviderProjectionCategory::UserMessage,
+                render_class: ProjectionRenderClass::UserChat,
+                title: "User".to_owned(),
+                body: "first prompt".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:tool-1".to_owned(),
+                sequence: 2,
+                category: ProviderProjectionCategory::NativeTool,
+                render_class: ProjectionRenderClass::ToolCard,
+                title: "Bash".to_owned(),
+                body: "first output".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:input-2".to_owned(),
+                sequence: 3,
+                category: ProviderProjectionCategory::UserMessage,
+                render_class: ProjectionRenderClass::UserChat,
+                title: "User".to_owned(),
+                body: "second prompt".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:tool-2".to_owned(),
+                sequence: 4,
+                category: ProviderProjectionCategory::NativeTool,
+                render_class: ProjectionRenderClass::ToolCard,
+                title: "Bash".to_owned(),
+                body: "second output".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+        ];
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), provider_items, Vec::new());
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert!(matches!(timeline[2], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[3],
             ChatTimelineItem::ProviderProjection(_)
         ));
     }
