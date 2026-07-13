@@ -1,0 +1,53 @@
+crates/core/src/workspace.rs
+  s_deeb89bccdbd18::t_dbc9600db3b9f8 17688-17711
+  s_2fd338f0b53281::t_ba3994bdc6931f 5353-5367
+  s_deeb89bccdbd18::t_344f6bf0c636a6 17687
+crates/gtk-app/src/session_surface.rs
+  s_deeb89bccdbd18::t_d66b657609b470 4232,4234-4245
+  s_deeb89bccdbd18::t_b110be7a382d31 7231-7242
+  s_deeb89bccdbd18::t_b2fad044dfcc30 1481
+  s_deeb89bccdbd18::t_8228549a294721 1467-1469,1472-1474,1479-1480,1482
+  s_deeb89bccdbd18::t_73e953bc8dc9fb 7267-7300,7302-7313
+  s_deeb89bccdbd18::t_94f50e32117d28 404-405,410,416-420,422-427,431,433-434,436-451,456,462-482,488-503,506-510,513-532,534-548,551-558
+  s_deeb89bccdbd18::t_045dd1398834d6 1415,2118,2135,2141
+  s_deeb89bccdbd18::t_0d783820b6a712 7314-7332
+  s_e25c3a24585b4a::t_b01363dffaa1f3 421,428-430,432,452-454,460-461,504-505,511-512,549-550,1412-1414,4285-4289,7230
+  s_deeb89bccdbd18::t_c33d9465c3a633 533
+  s_2fd338f0b53281::t_8f8ff7645075bf 7301
+  s_deeb89bccdbd18::t_20da9797e7ff2c 559,723-725,926-945
+  s_deeb89bccdbd18::t_84a3d19a6407f1 4140-4145,4164-4231,4284
+  s_2fd338f0b53281::t_ccd4b508fdc249 395,412
+  s_deeb89bccdbd18::t_35407e394a9aab 4233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "9eaaa2c66f4a7cfb31a3cc50d11cd6f03bfcf4f1",
+  "prompts": {},
+  "sessions": {
+    "s_2fd338f0b53281": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5852-b907-7720-b006-3980f27dafb1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_deeb89bccdbd18": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5956-c8b6-7fa0-8595-46454327607e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_e25c3a24585b4a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f596a-62f9-7a70-b39a-f1e2cda0fa9a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
