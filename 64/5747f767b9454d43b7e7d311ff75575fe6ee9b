@@ -1,0 +1,38 @@
+crates/core/src/archcar/session.rs
+  s_02f6ea75142afc::t_3a5035c9220509 910,2211-2212,2328-2329,2367-2377,2423-2424,2882-2909
+  s_02f6ea75142afc::t_67d7253bbe88b3 717,739,742,745
+  s_02f6ea75142afc::t_792b367b9f7860 636
+  s_02f6ea75142afc::t_8424101db217b2 645-649
+  s_02f6ea75142afc::t_73c302e92e3a94 1545-1548,1775-1776
+  s_02f6ea75142afc::t_a2f72ecb15be03 809,818-824,1950-1957
+  s_02f6ea75142afc::t_51213ffd0e2133 838,904-908
+  s_02f6ea75142afc::t_8c9f3cbd6ef990 803,807-808
+  s_02f6ea75142afc::t_1b424d7f740531 810,909,1958,2910
+crates/core/src/archcar/server.rs
+  s_02f6ea75142afc::t_3c7792d42c9a59 427,429-441,445-453,471
+  s_02f6ea75142afc::t_8424101db217b2 472-476,1667-1672
+  s_02f6ea75142afc::t_099f00091cada3 1647-1666,1673-1780
+  s_02f6ea75142afc::t_129d4f879cd74b 426,428
+  s_02f6ea75142afc::t_ed68d7b8282633 2082-2102,2104-2114
+  s_02f6ea75142afc::t_76d7126e5c456d 2103
+  s_02f6ea75142afc::t_13b8f8afea1adc 477-478
+crates/core/src/archcar/protocol.rs
+  s_02f6ea75142afc::t_4d7e0748db07da 159-166
+  s_02f6ea75142afc::t_3a5035c9220509 368,381
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "645747f767b9454d43b7e7d311ff75575fe6ee9b",
+  "prompts": {},
+  "sessions": {
+    "s_02f6ea75142afc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5ae0-30c7-7a82-8ac3-bbe19368b8bd",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
