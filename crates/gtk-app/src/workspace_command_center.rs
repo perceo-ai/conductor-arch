@@ -116,7 +116,13 @@ pub(crate) fn build_workspace_command_center(
         };
 
         if matches!(line.workspace.status.as_str(), "creating" | "failed") {
-            body.append(&workspace_creation_status_shell(&line.workspace));
+            body.append(&workspace_creation_status_shell(
+                &db_path,
+                &line.workspace,
+                &state,
+                refresh_hub.clone(),
+                toast_overlay.clone(),
+            ));
             return;
         }
 
@@ -136,7 +142,13 @@ pub(crate) fn build_workspace_command_center(
     (root, refresh)
 }
 
-fn workspace_creation_status_shell(ws: &Workspace) -> GBox {
+fn workspace_creation_status_shell(
+    db_path: &Path,
+    ws: &Workspace,
+    state: &AppState,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
     let shell = GBox::new(Orientation::Vertical, 0);
     shell.set_vexpand(true);
     shell.set_hexpand(true);
@@ -184,9 +196,60 @@ fn workspace_creation_status_shell(ws: &Workspace) -> GBox {
         "workspace-empty-label"
     });
     body.append(&label);
+    if workspace_creation_status_allows_delete(&ws.status) {
+        let confirm = CheckButton::with_label("Confirm delete");
+        let delete_btn = destructive_button("Delete");
+        let progress = Label::new(None);
+        progress.add_css_class("card-meta");
+        progress.set_wrap(true);
+        progress.set_xalign(0.0);
+
+        let db_delete = db_path.to_path_buf();
+        let workspace_delete = ws.name.clone();
+        let refresh_after_delete = refresh_hub.clone();
+        let progress_after_delete = progress.clone();
+        let toast_after_delete = toast_overlay.clone();
+        let state_after_delete = state.clone();
+        let confirm_delete = confirm.clone();
+        delete_btn.connect_clicked(move |_| {
+            if !confirm_delete.is_active() {
+                progress_after_delete.set_text("Check confirm before delete.");
+                return;
+            }
+            progress_after_delete.set_text("Deleting...");
+            let result = WorkspaceStore::open(db_delete.clone())
+                .and_then(|store| store.delete(&workspace_delete, true, true));
+            match result {
+                Ok(deleted) => {
+                    progress_after_delete.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                    apply_workspace_delete_navigation_result(
+                        &state_after_delete,
+                        &Ok(deleted.clone()),
+                    );
+                }
+                Err(err) => apply_runtime_action_feedback(
+                    &progress_after_delete,
+                    &toast_after_delete,
+                    lifecycle_action_failure_feedback("Delete", &err),
+                ),
+            }
+            refresh_after_delete.refresh(RefreshScope::All);
+        });
+
+        let actions = GBox::new(Orientation::Horizontal, 8);
+        actions.set_halign(Align::Center);
+        actions.append(&confirm);
+        actions.append(&delete_btn);
+        body.append(&actions);
+        body.append(&progress);
+    }
     shell.append(&body);
 
     shell
+}
+
+fn workspace_creation_status_allows_delete(status: &str) -> bool {
+    status == "failed"
 }
 
 fn simple_workspace_shell(
@@ -9266,6 +9329,13 @@ mod tests {
 
         let failure = workspace_delete_feedback(Err(anyhow::anyhow!("worktree remove failed")));
         assert_eq!(failure, "Delete failed: worktree remove failed");
+    }
+
+    #[test]
+    fn failed_workspace_creation_status_exposes_delete_action() {
+        assert!(workspace_creation_status_allows_delete("failed"));
+        assert!(!workspace_creation_status_allows_delete("creating"));
+        assert!(!workspace_creation_status_allows_delete("active"));
     }
 
     #[test]

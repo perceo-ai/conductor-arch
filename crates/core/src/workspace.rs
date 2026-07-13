@@ -1154,6 +1154,7 @@ impl WorkspaceStore {
         let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
+        let (name, branch) = self.resolve_create_identity(&repository, &name, &branch)?;
         let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
         let default_base_branch = settings
             .customization
@@ -1511,7 +1512,18 @@ impl WorkspaceStore {
         self.stop_workspace_processes(workspace.id)?;
 
         if remove_worktree {
-            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
+            match remove_workspace_worktree(&repository.root_path, &workspace.path) {
+                Ok(()) => {}
+                Err(err) if workspace_allows_best_effort_delete(&workspace) => {
+                    warn!(
+                        workspace = %workspace.name,
+                        path = %workspace.path.display(),
+                        error = %err,
+                        "continuing failed workspace metadata delete after artifact cleanup failed"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -6324,10 +6336,6 @@ mutation($threadId: ID!) {{
     ) -> Result<String> {
         let requested_name = requested_name.trim();
         if !requested_name.is_empty() {
-            anyhow::ensure!(
-                self.workspace_name_available(repository, requested_name)?,
-                "workspace {requested_name} already exists"
-            );
             return Ok(requested_name.to_owned());
         }
 
@@ -6373,6 +6381,38 @@ mutation($threadId: ID!) {{
         }
 
         unreachable!("workspace name generation should always return")
+    }
+
+    fn resolve_create_identity(
+        &self,
+        repository: &RepositoryRecord,
+        base_name: &str,
+        base_branch: &str,
+    ) -> Result<(String, String)> {
+        for version in 0.. {
+            let version = version + 1;
+            let name = if version == 1 {
+                base_name.to_owned()
+            } else {
+                versioned_workspace_name(base_name, version)
+            };
+            let branch = if version == 1 {
+                base_branch.to_owned()
+            } else {
+                versioned_branch_name(base_branch, version)
+            };
+
+            validate_workspace_name(&name)?;
+            validate_branch_name(&branch)?;
+
+            if self.workspace_name_available(repository, &name)?
+                && !local_branch_exists(&repository.root_path, &branch)?
+            {
+                return Ok((name, branch));
+            }
+        }
+
+        unreachable!("workspace identity generation should always return")
     }
 
     fn workspace_name_available(&self, repository: &RepositoryRecord, name: &str) -> Result<bool> {
@@ -7877,6 +7917,18 @@ fn validate_branch_name(branch: &str) -> Result<()> {
     Ok(())
 }
 
+fn workspace_allows_best_effort_delete(workspace: &Workspace) -> bool {
+    matches!(workspace.status.as_str(), "creating" | "failed")
+}
+
+fn versioned_workspace_name(base: &str, version: usize) -> String {
+    format!("{base}-v{version}")
+}
+
+fn versioned_branch_name(base: &str, version: usize) -> String {
+    format!("{base}-v{version}")
+}
+
 fn unique_message_branch_name(
     repository_root: &Path,
     base: &str,
@@ -9101,6 +9153,49 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn create_workspace_versions_branch_and_workspace_when_requested_branch_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "lc/berlin", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(workspace.name, "berlin-v2");
+        assert_eq!(workspace.branch, "lc/berlin-v2");
+        assert_eq!(workspace.status, "active");
+        assert_eq!(workspace.path, workspace_parent.join("berlin-v2"));
+
+        let branch = git_output(&workspace.path, ["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "lc/berlin-v2");
     }
 
     #[test]
@@ -10598,6 +10693,48 @@ CUSTOM_VALUE = "from-settings"
 
         assert!(store.delete("berlin", true, false).is_err());
         assert!(store.get_by_name("berlin").is_ok());
+    }
+
+    #[test]
+    fn delete_failed_workspace_removes_metadata_when_worktree_cleanup_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let not_a_worktree = temp.path().join("not-a-worktree");
+        fs::create_dir(&not_a_worktree).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET path = ?1, status = 'failed' WHERE id = ?2",
+                params![not_a_worktree.to_string_lossy(), workspace.id],
+            )
+            .unwrap();
+
+        let deleted = store.delete("berlin", true, false).unwrap();
+
+        assert_eq!(deleted.status, "failed");
+        assert!(store.get_by_name("berlin").is_err());
     }
 
     #[test]
