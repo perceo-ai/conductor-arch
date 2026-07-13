@@ -175,34 +175,46 @@ mod tests {
 
     fn init_repo(path: PathBuf) -> PathBuf {
         fs::create_dir(&path).unwrap();
-        Command::new("git")
-            .args(["init", "--initial-branch", "main"])
-            .arg(&path)
-            .status()
-            .unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--initial-branch", "main"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success(),
+            "git init fixture repo"
+        );
         fs::write(path.join("README.md"), "demo\n").unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["add", "."])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args([
-                "-c",
-                "user.name=Archductor",
-                "-c",
-                "user.email=archductor@example.test",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                "initial",
-            ])
-            .status()
-            .unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args(["add", "."])
+                .status()
+                .unwrap()
+                .success(),
+            "git add fixture repo"
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args([
+                    "-c",
+                    "user.name=Archductor",
+                    "-c",
+                    "user.email=archductor@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "initial",
+                ])
+                .status()
+                .unwrap()
+                .success(),
+            "git commit fixture repo"
+        );
         path
     }
 }

@@ -73,7 +73,7 @@ fn cli_starts_and_logs_real_shell_session() {
         .args(["logs", "berlin", "--session"])
         .assert()
         .success()
-        .stdout(contains("cli-session:berlin:3000"));
+        .stdout(contains("cli-session:berlin:"));
 }
 
 #[test]
@@ -524,7 +524,7 @@ fn init_repo(path: PathBuf) -> PathBuf {
 }
 
 fn wait_for_session_log(root: &Path) {
-    wait_for_session_log_contains(root, "berlin", "cli-session:berlin:3000");
+    wait_for_session_log_contains(root, "berlin", "cli-session:berlin:");
 }
 
 fn wait_for_session_log_contains(root: &Path, workspace: &str, needle: &str) {

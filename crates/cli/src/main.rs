@@ -606,10 +606,13 @@ fn main() -> Result<()> {
                     })?);
                 }
                 ArchcarCommand::Model { session_id, model } => {
-                    print_archcar_response(client.send(ArchcarRequest::SetSessionModel {
+                    match client.send(ArchcarRequest::SetSessionModel {
                         session_id,
                         model: Some(model),
-                    })?);
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
                 }
                 ArchcarCommand::Resize {
                     session_id,

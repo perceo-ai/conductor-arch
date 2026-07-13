@@ -52,20 +52,17 @@ pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHist
         }
 
         if line == "[codex raw]" {
-            let (_, next) = collect_bracketed_block(&lines, index + 1, "[/codex raw]");
-            index = next;
+            index = skip_bracketed_block(&lines, index + 1, "[/codex raw]");
             continue;
         }
 
         if line == "[codex-app-server jsonl]" {
-            let (_, next) = collect_bracketed_block(&lines, index + 1, "[/codex-app-server jsonl]");
-            index = next;
+            index = skip_bracketed_block(&lines, index + 1, "[/codex-app-server jsonl]");
             continue;
         }
 
         if line == "[claude-stream-json]" {
-            let (_, next) = collect_bracketed_block(&lines, index + 1, "[/claude-stream-json]");
-            index = next;
+            index = skip_bracketed_block(&lines, index + 1, "[/claude-stream-json]");
             continue;
         }
 
@@ -216,17 +213,14 @@ fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, us
     (content.join("\n"), index)
 }
 
-fn collect_bracketed_block(lines: &[&str], mut index: usize, end_marker: &str) -> (String, usize) {
-    let mut content = Vec::new();
+fn skip_bracketed_block(lines: &[&str], mut index: usize, end_marker: &str) -> usize {
     while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == end_marker {
-            return (content.join("\n"), index + 1);
+        if lines[index].trim_end() == end_marker {
+            return index + 1;
         }
-        content.push(lines[index]);
         index += 1;
     }
-    (content.join("\n"), index)
+    index
 }
 
 fn is_local_chat_marker(line: &str) -> bool {

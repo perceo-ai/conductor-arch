@@ -292,6 +292,12 @@ mod tests {
                 cols: 80,
             }
         ));
+        assert!(request_retry_safe_after_response_loss(
+            &ArchcarRequest::SetSessionModel {
+                session_id: 42,
+                model: Some("gpt-5".to_owned()),
+            }
+        ));
         assert!(!request_retry_safe_after_response_loss(
             &ArchcarRequest::SendInput {
                 session_id: 42,

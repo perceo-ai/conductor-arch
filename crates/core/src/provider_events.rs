@@ -574,6 +574,20 @@ impl ProviderEventStore {
         Ok(rows)
     }
 
+    pub fn list_for_process(&self, process_id: i64) -> Result<Vec<ProviderEventRecord>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            provider_event_select_sql(
+                "WHERE process_id = ?1 ORDER BY received_sequence ASC, id ASC",
+            )
+            .as_str(),
+        )?;
+        let rows = stmt
+            .query_map([process_id], row_to_provider_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn list_raw_payloads_for_identity(
         &self,
         identity_key: &str,
@@ -952,6 +966,13 @@ mod tests {
             [now],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO processes (
+                id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at
+             ) VALUES (10, 1, 7, 'session', 'codex', 1000, '/tmp/session-10.log', 'running', ?1)",
+            [now],
+        )
+        .unwrap();
     }
 
     fn draft(kind: ProviderEventKind, phase: ProviderEventPhase) -> ProviderEventDraft {
@@ -1031,6 +1052,40 @@ mod tests {
         assert_eq!(inserted.id, updated.id);
         assert_eq!(updated.normalized_payload["text"], "hello world");
         assert_eq!(store.list_for_chat_thread(7).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_for_process_returns_only_that_process_in_sequence_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        for (item, process_id, sequence) in [
+            ("item-2", Some(10), 2),
+            ("item-1", Some(9), 1),
+            ("item-3", Some(9), 3),
+            ("item-4", None, 4),
+        ] {
+            let mut event = draft(
+                ProviderEventKind::AssistantOutput,
+                ProviderEventPhase::Completed,
+            );
+            event.provider_event_id = Some(format!("evt-{sequence}"));
+            event.provider_item_id = Some(item.to_owned());
+            event.process_id = process_id;
+            event.provider_sequence = Some(sequence);
+            event.normalized_payload = json!({"title": "Assistant", "text": item});
+            store.upsert_event(&event).unwrap();
+        }
+
+        let process_events = store.list_for_process(9).unwrap();
+
+        assert_eq!(
+            process_events
+                .iter()
+                .map(|event| event.provider_item_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("item-1"), Some("item-3")]
+        );
     }
 
     #[test]

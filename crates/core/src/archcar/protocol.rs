@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn request_summary_describes_set_session_model() {
+    fn request_summary_describes_and_round_trips_set_session_model() {
         let request = ArchcarRequest::SetSessionModel {
             session_id: 9,
             model: Some("gpt-5.6-terra".to_owned()),
@@ -360,6 +360,23 @@ mod tests {
             archcar_request_summary(&request),
             "set_session_model session_id=9 model=gpt-5.6-terra"
         );
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"set_session_model\""));
+        let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
+
+        let reset = ArchcarRequest::SetSessionModel {
+            session_id: 9,
+            model: None,
+        };
+        assert_eq!(
+            archcar_request_summary(&reset),
+            "set_session_model session_id=9 model=<default>"
+        );
+        let json = serde_json::to_string(&reset).unwrap();
+        assert!(!json.contains("\"model\""));
+        let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, reset);
     }
 
     #[test]

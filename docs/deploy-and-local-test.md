@@ -117,8 +117,8 @@ that should travel across workspaces or PCs. Keep workspace `.context/` files
 gitignored because they are per-workspace scratch context. Put machine-local
 overrides and secrets in `.archductor/settings.local.toml`.
 If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
-Check scripts are exposed as workspace terminal command presets today. A
-first-class local check runner UI remains a known gap.
+Check scripts are exposed as workspace terminal command presets and through the
+workspace Checks tab runner UI.
 
 Repository prompts are part of the customization surface and should be editable
 from the Projects settings UI:

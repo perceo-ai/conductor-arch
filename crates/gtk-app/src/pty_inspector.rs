@@ -1,6 +1,6 @@
 use archductor_core::provider_events::{ProviderEventRecord, ProviderEventStore};
 use archductor_core::provider_projection::{
-    provider_projection_from_records, provider_projection_item_text,
+    provider_projection_from_records, provider_projection_item_text, ProviderProjectionStatus,
 };
 use archductor_core::redaction::redact_sensitive_text;
 use archductor_core::session_event::{SessionEvent, SessionEventPayload};
@@ -133,16 +133,8 @@ fn load_session_inputs(db_path: PathBuf) -> anyhow::Result<Vec<InspectorSessionI
             let raw_output = std::fs::read_to_string(&process.log_path).unwrap_or_default();
             let chunk_rows = store.list_pty_chunks(process.id).unwrap_or_default();
             let events = store.list_session_events(process.id).unwrap_or_default();
-            let provider_events = process
-                .chat_thread_id
-                .map(|thread_id| {
-                    ProviderEventStore::new(&db_path)
-                        .list_for_chat_thread(thread_id)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|event| event.process_id == Some(process.id))
-                        .collect::<Vec<_>>()
-                })
+            let provider_events = ProviderEventStore::new(&db_path)
+                .list_for_process(process.id)
                 .unwrap_or_default();
             sessions.push(session_input_from_process(
                 &status.workspace.name,
@@ -216,7 +208,10 @@ fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
         } else {
             format!(
                 "{} events",
-                session.events.len() + session.provider_events.len()
+                session.events.len()
+                    + provider_projection_from_records(&session.provider_events)
+                        .items
+                        .len()
             )
         },
         last_activity: session
@@ -502,10 +497,18 @@ fn provider_event_rows(events: &[ProviderEventRecord]) -> Vec<InspectorEventRow>
         .items
         .iter()
         .map(|item| InspectorEventRow {
-            sequence: format!("#{}", item.sequence),
-            timestamp: "provider".to_owned(),
+            sequence: item.sequence.to_string(),
+            timestamp: events
+                .iter()
+                .find(|event| event.received_sequence.max(0) as u64 == item.sequence)
+                .map(|event| event.occurred_at_ms.to_string())
+                .unwrap_or_else(|| "provider".to_owned()),
             source_chunk: "provider-event".to_owned(),
-            filter: provider_event_filter(item.category),
+            filter: if item.status == ProviderProjectionStatus::Failed {
+                EventFilter::Errors
+            } else {
+                provider_event_filter(item.category)
+            },
             status: format!("{} / {}", item.status.as_str(), item.stream_state.as_str()),
             rendered_text: redact_sensitive_text(&provider_projection_item_text(item)),
         })
@@ -1082,11 +1085,13 @@ fn mono_label(text: &str) -> Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archductor_core::provider_events::{ProviderEventKind, ProviderEventPhase};
     use archductor_core::session_event::{
         SessionCommandOutputStatus, SessionEvent, SessionEventPayload, SessionEventSource,
         SessionEventStatus,
     };
     use archductor_core::workspace::ProcessStatus;
+    use serde_json::json;
 
     #[test]
     fn inspector_model_summarizes_sessions_output_events_and_diagnostics() {
@@ -1518,6 +1523,65 @@ mod tests {
     }
 
     #[test]
+    fn provider_event_rows_use_projected_count_timestamp_and_failed_filter() {
+        let completed = provider_record(
+            1,
+            ProviderEventKind::Tool,
+            ProviderEventPhase::Completed,
+            "tool_call",
+            "Tool",
+            "ok",
+        );
+        let mut failed = provider_record(
+            2,
+            ProviderEventKind::Tool,
+            ProviderEventPhase::Failed,
+            "tool_call",
+            "Tool",
+            "boom",
+        );
+        failed.provider_item_id = Some("item-2".to_owned());
+        failed.identity_key = "codex:thread-1:item-2:failed".to_owned();
+        let session = InspectorSessionInput {
+            id: 12,
+            workspace: "rome".to_owned(),
+            command: "codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-12.log"),
+            pid: Some(5555),
+            status: ProcessStatus::Running,
+            started_at: "2026-07-06T12:00:00Z".to_owned(),
+            ended_at: None,
+            exit_code: None,
+            raw_output: String::new(),
+            raw_chunks: Vec::new(),
+            events: Vec::new(),
+            provider_events: vec![completed, failed],
+        };
+
+        let model = build_inspector_model(vec![session]);
+
+        assert_eq!(model.sessions[0].parser_state, "2 events");
+        assert_eq!(
+            model
+                .selected
+                .events
+                .iter()
+                .map(|event| {
+                    (
+                        event.sequence.as_str(),
+                        event.timestamp.as_str(),
+                        event.filter,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("1", "1001", EventFilter::ToolOutput),
+                ("2", "1002", EventFilter::Errors),
+            ]
+        );
+    }
+
+    #[test]
     fn event_rows_filter_by_selected_categories() {
         let events = vec![
             InspectorEventRow {
@@ -1571,5 +1635,41 @@ mod tests {
         assert!(redacted.contains("ANTHROPIC_API_KEY=[redacted]"));
         assert!(redacted.contains("--token [redacted]"));
         assert!(redacted.contains("--password=[redacted]"));
+    }
+
+    fn provider_record(
+        sequence: i64,
+        kind: ProviderEventKind,
+        phase: ProviderEventPhase,
+        subtype: &str,
+        title: &str,
+        body: &str,
+    ) -> ProviderEventRecord {
+        ProviderEventRecord {
+            id: sequence,
+            identity_key: format!("codex:thread-1:item-{sequence}:{}", phase.as_str()),
+            provider: "codex".to_owned(),
+            provider_event_id: Some(format!("evt-{sequence}")),
+            provider_item_id: Some(format!("item-{sequence}")),
+            provider_thread_id: Some("thread-1".to_owned()),
+            provider_turn_id: Some("turn-1".to_owned()),
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(12),
+            phase,
+            kind,
+            provider_subtype: Some(subtype.to_owned()),
+            provider_sequence: Some(sequence),
+            received_sequence: sequence,
+            occurred_at_ms: 1000 + sequence as u64,
+            normalized_payload: json!({"title": title, "body": body}),
+            raw_json: json!({"sequence": sequence}),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }
     }
 }

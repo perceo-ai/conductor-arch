@@ -416,8 +416,7 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
         } else {
             content
         };
-        let content = content.trim();
-        if content.is_empty() {
+        if content.trim().is_empty() {
             continue;
         }
         if item.render_class.role_label() == "user" {
@@ -431,14 +430,14 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
         if messages.iter().any(|message: &ArchcarMessage| {
             message.source != "provider_event"
                 && message.role == item.render_class.role_label()
-                && message.content.trim() == content
+                && message.content.trim() == content.trim()
         }) {
             continue;
         }
         messages.push(ArchcarMessage {
             id: next_provider_message_id,
             role: item.render_class.role_label().to_owned(),
-            content: content.to_owned(),
+            content,
             source: "provider_event".to_owned(),
             inline_event: None,
             context_usage: None,
@@ -1289,6 +1288,33 @@ mod tests {
                 ("reasoning", "Reasoning\nChecking failure output"),
             ]
         );
+    }
+
+    #[test]
+    fn session_messages_preserve_assistant_edge_whitespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        ProviderEventStore::new(&db_path)
+            .upsert_event(&provider_event(
+                thread.id,
+                "assistant-whitespace",
+                ProviderEventKind::AssistantOutput,
+                ProviderEventPhase::Completed,
+                "agent_message",
+                "Assistant",
+                "  indented reply\n",
+            ))
+            .unwrap();
+
+        let messages = session_messages_for_thread(&db_path, thread.id).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, "  indented reply\n");
     }
 
     #[test]
