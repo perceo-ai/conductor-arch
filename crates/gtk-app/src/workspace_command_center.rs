@@ -34,6 +34,12 @@ const WORKSPACE_TURN_DIFF_MAX_KIB: usize = 64;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
+fn clone_external_thread_selection_controller(
+    controller: &session_surface::ExternalThreadSelectionController,
+) -> Option<Rc<dyn Fn(Option<i64>)>> {
+    controller.borrow().as_ref().cloned()
+}
+
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
@@ -699,7 +705,7 @@ fn ws_center_panel(
                     state.set_selected_chat_thread(Some(thread_id));
                     content.set_visible_child_name("chat");
                     if let Some(select_thread) =
-                        external_thread_selection.borrow().as_ref().cloned()
+                        clone_external_thread_selection_controller(&external_thread_selection)
                     {
                         select_thread(Some(thread_id));
                     }
@@ -733,7 +739,9 @@ fn ws_center_panel(
                     content_for_click.set_visible_child_name("chat");
                     sync_workspace_chat_tabs(chat_tab_buttons_for_click.as_ref(), Some(thread_id));
                     sync_workspace_file_tabs(file_tab_buttons_for_click.as_ref(), None);
-                    if let Some(select_thread) = controller_for_click.borrow().as_ref().cloned() {
+                    if let Some(select_thread) =
+                        clone_external_thread_selection_controller(&controller_for_click)
+                    {
                         select_thread(Some(thread_id));
                     }
                 });
@@ -786,7 +794,7 @@ fn ws_center_panel(
                         sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), next);
                         sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
                         if let Some(select_thread) =
-                            external_thread_selection.borrow().as_ref().cloned()
+                            clone_external_thread_selection_controller(&external_thread_selection)
                         {
                             select_thread(next);
                         }
@@ -888,7 +896,9 @@ fn ws_center_panel(
             state.set_selected_chat_thread(Some(thread.id));
             content.set_visible_child_name("chat");
             (on_threads_changed)(threads, Some(thread.id));
-            if let Some(select_thread) = external_thread_selection.borrow().as_ref().cloned() {
+            if let Some(select_thread) =
+                clone_external_thread_selection_controller(&external_thread_selection)
+            {
                 select_thread(Some(thread.id));
             }
         });
@@ -1007,7 +1017,7 @@ fn ws_center_panel(
                     sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), selected);
                     sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
                     if let Some(select_thread) =
-                        external_thread_selection.borrow().as_ref().cloned()
+                        clone_external_thread_selection_controller(&external_thread_selection)
                     {
                         select_thread(selected);
                     }
@@ -9478,5 +9488,27 @@ mod tests {
                 Some("berlin")
             );
         }
+    }
+
+    #[test]
+    fn cloned_external_thread_selection_drops_borrow_before_callback_runs() {
+        let controller: session_surface::ExternalThreadSelectionController =
+            Rc::new(RefCell::new(None));
+        let observed = Rc::new(RefCell::new(None));
+        *controller.borrow_mut() = Some(Rc::new({
+            let controller = controller.clone();
+            let observed = observed.clone();
+            move |thread_id| {
+                let _same_controller = clone_external_thread_selection_controller(&controller);
+                *observed.borrow_mut() = thread_id;
+            }
+        }));
+
+        let Some(select_thread) = clone_external_thread_selection_controller(&controller) else {
+            panic!("expected selection controller");
+        };
+        select_thread(Some(42));
+
+        assert_eq!(*observed.borrow(), Some(42));
     }
 }

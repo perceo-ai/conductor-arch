@@ -86,6 +86,16 @@ pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 
+fn clone_refresh_chat_surface_controller(
+    controller: &RefreshChatSurfaceController,
+) -> Option<Rc<dyn Fn()>> {
+    controller.borrow().as_ref().cloned()
+}
+
+fn selected_harness_snapshot(selected_harness: &RefCell<SessionKind>) -> SessionKind {
+    *selected_harness.borrow()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ChatScrollSnapshot {
     value: f64,
@@ -648,7 +658,7 @@ pub fn agent_session_panel(
                                     || restore_composer_draft(),
                                 );
                                 if let Some(refresh_view) =
-                                    refresh_chat_surface.borrow().as_ref().cloned()
+                                    clone_refresh_chat_surface_controller(&refresh_chat_surface)
                                 {
                                     refresh_view();
                                 }
@@ -666,7 +676,7 @@ pub fn agent_session_panel(
                         }
                     }
                 }
-                if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
+                if let Some(sync) = clone_refresh_chat_surface_controller(&sync_live_controls) {
                     sync();
                 }
             })
@@ -992,31 +1002,31 @@ pub fn agent_session_panel(
                 |thread_id| app_state.set_selected_chat_thread(thread_id),
                 || restore_composer_draft(),
             );
-            if let Some(thread_id) = *selected_thread.borrow() {
-                if let Some(thread) = thread_state
-                    .borrow()
-                    .iter()
-                    .find(|thread| thread.id == thread_id)
+            let selected_thread_record = {
+                let selected_thread_id = *selected_thread.borrow();
+                let threads = thread_state.borrow();
+                selected_thread_id
+                    .and_then(|thread_id| threads.iter().find(|thread| thread.id == thread_id))
                     .cloned()
-                {
-                    let (kind, model) = selected_thread_harness_state(&thread);
-                    *selected_harness.borrow_mut() = kind;
-                    if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
-                        *reasoning_mode.borrow_mut() = Some("high".to_owned());
-                    }
-                    *selected_model.borrow_mut() = model.clone();
-                    let index = selected_provider_model_choice_index(
-                        provider_model_choices.as_ref(),
-                        kind,
-                        model.as_deref(),
-                    );
-                    if let Some(choice) = provider_model_choices.get(index) {
-                        provider_model_menu_set_child(&provider_model_btn, choice);
-                        provider_model_btn.set_tooltip_text(Some(&choice.button_label()));
-                    }
-                    if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
-                        sync();
-                    }
+            };
+            if let Some(thread) = selected_thread_record {
+                let (kind, model) = selected_thread_harness_state(&thread);
+                *selected_harness.borrow_mut() = kind;
+                if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+                    *reasoning_mode.borrow_mut() = Some("high".to_owned());
+                }
+                *selected_model.borrow_mut() = model.clone();
+                let index = selected_provider_model_choice_index(
+                    provider_model_choices.as_ref(),
+                    kind,
+                    model.as_deref(),
+                );
+                if let Some(choice) = provider_model_choices.get(index) {
+                    provider_model_menu_set_child(&provider_model_btn, choice);
+                    provider_model_btn.set_tooltip_text(Some(&choice.button_label()));
+                }
+                if let Some(sync) = clone_refresh_chat_surface_controller(&sync_live_controls) {
+                    sync();
                 }
                 restore_composer_draft();
             }
@@ -1150,7 +1160,7 @@ pub fn agent_session_panel(
                                     },
                                 );
                                 if let Some(refresh_view) =
-                                    refresh_chat_surface.borrow().as_ref().cloned()
+                                    clone_refresh_chat_surface_controller(&refresh_chat_surface)
                                 {
                                     refresh_view();
                                 }
@@ -2099,7 +2109,8 @@ pub fn agent_session_panel(
             );
         });
         *switch_chat_harness.borrow_mut() = Some(switch_action.clone());
-        switch_action(*selected_harness.borrow());
+        let initial_kind = selected_harness_snapshot(selected_harness.as_ref());
+        switch_action(initial_kind);
     }
 
     if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
@@ -2118,7 +2129,8 @@ pub fn agent_session_panel(
                     update_composer_state();
                 },
             );
-            if let Some(refresh_view) = refresh_chat_surface.borrow().as_ref().cloned() {
+            if let Some(refresh_view) = clone_refresh_chat_surface_controller(&refresh_chat_surface)
+            {
                 refresh_view();
             }
         }));
@@ -2172,7 +2184,7 @@ pub fn agent_session_panel(
                 &active_sessions,
                 &last_output,
             );
-            if let Some(refresh) = refresh_chat_surface.borrow().as_ref().cloned() {
+            if let Some(refresh) = clone_refresh_chat_surface_controller(&refresh_chat_surface) {
                 refresh();
             }
         }
@@ -8159,6 +8171,19 @@ mod tests {
     }
 
     #[test]
+    fn selected_harness_snapshot_drops_borrow_before_reentrant_switch() {
+        let selected_harness = RefCell::new(SessionKind::Codex);
+        let initial_kind = selected_harness_snapshot(&selected_harness);
+
+        let switch = |kind| {
+            *selected_harness.borrow_mut() = kind;
+        };
+        switch(initial_kind);
+
+        assert_eq!(*selected_harness.borrow(), SessionKind::Codex);
+    }
+
+    #[test]
     fn same_provider_model_selection_does_not_switch_chat_harness() {
         let current = ProviderModelChoice {
             provider: "codex".to_owned(),
@@ -11062,6 +11087,27 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*selected_thread.borrow(), Some(7));
         assert_eq!(*app_state.borrow(), None);
         assert_eq!(*composer_updates.borrow(), 0);
+    }
+
+    #[test]
+    fn cloned_refresh_controller_drops_borrow_before_callback_runs() {
+        let controller: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
+        let observed = Rc::new(Cell::new(false));
+        *controller.borrow_mut() = Some(Rc::new({
+            let controller = controller.clone();
+            let observed = observed.clone();
+            move || {
+                let _same_controller = clone_refresh_chat_surface_controller(&controller);
+                observed.set(true);
+            }
+        }));
+
+        let Some(refresh) = clone_refresh_chat_surface_controller(&controller) else {
+            panic!("expected refresh controller");
+        };
+        refresh();
+
+        assert!(observed.get());
     }
 
     #[test]
