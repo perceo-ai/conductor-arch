@@ -4351,9 +4351,10 @@ fn extract_local_path(line: &str) -> Option<PathBuf> {
 }
 
 fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
-    let group = GBox::new(Orientation::Vertical, 4);
+    let group = GBox::new(Orientation::Vertical, 0);
     group.set_hexpand(true);
-    group.set_margin_bottom(8);
+    group.set_margin_top(0);
+    group.set_margin_bottom(0);
     for event in events {
         group.append(&inline_event_widget(event));
     }
@@ -4361,18 +4362,22 @@ fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
 }
 
 fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
-    let root = GBox::new(Orientation::Vertical, 4);
+    let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("chat-inline-event");
     root.add_css_class(inline_event_type_css_class(event));
     if let Some(class) = inline_event_status_css_class(event.status) {
         root.add_css_class(class);
     }
     root.set_hexpand(true);
+    root.set_margin_top(0);
+    root.set_margin_bottom(0);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
     let toggle = ToggleButton::new();
     toggle.add_css_class("chat-inline-event-chip");
     toggle.set_halign(Align::Start);
+    toggle.set_margin_top(0);
+    toggle.set_margin_bottom(0);
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
     let toggle_label = Label::new(None);
     toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
