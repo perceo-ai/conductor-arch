@@ -1,24 +1,20 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
-use linux_archductor_core::archcar::client::ArchcarClient;
-use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest, ArchcarResponse};
-use linux_archductor_core::archcar::server::{
-    reconcile_managed_sessions_on_startup, ArchcarServer,
-};
-use linux_archductor_core::doctor;
-use linux_archductor_core::import::{
-    default_conductor_app_database, import_conductor_app_database,
-};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::repository::{AddRepository, RepositoryStore};
-use linux_archductor_core::settings::{
+use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest, ArchcarResponse};
+use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::doctor;
+use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
+use archductor_core::paths::AppPaths;
+use archductor_core::repository::{AddRepository, RepositoryStore};
+use archductor_core::settings::{
     repository_settings_from_toml, save_repository_settings, SettingsLayer,
 };
-use linux_archductor_core::workspace::{
+use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
     WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
 };
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -28,8 +24,8 @@ use std::thread;
 use std::time::Duration;
 
 #[derive(Debug, Parser)]
-#[command(name = "linux-archductor")]
-#[command(about = "Linux-native Git worktree workflow for parallel coding agents")]
+#[command(name = "archductor")]
+#[command(about = "Archductor Git worktree workflow for parallel coding agents")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -906,7 +902,7 @@ fn main() -> Result<()> {
         } => {
             if run == session {
                 anyhow::bail!(
-                    "choose exactly one log stream, for example: linux-archductor logs {workspace} --run"
+                    "choose exactly one log stream, for example: archductor logs {workspace} --run"
                 );
             }
             let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
@@ -1352,7 +1348,7 @@ fn print_archcar_response(response: ArchcarResponse) {
     }
 }
 
-fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary) {
+fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
     println!(
         "Workspace: {} ({})",
         summary.workspace.name, summary.workspace.status
@@ -1360,7 +1356,7 @@ fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary
     println!("Branch:    {}", summary.workspace.branch);
     match &summary.branch_push_state {
         Some(state) if !state.has_upstream => {
-            println!("Push:      no upstream set (push with: linux-archductor pr create)");
+            println!("Push:      no upstream set (push with: archductor pr create)");
         }
         Some(state) => println!(
             "Push:      {} ahead, {} behind upstream",
@@ -1404,7 +1400,7 @@ fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary
     }
 }
 
-fn print_source_preflight(preflight: linux_archductor_core::workspace::WorkspaceSourcePreflight) {
+fn print_source_preflight(preflight: archductor_core::workspace::WorkspaceSourcePreflight) {
     println!("Workspace source preflight");
     println!("GitHub: {}", preflight.github_status());
     println!("Linear: {}", preflight.linear_status());
@@ -1505,7 +1501,7 @@ fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
     }
 }
 
-fn print_mcp_status(status: linux_archductor_core::mcp::McpStatus) {
+fn print_mcp_status(status: archductor_core::mcp::McpStatus) {
     println!("MCP status for {}", status.workspace_path.display());
     let groups = [
         ("Claude user (~/.claude.json)", &status.claude_user),
@@ -1527,7 +1523,7 @@ fn print_mcp_status(status: linux_archductor_core::mcp::McpStatus) {
 
 fn print_status(lines: Vec<WorkspaceStatusLine>) {
     if lines.is_empty() {
-        println!("No workspaces found. Run: linux-archductor workspace create <repo> --name <name> --branch <branch>");
+        println!("No workspaces found. Run: archductor workspace create <repo> --name <name> --branch <branch>");
         return;
     }
     for line in lines {
@@ -2044,7 +2040,7 @@ mod tests {
     #[test]
     fn cli_session_start_and_open_accept_explicit_model() {
         let start = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "session",
             "start",
             "berlin",
@@ -2065,7 +2061,7 @@ mod tests {
         assert_eq!(start_model.as_deref(), Some("gpt-5.6-luna"));
 
         let open = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "session",
             "open",
             "berlin",
@@ -2090,7 +2086,7 @@ mod tests {
     #[test]
     fn cli_archcar_send_accepts_automation_input_kinds() {
         let control = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "archcar",
             "send",
             "7",
@@ -2118,7 +2114,7 @@ mod tests {
         assert_eq!(input, vec!["/model".to_owned(), "gpt-5.6-sol".to_owned()]);
 
         let review = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "archcar",
             "send",
             "8",
@@ -2208,8 +2204,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_removed_internal_run_codex_session_command() {
-        let parse =
-            Cli::try_parse_from(["linux-archductor", "internal", "run-codex-session", "demo"]);
+        let parse = Cli::try_parse_from(["archductor", "internal", "run-codex-session", "demo"]);
 
         assert!(parse.is_err());
     }
@@ -2217,7 +2212,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_delete_cleanup_flags() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "delete",
             "berlin",
@@ -2246,7 +2241,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_branch_actions() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "branch",
             "berlin",
@@ -2273,7 +2268,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_duplicate_branch() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "duplicate",
             "berlin",
@@ -2303,7 +2298,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_timeline_filter() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "timeline",
             "berlin",

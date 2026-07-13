@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make Linux Archductor feel much closer to `conductor.build/docs` without
+Make Archductor feel much closer to `conductor.build/docs` without
 rewriting the product or losing the denser Linux-specific workflow areas that
 already exist.
 
@@ -106,7 +106,7 @@ It should not come from turning the whole app into a dark terminal dashboard.
 - border weight
 - surface simplicity
 
-Linux Archductor should not copy docs literally where the product shape differs.
+Archductor should not copy docs literally where the product shape differs.
 The docs site is the reference for taste and hierarchy, not a strict layout
 template for every screen.
 
@@ -394,7 +394,7 @@ Verification should focus on visual quality and no-regression behavior.
 Required checks:
 
 - `cargo fmt --all -- --check`
-- `cargo test -p linux-archductor-gtk`
+- `cargo test -p archductor-gtk`
 - GTK app launch after styling changes
 
 Manual review targets:

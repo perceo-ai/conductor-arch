@@ -1,10 +1,8 @@
 use std::fs::{self, OpenOptions};
 
 use anyhow::{Context, Result};
-use linux_archductor_core::archcar::server::{
-    reconcile_managed_sessions_on_startup, ArchcarServer,
-};
-use linux_archductor_core::paths::AppPaths;
+use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::paths::AppPaths;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;

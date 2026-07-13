@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
+use archductor_core::paths::AppPaths;
+use archductor_core::repository::{AddRepository, RepositoryStore};
+use archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, ComboBoxText, Entry, Image, Label, ListBox, ListBoxRow, Orientation,
     PolicyType, Popover, ScrolledWindow, Stack,
 };
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::repository::{AddRepository, RepositoryStore};
-use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -1061,7 +1061,7 @@ fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {
 
 fn workspace_source_create_feedback(
     source: &str,
-    result: anyhow::Result<linux_archductor_core::workspace::Workspace>,
+    result: anyhow::Result<archductor_core::workspace::Workspace>,
 ) -> String {
     match result {
         Ok(workspace) => format!(
@@ -1222,7 +1222,7 @@ impl WorkspaceSourceRequest {
         &self,
         store: &WorkspaceStore,
         repository_name: &str,
-    ) -> anyhow::Result<linux_archductor_core::workspace::Workspace> {
+    ) -> anyhow::Result<archductor_core::workspace::Workspace> {
         self.create_workspace_with_progress(store, repository_name, |_| {})
     }
 
@@ -1230,8 +1230,8 @@ impl WorkspaceSourceRequest {
         &self,
         store: &WorkspaceStore,
         repository_name: &str,
-        after_insert: impl FnOnce(&linux_archductor_core::workspace::Workspace),
-    ) -> anyhow::Result<linux_archductor_core::workspace::Workspace> {
+        after_insert: impl FnOnce(&archductor_core::workspace::Workspace),
+    ) -> anyhow::Result<archductor_core::workspace::Workspace> {
         match self {
             Self::Branch { name, branch, base } => store.create_with_progress(
                 CreateWorkspace {
@@ -1820,7 +1820,7 @@ fn add_repository_from_path(
     database_path: &Path,
     path: &str,
     explicit_name: Option<String>,
-) -> Result<linux_archductor_core::repository::Repository> {
+) -> Result<archductor_core::repository::Repository> {
     let trimmed = path.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Local repository path is required.");
     RepositoryStore::open(database_path)?.add(AddRepository {
@@ -1836,7 +1836,7 @@ fn clone_repository_into_default_parent(
     database_path: &Path,
     url: &str,
     explicit_name: Option<String>,
-) -> Result<linux_archductor_core::repository::Repository> {
+) -> Result<archductor_core::repository::Repository> {
     let trimmed = url.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Git URL is required.");
     let name = explicit_name.unwrap_or_else(|| repo_name_from_url(trimmed));
@@ -1867,7 +1867,7 @@ fn create_repository_from_template(
     parent_folder: &str,
     project_name: &str,
     template: &str,
-) -> Result<linux_archductor_core::repository::Repository> {
+) -> Result<archductor_core::repository::Repository> {
     let parent = parent_folder.trim();
     anyhow::ensure!(!parent.is_empty(), "Parent folder is required.");
     let path = scaffold_new_repository(Path::new(parent), project_name, template)?;
@@ -1963,7 +1963,7 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
 }
 
 fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
-    linux_archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
+    archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
         .into_iter()
         .filter_map(|choice| {
             let title = choice.title.trim();
@@ -2200,13 +2200,13 @@ mod tests {
 
     #[test]
     fn workspace_source_create_feedback_summarizes_success_and_failure() {
-        let workspace = linux_archductor_core::workspace::Workspace {
+        let workspace = archductor_core::workspace::Workspace {
             id: 1,
             repository_id: 2,
             name: "pr-10".to_owned(),
             path: PathBuf::from("/tmp/pr-10"),
             branch: "lc/pr-10".to_owned(),
-            base_ref: "refs/linux-archductor/pull-requests/10".to_owned(),
+            base_ref: "refs/archductor/pull-requests/10".to_owned(),
             port_base: 3000,
             status: "active".to_owned(),
             archived_at: None,

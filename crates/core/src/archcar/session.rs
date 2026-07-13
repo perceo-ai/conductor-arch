@@ -1251,9 +1251,9 @@ mod tests {
             .arg(&path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

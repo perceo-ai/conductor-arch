@@ -24,7 +24,7 @@ Use official Conductor behavior as the parity baseline:
 
 ## Product Baseline
 
-Linux Archductor is a local desktop control plane for parallel coding agents.
+Archductor is a local desktop control plane for parallel coding agents.
 The core loop should work in the app: add or clone a repository, create
 workspaces, run multiple chats/sessions, review work, create/merge PRs, archive,
 and repeat for the same repository.

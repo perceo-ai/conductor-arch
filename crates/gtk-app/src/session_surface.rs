@@ -1,33 +1,33 @@
-use gtk::prelude::*;
-use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry, EventControllerKey,
-    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
-    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
-};
-use linux_archductor_core::agent_tools::{
+use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
-use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
-use linux_archductor_core::codex_tui::{
+use archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
+use archductor_core::codex_tui::{
     parse_codex_context_usage, parse_codex_file_change_block, parse_codex_inline_event,
     CodexFileChangeAction as CoreCodexFileChangeAction,
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
     CodexTranscriptEvent,
 };
-use linux_archductor_core::doctor::SetupReadiness;
-use linux_archductor_core::model_registry::{
+use archductor_core::doctor::SetupReadiness;
+use archductor_core::model_registry::{
     default_model_for_provider, model_choices_for_provider, CODEX_DEFAULT_MODEL,
 };
-use linux_archductor_core::provider_events::{
+use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
 #[cfg(test)]
-use linux_archductor_core::session_state::AgentSessionState;
-use linux_archductor_core::settings::load_repository_settings;
-use linux_archductor_core::workflow_actions::gtk_live_controls_for_provider;
-use linux_archductor_core::workspace::{
+use archductor_core::session_state::AgentSessionState;
+use archductor_core::settings::load_repository_settings;
+use archductor_core::workflow_actions::gtk_live_controls_for_provider;
+use archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
+};
+use gtk::prelude::*;
+use gtk::{
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry, EventControllerKey,
+    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
+    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use std::any::Any;
 use std::backtrace::Backtrace;
@@ -2806,16 +2806,12 @@ fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexT
                 .flatten()
                 .filter_map(|line| {
                     let kind = match line.get("kind")?.as_str()? {
-                        "context" => {
-                            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Context
-                        }
-                        "added" => linux_archductor_core::codex_tui::CodexFileChangeLineKind::Added,
-                        "deleted" => {
-                            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Deleted
-                        }
+                        "context" => archductor_core::codex_tui::CodexFileChangeLineKind::Context,
+                        "added" => archductor_core::codex_tui::CodexFileChangeLineKind::Added,
+                        "deleted" => archductor_core::codex_tui::CodexFileChangeLineKind::Deleted,
                         _ => return None,
                     };
-                    Some(linux_archductor_core::codex_tui::CodexFileChangeLine {
+                    Some(archductor_core::codex_tui::CodexFileChangeLine {
                         kind,
                         old_line: line
                             .get("old_line")
@@ -2830,7 +2826,7 @@ fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexT
                 })
                 .collect();
             Some(CodexTranscriptEvent::FileChange(
-                linux_archductor_core::codex_tui::CodexFileChange {
+                archductor_core::codex_tui::CodexFileChange {
                     action,
                     path: value.get("path")?.as_str()?.to_owned(),
                     additions: value
@@ -2849,9 +2845,7 @@ fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexT
     }
 }
 
-fn format_codex_file_change_event(
-    change: &linux_archductor_core::codex_tui::CodexFileChange,
-) -> String {
+fn format_codex_file_change_event(change: &archductor_core::codex_tui::CodexFileChange) -> String {
     let mut body = format!(
         "{} {}",
         codex_file_change_action_label(change.action),
@@ -2865,9 +2859,9 @@ fn format_codex_file_change_event(
     }
     for line in &change.lines {
         let prefix = match line.kind {
-            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Context => " ",
-            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Added => "+",
-            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Deleted => "-",
+            archductor_core::codex_tui::CodexFileChangeLineKind::Context => " ",
+            archductor_core::codex_tui::CodexFileChangeLineKind::Added => "+",
+            archductor_core::codex_tui::CodexFileChangeLineKind::Deleted => "-",
         };
         let line_number = line
             .new_line
@@ -5804,7 +5798,7 @@ fn seed_running_sessions(
     }
 }
 
-fn provider_status_text(status: &linux_archductor_core::mcp::McpStatus) -> String {
+fn provider_status_text(status: &archductor_core::mcp::McpStatus) -> String {
     let codex_servers = status.codex_user.len() + status.codex_project.len();
     let claude_servers = status.claude_user.len() + status.claude_project.len();
     let cursor_servers = status.cursor_user.len() + status.cursor_project.len();
@@ -6817,8 +6811,8 @@ Do not answer this message. Use it only for continuity and wait for the next rea
 mod tests {
     use super::*;
     use crate::archcar_async::AsyncArchcarRequestKind;
-    use linux_archductor_core::doctor::SetupCheck;
-    use linux_archductor_core::workspace::ProcessKind;
+    use archductor_core::doctor::SetupCheck;
+    use archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -7420,7 +7414,7 @@ fix it
         };
         let command_event = CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
-            title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+            title: "cargo test -p archductor-core codex_tui".to_owned(),
             subtitle: Some("Command result".to_owned()),
             body: None,
             path: None,
@@ -7437,7 +7431,7 @@ fix it
         );
         assert_eq!(
             inline_event_chip_label(&command_event, false),
-            "+ cargo test -p linux-archductor-core codex_tui"
+            "+ cargo test -p archductor-core codex_tui"
         );
     }
 
@@ -8191,7 +8185,7 @@ Read SKILL.md (graphify), SKILL.md (skill-creator)
 ---
 name: graphify
 ---
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 23 tests
 test result: ok. 23 passed
 • Edited crates/core/src/codex_tui.rs (+12 -3)
@@ -8212,7 +8206,7 @@ I summarized the result.
         assert_eq!(events[1].role, SessionTranscriptRole::Tool);
         assert_eq!(
             events[1].body,
-            "Ran cargo test -p linux-archductor-core codex_tui\nrunning 23 tests\ntest result: ok. 23 passed"
+            "Ran cargo test -p archductor-core codex_tui\nrunning 23 tests\ntest result: ok. 23 passed"
         );
         assert_eq!(events[2].role, SessionTranscriptRole::Tool);
         assert_eq!(

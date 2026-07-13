@@ -199,7 +199,7 @@ fn cli_session_open_print_command_uses_explicit_provider_models() {
 }
 
 fn app(root: &Path) -> AssertCommand {
-    let mut command = AssertCommand::cargo_bin("linux-archductor").unwrap();
+    let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command
         .env("XDG_CONFIG_HOME", root.join("xdg/config"))
         .env("XDG_DATA_HOME", root.join("xdg/data"))
@@ -227,9 +227,9 @@ fn init_repo(path: PathBuf) -> PathBuf {
         .arg(&path)
         .args([
             "-c",
-            "user.name=Linux Archductor",
+            "user.name=Archductor",
             "-c",
-            "user.email=linux-archductor@example.test",
+            "user.email=archductor@example.test",
             "-c",
             "commit.gpgsign=false",
             "commit",
@@ -246,7 +246,7 @@ fn wait_for_session_log(root: &Path) {
 }
 
 fn wait_for_session_log_contains(root: &Path, workspace: &str, needle: &str) {
-    let log_dir = root.join("xdg/state/linux-archductor/logs").join(workspace);
+    let log_dir = root.join("xdg/state/archductor/logs").join(workspace);
     for _ in 0..100 {
         if fs::read_dir(&log_dir)
             .ok()

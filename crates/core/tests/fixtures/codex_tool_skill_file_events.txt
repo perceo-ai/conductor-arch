@@ -1,4 +1,4 @@
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 

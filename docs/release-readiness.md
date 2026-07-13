@@ -1,6 +1,6 @@
 # Release Readiness
 
-This runbook is the launch gate for Linux Archductor. The Rust workspace can be
+This runbook is the launch gate for Archductor. The Rust workspace can be
 locally healthy while the public launch is still blocked by package-channel,
 website, or live-provider validation.
 
@@ -20,7 +20,7 @@ scripts/release-readiness.sh --version 0.1.0 --package
 ```
 
 The local gate covers formatting, clippy, the workspace test suite, release
-build, `linux-archductor doctor`, and `cargo deny check` when `cargo-deny` is
+build, `archductor doctor`, and `cargo deny check` when `cargo-deny` is
 available. The focused shell test covers script argument validation and
 non-Linux package behavior. On Linux, the package option requires `nfpm` and
 `appimagetool`, then creates a tarball, `.deb`, `.rpm`, AppImage, and
@@ -40,7 +40,7 @@ git push origin v0.1.0
 
 The release workflow must produce:
 
-- `linux-archductor-<version>-linux-x86_64.tar.gz`
+- `archductor-<version>-linux-x86_64.tar.gz`
 - `.deb`
 - `.rpm`
 - AppImage
@@ -76,17 +76,17 @@ and rollback or yank paths are validated for that channel.
 | Channel | Launch Requirement |
 | --- | --- |
 | GitHub/AppImage | Tag workflow attaches AppImage and checksum; AppImage opens GUI with no args and forwards CLI args. |
-| Debian/Ubuntu | `.deb` installs with `dpkg` or `apt`, launches GUI, runs `linux-archductor doctor`, and has upgrade/removal notes. |
-| Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, launches GUI, runs `linux-archductor doctor`, and has upgrade/removal notes. |
+| Debian/Ubuntu | `.deb` installs with `dpkg` or `apt`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
+| Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
 | AUR | `PKGBUILD` uses the release tag and real checksum, `makepkg -si` passes on Arch, and update/yank process is documented. |
 | Flatpak | Build result is documented. If published, note broad filesystem access for arbitrary repository paths. |
 
 ## Website Gate
 
-The `perceo.ai` Linux Archductor page must ship before public launch or be a
+The `perceo.ai` Archductor page must ship before public launch or be a
 required release gate. It needs:
 
-- Linux Archductor product page with the real workflow
+- Archductor product page with the real workflow
 - download/install instructions for supported channels only
 - supported Linux targets and prerequisites
 - known limits copied from `progress.md`

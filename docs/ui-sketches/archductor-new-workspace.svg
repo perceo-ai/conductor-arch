@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">Linux Archductor new workspace UI sketch</title>
+  <title id="title">Archductor new workspace UI sketch</title>
   <desc id="desc">Dark wireframe showing a new workspace form with repository, issue, branch, agent, files to copy, and setup preview.</desc>
   <defs>
     <style>

@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use gtk::glib;
-use linux_archductor_core::archcar::client::ArchcarClient;
-use linux_archductor_core::archcar::protocol::{
+use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputKind, ArchcarRequest, ArchcarResponse,
 };
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::SessionKind;
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::SessionKind;
+use gtk::glib;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

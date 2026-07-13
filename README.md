@@ -1,6 +1,6 @@
-# Linux Archductor
+# Archductor
 
-Linux Archductor is a desktop control plane for running coding agents across
+Archductor is a desktop control plane for running coding agents across
 isolated Git worktree workspaces.
 
 Use it when one codebase has several streams of work in flight: create a
@@ -73,7 +73,7 @@ application, and full Archductor visual parity are still in progress.
 
 ## The Workflow
 
-1. Open `linux-archductor-gtk`.
+1. Open `archductor-gtk`.
 2. Add or clone a repository on the Projects page. This creates the Archductor
    project entry for that codebase.
 3. Configure repository scripts and settings if the project needs them.
@@ -94,16 +94,16 @@ debugging, and fallback workflows.
 ### AppImage
 
 ```bash
-curl -Lo linux-archductor.AppImage \
-  https://github.com/pranavkannepalli/conductor-arch/releases/latest/download/linux-archductor-x86_64.AppImage
-chmod +x linux-archductor.AppImage
-sudo mv linux-archductor.AppImage /usr/local/bin/linux-archductor
+curl -Lo archductor.AppImage \
+  https://github.com/pranavkannepalli/conductor-arch/releases/latest/download/archductor-x86_64.AppImage
+chmod +x archductor.AppImage
+sudo mv archductor.AppImage /usr/local/bin/archductor
 ```
 
 Run the app:
 
 ```bash
-linux-archductor
+archductor
 ```
 
 The AppImage opens the GTK app with no arguments and forwards CLI arguments to
@@ -134,7 +134,7 @@ Build and run:
 git clone https://github.com/pranavkannepalli/conductor-arch
 cd conductor-arch
 cargo build --workspace --release --locked
-./target/release/linux-archductor-gtk
+./target/release/archductor-gtk
 ```
 
 Or use the short `make` targets:
@@ -153,8 +153,8 @@ make publish-tag VERSION=0.1.0
 Optional install:
 
 ```bash
-sudo install -Dm755 target/release/linux-archductor /usr/local/bin/linux-archductor
-sudo install -Dm755 target/release/linux-archductor-gtk /usr/local/bin/linux-archductor-gtk
+sudo install -Dm755 target/release/archductor /usr/local/bin/archductor
+sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 ```
 
 ## Requirements
@@ -316,9 +316,9 @@ Links are stored in the app database and materialized as symlinks under
 `.context/linked-directories/<target-workspace>`.
 
 ```bash
-linux-archductor workspace link-dir frontend backend
-linux-archductor workspace linked-dirs frontend
-linux-archductor workspace unlink-dir frontend backend
+archductor workspace link-dir frontend backend
+archductor workspace linked-dirs frontend
+archductor workspace unlink-dir frontend backend
 ```
 
 `scripts.run_mode = "concurrent"` lets multiple workspaces run at once.
@@ -507,68 +507,68 @@ first.
 The CLI mirrors the app backend and is useful for smoke tests:
 
 ```bash
-linux-archductor doctor
+archductor doctor
 
-linux-archductor repo add <path> [--name <name>]
-linux-archductor repo list
-linux-archductor repo doctor [<name>]
-linux-archductor repo settings <name> export [--local] [--output <path>]
-linux-archductor repo settings <name> import <path> [--local]
+archductor repo add <path> [--name <name>]
+archductor repo list
+archductor repo doctor [<name>]
+archductor repo settings <name> export [--local] [--output <path>]
+archductor repo settings <name> import <path> [--local]
 
-linux-archductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
-linux-archductor workspace create <repo> --from-issue <number>
-linux-archductor workspace create <repo> --from-pr <number>
-linux-archductor workspace create <repo> --from-linear <issue-id>
-linux-archductor workspace create <repo> --prompt <prompt>
-linux-archductor workspace list
-linux-archductor workspace archive <name> [--remove-worktree]
-linux-archductor workspace restore <name>
-linux-archductor workspace discard <name>
-linux-archductor workspace delete <name> [--remove-worktree] [--delete-branch]
-linux-archductor workspace rename <name> <new-name>
+archductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
+archductor workspace create <repo> --from-issue <number>
+archductor workspace create <repo> --from-pr <number>
+archductor workspace create <repo> --from-linear <issue-id>
+archductor workspace create <repo> --prompt <prompt>
+archductor workspace list
+archductor workspace archive <name> [--remove-worktree]
+archductor workspace restore <name>
+archductor workspace discard <name>
+archductor workspace delete <name> [--remove-worktree] [--delete-branch]
+archductor workspace rename <name> <new-name>
 
-linux-archductor session start <workspace> --kind shell|codex|claude|cursor
-linux-archductor session open <workspace> --kind shell|codex|claude|cursor
-linux-archductor session stop <workspace>
-linux-archductor session list <workspace>
+archductor session start <workspace> --kind shell|codex|claude|cursor
+archductor session open <workspace> --kind shell|codex|claude|cursor
+archductor session stop <workspace>
+archductor session list <workspace>
 
-linux-archductor run <workspace>
-linux-archductor stop <workspace>
-linux-archductor logs <workspace> --run|--session
+archductor run <workspace>
+archductor stop <workspace>
+archductor logs <workspace> --run|--session
 
-linux-archductor diff <workspace> [--name-only] [--file <path>]
-linux-archductor checks <workspace>
-linux-archductor conflicts <workspace>
+archductor diff <workspace> [--name-only] [--file <path>]
+archductor checks <workspace>
+archductor conflicts <workspace>
 
-linux-archductor todo add <workspace> <text...>
-linux-archductor todo list <workspace>
-linux-archductor todo done <id>
+archductor todo add <workspace> <text...>
+archductor todo list <workspace>
+archductor todo done <id>
 
-linux-archductor review add <workspace> <file> [--line <n>] <body...>
-linux-archductor review list <workspace>
-linux-archductor review resolve <id>
+archductor review add <workspace> <file> [--line <n>] <body...>
+archductor review list <workspace>
+archductor review resolve <id>
 
-linux-archductor pr create <workspace> [--title <title>] [--body <body>] [--draft]
-linux-archductor pr view <workspace>
-linux-archductor pr checks <workspace>
-linux-archductor pr merge <workspace> [--method squash|merge|rebase]
+archductor pr create <workspace> [--title <title>] [--body <body>] [--draft]
+archductor pr view <workspace>
+archductor pr checks <workspace>
+archductor pr merge <workspace> [--method squash|merge|rebase]
 
-linux-archductor workspace link-dir <workspace> <target-workspace>
-linux-archductor workspace linked-dirs <workspace>
-linux-archductor workspace unlink-dir <workspace> <target-workspace>
+archductor workspace link-dir <workspace> <target-workspace>
+archductor workspace linked-dirs <workspace>
+archductor workspace unlink-dir <workspace> <target-workspace>
 
-linux-archductor checkpoint create <workspace> [--session <id>] <message...>
-linux-archductor checkpoint list <workspace>
-linux-archductor checkpoint restore <workspace> <id>
+archductor checkpoint create <workspace> [--session <id>] <message...>
+archductor checkpoint list <workspace>
+archductor checkpoint restore <workspace> <id>
 ```
 
 ## Data Locations
 
 ```text
-~/.config/linux-archductor/config.toml
-~/.local/share/linux-archductor/linux-archductor.db
-~/.local/state/linux-archductor/logs/<workspace>/
-~/.cache/linux-archductor/
+~/.config/archductor/config.toml
+~/.local/share/archductor/archductor.db
+~/.local/state/archductor/logs/<workspace>/
+~/.cache/archductor/
 ~/archductor/workspaces/<repo>/<workspace>/
 ```
 

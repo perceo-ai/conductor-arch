@@ -1,6 +1,6 @@
 # Deploy And Test Locally
 
-This guide validates Linux Archductor on a local machine. It covers both the GTK
+This guide validates Archductor on a local machine. It covers both the GTK
 app and the CLI backend used by the app.
 
 The happy path is app-first: add a repository, create workspaces, run agent
@@ -52,37 +52,37 @@ CLI authentication.
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p linux-archductor-core -p linux-archductor -p linux-archductor-gtk
+cargo test -p archductor-core -p archductor -p archductor-gtk
 cargo build --workspace --release --locked
 ```
 
 Binaries:
 
 ```text
-target/release/linux-archductor
-target/release/linux-archductor-gtk
+target/release/archductor
+target/release/archductor-gtk
 ```
 
 Optional install:
 
 ```bash
-sudo install -Dm755 target/release/linux-archductor /usr/local/bin/linux-archductor
-sudo install -Dm755 target/release/linux-archductor-gtk /usr/local/bin/linux-archductor-gtk
+sudo install -Dm755 target/release/archductor /usr/local/bin/archductor
+sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 ```
 
 ## 4. Launch The App
 
 ```bash
-linux-archductor-gtk
+archductor-gtk
 ```
 
 Or preselect a workspace:
 
 ```bash
-linux-archductor-gtk --workspace berlin
-linux-archductor-gtk --workspace berlin --tab checks
-linux-archductor-gtk 'linux-archductor://workspace/berlin?tab=review'
-linux-archductor-gtk 'linux-archductor://history'
+archductor-gtk --workspace berlin
+archductor-gtk --workspace berlin --tab checks
+archductor-gtk 'archductor://workspace/berlin?tab=review'
+archductor-gtk 'archductor://history'
 ```
 
 Validate the app path with
@@ -233,50 +233,50 @@ for workflow surfaces that use them.
 Register a repository:
 
 ```bash
-linux-archductor doctor
-linux-archductor repo add /path/to/repo --name demo
-linux-archductor repo list
-linux-archductor repo settings demo export --output /tmp/demo-settings.toml
-linux-archductor repo settings demo import /tmp/demo-settings.toml
-linux-archductor repo settings demo import /tmp/demo-settings.toml --local
+archductor doctor
+archductor repo add /path/to/repo --name demo
+archductor repo list
+archductor repo settings demo export --output /tmp/demo-settings.toml
+archductor repo settings demo import /tmp/demo-settings.toml
+archductor repo settings demo import /tmp/demo-settings.toml --local
 ```
 
 Create two workspaces:
 
 ```bash
-linux-archductor workspace create demo --name berlin --branch lc/berlin-demo
-linux-archductor workspace create demo --name tokyo --branch lc/tokyo-demo
-linux-archductor workspace list
-linux-archductor workspace link-dir berlin tokyo
-linux-archductor workspace linked-dirs berlin
+archductor workspace create demo --name berlin --branch lc/berlin-demo
+archductor workspace create demo --name tokyo --branch lc/tokyo-demo
+archductor workspace list
+archductor workspace link-dir berlin tokyo
+archductor workspace linked-dirs berlin
 ```
 
 Open sessions:
 
 ```bash
-linux-archductor session open berlin --kind codex
-linux-archductor session open tokyo --kind claude
-linux-archductor session start berlin --kind shell
-linux-archductor session list berlin
-linux-archductor session stop berlin
-linux-archductor history list --workspace berlin
-linux-archductor history show <process-id>
+archductor session open berlin --kind codex
+archductor session open tokyo --kind claude
+archductor session start berlin --kind shell
+archductor session list berlin
+archductor session stop berlin
+archductor history list --workspace berlin
+archductor history show <process-id>
 ```
 
 Run scripts and inspect work:
 
 ```bash
-linux-archductor run berlin
-linux-archductor logs berlin --run
-linux-archductor stop berlin
+archductor run berlin
+archductor logs berlin --run
+archductor stop berlin
 
-linux-archductor diff berlin
-linux-archductor checks berlin
-linux-archductor conflicts berlin
-linux-archductor workspace source-preflight
-linux-archductor pr summary berlin
-linux-archductor pr resolve-thread berlin <thread-id>
-linux-archductor pr reopen-thread berlin <thread-id>
+archductor diff berlin
+archductor checks berlin
+archductor conflicts berlin
+archductor workspace source-preflight
+archductor pr summary berlin
+archductor pr resolve-thread berlin <thread-id>
+archductor pr reopen-thread berlin <thread-id>
 ```
 
 For a workspace created with `workspace create <repo> --from-pr <number>`, `pr
@@ -287,40 +287,40 @@ GitHub review thread node ID from `pr summary`.
 Todos and checkpoints:
 
 ```bash
-linux-archductor todo add berlin "manual smoke todo"
-linux-archductor todo list berlin
-linux-archductor todo done <id>
+archductor todo add berlin "manual smoke todo"
+archductor todo list berlin
+archductor todo done <id>
 
-linux-archductor checkpoint create berlin "manual smoke checkpoint"
-linux-archductor checkpoint list berlin
+archductor checkpoint create berlin "manual smoke checkpoint"
+archductor checkpoint list berlin
 ```
 
 GitHub PR flow:
 
 ```bash
 cd ~/archductor/workspaces/demo/berlin
-echo "linux-archductor smoke $(date)" >> linux-archductor-smoke.txt
-git add linux-archductor-smoke.txt
-git commit -m "test: linux archductor smoke"
+echo "archductor smoke $(date)" >> archductor-smoke.txt
+git add archductor-smoke.txt
+git commit -m "test: archductor smoke"
 
-linux-archductor pr create berlin --title "test: linux archductor smoke" \
-  --body "Manual Linux Archductor smoke test"
-linux-archductor pr view berlin
-linux-archductor pr checks berlin
+archductor pr create berlin --title "test: archductor smoke" \
+  --body "Manual Archductor smoke test"
+archductor pr view berlin
+archductor pr checks berlin
 ```
 
 Merge only in a disposable repository:
 
 ```bash
-linux-archductor pr merge berlin --method squash
-linux-archductor workspace archive berlin --remove-worktree
+archductor pr merge berlin --method squash
+archductor workspace archive berlin --remove-worktree
 ```
 
 For a non-disposable repository, close the PR manually and discard the
 workspace:
 
 ```bash
-linux-archductor workspace discard berlin
+archductor workspace discard berlin
 ```
 
 ## 7. Import macOS Conductor Data
@@ -328,9 +328,9 @@ linux-archductor workspace discard berlin
 On macOS, existing Conductor repositories/workspaces can be imported:
 
 ```bash
-linux-archductor import conductor
-linux-archductor repo list
-linux-archductor workspace list
+archductor import conductor
+archductor repo list
+archductor workspace list
 ```
 
 The importer reads
@@ -365,19 +365,19 @@ sudo curl -fsSL -o /usr/local/bin/appimagetool \
   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
 sudo chmod +x /usr/local/bin/appimagetool
 
-install -Dm755 target/release/linux-archductor \
-  packaging/appimage/linux-archductor.AppDir/usr/bin/linux-archductor
-install -Dm755 target/release/linux-archductor-gtk \
-  packaging/appimage/linux-archductor.AppDir/usr/bin/linux-archductor-gtk
+install -Dm755 target/release/archductor \
+  packaging/appimage/archductor.AppDir/usr/bin/archductor
+install -Dm755 target/release/archductor-gtk \
+  packaging/appimage/archductor.AppDir/usr/bin/archductor-gtk
 
 appimagetool --appimage-extract-and-run \
-  packaging/appimage/linux-archductor.AppDir \
-  dist/linux-archductor-0.1.0-x86_64.AppImage
+  packaging/appimage/archductor.AppDir \
+  dist/archductor-0.1.0-x86_64.AppImage
 ```
 
 Smoke the AppImage:
 
 ```bash
-./dist/linux-archductor-0.1.0-x86_64.AppImage
-./dist/linux-archductor-0.1.0-x86_64.AppImage doctor
+./dist/archductor-0.1.0-x86_64.AppImage
+./dist/archductor-0.1.0-x86_64.AppImage doctor
 ```

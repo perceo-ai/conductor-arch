@@ -52,14 +52,14 @@ scripts/release-readiness.sh --version 0.1.0 --package
 
 ```bash
 VERSION=0.1.0 nfpm package --packager deb --target dist/
-sudo dpkg -i dist/linux-archductor_0.1.0_amd64.deb
+sudo dpkg -i dist/archductor_0.1.0_amd64.deb
 ```
 
 ### .rpm (Fedora / openSUSE)
 
 ```bash
 VERSION=0.1.0 nfpm package --packager rpm --target dist/
-sudo rpm -i dist/linux-archductor-0.1.0-1.x86_64.rpm
+sudo rpm -i dist/archductor-0.1.0-1.x86_64.rpm
 ```
 
 ### AppImage
@@ -71,22 +71,22 @@ curl -fsSL -o /usr/local/bin/appimagetool \
 chmod +x /usr/local/bin/appimagetool
 
 # Copy binaries into AppDir
-install -Dm755 target/release/linux-archductor \
-  packaging/appimage/linux-archductor.AppDir/usr/bin/linux-archductor
-install -Dm755 target/release/linux-archductor-gtk \
-  packaging/appimage/linux-archductor.AppDir/usr/bin/linux-archductor-gtk
+install -Dm755 target/release/archductor \
+  packaging/appimage/archductor.AppDir/usr/bin/archductor
+install -Dm755 target/release/archductor-gtk \
+  packaging/appimage/archductor.AppDir/usr/bin/archductor-gtk
 
 # Build AppImage
 appimagetool --appimage-extract-and-run \
-  packaging/appimage/linux-archductor.AppDir \
-  dist/linux-archductor-0.1.0-x86_64.AppImage
+  packaging/appimage/archductor.AppDir \
+  dist/archductor-0.1.0-x86_64.AppImage
 ```
 
 With no arguments, the AppImage launches the GTK GUI. With arguments, it passes
 through to the CLI, for example:
 
 ```bash
-./dist/linux-archductor-0.1.0-x86_64.AppImage doctor
+./dist/archductor-0.1.0-x86_64.AppImage doctor
 ```
 
 ### AUR (Arch Linux)
@@ -109,10 +109,10 @@ flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
 # Build and install locally
 flatpak-builder --install --user --force-clean \
   build-dir \
-  packaging/flatpak/io.github.pranavkannepalli.linux-archductor.yml
+  packaging/flatpak/io.github.pranavkannepalli.archductor.yml
 
 # Run
-flatpak run io.github.pranavkannepalli.linux-archductor
+flatpak run io.github.pranavkannepalli.archductor
 ```
 
 > **Note:** The Flatpak sandbox requires `--filesystem=host` to access arbitrary

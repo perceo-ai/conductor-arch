@@ -111,7 +111,7 @@ Follow the Archductor-style dark shell guidance:
 ## Testing
 
 - Add small unit coverage for any new section metadata/helper logic introduced in `settings.rs`
-- Run `cargo test -p linux-archductor-gtk -- --nocapture`
+- Run `cargo test -p archductor-gtk -- --nocapture`
 
 ## Risks
 

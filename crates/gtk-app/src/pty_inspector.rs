@@ -1,12 +1,10 @@
+use archductor_core::redaction::redact_sensitive_text;
+use archductor_core::session_event::{SessionEvent, SessionEventPayload};
+use archductor_core::workspace::{ProcessRecord, ProcessStatus, PtyChunkRecord, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, CheckButton, Label, ListBox, ListBoxRow, Orientation, PolicyType,
     ScrolledWindow, SelectionMode, Stack,
-};
-use linux_archductor_core::redaction::redact_sensitive_text;
-use linux_archductor_core::session_event::{SessionEvent, SessionEventPayload};
-use linux_archductor_core::workspace::{
-    ProcessRecord, ProcessStatus, PtyChunkRecord, WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -482,7 +480,7 @@ fn event_filter(event: &SessionEvent) -> EventFilter {
         SessionEventPayload::CommandOutput { status, .. } => {
             if matches!(
                 status,
-                linux_archductor_core::session_event::SessionCommandOutputStatus::Failed
+                archductor_core::session_event::SessionCommandOutputStatus::Failed
             ) {
                 EventFilter::Errors
             } else {
@@ -1012,11 +1010,11 @@ fn mono_label(text: &str) -> Label {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_archductor_core::session_event::{
+    use archductor_core::session_event::{
         SessionCommandOutputStatus, SessionEvent, SessionEventPayload, SessionEventSource,
         SessionEventStatus,
     };
-    use linux_archductor_core::workspace::ProcessStatus;
+    use archductor_core::workspace::ProcessStatus;
 
     #[test]
     fn inspector_model_summarizes_sessions_output_events_and_diagnostics() {

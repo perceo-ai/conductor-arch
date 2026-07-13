@@ -1,4 +1,4 @@
-name: linux-archductor
+name: archductor
 arch: amd64
 platform: linux
 version: ${VERSION}
@@ -7,36 +7,36 @@ section: utils
 priority: optional
 maintainer: Pranav Kannepalli <pranav.kannepalli@gmail.com>
 description: |
-  A Linux-native parallel coding-agent workflow tool built around Git worktrees.
+  Archductor is a parallel coding-agent workflow tool built around Git worktrees.
   Each task gets its own isolated workspace: a branch, a directory, a terminal,
   agent sessions, run scripts, diffs, checks, and a pull request path.
-vendor: linux-archductor
+vendor: archductor
 homepage: https://github.com/pranavkannepalli/conductor-arch
 license: Apache-2.0
 
 contents:
-  - src: target/release/linux-archductor
-    dst: /usr/bin/linux-archductor
+  - src: target/release/archductor
+    dst: /usr/bin/archductor
     file_info:
       mode: 0755
 
-  - src: target/release/linux-archductor-gtk
-    dst: /usr/bin/linux-archductor-gtk
+  - src: target/release/archductor-gtk
+    dst: /usr/bin/archductor-gtk
     file_info:
       mode: 0755
 
-  - src: packaging/linux-archductor-gtk.desktop
-    dst: /usr/share/applications/linux-archductor-gtk.desktop
+  - src: packaging/archductor-gtk.desktop
+    dst: /usr/share/applications/archductor-gtk.desktop
     file_info:
       mode: 0644
 
-  - src: packaging/linux-archductor.svg
-    dst: /usr/share/icons/hicolor/scalable/apps/linux-archductor.svg
+  - src: packaging/archductor.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/archductor.svg
     file_info:
       mode: 0644
 
   - src: README.md
-    dst: /usr/share/doc/linux-archductor/README.md
+    dst: /usr/share/doc/archductor/README.md
     file_info:
       mode: 0644
 

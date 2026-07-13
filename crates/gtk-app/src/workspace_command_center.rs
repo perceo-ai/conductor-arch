@@ -1,19 +1,19 @@
 use adw::ToastOverlay;
+use archductor_core::agent_tools::launchable_provider_key;
+use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
+use archductor_core::doctor::SetupReadiness;
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::{
+    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
+    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
+    WorkspaceStore, WorkspaceTimelineEvent,
+};
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
     Paned, PolicyType, Popover, ScrolledWindow, Separator, Spinner, Stack, StackSwitcher, TextTag,
     TextView, WrapMode,
-};
-use linux_archductor_core::agent_tools::launchable_provider_key;
-use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
-use linux_archductor_core::doctor::SetupReadiness;
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
-    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -361,7 +361,7 @@ impl WorkspaceRunConsoleTerminalConnection {
             ));
         };
         crate::archcar_async::spawn_archcar_request(
-            linux_archductor_core::paths::AppPaths::from_env(),
+            archductor_core::paths::AppPaths::from_env(),
             ArchcarRequest::SendInput {
                 session_id: record.id,
                 input: input.to_owned(),
@@ -2002,7 +2002,7 @@ fn spawn_workspace_terminal_session(
     let store = WorkspaceStore::open(db_path)?;
     let _ = store.session_launch(workspace_name, SessionKind::Shell)?;
     crate::archcar_async::spawn_archcar_request(
-        linux_archductor_core::paths::AppPaths::from_env(),
+        archductor_core::paths::AppPaths::from_env(),
         ArchcarRequest::SpawnSession {
             workspace: workspace_name.to_owned(),
             kind: SessionKind::Shell,
@@ -2266,7 +2266,7 @@ fn toolbar_label(text: &str) -> Label {
 
 fn workspace_status_strip(
     ws: &Workspace,
-    checks: Option<&linux_archductor_core::workspace::ChecksSummary>,
+    checks: Option<&archductor_core::workspace::ChecksSummary>,
 ) -> GBox {
     let strip = GBox::new(Orientation::Horizontal, 10);
     strip.add_css_class("command-center-strip");
@@ -5316,13 +5316,13 @@ impl PullRequestStatusSummary {
 struct WorkspacePrStatusSnapshot {
     pr: Option<PullRequest>,
     status: Option<PullRequestStatusSummary>,
-    summary: Option<linux_archductor_core::workspace::ChecksSummary>,
+    summary: Option<archductor_core::workspace::ChecksSummary>,
 }
 
 pub(crate) fn pull_request_status_summary(
     pr: &PullRequest,
-    readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
-    summary: &linux_archductor_core::workspace::ChecksSummary,
+    readiness: Option<&archductor_core::workspace::PullRequestReadiness>,
+    summary: &archductor_core::workspace::ChecksSummary,
 ) -> PullRequestStatusSummary {
     if pr.state.eq_ignore_ascii_case("merged") {
         return PullRequestStatusSummary {
@@ -5703,7 +5703,7 @@ fn workspace_pr_status_title(
 
 fn pull_request_status_summary_without_checks_summary(
     pr: &PullRequest,
-    readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
+    readiness: Option<&archductor_core::workspace::PullRequestReadiness>,
 ) -> PullRequestStatusSummary {
     if pr.state.eq_ignore_ascii_case("merged") {
         return PullRequestStatusSummary {
@@ -5737,9 +5737,7 @@ fn pull_request_status_summary_without_checks_summary(
     }
 }
 
-fn pull_request_is_failed(
-    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
-) -> bool {
+fn pull_request_is_failed(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
     readiness.checks.iter().any(|check| check.is_failure())
         || readiness
             .deployments
@@ -5747,9 +5745,7 @@ fn pull_request_is_failed(
             .any(|deployment| deployment.is_failure())
 }
 
-fn pull_request_is_pending(
-    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
-) -> bool {
+fn pull_request_is_pending(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
     readiness.checks.iter().any(|check| check.is_pending())
         || readiness
             .deployments
@@ -5758,8 +5754,8 @@ fn pull_request_is_pending(
 }
 
 fn pull_request_is_ready(
-    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
-    summary: &linux_archductor_core::workspace::ChecksSummary,
+    readiness: &archductor_core::workspace::PullRequestReadiness,
+    summary: &archductor_core::workspace::ChecksSummary,
 ) -> bool {
     readiness.review_decision.as_deref() == Some("APPROVED")
         && readiness
@@ -7180,7 +7176,7 @@ fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
 }
 
 fn pull_request_merge_and_archive_feedback(
-    result: anyhow::Result<linux_archductor_core::workspace::MergePullRequestResult>,
+    result: anyhow::Result<archductor_core::workspace::MergePullRequestResult>,
 ) -> String {
     match result {
         Ok(result) => {
@@ -7643,7 +7639,7 @@ fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
     entry.set_hexpand(true);
     let add_btn = text_button("Add Todo");
     add_btn.add_css_class("suggested-action");
-    let db_path = linux_archductor_core::paths::AppPaths::from_env().database_path;
+    let db_path = archductor_core::paths::AppPaths::from_env().database_path;
     let workspace = name.to_owned();
     let entry_clone = entry.clone();
     add_btn.connect_clicked(move |_| {
@@ -8009,8 +8005,8 @@ fn apply_action_feedback(
 mod tests {
     use super::*;
 
-    fn test_checkpoint(id: i64, message: &str) -> linux_archductor_core::workspace::Checkpoint {
-        linux_archductor_core::workspace::Checkpoint {
+    fn test_checkpoint(id: i64, message: &str) -> archductor_core::workspace::Checkpoint {
+        archductor_core::workspace::Checkpoint {
             id,
             workspace_id: 1,
             session_id: None,
@@ -8036,8 +8032,8 @@ mod tests {
         }
     }
 
-    fn test_pull_request(state: &str) -> linux_archductor_core::workspace::PullRequest {
-        linux_archductor_core::workspace::PullRequest {
+    fn test_pull_request(state: &str) -> archductor_core::workspace::PullRequest {
+        archductor_core::workspace::PullRequest {
             id: 1,
             workspace_id: 2,
             provider: "github".to_owned(),
@@ -8051,10 +8047,10 @@ mod tests {
 
     fn test_checks_summary(
         changed_files: usize,
-        branch_push_state: Option<linux_archductor_core::workspace::BranchPushState>,
+        branch_push_state: Option<archductor_core::workspace::BranchPushState>,
         conflicting_workspaces: Vec<(String, Vec<String>)>,
-    ) -> linux_archductor_core::workspace::ChecksSummary {
-        linux_archductor_core::workspace::ChecksSummary {
+    ) -> archductor_core::workspace::ChecksSummary {
+        archductor_core::workspace::ChecksSummary {
             workspace: test_workspace(),
             changed_files,
             run_status: None,
@@ -8154,7 +8150,7 @@ mod tests {
     #[test]
     fn diff_file_summary_renders_review_scan_rows() {
         let summaries = vec![
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "README.md".to_owned(),
                 additions: Some(2),
                 deletions: Some(1),
@@ -8162,7 +8158,7 @@ mod tests {
                 unstaged: true,
                 untracked: false,
             },
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "assets/logo.png".to_owned(),
                 additions: None,
                 deletions: None,
@@ -8226,7 +8222,7 @@ mod tests {
 
     #[test]
     fn hunk_action_label_includes_state_and_counts() {
-        let label = hunk_action_label(&linux_archductor_core::workspace::DiffHunkSummary {
+        let label = hunk_action_label(&archductor_core::workspace::DiffHunkSummary {
             index: 1,
             header: "@@ -10,2 +10,3 @@".to_owned(),
             additions: 3,
@@ -8241,7 +8237,7 @@ mod tests {
 
     #[test]
     fn review_comment_summary_marks_open_comments_resolvable() {
-        let comment = linux_archductor_core::workspace::ReviewComment {
+        let comment = archductor_core::workspace::ReviewComment {
             id: 7,
             workspace_id: 1,
             file_path: "src/lib.rs".to_owned(),
@@ -8262,7 +8258,7 @@ mod tests {
     #[test]
     fn file_inline_comments_text_filters_to_selected_file() {
         let comments = vec![
-            linux_archductor_core::workspace::ReviewComment {
+            archductor_core::workspace::ReviewComment {
                 id: 7,
                 workspace_id: 1,
                 file_path: "src/lib.rs".to_owned(),
@@ -8273,7 +8269,7 @@ mod tests {
                 created_at: "2026-06-19T00:00:00Z".to_owned(),
                 updated_at: "2026-06-19T00:00:00Z".to_owned(),
             },
-            linux_archductor_core::workspace::ReviewComment {
+            archductor_core::workspace::ReviewComment {
                 id: 8,
                 workspace_id: 1,
                 file_path: "README.md".to_owned(),
@@ -8296,7 +8292,7 @@ mod tests {
     #[test]
     fn diff_tree_rows_insert_directory_headers_once() {
         let summaries = vec![
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "src/lib.rs".to_owned(),
                 additions: Some(1),
                 deletions: Some(0),
@@ -8304,7 +8300,7 @@ mod tests {
                 unstaged: true,
                 untracked: false,
             },
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "src/ui/panel.rs".to_owned(),
                 additions: Some(3),
                 deletions: Some(1),
@@ -8595,7 +8591,7 @@ mod tests {
             status: None,
             summary: Some(test_checks_summary(
                 0,
-                Some(linux_archductor_core::workspace::BranchPushState {
+                Some(archductor_core::workspace::BranchPushState {
                     ahead: 2,
                     behind: 0,
                     has_upstream: true,
@@ -8617,7 +8613,7 @@ mod tests {
             status: None,
             summary: Some(test_checks_summary(
                 0,
-                Some(linux_archductor_core::workspace::BranchPushState {
+                Some(archductor_core::workspace::BranchPushState {
                     ahead: 0,
                     behind: 0,
                     has_upstream: false,
@@ -8708,7 +8704,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_marks_pending_checks() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -8718,19 +8714,19 @@ mod tests {
                 created_at: "then".to_owned(),
                 updated_at: "now".to_owned(),
             },
-            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+            Some(&archductor_core::workspace::PullRequestReadiness {
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
                 review_threads: Vec::new(),
-                checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                checks: vec![archductor_core::workspace::PullRequestCheckRun {
                     name: "ci".to_owned(),
                     status: "in_progress".to_owned(),
                     detail: None,
                 }],
                 deployments: Vec::new(),
             }),
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -8777,12 +8773,12 @@ mod tests {
 
     #[test]
     fn review_thread_row_format_includes_state_location_and_comment_count() {
-        let thread = linux_archductor_core::workspace::PullRequestReviewThread {
+        let thread = archductor_core::workspace::PullRequestReviewThread {
             id: Some("PRRT_fake".to_owned()),
             path: Some("src/lib.rs".to_owned()),
             line: Some(42),
             resolved: false,
-            comments: vec![linux_archductor_core::workspace::PullRequestThreadComment {
+            comments: vec![archductor_core::workspace::PullRequestThreadComment {
                 author: "alice".to_owned(),
                 body: "Need a test.".to_owned(),
                 url: None,
@@ -8880,7 +8876,7 @@ mod tests {
     #[test]
     fn pull_request_merge_and_archive_feedback_reports_archive_state() {
         let success = pull_request_merge_and_archive_feedback(Ok(
-            linux_archductor_core::workspace::MergePullRequestResult {
+            archductor_core::workspace::MergePullRequestResult {
                 merge_output: "Merged pull request #42\n".to_owned(),
                 archived_workspace: Some(Workspace {
                     id: 1,
@@ -8903,7 +8899,7 @@ mod tests {
         );
 
         let no_archive = pull_request_merge_and_archive_feedback(Ok(
-            linux_archductor_core::workspace::MergePullRequestResult {
+            archductor_core::workspace::MergePullRequestResult {
                 merge_output: "Merged pull request #42\n".to_owned(),
                 archived_workspace: None,
             },
@@ -8924,8 +8920,8 @@ mod tests {
 
     #[test]
     fn pull_request_refresh_feedback_summarizes_state() {
-        let success = pull_request_refresh_feedback(Ok(Some(
-            linux_archductor_core::workspace::PullRequest {
+        let success =
+            pull_request_refresh_feedback(Ok(Some(archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -8934,8 +8930,7 @@ mod tests {
                 state: "MERGED".to_owned(),
                 created_at: "now".to_owned(),
                 updated_at: "now".to_owned(),
-            },
-        )));
+            })));
         assert_eq!(success, "PR #42 state: MERGED");
 
         let missing = pull_request_refresh_feedback(Ok(None));
@@ -8999,7 +8994,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_prefers_failed_checks() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -9009,19 +9004,19 @@ mod tests {
                 created_at: "then".to_owned(),
                 updated_at: "now".to_owned(),
             },
-            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+            Some(&archductor_core::workspace::PullRequestReadiness {
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
                 review_threads: Vec::new(),
-                checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                checks: vec![archductor_core::workspace::PullRequestCheckRun {
                     name: "ci".to_owned(),
                     status: "failure".to_owned(),
                     detail: None,
                 }],
                 deployments: Vec::new(),
             }),
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -9057,7 +9052,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_open_state_is_not_attention() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -9068,7 +9063,7 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             None,
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -9104,7 +9099,7 @@ mod tests {
 
     #[test]
     fn pull_request_status_summary_keeps_failed_attention_without_checks_summary() {
-        let pr = linux_archductor_core::workspace::PullRequest {
+        let pr = archductor_core::workspace::PullRequest {
             id: 1,
             workspace_id: 2,
             provider: "github".to_owned(),
@@ -9114,12 +9109,12 @@ mod tests {
             created_at: "then".to_owned(),
             updated_at: "now".to_owned(),
         };
-        let readiness = linux_archductor_core::workspace::PullRequestReadiness {
+        let readiness = archductor_core::workspace::PullRequestReadiness {
             review_decision: None,
             latest_reviews: Vec::new(),
             comments: Vec::new(),
             review_threads: Vec::new(),
-            checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+            checks: vec![archductor_core::workspace::PullRequestCheckRun {
                 name: "ci".to_owned(),
                 status: "failure".to_owned(),
                 detail: None,
@@ -9138,7 +9133,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_keeps_review_blocked_state_grey() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -9148,7 +9143,7 @@ mod tests {
                 created_at: "then".to_owned(),
                 updated_at: "now".to_owned(),
             },
-            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+            Some(&archductor_core::workspace::PullRequestReadiness {
                 review_decision: Some("CHANGES_REQUESTED".to_owned()),
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -9156,7 +9151,7 @@ mod tests {
                 checks: Vec::new(),
                 deployments: Vec::new(),
             }),
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -9193,7 +9188,7 @@ mod tests {
     fn pull_request_review_thread_action_feedback_reports_state_and_id() {
         let success = pull_request_review_thread_action_feedback(
             "Resolve",
-            Ok(linux_archductor_core::workspace::PullRequestReviewThread {
+            Ok(archductor_core::workspace::PullRequestReviewThread {
                 id: Some("PRRT_fake".to_owned()),
                 path: Some("src/lib.rs".to_owned()),
                 line: Some(42),

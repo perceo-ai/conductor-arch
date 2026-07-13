@@ -2,7 +2,7 @@
 
 ## Current State
 
-Linux Archductor now has a usable app-first loop for one repository:
+Archductor now has a usable app-first loop for one repository:
 
 1. Add or clone a repository.
 2. Configure repository settings.
@@ -32,14 +32,14 @@ combine staged, unstaged, and untracked files with staged/unstaged state labels
 so staged-only changes appear in review/check surfaces. Focused verification
 passed:
 `cargo fmt --all -- --check`,
-`cargo test -p linux-archductor-core workspace::tests:: -- --nocapture`,
-`cargo test -p linux-archductor-core diff_file_summaries_include_deleted_and_renamed_changes -- --nocapture`,
-`cargo test -p linux-archductor cli_parses_workspace_branch_actions -- --nocapture`,
-`cargo test -p linux-archductor cli_parses_workspace_timeline_filter -- --nocapture`,
-`cargo test -p linux-archductor timeline_render_outputs_append_only_rows -- --nocapture`,
-`cargo test -p linux-archductor cli_parses_workspace_duplicate_branch -- --nocapture`,
+`cargo test -p archductor-core workspace::tests:: -- --nocapture`,
+`cargo test -p archductor-core diff_file_summaries_include_deleted_and_renamed_changes -- --nocapture`,
+`cargo test -p archductor cli_parses_workspace_branch_actions -- --nocapture`,
+`cargo test -p archductor cli_parses_workspace_timeline_filter -- --nocapture`,
+`cargo test -p archductor timeline_render_outputs_append_only_rows -- --nocapture`,
+`cargo test -p archductor cli_parses_workspace_duplicate_branch -- --nocapture`,
 and
-`cargo test -p linux-archductor-gtk workspace_timeline_formatter_lists_events -- --nocapture`.
+`cargo test -p archductor-gtk workspace_timeline_formatter_lists_events -- --nocapture`.
 Full workspace verification also passed:
 `cargo test --workspace`
 and
@@ -56,29 +56,29 @@ snapshots expose repository settings, scripts, environment, prompts, workspace
 IDs, branch/worktree paths, session IDs, checkpoint IDs, and review/todo counts.
 Focused verification passed:
 `cargo fmt --all -- --check`,
-`cargo test -p linux-archductor-core --lib`,
-`cargo test -p linux-archductor-core --test session_event_model -- --nocapture`,
-and `cargo test -p linux-archductor-core --test pty_parser_fixture_corpus -- --nocapture`.
+`cargo test -p archductor-core --lib`,
+`cargo test -p archductor-core --test session_event_model -- --nocapture`,
+and `cargo test -p archductor-core --test pty_parser_fixture_corpus -- --nocapture`.
 Linux VM verification also passed for the same core lib/event/corpus tests, and
 the GTK app was built and launched on the Lima `ubuntu` VM VNC display `:1`
-from `target/lima-debug/debug/linux-archductor-gtk`.
+from `target/lima-debug/debug/archductor-gtk`.
 Follow-up verification on 2026-07-05 passed:
 `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`,
 `cargo test --workspace`,
-`cargo test -p linux-archductor-core codex_tui -- --nocapture`,
-`cargo test -p linux-archductor-core chat_messages -- --nocapture`,
-`cargo test -p linux-archductor-gtk session_surface -- --nocapture`,
+`cargo test -p archductor-core codex_tui -- --nocapture`,
+`cargo test -p archductor-core chat_messages -- --nocapture`,
+`cargo test -p archductor-gtk session_surface -- --nocapture`,
 and, inside the Lima `ubuntu` VM,
-`cargo test -p linux-archductor-core --lib`,
-`cargo test -p linux-archductor-core --test session_event_model -- --nocapture`,
-`cargo test -p linux-archductor-core --test pty_parser_fixture_corpus -- --nocapture`,
+`cargo test -p archductor-core --lib`,
+`cargo test -p archductor-core --test session_event_model -- --nocapture`,
+`cargo test -p archductor-core --test pty_parser_fixture_corpus -- --nocapture`,
 and
-`cargo test -p linux-archductor --test cli_sessions cli_starts_logs_and_stops_real_shell_session -- --nocapture`.
+`cargo test -p archductor --test cli_sessions cli_starts_logs_and_stops_real_shell_session -- --nocapture`.
 
 Latest verification on 2026-06-20: `cargo fmt --all -- --check`,
-`cargo test -p linux-archductor-core --lib` (96 tests), and
-`cargo test -p linux-archductor-gtk` (92 tests) passed for PTY session input,
+`cargo test -p archductor-core --lib` (96 tests), and
+`cargo test -p archductor-gtk` (92 tests) passed for PTY session input,
 structured PR readiness summaries, recorded-PR-number fallback,
 review-thread resolve/reopen mutations, PR readiness aggregate/attention
 rollups, flat and connection-wrapped status rollup parsing, PR-head deployment
@@ -87,10 +87,10 @@ PR summary feedback, GTK command palette command mapping, and terminal
 transcript cursor handling. GTK terminal transcript rendering now restores the
 normal screen after common alternate-screen TUI sequences and handles
 additional CSI cursor-position variants used by shells/TUIs.
-`linux-archductor workspace source-preflight` reports GitHub ready and Linear
+`archductor workspace source-preflight` reports GitHub ready and Linear
 blocked by missing `LINEAR_API_KEY`. Live smoke proved authenticated GitHub
 issue workspace creation from temporary issue #11, authenticated GitHub PR
-workspace creation from PR #10, and `linux-archductor pr summary` on that
+workspace creation from PR #10, and `archductor pr summary` on that
 generated PR workspace, including status-check aggregation.
 Live smoke also proved review-thread summary, resolve, and reopen against
 temporary PR #12 with a real GitHub review thread, and PR-head deployment
@@ -101,7 +101,7 @@ failure, pending, and inactive deployments; cleanup closed the PR and deleted
 the temporary branch/deployments. A follow-up temporary PR #21 proved the
 rollup/head-status de-duplication path and was also cleaned up. Temporary PR
 #28 proved real provider rollup handling for cancelled and skipped check runs
-through `linux-archductor pr summary issue19-proof`; cancelled checks were
+through `archductor pr summary issue19-proof`; cancelled checks were
 promoted to attention and the skipped check stayed visible in the raw check
 list. GTK launched and stayed running on the available display, but
 source-creation click-through is not yet automated, though the GTK source form
@@ -118,7 +118,7 @@ agent output are labeled as separate app-native transcript events instead of
 raw log text, including live appends while a selected session is running.
 Multi-line composer input and fenced multi-line review prompts are preserved as
 single labeled transcript events. Focused verification:
-`cargo test -p linux-archductor-gtk session_surface::tests -- --nocapture`;
+`cargo test -p archductor-gtk session_surface::tests -- --nocapture`;
 workspace verification: `cargo test --workspace`.
 
 Phase 9 has a substantial customization/settings slice in progress:
@@ -131,10 +131,10 @@ sections instead of dropping them. Workspace creation now consumes
 `customization.workspace_defaults.base_branch`, `branch_prefix`, and
 `port_block_size` when the create request does not provide explicit base or
 branch values. Focused verification:
-`cargo test -p linux-archductor-core settings::tests -- --nocapture`,
-`cargo test -p linux-archductor-core workspace::tests::create_workspace_uses_configured -- --nocapture`,
-`cargo test -p linux-archductor-core workspace::tests::create_from_ -- --nocapture`,
-and `cargo test -p linux-archductor-gtk projects::tests -- --nocapture`.
+`cargo test -p archductor-core settings::tests -- --nocapture`,
+`cargo test -p archductor-core workspace::tests::create_workspace_uses_configured -- --nocapture`,
+`cargo test -p archductor-core workspace::tests::create_from_ -- --nocapture`,
+and `cargo test -p archductor-gtk projects::tests -- --nocapture`.
 
 Phase 9 also has the first monorepo working-directory slice: repository
 settings accept `customization.workspace_defaults.working_directory` as a safe
@@ -143,26 +143,26 @@ terminal commands, editor/session launches, and Shell/Codex/Claude/Cursor
 session cwd selection use that subdirectory when configured. The environment
 keeps `ARCHDUCTOR_WORKSPACE_PATH` as the worktree root and adds
 `ARCHDUCTOR_WORKING_DIRECTORY` for the selected process cwd. Focused
-verification: `cargo test -p linux-archductor-core monorepo -- --nocapture` and
-`cargo test -p linux-archductor-core settings::tests::rejects_unsafe_workspace_working_directory_settings -- --nocapture`.
+verification: `cargo test -p archductor-core monorepo -- --nocapture` and
+`cargo test -p archductor-core settings::tests::rejects_unsafe_workspace_working_directory_settings -- --nocapture`.
 
 Phase 9 now consumes merge customization instead of only preserving it: PR merge
 uses `customization.naming.default_merge_method` when no explicit method is
 provided, preserves the existing open-todo/open-local-comment blockers by
 default, lets repositories disable those local blockers, and can block merges
 on failed or pending PR checks through `customization.merge_rules`. Focused
-verification: `cargo test -p linux-archductor-core merge_pull_request -- --nocapture`
-and `cargo test -p linux-archductor-core settings::tests -- --nocapture`.
+verification: `cargo test -p archductor-core merge_pull_request -- --nocapture`
+and `cargo test -p archductor-core settings::tests -- --nocapture`.
 
 Phase 9 now has unified local chat history for new Linux sessions: saved
 PTY-backed Shell/Codex/Claude/Cursor session process logs are exposed through a
 core history API, the GTK History page merges those local sessions with
 imported macOS Conductor chats, workspace chat panels show local saved
-sessions for the selected worktree, and the CLI has `linux-archductor history
-list [--workspace <name>]` plus `linux-archductor history show <process-id>`.
-Focused verification: `cargo test -p linux-archductor-core local_chat_history -- --nocapture`,
-`cargo test -p linux-archductor-gtk history -- --nocapture`, and
-`cargo test -p linux-archductor history -- --nocapture`.
+sessions for the selected worktree, and the CLI has `archductor history
+list [--workspace <name>]` plus `archductor history show <process-id>`.
+Focused verification: `cargo test -p archductor-core local_chat_history -- --nocapture`,
+`cargo test -p archductor-gtk history -- --nocapture`, and
+`cargo test -p archductor history -- --nocapture`.
 
 Phase 9 now has linked-directory workflows for multi-repository or
 multi-workspace agent tasks: a source workspace can link another active
@@ -173,19 +173,19 @@ terminal commands, editor launches, and Shell/Codex/Claude/Cursor sessions via
 The CLI has `workspace link-dir`, `workspace linked-dirs`, and
 `workspace unlink-dir`; the GTK workspace chat column has a Linked Directories
 panel for the same workflow. Focused verification:
-`cargo test -p linux-archductor-core linked_directory -- --nocapture`,
-`cargo test -p linux-archductor linked -- --nocapture`, and
-`cargo test -p linux-archductor-gtk workspace_command_center::tests -- --nocapture`.
+`cargo test -p archductor-core linked_directory -- --nocapture`,
+`cargo test -p archductor linked -- --nocapture`, and
+`cargo test -p archductor-gtk workspace_command_center::tests -- --nocapture`.
 
 Phase 9 now has first-class GTK launch targets and deep links: startup accepts
 `--workspace <name> --tab <tab>`, workspace deep links like
-`linux-archductor://workspace/berlin?tab=checks`, and page deep links like
-`linux-archductor://history`. Review is now a distinct workspace tab target, so
+`archductor://workspace/berlin?tab=checks`, and page deep links like
+`archductor://history`. Review is now a distinct workspace tab target, so
 command palette navigation and deep links can land on Changes, Checks, or
 Review instead of collapsing all three to the outer work stack. Focused
-verification: `cargo test -p linux-archductor-gtk launch_target -- --nocapture`,
-`cargo test -p linux-archductor-gtk command_palette::tests -- --nocapture`, and
-`cargo test -p linux-archductor-gtk workspace_command_center::tests::workspace_tab_stack_name_maps_palette_targets_to_tabs -- --nocapture`.
+verification: `cargo test -p archductor-gtk launch_target -- --nocapture`,
+`cargo test -p archductor-gtk command_palette::tests -- --nocapture`, and
+`cargo test -p archductor-gtk workspace_command_center::tests::workspace_tab_stack_name_maps_palette_targets_to_tabs -- --nocapture`.
 
 Phase 9 now consumes the configured default workspace tab: repository
 customization exposes view defaults through the workspace store, validates
@@ -194,9 +194,9 @@ selection use that tab when opening a workspace unless the launch target passes
 an explicit tab. Supported values include Changes, Checks, Review,
 Chat/Terminal, Big Terminal, Todos, Processes, and Checkpoints plus common
 aliases. Focused verification:
-`cargo test -p linux-archductor-core default_visible_tab -- --nocapture`,
-`cargo test -p linux-archductor-core workspace_view_defaults -- --nocapture`,
-and `cargo test -p linux-archductor-gtk state::tests -- --nocapture`.
+`cargo test -p archductor-core default_visible_tab -- --nocapture`,
+`cargo test -p archductor-core workspace_view_defaults -- --nocapture`,
+and `cargo test -p archductor-gtk state::tests -- --nocapture`.
 
 Phase 9 now consumes the first GTK visual view preferences too: workspace view
 defaults normalize `customization.view.theme`, `accent_color`, and `density`
@@ -205,7 +205,7 @@ preferences, and sidebar workspace selection refreshes those classes. The CSS
 currently covers common light/dark surfaces, blue/green/amber/rose accents,
 and compact/comfortable spacing; this is not full visual parity or a bespoke
 settings UI. Focused verification:
-`cargo test -p linux-archductor-gtk view_preferences -- --nocapture`.
+`cargo test -p archductor-gtk view_preferences -- --nocapture`.
 
 Phase 9 now has configurable global GTK keybindings for the shortcuts that were
 previously hard-coded: refresh, sidebar toggle, and command palette. Repository
@@ -214,17 +214,17 @@ on startup and workspace selection, supports the default/native preset, a `vim`
 preset, and custom mappings such as
 `palette=ctrl+p,refresh=ctrl+shift+r,sidebar=ctrl+alt+b`. The command palette
 shows the active refresh/sidebar shortcuts and filters by those labels. Focused
-verification: `cargo test -p linux-archductor-gtk command_palette -- --nocapture`
-and `cargo test -p linux-archductor-core workspace_view_defaults -- --nocapture`.
+verification: `cargo test -p archductor-gtk command_palette -- --nocapture`
+and `cargo test -p archductor-core workspace_view_defaults -- --nocapture`.
 
 Phase 9 now has CLI settings bundle import/export for registered repositories:
-`linux-archductor repo settings <name> export [--local] [--output <path>]`
+`archductor repo settings <name> export [--local] [--output <path>]`
 exports the exact shared or local TOML file, and
-`linux-archductor repo settings <name> import <path> [--local]` parses,
+`archductor repo settings <name> import <path> [--local]` parses,
 validates, and writes shared or local repository settings. Focused
 verification:
-`cargo test -p linux-archductor-core settings::tests::repository_toml_helpers_parse_validate_and_serialize_settings -- --nocapture`
-and `cargo test -p linux-archductor -- --nocapture`.
+`cargo test -p archductor-core settings::tests::repository_toml_helpers_parse_validate_and_serialize_settings -- --nocapture`
+and `cargo test -p archductor -- --nocapture`.
 
 Phase 9 GTK polish pass completed on 2026-06-21: seven rough/missing
 features were finished. (1) Big Terminal tab removes header chrome in

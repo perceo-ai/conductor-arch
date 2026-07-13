@@ -3347,7 +3347,7 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(&title);
-        let remote_ref = format!("refs/linux-archductor/pull-requests/{pr_number}");
+        let remote_ref = format!("refs/archductor/pull-requests/{pr_number}");
         let fetch_refspec = format!("pull/{pr_number}/head:{remote_ref}");
         git_dynamic(
             &repository.root_path,
@@ -4217,7 +4217,7 @@ mutation($threadId: ID!) {{
     fn spotlight_checkpoint(&self, workspace: &Workspace, patch: &str) -> Result<Checkpoint> {
         let now = timestamp_nanos();
         let git_ref = format!(
-            "refs/linux-archductor/checkpoints/{}/spotlight-{now}",
+            "refs/archductor/checkpoints/{}/spotlight-{now}",
             workspace.id
         );
         let message = "Spotlight checkpoint";
@@ -8071,7 +8071,7 @@ fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -
 
 fn root_tracked_patch(root_path: &Path) -> Result<String> {
     let index_path =
-        std::env::temp_dir().join(format!("linux-archductor-root-index-{}", timestamp_nanos()));
+        std::env::temp_dir().join(format!("archductor-root-index-{}", timestamp_nanos()));
     git_with_index(root_path, &index_path, &["read-tree", "HEAD"])?;
     git_with_index(root_path, &index_path, &["add", "-A"])?;
     let current_patch = git_with_index_output(
@@ -8096,11 +8096,11 @@ fn create_worktree_checkpoint_commit(
     let now = timestamp();
     let ref_suffix = timestamp_nanos();
     let git_ref = format!(
-        "refs/linux-archductor/checkpoints/{}/{ref_kind}-{ref_suffix}",
+        "refs/archductor/checkpoints/{}/{ref_kind}-{ref_suffix}",
         workspace.id
     );
     let index_path = std::env::temp_dir().join(format!(
-        "linux-archductor-checkpoint-index-{}-{ref_suffix}",
+        "archductor-checkpoint-index-{}-{ref_suffix}",
         workspace.id
     ));
     let result = (|| -> Result<CreatedCheckpointRef> {
@@ -8119,10 +8119,8 @@ fn create_worktree_checkpoint_commit(
 
 fn diff_worktree_against_ref(workspace: &Workspace, base_ref: &str) -> Result<String> {
     let now = timestamp_nanos();
-    let index_path = std::env::temp_dir().join(format!(
-        "linux-archductor-turn-diff-index-{}-{now}",
-        workspace.id
-    ));
+    let index_path =
+        std::env::temp_dir().join(format!("archductor-turn-diff-index-{}-{now}", workspace.id));
     let result = (|| -> Result<String> {
         let tree = worktree_snapshot_tree(&workspace.path, &index_path)?;
         git_output_dynamic(
@@ -8456,9 +8454,9 @@ fn git_commit_tree(cwd: &Path, tree: &str, parent: &str, message: &str) -> Resul
         .arg(cwd)
         .args([
             "-c",
-            "user.name=Linux Archductor",
+            "user.name=Archductor",
             "-c",
-            "user.email=linux-archductor@example.test",
+            "user.email=archductor@example.test",
             "-c",
             "commit.gpgsign=false",
             "commit-tree",
@@ -9178,9 +9176,9 @@ mod tests {
             .arg(&seed_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -9530,9 +9528,9 @@ exit 1
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10122,9 +10120,9 @@ notes.local
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10191,9 +10189,9 @@ setup = "printf 'setup-ran\n' > .context/setup-env"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10258,9 +10256,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10366,9 +10364,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10695,9 +10693,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10765,9 +10763,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10856,9 +10854,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10928,9 +10926,9 @@ run = "true"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10994,9 +10992,9 @@ run = "printf 'started\n'"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11064,9 +11062,9 @@ run = "printf 'done\n'; exit 3"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11138,9 +11136,9 @@ lint = "printf 'lint failed\n'; exit 7"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11222,9 +11220,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11299,9 +11297,9 @@ working_directory = "apps/web"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12305,9 +12303,9 @@ accent = "#0ea5e9"
             &repo_path,
             [
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12385,9 +12383,9 @@ setup = "printf 'setup:%s:%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_POR
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12459,9 +12457,9 @@ working_directory = "apps/api"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12526,9 +12524,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12636,9 +12634,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12740,9 +12738,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12824,9 +12822,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12922,9 +12920,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13009,9 +13007,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13098,9 +13096,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13184,9 +13182,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13257,9 +13255,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13340,9 +13338,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13451,9 +13449,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13582,9 +13580,9 @@ working_directory = "apps/worker"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14576,9 +14574,9 @@ general = "Keep changes focused."
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14621,9 +14619,9 @@ general = "Keep changes focused."
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14672,9 +14670,9 @@ general = "Keep changes focused."
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14763,9 +14761,9 @@ general = "Keep changes focused."
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -16413,9 +16411,9 @@ exit 1
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -16505,14 +16503,10 @@ exit 1
             })
             .unwrap();
 
+        git_dynamic(&workspace.path, &["config", "user.name", "Archductor"]).unwrap();
         git_dynamic(
             &workspace.path,
-            &["config", "user.name", "Linux Archductor"],
-        )
-        .unwrap();
-        git_dynamic(
-            &workspace.path,
-            &["config", "user.email", "linux-archductor@example.test"],
+            &["config", "user.email", "archductor@example.test"],
         )
         .unwrap();
         git_dynamic(&workspace.path, &["config", "commit.gpgsign", "false"]).unwrap();
@@ -16629,9 +16623,9 @@ pr_body_sections = ["Summary", "Tests", "Risk"]
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -16976,9 +16970,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -17080,7 +17074,7 @@ spotlight_testing = true
             .checkpoint_create("berlin", "before refactor", None)
             .unwrap();
         assert_eq!(cp.message, "before refactor");
-        assert!(cp.git_ref.starts_with("refs/linux-archductor/checkpoints/"));
+        assert!(cp.git_ref.starts_with("refs/archductor/checkpoints/"));
         assert!(cp.session_id.is_none());
 
         let list = store.checkpoint_list("berlin").unwrap();
@@ -17325,9 +17319,9 @@ spotlight_testing = true
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -17503,7 +17497,7 @@ spotlight_testing = true
             .append_chat_message(
                 thread.id,
                 "agent",
-                "Repo Status\n\nThis is Linux Archductor.\n\nCurrent Git State",
+                "Repo Status\n\nThis is Archductor.\n\nCurrent Git State",
                 "agent_screen_parse",
             )
             .unwrap();
@@ -17511,7 +17505,7 @@ spotlight_testing = true
             .append_chat_message(
                 thread.id,
                 "agent",
-                "This is Linux Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia.",
+                "This is Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia.",
                 "agent_screen_parse",
             )
             .unwrap();
@@ -17528,7 +17522,7 @@ spotlight_testing = true
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].content,
-            "Repo Status\n\nThis is Linux Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia."
+            "Repo Status\n\nThis is Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia."
         );
     }
 
@@ -18660,9 +18654,9 @@ spotlight_testing = true
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -18864,9 +18858,9 @@ spotlight_testing = true
             .arg(&path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

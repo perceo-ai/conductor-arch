@@ -1,6 +1,6 @@
-# Linux Archductor UI Sketches
+# Archductor UI Sketches
 
-These sketches define a fast MVP interface for a Linux-native Archductor-like
+These sketches define a fast MVP interface for a Archductor
 workflow. They are inspired by the public Conductor product layout and the
 official Conductor docs: dark app chrome, a narrow workspace sidebar, central
 agent session surface, bottom composer, embedded terminal mode, project
@@ -12,9 +12,9 @@ should be chosen deliberately after parity is specified.
 
 ## Sketches
 
-- [Main workspace shell](./linux-archductor-main-workspace.svg)
-- [New workspace flow](./linux-archductor-new-workspace.svg)
-- [Review and checks panel](./linux-archductor-review-checks.svg)
+- [Main workspace shell](./archductor-main-workspace.svg)
+- [New workspace flow](./archductor-new-workspace.svg)
+- [Review and checks panel](./archductor-review-checks.svg)
 
 ## UI Principles
 

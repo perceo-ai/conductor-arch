@@ -1,9 +1,9 @@
+use archductor_core::import::default_conductor_app_database;
+use archductor_core::workspace::{WorkspaceStatusLine, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Label, ListBox, Orientation, PolicyType, ScrolledWindow, Separator, TextView,
 };
-use linux_archductor_core::import::default_conductor_app_database;
-use linux_archductor_core::workspace::{WorkspaceStatusLine, WorkspaceStore};
 use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -524,7 +524,7 @@ fn history_session_messages(database_path: &Path, session_id: &str) -> String {
 
 fn local_thread_messages(database_path: &Path, thread_id: i64) -> String {
     let Ok(store) = WorkspaceStore::open(database_path) else {
-        return "Could not open Linux Archductor history database.".to_owned();
+        return "Could not open Archductor history database.".to_owned();
     };
     let Ok(messages) = store.local_chat_thread_messages(thread_id) else {
         return "Could not read local chat thread.".to_owned();
@@ -547,7 +547,7 @@ fn local_thread_messages(database_path: &Path, thread_id: i64) -> String {
 
 fn local_session_messages(database_path: &Path, process_id: i64) -> String {
     let Ok(store) = WorkspaceStore::open(database_path) else {
-        return "Could not open Linux Archductor history database.".to_owned();
+        return "Could not open Archductor history database.".to_owned();
     };
     let Ok(messages) = store.local_chat_history_messages(process_id) else {
         return "Could not read local chat transcript.".to_owned();
@@ -643,7 +643,7 @@ where
 #[cfg(test)]
 mod workspace_history_tests {
     use super::{workspace_history_bucket, WorkspaceStatusLine};
-    use linux_archductor_core::workspace::{PullRequest, Workspace};
+    use archductor_core::workspace::{PullRequest, Workspace};
     use std::path::PathBuf;
 
     fn line(status: &str) -> WorkspaceStatusLine {

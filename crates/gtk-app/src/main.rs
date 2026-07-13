@@ -25,6 +25,9 @@ mod workspace_command_center;
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, ColorScheme, StyleManager};
+use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use command_palette::{
     filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
     ShortcutAction,
@@ -33,11 +36,6 @@ use gtk::{
     Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overflow, Overlay, ScrolledWindow,
     Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_archductor_core::archcar::server::{
-    reconcile_managed_sessions_on_startup, ArchcarServer,
-};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
@@ -50,7 +48,7 @@ use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
-const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
+const APP_ID: &str = "io.github.pranavkannepalli.archductor";
 static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,7 +253,7 @@ where
                     .ok_or_else(|| "--page requires a value".to_owned())?;
                 target.page = parse_app_page_with_debug_mode(value, debug_mode)?;
             }
-            value if value.starts_with("linux-archductor://") => {
+            value if value.starts_with("archductor://") => {
                 target = parse_deep_link_with_debug_mode(value, debug_mode)?;
             }
             _ => {}
@@ -271,8 +269,8 @@ fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
 
 fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<LaunchTarget, String> {
     let rest = value
-        .strip_prefix("linux-archductor://")
-        .ok_or_else(|| "deep link must start with linux-archductor://".to_owned())?;
+        .strip_prefix("archductor://")
+        .ok_or_else(|| "deep link must start with archductor://".to_owned())?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let mut target = LaunchTarget::default();
     let parts = path
@@ -336,7 +334,7 @@ fn debug_mode_enabled() -> bool {
 }
 
 fn debug_mode_enabled_from_env(value: Option<&str>) -> bool {
-    linux_archductor_core::env_flags::explicit_truthy(value)
+    archductor_core::env_flags::explicit_truthy(value)
 }
 
 fn parse_workspace_tab(value: &str) -> Result<WorkspaceTab, String> {
@@ -614,7 +612,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let refresh_hub = RefreshHub::default();
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Linux Archductor")
+        .title("Archductor")
         .default_width(1280)
         .default_height(800)
         .build();
@@ -1468,9 +1466,9 @@ pub(crate) fn detail_row(label: &str, value: &str) -> GBox {
 pub(crate) fn cli_binary() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("linux-archductor")))
+        .and_then(|path| path.parent().map(|parent| parent.join("archductor")))
         .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("linux-archductor"))
+        .unwrap_or_else(|| PathBuf::from("archductor"))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -1559,8 +1557,8 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_archductor_core::repository::{AddRepository, RepositoryStore};
-    use linux_archductor_core::workspace::{CreateWorkspace, ProcessStatus};
+    use archductor_core::repository::{AddRepository, RepositoryStore};
+    use archductor_core::workspace::{CreateWorkspace, ProcessStatus};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1609,14 +1607,9 @@ mod tests {
 
     #[test]
     fn launch_target_parses_workspace_and_tab_args() {
-        let target = parse_launch_target([
-            "linux-archductor-gtk",
-            "--workspace",
-            "berlin",
-            "--tab",
-            "checks",
-        ])
-        .unwrap();
+        let target =
+            parse_launch_target(["archductor-gtk", "--workspace", "berlin", "--tab", "checks"])
+                .unwrap();
 
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
@@ -1625,11 +1618,9 @@ mod tests {
 
     #[test]
     fn launch_target_parses_workspace_deep_link() {
-        let target = parse_launch_target([
-            "linux-archductor-gtk",
-            "linux-archductor://workspace/berlin?tab=review",
-        ])
-        .unwrap();
+        let target =
+            parse_launch_target(["archductor-gtk", "archductor://workspace/berlin?tab=review"])
+                .unwrap();
 
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Review);
@@ -1638,8 +1629,7 @@ mod tests {
 
     #[test]
     fn launch_target_parses_page_deep_links_and_tab_aliases() {
-        let history =
-            parse_launch_target(["linux-archductor-gtk", "linux-archductor://history"]).unwrap();
+        let history = parse_launch_target(["archductor-gtk", "archductor://history"]).unwrap();
         let terminal = parse_workspace_tab("big-terminal").unwrap();
 
         assert_eq!(history.page, AppPage::History);
@@ -1661,14 +1651,14 @@ mod tests {
     #[test]
     fn pty_inspector_route_is_gated_by_debug_mode() {
         let err = parse_launch_target_with_debug_mode(
-            ["linux-archductor-gtk", "--page", "pty-inspector"],
+            ["archductor-gtk", "--page", "pty-inspector"],
             false,
         )
         .unwrap_err();
         assert_eq!(err, "unknown page: ptyinspector");
 
         let target = parse_launch_target_with_debug_mode(
-            ["linux-archductor-gtk", "--page", "pty-inspector"],
+            ["archductor-gtk", "--page", "pty-inspector"],
             true,
         )
         .unwrap();
@@ -1785,9 +1775,9 @@ mod tests {
             &path,
             [
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

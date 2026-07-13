@@ -1,4 +1,4 @@
-# Linux Archductor Manual Testing Checklist
+# Archductor Manual Testing Checklist
 
 Use this checklist before calling the app flow healthy or cutting a public
 artifact. It focuses on the real Archductor loop: one repository, many
@@ -11,10 +11,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 ## Build And Launch
 
 - [ ] `cargo fmt --all -- --check`
-- [ ] `cargo test -p linux-archductor-core -p linux-archductor -p linux-archductor-gtk`
+- [ ] `cargo test -p archductor-core -p archductor -p archductor-gtk`
 - [ ] `cargo build --workspace --release --locked`
-- [ ] `./target/release/linux-archductor doctor` prints distro guidance.
-- [ ] `./target/release/linux-archductor-gtk` opens the GTK app.
+- [ ] `./target/release/archductor doctor` prints distro guidance.
+- [ ] `./target/release/archductor-gtk` opens the GTK app.
 
 ## Repository Setup
 
@@ -25,9 +25,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Edit shared `.archductor/settings.toml` from Projects.
 - [ ] Edit local `.archductor/settings.local.toml` from Projects.
 - [ ] Export shared settings with
-  `linux-archductor repo settings <name> export --output <file>`.
+  `archductor repo settings <name> export --output <file>`.
 - [ ] Import that file back into shared and local settings with
-  `linux-archductor repo settings <name> import <file>` and `--local`.
+  `archductor repo settings <name> import <file>` and `--local`.
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
   test/lint/typecheck/build commands, environment variables, provider
   executable fields, prompts, prompt pack metadata, and Git
@@ -78,7 +78,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Create a GitHub PR workspace with authenticated `gh`; confirm the PR head
   ref is fetched before the worktree is created.
 - [ ] For a PR-sourced workspace whose local branch name differs from the remote
-  PR branch, run `linux-archductor pr summary <workspace>` and confirm it uses
+  PR branch, run `archductor pr summary <workspace>` and confirm it uses
   the stored PR number instead of failing branch inference.
 - [ ] Confirm GitHub source creation fails clearly when `gh auth status` is not
   authenticated.
@@ -100,7 +100,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] From the workspace Branch tab, create a new branch, check it out, rename
   it, switch away from it, and delete it after checking Confirm delete.
 - [ ] Repeat the same branch flow through
-  `linux-archductor workspace branch <workspace> create|checkout|rename|delete`.
+  `archductor workspace branch <workspace> create|checkout|rename|delete`.
 - [ ] Confirm dirty working trees and branch collisions show actionable branch
   errors in the GTK Branch tab and CLI.
 
@@ -144,7 +144,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm provider/auth/MCP status text appears where applicable.
 - [ ] Link one workspace to another from the workspace page and confirm
   `.context/linked-directories/<target>` points at the target workspace.
-- [ ] Run `linux-archductor workspace linked-dirs <workspace>` and confirm the
+- [ ] Run `archductor workspace linked-dirs <workspace>` and confirm the
   same target and symlink path are listed.
 - [ ] Start a session in the source workspace and confirm
   `ARCHDUCTOR_LINKED_DIRECTORIES` and `ARCHDUCTOR_LINKED_DIRECTORY_<NAME>` are
@@ -159,11 +159,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   do not leave duplicate or misplaced text.
 - [ ] Confirm stopped/exited terminal process rows reconcile after restart.
 - [ ] Confirm terminal transcripts are persisted, searchable, and reloadable.
-- [ ] Launch `./target/release/linux-archductor-gtk` without
+- [ ] Launch `./target/release/archductor-gtk` without
   `ARCHDUCTOR_DEBUG`; confirm there is no PTY Inspector sidebar item, no debug
   fields in normal workspace/session UI, and `--page pty-inspector` falls back
   to the normal default page.
-- [ ] Launch `ARCHDUCTOR_DEBUG=1 ./target/release/linux-archductor-gtk`;
+- [ ] Launch `ARCHDUCTOR_DEBUG=1 ./target/release/archductor-gtk`;
   confirm PTY Inspector appears directly under Dashboard and History.
 - [ ] With debug mode on and at least one active or recent agent session,
   select PTY Inspector and confirm the left list shows session id, workspace,
@@ -249,8 +249,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   promoted to attention.
 - [ ] For a PR with review threads, confirm the structured PR summary includes
   GitHub review thread node IDs.
-- [ ] Run `linux-archductor pr resolve-thread <workspace> <thread-id>` and
-  `linux-archductor pr reopen-thread <workspace> <thread-id>` against a real
+- [ ] Run `archductor pr resolve-thread <workspace> <thread-id>` and
+  `archductor pr reopen-thread <workspace> <thread-id>` against a real
   review thread and confirm GitHub updates the thread state.
 - [ ] Enter the same thread ID in the Checks tab and confirm Resolve Thread and
   Reopen Thread update the GitHub thread state.
@@ -262,7 +262,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Duplicate a workspace from the GUI and confirm the new workspace has its
   own branch, worktree, `.context` files, and timeline entry.
 - [ ] Duplicate a workspace with
-  `linux-archductor workspace duplicate <source> <new-name> --branch <branch>`
+  `archductor workspace duplicate <source> <new-name> --branch <branch>`
   and confirm it appears in active workspace lists.
 - [ ] Repeat the create-work-review-merge-archive loop for the same repository.
 
@@ -274,13 +274,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Workspace Timeline tab shows creation, branch changes, session
   start/stop, PR creation, archive/restore/delete, push, and check refresh
   events in timestamp order.
-- [ ] Run `linux-archductor workspace timeline <workspace>` and confirm it
+- [ ] Run `archductor workspace timeline <workspace>` and confirm it
   matches the GTK Timeline tab; repeat with `--kind branch.renamed`.
 - [ ] Start a local Shell/Codex/Claude/Cursor session, send at least one
   composer message, refresh History, and confirm the saved Linux session appears.
-- [ ] Run `linux-archductor history list --workspace <name>` and confirm the
+- [ ] Run `archductor history list --workspace <name>` and confirm the
   saved session row appears with message count and preview.
-- [ ] Run `linux-archductor history show <process-id>` and confirm the saved
+- [ ] Run `archductor history show <process-id>` and confirm the saved
   transcript is labeled as You, Agent, System, or Review Prompt.
 - [ ] History reads old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
@@ -294,11 +294,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   Processes, and Checkpoints.
 - [ ] Confirm command palette workspace-tab commands are hidden until a
   workspace is selected.
-- [ ] Launch `linux-archductor-gtk --workspace <name> --tab checks` and confirm
+- [ ] Launch `archductor-gtk --workspace <name> --tab checks` and confirm
   the workspace opens on Checks.
-- [ ] Launch `linux-archductor-gtk 'linux-archductor://workspace/<name>?tab=review'`
+- [ ] Launch `archductor-gtk 'archductor://workspace/<name>?tab=review'`
   and confirm the workspace opens on Review.
-- [ ] Launch `linux-archductor-gtk 'linux-archductor://history'` and confirm
+- [ ] Launch `archductor-gtk 'archductor://history'` and confirm
   History opens directly.
 - [ ] Set `customization.workspace_defaults.default_visible_tab = "checks"` and
   confirm opening/selecting that workspace lands on Checks when no explicit tab
@@ -339,9 +339,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] `VERSION=0.1.0 nfpm package --packager deb --target dist/`
 - [ ] `VERSION=0.1.0 nfpm package --packager rpm --target dist/`
 - [ ] AppImage launches GUI with no args:
-  `./dist/linux-archductor-0.1.0-x86_64.AppImage`
+  `./dist/archductor-0.1.0-x86_64.AppImage`
 - [ ] AppImage forwards CLI args:
-  `./dist/linux-archductor-0.1.0-x86_64.AppImage doctor`
+  `./dist/archductor-0.1.0-x86_64.AppImage doctor`
 - [ ] Flatpak build status is documented if it fails because of sandbox or
   dependency limitations.
 - [ ] Tag-driven publish pipeline creates or updates GitHub release artifacts,

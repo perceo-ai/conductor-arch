@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">Linux Archductor main workspace UI sketch</title>
+  <title id="title">Archductor main workspace UI sketch</title>
   <desc id="desc">Dark desktop app wireframe with a left workspace sidebar, central agent terminal, right review panel, and bottom prompt composer.</desc>
   <defs>
     <style>
@@ -88,7 +88,7 @@
 
   <rect class="panel2" x="354" y="456" width="706" height="192" rx="8"/>
   <text class="small" x="378" y="484">Terminal · run script</text>
-  <text class="mono" x="378" y="518">$ linux-archductor run tel-aviv</text>
+  <text class="mono" x="378" y="518">$ archductor run tel-aviv</text>
   <text class="mono" x="378" y="550">&gt; vite --host 127.0.0.1 --port 42030</text>
   <text class="green" x="378" y="582">Local: http://127.0.0.1:42030/</text>
   <text class="muted" x="378" y="614">watching src/main.rs, crates/core/src/workspace.rs</text>

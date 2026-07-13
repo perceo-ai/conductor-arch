@@ -1,14 +1,14 @@
 use anyhow::Context;
+use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
+use archductor_core::workspace::{
+    ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
+    WorkspaceStore,
+};
 use futures_channel::oneshot;
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation,
     ScrolledWindow, TextBuffer, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
-};
-use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
-use linux_archductor_core::workspace::{
-    ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
-    WorkspaceStore,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -218,7 +218,7 @@ pub fn embedded_terminal_panel(
             harness: None,
         };
         crate::archcar_async::spawn_archcar_request(
-            linux_archductor_core::paths::AppPaths::from_env(),
+            archductor_core::paths::AppPaths::from_env(),
             request,
         );
         append_text(
@@ -254,7 +254,7 @@ pub fn embedded_terminal_panel(
             transcript_for_resize.allocated_height(),
         );
         crate::archcar_async::spawn_archcar_request(
-            linux_archductor_core::paths::AppPaths::from_env(),
+            archductor_core::paths::AppPaths::from_env(),
             ArchcarRequest::ResizeSession {
                 session_id: record.id,
                 rows,
@@ -286,7 +286,7 @@ pub fn embedded_terminal_panel(
             session_id: record.id,
         };
         crate::archcar_async::spawn_archcar_request(
-            linux_archductor_core::paths::AppPaths::from_env(),
+            archductor_core::paths::AppPaths::from_env(),
             request,
         );
         append_text(
@@ -440,7 +440,7 @@ fn run_terminal_command(
         return;
     };
     crate::archcar_async::spawn_archcar_request(
-        linux_archductor_core::paths::AppPaths::from_env(),
+        archductor_core::paths::AppPaths::from_env(),
         ArchcarRequest::SendInput {
             session_id: record.id,
             input: command.clone(),
@@ -2856,7 +2856,7 @@ fn display_command(program: &Path, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_archductor_core::workspace::{ProcessKind, ProcessStatus};
+    use archductor_core::workspace::{ProcessKind, ProcessStatus};
 
     fn terminal_summary(
         id: i64,

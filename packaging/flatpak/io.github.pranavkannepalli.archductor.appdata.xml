@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.pranavkannepalli.linux-archductor</id>
+  <id>io.github.pranavkannepalli.archductor</id>
   <metadata_license>Apache-2.0</metadata_license>
   <project_license>Apache-2.0</project_license>
-  <name>Linux Archductor</name>
-  <summary>Linux-native parallel coding-agent workflow tool built around Git worktrees</summary>
+  <name>Archductor</name>
+  <summary>Archductor parallel coding-agent workflow tool built around Git worktrees</summary>
   <description>
     <p>
-      Linux Archductor gives you the Archductor workflow model on Linux. Each coding
+      Archductor gives you the Archductor workflow model on Linux. Each coding
       task gets its own isolated Git worktree, branch, terminal, agent session,
       diff viewer, checks panel, and pull request path.
     </p>
@@ -42,8 +42,8 @@
     <keyword>workflow</keyword>
   </keywords>
   <provides>
-    <binary>linux-archductor</binary>
-    <binary>linux-archductor-gtk</binary>
+    <binary>archductor</binary>
+    <binary>archductor-gtk</binary>
   </provides>
   <releases>
     <release version="0.1.0" date="2026-06-16">

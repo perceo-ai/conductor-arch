@@ -38,7 +38,7 @@ mod pty_tests {
     #[test]
     fn pty_session_accepts_input_and_streams_output() {
         let temp = tempfile::tempdir().unwrap();
-        let marker = "linux-archductor-pty-ready";
+        let marker = "archductor-pty-ready";
         let mut session = crate::pty::PtySession::spawn(
             PathBuf::from("/bin/sh"),
             Vec::new(),

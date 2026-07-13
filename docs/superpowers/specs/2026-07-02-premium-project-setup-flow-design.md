@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make Linux Archductor feel like a premium desktop developer product by improving the typography package, replacing the generic add-repository flow with a compact project creation menu plus focused modals, and blocking startup when required command-line dependencies are missing.
+Make Archductor feel like a premium desktop developer product by improving the typography package, replacing the generic add-repository flow with a compact project creation menu plus focused modals, and blocking startup when required command-line dependencies are missing.
 
 ## Scope
 

@@ -1,11 +1,11 @@
-app-id: io.github.pranavkannepalli.linux-archductor
+app-id: io.github.pranavkannepalli.archductor
 runtime: org.gnome.Platform
 runtime-version: '47'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 
-command: linux-archductor-gtk
+command: archductor-gtk
 
 finish-args:
   # Full filesystem access required for arbitrary repository and workspace paths
@@ -23,23 +23,23 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
-    CARGO_HOME: /run/build/linux-archductor/cargo
+    CARGO_HOME: /run/build/archductor/cargo
     RUST_BACKTRACE: '1'
 
 modules:
-  - name: linux-archductor
+  - name: archductor
     buildsystem: simple
     build-commands:
       - cargo build --release --locked --workspace
-      - install -Dm755 target/release/linux-archductor /app/bin/linux-archductor
-      - install -Dm755 target/release/linux-archductor-gtk /app/bin/linux-archductor-gtk
-      - install -Dm644 README.md /app/share/doc/linux-archductor/README.md
-      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.linux-archductor.appdata.xml
-          /app/share/metainfo/io.github.pranavkannepalli.linux-archductor.appdata.xml
-      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.linux-archductor.desktop
-          /app/share/applications/io.github.pranavkannepalli.linux-archductor.desktop
-      - install -Dm644 packaging/linux-archductor.svg
-          /app/share/icons/hicolor/scalable/apps/io.github.pranavkannepalli.linux-archductor.svg
+      - install -Dm755 target/release/archductor /app/bin/archductor
+      - install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk
+      - install -Dm644 README.md /app/share/doc/archductor/README.md
+      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.archductor.appdata.xml
+          /app/share/metainfo/io.github.pranavkannepalli.archductor.appdata.xml
+      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.archductor.desktop
+          /app/share/applications/io.github.pranavkannepalli.archductor.desktop
+      - install -Dm644 packaging/archductor.svg
+          /app/share/icons/hicolor/scalable/apps/io.github.pranavkannepalli.archductor.svg
     sources:
       - type: dir
         path: ../..

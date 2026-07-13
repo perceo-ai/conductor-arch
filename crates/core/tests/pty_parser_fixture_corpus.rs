@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use linux_archductor_core::codex_tui::{
+use archductor_core::codex_tui::{
     parse_codex_screen_delta, CodexFileChangeAction, CodexParsedItem, CodexTranscriptEvent,
     ScreenMessageRole,
 };

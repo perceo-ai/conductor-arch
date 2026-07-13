@@ -1,13 +1,13 @@
 use adw::ApplicationWindow;
+use archductor_core::archcar::protocol::ArchcarRequest;
+use archductor_core::repository::RepositoryStore;
+use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
     Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
     RevealerTransitionType, ScrolledWindow, Spinner, Stack,
 };
-use linux_archductor_core::archcar::protocol::ArchcarRequest;
-use linux_archductor_core::repository::RepositoryStore;
-use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};

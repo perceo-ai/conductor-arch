@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use linux_archductor_core::paths::AppPaths;
+use archductor_core::paths::AppPaths;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NavigationEntry {

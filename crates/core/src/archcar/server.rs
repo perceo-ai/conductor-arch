@@ -1364,9 +1364,9 @@ mod tests {
             .arg(&path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -1483,7 +1483,7 @@ mod tests {
             data_dir: root.join("data"),
             state_dir: state_dir.clone(),
             cache_dir: root.join("cache"),
-            database_path: root.join("data/linux-archductor.db"),
+            database_path: root.join("data/archductor.db"),
             logs_dir: state_dir.join("logs"),
         }
     }

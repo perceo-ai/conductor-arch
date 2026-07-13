@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Archductor
+GenericName=Coding Agent Workflow
+Comment=Archductor parallel coding-agent workflow tool built around Git worktrees
+Exec=archductor-gtk
+Icon=io.github.pranavkannepalli.archductor
+Terminal=false
+Type=Application
+Categories=Development;
+Keywords=git;worktree;codex;claude;agents;workflow;

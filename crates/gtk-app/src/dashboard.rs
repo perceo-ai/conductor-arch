@@ -1,8 +1,8 @@
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::WorkspaceStatusLine;
+use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
 use gtk::{Box as GBox, Button, Label, Orientation, PolicyType, ScrolledWindow};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::WorkspaceStatusLine;
-use linux_archductor_core::workspace::WorkspaceStore;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
