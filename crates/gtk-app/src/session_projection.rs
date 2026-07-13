@@ -343,7 +343,7 @@ fn redact_json_value(value: &Value) -> Value {
 }
 
 fn secret_like_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    let key = key.trim().to_ascii_lowercase();
     key.contains("token")
         || key.contains("secret")
         || key.contains("password")
@@ -351,13 +351,18 @@ fn secret_like_key(key: &str) -> bool {
         || key.contains("apikey")
         || key.contains("access_key")
         || key.contains("private_key")
-        || key.contains("client_secret")
-        || key.contains("refresh_token")
-        || key.contains("authorization")
-        || key.contains("bearer")
         || key.contains("credential")
         || key == "auth"
         || key.ends_with("_auth")
+        || matches!(
+            key.as_str(),
+            "authorization"
+                | "proxy_authorization"
+                | "www_authorization"
+                | "authorization_header"
+                | "auth_header"
+                | "bearer"
+        )
 }
 
 #[cfg(test)]
@@ -729,6 +734,33 @@ mod tests {
         assert!(!payload.contains("client-secret"));
         assert!(!payload.contains("refresh-secret"));
         assert!(!payload.contains("nested-client-secret"));
+    }
+
+    #[test]
+    fn raw_payload_redaction_preserves_authorization_and_bearer_metadata_keys() {
+        let mut unknown = event("unknown-3", 1, ProviderProjectionCategory::Unknown, "", "");
+        unknown.raw_payload = Some(json!({
+            "authorization": "Bearer auth-secret",
+            "bearer": "bearer-secret",
+            "authorization_url": "https://auth.example/oauth/authorize",
+            "bearer_format": "JWT",
+            "diagnostics": {
+                "authorization_url": "https://nested.example/oauth/authorize",
+                "bearer_format": "opaque"
+            }
+        }));
+
+        let projection = render_provider_event_projection(vec![unknown]);
+        let payload = projection.items[0].raw_payload.as_deref().unwrap();
+
+        assert!(!payload.contains("auth-secret"));
+        assert!(!payload.contains("bearer-secret"));
+        assert!(payload.contains("authorization_url"));
+        assert!(payload.contains("https://auth.example/oauth/authorize"));
+        assert!(payload.contains("bearer_format"));
+        assert!(payload.contains("JWT"));
+        assert!(payload.contains("https://nested.example/oauth/authorize"));
+        assert!(payload.contains("opaque"));
     }
 
     #[test]

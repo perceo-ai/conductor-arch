@@ -2767,6 +2767,16 @@ fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
         }
         text.push_str(&item.body);
     }
+    if item.render_class == ProjectionRenderClass::FallbackCard {
+        if let Some(raw_payload) = item.raw_payload.as_deref() {
+            if !raw_payload.trim().is_empty() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(raw_payload);
+            }
+        }
+    }
     if text.trim().is_empty() && item.inspectable {
         text.push_str("Provider details available for inspection.");
     }
@@ -8532,6 +8542,32 @@ I summarized the result.
         );
         assert!(!text.contains("raw-secret"));
         assert!(!text.contains("\"type\""));
+    }
+
+    #[test]
+    fn provider_projection_fallback_card_text_shows_redacted_raw_payload() {
+        let item = ProviderProjectionItem {
+            id: "fallback-1".to_owned(),
+            sequence: 1,
+            category: ProviderProjectionCategory::Unknown,
+            render_class: ProjectionRenderClass::FallbackCard,
+            title: "Unknown provider event".to_owned(),
+            body: String::new(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: Some(
+                "{\n  \"type\": \"future_event\",\n  \"api_key\": \"[redacted]\"\n}".to_owned(),
+            ),
+            inspectable: true,
+        };
+
+        let text = provider_projection_card_text(&item);
+
+        assert!(text.contains("Unknown provider event"));
+        assert!(text.contains("\"type\": \"future_event\""));
+        assert!(text.contains("[redacted]"));
     }
 
     #[test]

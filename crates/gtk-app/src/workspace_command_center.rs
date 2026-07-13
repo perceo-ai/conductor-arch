@@ -2838,14 +2838,18 @@ fn lifecycle_panel(
                             .map_err(|err| format!("{err:#}"))
                     },
                     move |result| {
+                        let navigation_workspace =
+                            workspace_delete_navigation_target(&result).map(str::to_owned);
                         match result {
                             Ok(deleted) => {
                                 progress_after_delete
                                     .set_text(&workspace_delete_feedback(Ok(deleted.clone())));
-                                state_after_delete.remove_workspace_from_navigation(
-                                    &deleted.name,
-                                    crate::state::AppPage::Dashboard,
-                                );
+                                if let Some(workspace_name) = navigation_workspace.as_deref() {
+                                    state_after_delete.remove_workspace_from_navigation(
+                                        workspace_name,
+                                        crate::state::AppPage::Dashboard,
+                                    );
+                                }
                                 let db_cleanup = db_cleanup_after_delete.clone();
                                 std::thread::spawn(move || {
                                     if let Err(err) =
@@ -7280,6 +7284,15 @@ fn workspace_delete_feedback(result: anyhow::Result<Workspace>) -> String {
     }
 }
 
+fn workspace_delete_navigation_target(
+    result: &std::result::Result<Workspace, String>,
+) -> Option<&str> {
+    result
+        .as_ref()
+        .ok()
+        .map(|workspace| workspace.name.as_str())
+}
+
 fn merge_blockers_text(
     open_todos: usize,
     open_review_comments: usize,
@@ -9334,22 +9347,12 @@ mod tests {
     }
 
     #[test]
-    fn workspace_delete_navigation_is_removed_only_after_successful_delete() {
-        let source = include_str!("workspace_command_center.rs");
-        let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
-        let remove_call = "state_after_delete.remove_workspace_from_navigation";
-        let delete_call = "store.delete(&workspace_delete";
+    fn workspace_delete_navigation_target_is_only_returned_for_successful_delete() {
+        let success = Ok(test_workspace());
+        assert_eq!(workspace_delete_navigation_target(&success), Some("berlin"));
 
-        let remove_index = production_source
-            .find(remove_call)
-            .expect("delete success path should remove navigation");
-        let delete_index = production_source
-            .find(delete_call)
-            .expect("delete path should call workspace store delete");
-
-        assert!(
-            remove_index > delete_index,
-            "workspace navigation must not be cleared before store.delete succeeds"
-        );
+        let failure: std::result::Result<Workspace, String> =
+            Err("worktree remove failed".to_owned());
+        assert_eq!(workspace_delete_navigation_target(&failure), None);
     }
 }
