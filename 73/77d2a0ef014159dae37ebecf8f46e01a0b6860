@@ -1,0 +1,25 @@
+claude/CLAUDE.md
+  s_1c34d93cc814fc::t_fde61d6562b6ea 73,77-100,195
+AGENTS.md
+  s_1c34d93cc814fc::t_97c5092e27bb14 5-8
+.codex/AGENTS.md
+  s_1c34d93cc814fc::t_b9010e0d84ee02 47,69-95,220
+CLAUDE.md
+  s_1c34d93cc814fc::t_6d23d90efd6e2b 5-8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "7377d2a0ef014159dae37ebecf8f46e01a0b6860",
+  "prompts": {},
+  "sessions": {
+    "s_1c34d93cc814fc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f59d3-45f3-7f93-9910-d422e6a7ed66",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
