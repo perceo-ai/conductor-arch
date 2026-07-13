@@ -3684,6 +3684,22 @@ fn inline_event_type_color(event: &CodexInlineEvent) -> &'static str {
     }
 }
 
+fn inline_event_chip_label_min_width_chars() -> i32 {
+    1
+}
+
+fn inline_event_chip_label_max_width_chars() -> i32 {
+    140
+}
+
+fn configure_inline_event_chip_label(label: &Label) {
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_width_chars(inline_event_chip_label_min_width_chars());
+    label.set_max_width_chars(inline_event_chip_label_max_width_chars());
+}
+
 fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
     event
         .path
@@ -3971,7 +3987,7 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
     let toggle_label = Label::new(None);
     toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
-    toggle_label.set_xalign(0.0);
+    configure_inline_event_chip_label(&toggle_label);
     toggle.set_child(Some(&toggle_label));
     root.append(&toggle);
 
@@ -8625,6 +8641,27 @@ fix it
         assert!(skill_markup.contains("foreground=\"#fcd34d\""));
         assert!(skill_markup.contains("+ Read"));
         assert!(skill_markup.contains("foreground=\"#e7e7e7\">superpowers:test-driven-development"));
+    }
+
+    #[test]
+    fn inline_event_chip_label_layout_caps_long_commands() {
+        let long_command = format!("Ran pnpm {}", "x".repeat(240));
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: long_command,
+            subtitle: Some("Command".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        assert_eq!(inline_event_chip_label_min_width_chars(), 1);
+        assert_eq!(inline_event_chip_label_max_width_chars(), 140);
+        assert_eq!(
+            inline_event_type_css_class(&event),
+            "chat-inline-event-command"
+        );
+        assert!(inline_event_chip_markup(&event, false).contains("foreground=\"#e7e7e7\">pnpm"));
     }
 
     #[test]

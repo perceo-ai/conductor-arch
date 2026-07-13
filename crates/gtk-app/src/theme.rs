@@ -2070,6 +2070,7 @@ popover.context-menu-popover arrow {
     font-size: 11px;
     font-weight: 600;
     min-height: 24px;
+    min-width: 0;
     padding: 2px 8px;
 }
 .chat-inline-event-tool .chat-inline-event-chip {
@@ -2727,6 +2728,7 @@ mod tests {
         assert!(css.contains(".chat-inline-event-chip"));
         assert!(css.contains("border-radius: 6px;"));
         assert!(css.contains("font-size: 11px;"));
+        assert!(css.contains("min-width: 0;"));
         assert!(css.contains(".chat-inline-event-command .chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-subagent .chat-inline-event-chip"));
