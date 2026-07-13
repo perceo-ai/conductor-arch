@@ -2799,18 +2799,91 @@ fn read_only_command_inline_event(command: &str, body: &str) -> Option<CodexInli
 
 fn read_only_command_path(command: &str) -> Option<PathBuf> {
     let trimmed = command.trim();
-    let executable = trimmed.split_whitespace().next()?;
+    if let Some(inner) = shell_command_inner(trimmed) {
+        if let Some(path) = read_only_command_path(&inner) {
+            return Some(path);
+        }
+    }
+    let tokens = shell_command_tokens(trimmed);
+    let executable = tokens.first()?;
+    let executable = command_executable_name(executable);
     if !matches!(
         executable,
         "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "batcat" | "less" | "more"
     ) {
         return None;
     }
-    trimmed
-        .split_whitespace()
-        .filter_map(clean_read_command_path_token)
+    tokens
+        .iter()
+        .filter_map(|token| clean_read_command_path_token(token))
         .find(|token| is_readable_path_token(token))
         .map(PathBuf::from)
+}
+
+fn shell_command_inner(command: &str) -> Option<String> {
+    let tokens = shell_command_tokens(command);
+    let executable = tokens.first().map(|token| command_executable_name(token))?;
+    if !matches!(executable, "bash" | "sh" | "zsh" | "dash") {
+        return None;
+    }
+    tokens
+        .windows(2)
+        .find_map(|window| matches!(window[0].as_str(), "-c" | "-lc").then(|| window[1].clone()))
+        .filter(|inner| !inner.trim().is_empty())
+}
+
+fn command_executable_name(executable: &str) -> &str {
+    executable
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(executable)
+}
+
+fn shell_command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn clean_read_command_path_token(token: &str) -> Option<&str> {
@@ -9191,6 +9264,32 @@ fix it
     }
 
     #[test]
+    fn read_only_bash_lc_commands_render_as_file_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("session_surface.rs");
+        fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!(
+                "Ran /bin/bash -lc \"sed -n '1,220p' {}\"",
+                source_path.display()
+            ),
+            "fn main() {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Tool);
+        assert_eq!(read.title, "Read session_surface.rs");
+        assert_eq!(read.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
     fn read_only_shell_commands_render_skill_md_as_skill_reads() {
         let temp = tempfile::tempdir().unwrap();
         let skill_dir = temp.path().join("graphify");
@@ -9212,6 +9311,41 @@ fix it
         assert_eq!(
             inline_event_chip_label(&read, false),
             "+ Read SKILL.md for graphify"
+        );
+    }
+
+    #[test]
+    fn read_only_bash_lc_commands_render_skill_md_as_skill_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("verification-before-completion");
+        fs::create_dir(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        fs::write(
+            &skill_path,
+            "---\nname: verification-before-completion\n---",
+        )
+        .unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!(
+                "Ran /bin/bash -lc \"sed -n '1,260p' {}\"",
+                skill_path.display()
+            ),
+            "---\nname: verification-before-completion\n---",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Skill);
+        assert_eq!(
+            read.title,
+            "Read SKILL.md for verification-before-completion"
+        );
+        assert_eq!(read.subtitle.as_deref(), Some("Skill"));
+        assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read SKILL.md for verification-before-completion"
         );
     }
 
@@ -10714,6 +10848,29 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         );
         record.normalized_payload = serde_json::json!({
             "title": "sed -n '1,220p' crates/gtk-app/src/session_surface.rs",
+            "body": "fn agent_session_panel() {}"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Read session_surface.rs");
+        assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn provider_projection_bash_lc_read_only_commands_render_as_reads() {
+        let mut record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "/bin/bash -lc \"sed -n '1,220p' crates/gtk-app/src/session_surface.rs\"",
             "body": "fn agent_session_panel() {}"
         });
         let projection = provider_projection_from_records(&[record]);
