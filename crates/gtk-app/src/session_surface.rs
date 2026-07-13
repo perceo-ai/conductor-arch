@@ -9,9 +9,7 @@ use archductor_core::codex_tui::{
     CodexTranscriptEvent,
 };
 use archductor_core::doctor::SetupReadiness;
-use archductor_core::model_registry::{
-    default_model_for_provider, model_choices_for_provider, CODEX_DEFAULT_MODEL,
-};
+use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_MODEL};
 use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
@@ -270,9 +268,7 @@ pub fn agent_session_panel(
         initial_chat_harness_from_setup(&database_path, _workspace_name, &readiness)
     };
     let selected_harness = Rc::new(RefCell::new(initial_harness));
-    let selected_model = Rc::new(RefCell::new(default_model_for_session_kind(
-        initial_harness,
-    )));
+    let selected_model = Rc::new(RefCell::new(None::<String>));
     let reasoning_mode = Rc::new(RefCell::new(Some("high".to_owned())));
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
     let selected_thread: Rc<RefCell<Option<i64>>> =
@@ -4048,10 +4044,6 @@ fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoic
     }
 }
 
-fn default_model_for_session_kind(kind: SessionKind) -> Option<String> {
-    default_model_for_provider(session_kind_provider(kind)).map(str::to_owned)
-}
-
 fn selected_provider_model_choice_index(
     choices: &[ProviderModelChoice],
     kind: SessionKind,
@@ -4217,10 +4209,10 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
 }
 
 fn codex_model_command(model: Option<&str>) -> Option<String> {
-    match model.map(str::trim).filter(|model| !model.is_empty()) {
-        Some(model) => Some(format!("/model {model}")),
-        None => Some(format!("/model {CODEX_DEFAULT_MODEL}")),
-    }
+    model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| format!("/model {model}"))
 }
 
 fn replace_pending_model_command(
@@ -7114,7 +7106,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_model_choice_queues_explicit_codex_default_model() {
+    fn empty_model_choice_does_not_queue_default_model_command() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
         queue_thread_command(&pending, 7, "/model gpt-5.6-sol".to_owned());
         queue_thread_command(&pending, 7, "/thinking high".to_owned());
@@ -7123,7 +7115,7 @@ mod tests {
 
         assert_eq!(
             pending.borrow().get(&7).cloned().unwrap_or_default(),
-            vec!["/thinking high".to_owned(), "/model gpt-5.6-sol".to_owned()]
+            vec!["/thinking high".to_owned()]
         );
     }
 
