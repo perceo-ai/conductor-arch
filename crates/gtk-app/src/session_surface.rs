@@ -2712,13 +2712,13 @@ fn merge_chat_timeline_for_render(
 fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
     match item {
         ChatTimelineItem::Message(message) => {
-            (message.timeline_seq.unwrap_or(message.id), 0, message.id)
+            (message.timeline_seq.unwrap_or(i64::MAX - 2), 0, message.id)
         }
         ChatTimelineItem::Event(event) => (event.timeline_seq, 1, event.id),
         ChatTimelineItem::PendingUserInput(_) => (i64::MAX - 1, 2, 0),
         ChatTimelineItem::ProviderProjection(item) => (
-            i64::MAX,
-            3,
+            i64::MAX - 3,
+            2,
             i64::try_from(item.sequence).unwrap_or(i64::MAX),
         ),
     }
@@ -2730,23 +2730,30 @@ fn chat_structured_items_for_render(
     provider_projection_items: Vec<ProviderProjectionItem>,
     pending_inputs: Vec<String>,
 ) -> Vec<ChatTimelineItem> {
-    let mut items = merge_chat_timeline_for_render(messages.clone(), events)
-        .into_iter()
-        .filter(|item| match item {
-            ChatTimelineItem::Message(message) => chat_message_is_renderable(message),
-            _ => true,
-        })
-        .collect::<Vec<_>>();
+    let (mut items, mut unsequenced_messages): (Vec<_>, Vec<_>) =
+        merge_chat_timeline_for_render(messages.clone(), events)
+            .into_iter()
+            .filter(|item| match item {
+                ChatTimelineItem::Message(message) => chat_message_is_renderable(message),
+                _ => true,
+            })
+            .partition(|item| {
+                !matches!(
+                    item,
+                    ChatTimelineItem::Message(message) if message.timeline_seq.is_none()
+                )
+            });
+    items.extend(
+        provider_projection_items_for_render(provider_projection_items, &messages)
+            .into_iter()
+            .map(ChatTimelineItem::ProviderProjection),
+    );
+    items.append(&mut unsequenced_messages);
     items.extend(
         pending_inputs
             .into_iter()
             .filter(|input| !input.trim().is_empty())
             .map(ChatTimelineItem::PendingUserInput),
-    );
-    items.extend(
-        provider_projection_items_for_render(provider_projection_items, &messages)
-            .into_iter()
-            .map(ChatTimelineItem::ProviderProjection),
     );
     items
 }
@@ -9654,7 +9661,7 @@ I summarized the result.
     }
 
     #[test]
-    fn chat_render_places_pending_user_input_before_provider_events() {
+    fn chat_render_places_pending_user_input_after_provider_events() {
         let messages = vec![ChatMessageRecord {
             id: 30,
             thread_id: 7,
@@ -9688,9 +9695,83 @@ I summarized the result.
         );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
-        assert!(matches!(timeline[1], ChatTimelineItem::PendingUserInput(_)));
         assert!(matches!(
-            timeline[2],
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert!(matches!(timeline[2], ChatTimelineItem::PendingUserInput(_)));
+    }
+
+    #[test]
+    fn chat_render_places_unsequenced_user_messages_after_provider_events() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "new user message".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "running tests".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), vec![provider_item], Vec::new());
+
+        assert!(matches!(
+            timeline[0],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert!(matches!(timeline[1], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn chat_render_keeps_provider_events_after_persisted_history() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "agent".to_owned(),
+            content: "older persisted answer".to_owned(),
+            source: "agent_reply".to_owned(),
+            timeline_seq: Some(500),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "running tests".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), vec![provider_item], Vec::new());
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
             ChatTimelineItem::ProviderProjection(_)
         ));
     }
