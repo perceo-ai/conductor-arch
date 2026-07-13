@@ -1666,6 +1666,18 @@ impl WorkspaceStore {
             [workspace_id],
         )?;
         self.conn.execute(
+            "DELETE FROM provider_event_raw_payloads
+             WHERE identity_key IN (
+                SELECT identity_key FROM provider_events
+                WHERE workspace_id = ?1
+                   OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
+                   OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)
+             )
+                OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
+                OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+        self.conn.execute(
             "DELETE FROM provider_events
              WHERE workspace_id = ?1
                 OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
@@ -10534,9 +10546,18 @@ CUSTOM_VALUE = "from-settings"
             .conn
             .query_row("SELECT COUNT(*) FROM provider_events", [], |row| row.get(0))
             .unwrap();
+        let orphan_provider_raw_payloads: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_event_raw_payloads",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(orphan_pty_chunks, 0);
         assert_eq!(orphan_session_events, 0);
         assert_eq!(orphan_provider_events, 0);
+        assert_eq!(orphan_provider_raw_payloads, 0);
     }
 
     #[test]

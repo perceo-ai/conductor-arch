@@ -212,6 +212,27 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_provider_events_process
           ON provider_events(process_id, received_sequence, id);
 
+        CREATE TABLE IF NOT EXISTS provider_event_raw_payloads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          identity_key TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          chat_thread_id INTEGER,
+          process_id INTEGER,
+          phase TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          provider_sequence INTEGER,
+          raw_sequence INTEGER NOT NULL,
+          occurred_at_ms INTEGER NOT NULL,
+          raw_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_provider_event_raw_payloads_identity
+          ON provider_event_raw_payloads(identity_key, raw_sequence, id);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_event_raw_payloads_chat_thread
+          ON provider_event_raw_payloads(chat_thread_id, raw_sequence, id);
+
         CREATE TABLE IF NOT EXISTS workspace_timeline (
           id INTEGER PRIMARY KEY,
           workspace_id INTEGER NOT NULL,

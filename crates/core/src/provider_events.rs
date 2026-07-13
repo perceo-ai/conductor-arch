@@ -681,10 +681,15 @@ fn merge_existing_streaming_payload(
     Ok(merge_streaming_payload(
         existing,
         draft.normalized_payload.clone(),
+        draft.phase,
     ))
 }
 
-fn merge_streaming_payload(existing: Value, mut incoming: Value) -> Value {
+fn merge_streaming_payload(
+    existing: Value,
+    mut incoming: Value,
+    phase: ProviderEventPhase,
+) -> Value {
     for key in ["body", "text"] {
         let Some(existing_text) = existing.get(key).and_then(Value::as_str) else {
             continue;
@@ -692,14 +697,13 @@ fn merge_streaming_payload(existing: Value, mut incoming: Value) -> Value {
         let Some(incoming_text) = incoming.get(key).and_then(Value::as_str) else {
             continue;
         };
-        if incoming_text.starts_with(existing_text) {
+        if phase != ProviderEventPhase::Delta && incoming_text == existing_text {
             continue;
         }
-        if existing_text.ends_with(incoming_text) {
-            incoming[key] = Value::String(existing_text.to_owned());
-        } else {
-            incoming[key] = Value::String(format!("{existing_text}{incoming_text}"));
+        if incoming_text.len() > existing_text.len() && incoming_text.starts_with(existing_text) {
+            continue;
         }
+        incoming[key] = Value::String(format!("{existing_text}{incoming_text}"));
     }
     incoming
 }
@@ -1009,6 +1013,35 @@ mod tests {
         assert_eq!(raw_payloads[0].raw_json["params"]["delta"], "hello");
         assert_eq!(raw_payloads[1].raw_json["params"]["delta"], " world");
         assert_eq!(raw_payloads[2].raw_json["params"]["tokens"], 12);
+    }
+
+    #[test]
+    fn streaming_deltas_append_repeated_identical_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut first = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        first.normalized_payload = json!({"title": "Assistant", "text": "ha"});
+        first.raw_json = json!({"method": "agent/message/delta", "params": {"delta": "ha"}});
+        let mut second = first.clone();
+        second.provider_event_id = Some("evt-2".to_owned());
+        second.provider_sequence = Some(2);
+        second.raw_json = json!({"method": "agent/message/delta", "params": {"delta": "ha"}});
+
+        store.upsert_event(&first).unwrap();
+        let latest = store.upsert_event(&second).unwrap();
+
+        assert_eq!(latest.normalized_payload["text"], "haha");
+        assert_eq!(
+            store
+                .list_raw_payloads_for_identity(&latest.identity_key)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

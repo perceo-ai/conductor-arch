@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -13,6 +13,7 @@ use crate::archcar::harness::{
     controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
 };
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputKind};
+use crate::codex_tui::codex_screen_ready_for_input;
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
@@ -591,16 +592,51 @@ fn screen_persistence_fingerprint(kind: SessionKind, screen: &str) -> String {
 
     screen
         .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.contains("Working (") && trimmed.contains("esc to interrupt") {
-                "codex:working-status".to_owned()
-            } else {
-                line.to_owned()
-            }
-        })
+        .map(normalize_codex_working_status_for_fingerprint)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_codex_working_status_for_fingerprint(line: &str) -> String {
+    let Some(working_start) = line.find("Working (") else {
+        return line.to_owned();
+    };
+    let Some(status_end_offset) = line[working_start..].find("esc to interrupt)") else {
+        return line.to_owned();
+    };
+    let status_end = working_start + status_end_offset + "esc to interrupt)".len();
+    let mut prefix = line[..working_start].to_owned();
+    if let Some((idx, ch)) = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_whitespace())
+    {
+        if matches!(ch, '•' | '◦') {
+            prefix.replace_range(idx..idx + ch.len_utf8(), "•");
+        }
+    }
+    format!(
+        "{prefix}Working ([elapsed] • esc to interrupt){}",
+        &line[status_end..]
+    )
+}
+
+fn runtime_identity_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn user_input_identity_suffix(loop_nonce: u128, sequence: u64) -> String {
+    format!("input-{loop_nonce}-{sequence}")
+}
+
+fn session_ready_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
+    match kind {
+        SessionKind::Codex => codex_screen_ready_for_input(screen),
+        _ => false,
+    }
 }
 
 fn write_pty_screen_snapshot(
@@ -662,6 +698,7 @@ fn run_session_loop(
     let mut last_persisted_screen_fingerprint = None;
     let mut native_thread_id_resolved = false;
     let mut user_input_sequence = 0_u64;
+    let user_input_identity_nonce = runtime_identity_nonce();
     let runtime_store = RuntimeSessionStore::new(db_path.clone());
     append_runtime_provider_event(
         &runtime_store,
@@ -716,7 +753,8 @@ fn run_session_loop(
                         &log_text,
                     );
                     user_input_sequence += 1;
-                    let user_input_identity = format!("input-{user_input_sequence}");
+                    let user_input_identity =
+                        user_input_identity_suffix(user_input_identity_nonce, user_input_sequence);
                     append_runtime_provider_event(
                         &runtime_store,
                         runtime_provider_event(RuntimeProviderEventInput {
@@ -742,11 +780,24 @@ fn run_session_loop(
                     );
                     match pty.send_line(&input) {
                         Ok(()) => {
-                            if matches!(current.kind, SessionKind::Codex | SessionKind::Shell) {
-                                if let Ok(mut state) = snapshot.lock() {
-                                    state.ready = false;
-                                    state.runtime_state = AgentSessionState::Running;
+                            match current.kind {
+                                SessionKind::Codex => {
+                                    if let Ok(mut state) = snapshot.lock() {
+                                        state.ready = false;
+                                        state.runtime_state = AgentSessionState::Running;
+                                    }
                                 }
+                                SessionKind::Shell => {
+                                    if let Ok(mut state) = snapshot.lock() {
+                                        state.ready = true;
+                                        state.runtime_state = AgentSessionState::WaitingForInput;
+                                    }
+                                    let _ = event_tx.send(ArchcarEvent::SessionReady {
+                                        session_id: current.session_id,
+                                        thread_id: current.thread_id,
+                                    });
+                                }
+                                SessionKind::Claude => {}
                             }
                             info!(
                                 session_id = current.session_id,
@@ -832,11 +883,24 @@ fn run_session_loop(
                     &screen,
                 );
             }
-            {
+            let ready_event = {
                 let mut state = snapshot.lock().unwrap();
                 state.screen = screen.clone();
                 let _ = event_tx.send(ArchcarEvent::SessionScreenUpdated {
                     session_id: state.session_id,
+                });
+                if !state.ready && session_ready_for_visible_screen(state.kind, &state.screen) {
+                    state.ready = true;
+                    state.runtime_state = AgentSessionState::WaitingForInput;
+                    Some((state.session_id, state.thread_id))
+                } else {
+                    None
+                }
+            };
+            if let Some((session_id, thread_id)) = ready_event {
+                let _ = event_tx.send(ArchcarEvent::SessionReady {
+                    session_id,
+                    thread_id,
                 });
             }
             last_screen = screen;
@@ -1031,6 +1095,10 @@ mod tests {
 
         assert_ne!(first.provider_event_id, second.provider_event_id);
         assert_ne!(first.provider_item_id, second.provider_item_id);
+        assert_ne!(
+            user_input_identity_suffix(100, 1),
+            user_input_identity_suffix(200, 1)
+        );
     }
 
     #[test]
@@ -1103,6 +1171,13 @@ mod tests {
 • Found a real issue in session.rs.
 
 • Working (2m 07s • esc to interrupt) · 1 background terminal running · /ps to …";
+        let background_terminal_update = "\
+› Explain this codebase
+
+• Explored
+  └ Read main.rs, server.rs
+
+• Working (2m 07s • esc to interrupt) · 2 background terminals running · /ps to …";
 
         let mut last_persisted = None;
         assert!(should_persist_screen_output(
@@ -1123,10 +1198,42 @@ mod tests {
         assert!(should_persist_screen_output(
             SessionKind::Codex,
             &mut last_persisted,
+            background_terminal_update
+        ));
+        assert!(should_persist_screen_output(
+            SessionKind::Codex,
+            &mut last_persisted,
             real_update
         ));
 
         assert!(timer_repaint.contains("Working (2m 06s"));
+    }
+
+    #[test]
+    fn codex_screen_readiness_marks_session_ready_without_semantic_message_parsing() {
+        let ready_screen = "\
+› Follow up
+
+  gpt-5.6-sol medium · ~/archductor/workspaces/demo";
+        let working_screen = "\
+› Follow up
+
+• Working (12s • esc to interrupt)
+
+  gpt-5.6-sol medium · ~/archductor/workspaces/demo";
+
+        assert!(session_ready_for_visible_screen(
+            SessionKind::Codex,
+            ready_screen
+        ));
+        assert!(!session_ready_for_visible_screen(
+            SessionKind::Codex,
+            working_screen
+        ));
+        assert!(!session_ready_for_visible_screen(
+            SessionKind::Shell,
+            ready_screen
+        ));
     }
 
     #[test]
