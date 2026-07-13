@@ -411,6 +411,11 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
     }
     for item in provider_items {
         let content = provider_projection_item_text(&item);
+        let content = if item.render_class.role_label() == "assistant" {
+            store.apply_agent_chat_metadata_directive(thread_id, &content)?
+        } else {
+            content
+        };
         let content = content.trim();
         if content.is_empty() {
             continue;

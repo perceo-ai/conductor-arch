@@ -25,8 +25,8 @@ use archductor_core::session_state::AgentSessionState;
 use archductor_core::settings::load_repository_settings;
 use archductor_core::workflow_actions::gtk_live_controls_for_provider;
 use archductor_core::workspace::{
-    ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
-    SessionHarnessOptions, SessionKind, WorkspaceStore,
+    strip_archductor_metadata_block, ChatEventRecord, ChatMessageRecord, ChatThreadRecord,
+    ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, WorkspaceStore,
 };
 use gtk::prelude::*;
 use gtk::{
@@ -1361,6 +1361,24 @@ pub fn agent_session_panel(
                                 || !thread_events.is_empty()
                                 || !provider_events.is_empty()
                             {
+                                let provider_projection =
+                                    provider_projection_from_records(&provider_events);
+                                if let Some(new_workspace) =
+                                    apply_provider_projection_agent_metadata(
+                                        &database_path,
+                                        thread_id,
+                                        &provider_projection.items,
+                                    )
+                                {
+                                    if new_workspace != workspace {
+                                        app_state.rename_workspace_in_navigation(
+                                            &workspace,
+                                            &new_workspace,
+                                        );
+                                        *current_workspace_name.borrow_mut() =
+                                            new_workspace.clone();
+                                    }
+                                }
                                 let status_banner =
                                     chat_status_banner_kind(&startup_state, working_elapsed, true);
                                 let signature = chat_render_signature(
@@ -1399,8 +1417,6 @@ pub fn agent_session_panel(
                                     &startup_state,
                                     working_elapsed,
                                 );
-                                let provider_projection =
-                                    provider_projection_from_records(&provider_events);
                                 let timeline = chat_structured_items_for_render(
                                     thread_messages.clone(),
                                     thread_events,
@@ -3201,9 +3217,12 @@ fn provider_projection_items_for_timeline(
 fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
     match item.render_class {
         ProjectionRenderClass::UserChat => false,
-        ProjectionRenderClass::AssistantChat | ProjectionRenderClass::ReasoningCard => {
-            !item.body.trim().is_empty()
+        ProjectionRenderClass::AssistantChat => {
+            !provider_projection_assistant_body_for_render(item)
+                .trim()
+                .is_empty()
         }
+        ProjectionRenderClass::ReasoningCard => !item.body.trim().is_empty(),
         _ => true,
     }
 }
@@ -3225,6 +3244,38 @@ fn provider_projection_item_has_persisted_message(
             .any(|message| message.role == "user" && message.content.trim() == item.body.trim())
 }
 
+fn apply_provider_projection_agent_metadata(
+    database_path: &Path,
+    thread_id: i64,
+    items: &[ProviderProjectionItem],
+) -> Option<String> {
+    if !items.iter().any(|item| {
+        item.render_class == ProjectionRenderClass::AssistantChat
+            && item.body.contains("<archductor_metadata>")
+    }) {
+        return None;
+    }
+
+    let store = WorkspaceStore::open(database_path).ok()?;
+    for item in items.iter().filter(|item| {
+        item.render_class == ProjectionRenderClass::AssistantChat
+            && item.body.contains("<archductor_metadata>")
+    }) {
+        if let Err(err) = store.apply_agent_chat_metadata_directive(thread_id, &item.body) {
+            warn!(
+                thread_id,
+                error = %err,
+                "failed to apply provider projection metadata"
+            );
+        }
+    }
+    store
+        .get_chat_thread_record(thread_id)
+        .and_then(|thread| store.get_workspace_record(thread.workspace_id))
+        .map(|workspace| workspace.name)
+        .ok()
+}
+
 fn append_pending_user_input_rows(container: &GBox, pending_inputs: &[String]) {
     for input in pending_inputs {
         append_chat_refresh_row(container, &chat_user_bubble(input));
@@ -3238,7 +3289,9 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
 
     match item.render_class {
         ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
-        ProjectionRenderClass::AssistantChat => provider_projection_text_widget(&item.body),
+        ProjectionRenderClass::AssistantChat => {
+            provider_projection_text_widget(&provider_projection_assistant_body_for_render(item))
+        }
         ProjectionRenderClass::ReasoningCard => provider_projection_reasoning_widget(item),
         _ => {
             let container = GBox::new(Orientation::Vertical, 4);
@@ -3257,6 +3310,10 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
             container.upcast()
         }
     }
+}
+
+fn provider_projection_assistant_body_for_render(item: &ProviderProjectionItem) -> String {
+    strip_archductor_metadata_block(&item.body)
 }
 
 fn provider_projection_reasoning_text(item: &ProviderProjectionItem) -> Option<String> {
@@ -10903,6 +10960,30 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(!provider_projection_reasoning_text(item)
             .unwrap()
             .contains("Reasoning"));
+    }
+
+    #[test]
+    fn provider_assistant_body_hides_archductor_metadata() {
+        let item = ProviderProjectionItem {
+            id: "assistant".to_owned(),
+            sequence: 1,
+            category: ProviderProjectionCategory::AssistantMessage,
+            render_class: ProjectionRenderClass::AssistantChat,
+            title: "Assistant".to_owned(),
+            body: "<archductor_metadata>{\"workspace_name\":\"harness-file-changes\",\"branch_name\":\"lc/harness-file-changes\",\"chat_title\":\"Harness File Changes\"}</archductor_metadata>\nContinuing."
+                .to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        assert_eq!(
+            provider_projection_assistant_body_for_render(&item),
+            "Continuing."
+        );
     }
 
     #[test]

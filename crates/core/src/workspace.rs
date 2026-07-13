@@ -5466,27 +5466,34 @@ mutation($threadId: ID!) {{
         self.get_chat_message(self.conn.last_insert_rowid())
     }
 
+    pub fn apply_agent_chat_metadata_directive(
+        &self,
+        thread_id: i64,
+        content: &str,
+    ) -> Result<String> {
+        let accepts_metadata = !self.thread_has_agent_message(thread_id)?;
+        let (content, directive) = extract_archductor_metadata_directive(content);
+        if accepts_metadata {
+            if let Some(directive) = directive {
+                if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
+                    warn!(
+                        thread_id,
+                        error = %err,
+                        "failed to apply archductor metadata directive"
+                    );
+                }
+            }
+        }
+        Ok(content)
+    }
+
     fn append_agent_chat_message_with_metadata(
         &self,
         thread_id: i64,
         content: &str,
         source: &str,
     ) -> Result<()> {
-        let accepts_metadata = !self.thread_has_agent_message(thread_id)?;
-        let (content, directive) = if accepts_metadata {
-            extract_archductor_metadata_directive(content)
-        } else {
-            (content.to_owned(), None)
-        };
-        if let Some(directive) = directive {
-            if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
-                warn!(
-                    thread_id,
-                    error = %err,
-                    "failed to apply archductor metadata directive"
-                );
-            }
-        }
+        let content = self.apply_agent_chat_metadata_directive(thread_id, content)?;
         if !content.trim().is_empty() {
             self.append_chat_message(thread_id, "agent", &content, source)?;
         }
@@ -5514,31 +5521,57 @@ mutation($threadId: ID!) {{
             }
         }
 
-        let mut workspace = workspace;
-        if let Some(branch_name) = directive.branch_name.as_deref() {
-            let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
-            if branch_name != workspace.branch {
-                match self.rename_branch(&workspace.name, &branch_name) {
-                    Ok(updated) => workspace = updated,
-                    Err(err) => warn!(
-                        workspace = %workspace.name,
-                        branch = %branch_name,
-                        error = %err,
-                        "failed to apply archductor branch metadata"
-                    ),
+        let has_workspace_metadata =
+            directive.branch_name.is_some() || directive.workspace_name.is_some();
+        if has_workspace_metadata && !self.workspace_agent_metadata_applied(workspace.id)? {
+            let mut workspace = workspace;
+            if let Some(branch_name) = directive.branch_name.as_deref() {
+                let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
+                if branch_name != workspace.branch {
+                    match self.rename_branch(&workspace.name, &branch_name) {
+                        Ok(updated) => workspace = updated,
+                        Err(err) => warn!(
+                            workspace = %workspace.name,
+                            branch = %branch_name,
+                            error = %err,
+                            "failed to apply archductor branch metadata"
+                        ),
+                    }
                 }
             }
-        }
 
-        if let Some(workspace_name) = directive.workspace_name.as_deref() {
-            let repository = self.load_repository_by_id(workspace.repository_id)?;
-            let workspace_name =
-                self.metadata_workspace_name(&repository, workspace.id, workspace_name)?;
-            if workspace_name != workspace.name {
-                self.rename(&workspace.name, &workspace_name)?;
+            if let Some(workspace_name) = directive.workspace_name.as_deref() {
+                let repository = self.load_repository_by_id(workspace.repository_id)?;
+                let workspace_name =
+                    self.metadata_workspace_name(&repository, workspace.id, workspace_name)?;
+                if workspace_name != workspace.name {
+                    self.rename(&workspace.name, &workspace_name)?;
+                }
             }
+            self.mark_workspace_agent_metadata_applied(workspace.id)?;
         }
 
+        Ok(())
+    }
+
+    fn workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<bool> {
+        let applied_at: Option<String> = self.conn.query_row(
+            "SELECT agent_metadata_applied_at FROM workspaces WHERE id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        Ok(applied_at.is_some())
+    }
+
+    fn mark_workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces
+             SET agent_metadata_applied_at = COALESCE(agent_metadata_applied_at, ?1),
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, workspace_id],
+        )?;
         Ok(())
     }
 
@@ -7830,6 +7863,10 @@ fn extract_archductor_metadata_directive(
     cleaned.push_str(&content[..start]);
     cleaned.push_str(&content[end + ARCHDUCTOR_METADATA_CLOSE.len()..]);
     (trim_metadata_blank_edges(&cleaned), directive)
+}
+
+pub fn strip_archductor_metadata_block(content: &str) -> String {
+    extract_archductor_metadata_directive(content).0
 }
 
 fn parse_archductor_metadata_directive(json_text: &str) -> Option<ArchductorMetadataDirective> {
@@ -18411,6 +18448,87 @@ spotlight_testing = true
         assert!(store.get_by_name("late-rename").is_err());
         let workspace = store.get_by_name("berlin").unwrap();
         assert_eq!(workspace.branch, "lc/berlin");
+    }
+
+    #[test]
+    fn later_agent_metadata_directives_are_hidden_without_applying_metadata() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "First response.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"workspace_name\":\"late rename\",\"branch_name\":\"lc/late-rename\",\"chat_title\":\"Late Rename\"}</archductor_metadata>\nContinuing.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert!(store.get_by_name("late-rename").is_err());
+        let updated_thread = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(updated_thread.title, "New Chat");
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages[2].content, "Continuing.");
+        assert!(!messages[2].content.contains("archductor_metadata"));
+    }
+
+    #[test]
+    fn agent_metadata_directive_renames_workspace_only_once_but_titles_each_new_chat() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let first = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(first.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                first.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing-webhook-fix\",\"branch_name\":\"lc/billing-webhook-fix\",\"chat_title\":\"Billing Webhook Fix\"}</archductor_metadata>\nFirst.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let renamed = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(renamed.id, workspace.id);
+        let second = store
+            .create_chat_thread("billing-webhook-fix", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(second.id, "user", "Add billing dashboard", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                second.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing-dashboard\",\"branch_name\":\"lc/billing-dashboard\",\"chat_title\":\"Billing Dashboard\"}</archductor_metadata>\nSecond.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert!(store.get_by_name("billing-dashboard").is_err());
+        let workspace = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(workspace.id, renamed.id);
+        assert_eq!(workspace.branch, "lc/billing-webhook-fix");
+        assert_eq!(
+            store.get_chat_thread_record(first.id).unwrap().title,
+            "Billing Webhook Fix"
+        );
+        assert_eq!(
+            store.get_chat_thread_record(second.id).unwrap().title,
+            "Billing Dashboard"
+        );
     }
 
     #[test]

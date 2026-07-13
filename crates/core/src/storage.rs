@@ -25,6 +25,7 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           port_base INTEGER NOT NULL,
           status TEXT NOT NULL,
           archived_at TEXT,
+          agent_metadata_applied_at TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -273,6 +274,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "chat_messages",
         "timeline_seq",
         "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "agent_metadata_applied_at",
+        "ALTER TABLE workspaces ADD COLUMN agent_metadata_applied_at TEXT",
     )?;
     Ok(())
 }
