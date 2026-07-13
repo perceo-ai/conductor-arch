@@ -36,7 +36,7 @@ use gtk::{
 };
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::fs;
@@ -335,6 +335,8 @@ pub fn agent_session_panel(
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
     let selected_thread: Rc<RefCell<Option<i64>>> =
         Rc::new(RefCell::new(app_state.selected_chat_thread()));
+    let composer_drafts = Rc::new(RefCell::new(HashMap::<i64, String>::new()));
+    let restoring_composer_draft = Rc::new(Cell::new(false));
     let pending_commands = Rc::new(RefCell::new(HashMap::<i64, Vec<String>>::new()));
     let pending_archcar_inputs =
         Rc::new(RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new()));
@@ -396,6 +398,22 @@ pub fn agent_session_panel(
     input_view.set_right_margin(16);
     input_view.set_top_margin(14);
     input_view.set_bottom_margin(6);
+    let buffer = input_view.buffer();
+    let restore_composer_draft = Rc::new({
+        let buffer = buffer.clone();
+        let selected_thread = selected_thread.clone();
+        let composer_drafts = composer_drafts.clone();
+        let restoring_composer_draft = restoring_composer_draft.clone();
+        move || {
+            let text = composer_draft_for_thread(&composer_drafts, *selected_thread.borrow());
+            if text_buffer_text(&buffer) == text {
+                return;
+            }
+            restoring_composer_draft.set(true);
+            buffer.set_text(&text);
+            restoring_composer_draft.set(false);
+        }
+    });
 
     let input_scroll = ScrolledWindow::new();
     input_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -470,6 +488,7 @@ pub fn agent_session_panel(
             let archcar_ready_cache = archcar_ready_cache.clone();
             let inflight_archcar_actions = inflight_archcar_actions.clone();
             let toast_manager = toast_manager.clone();
+            let restore_composer_draft = restore_composer_draft.clone();
             Rc::new(move |index| {
                 let Some(choice) = provider_model_choices_for_menu.get(index).cloned() else {
                     return;
@@ -626,7 +645,7 @@ pub fn agent_session_panel(
                                     selected_thread.as_ref(),
                                     Some(thread.id),
                                     |thread_id| app_state.set_selected_chat_thread(thread_id),
-                                    || {},
+                                    || restore_composer_draft(),
                                 );
                                 if let Some(refresh_view) =
                                     refresh_chat_surface.borrow().as_ref().cloned()
@@ -718,7 +737,6 @@ pub fn agent_session_panel(
     chat_overlay.set_measure_overlay(&composer_wrap, false);
 
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
-    let buffer = input_view.buffer();
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
         let placeholder = placeholder.clone();
@@ -791,7 +809,19 @@ pub fn agent_session_panel(
     };
     buffer.connect_changed({
         let update = update_composer_state.clone();
-        move |_| update()
+        let selected_thread = selected_thread.clone();
+        let composer_drafts = composer_drafts.clone();
+        let restoring_composer_draft = restoring_composer_draft.clone();
+        move |buffer| {
+            if !restoring_composer_draft.get() {
+                remember_composer_draft(
+                    &composer_drafts,
+                    *selected_thread.borrow(),
+                    &text_buffer_text(buffer),
+                );
+            }
+            update();
+        }
     });
     update_composer_state();
 
@@ -810,6 +840,7 @@ pub fn agent_session_panel(
         let last_render_signature = last_render_signature.clone();
         let selected_harness = selected_harness.clone();
         let selected_model = selected_model.clone();
+        let reasoning_mode = reasoning_mode.clone();
         let provider_model_btn = provider_model_btn.clone();
         let provider_model_choices = provider_model_choices.clone();
         let active_sessions = active_sessions.clone();
@@ -831,6 +862,8 @@ pub fn agent_session_panel(
         let external_chat_tabs = external_chat_tabs.clone();
         let context_usage = context_usage.clone();
         let toast_manager = toast_manager.clone();
+        let restore_composer_draft = restore_composer_draft.clone();
+        let sync_live_controls = sync_live_controls.clone();
         Rc::new(move || {
             let workspace = current_workspace_name.borrow().clone();
             debug!(workspace = %workspace, "chat refresh_view start");
@@ -947,6 +980,52 @@ pub fn agent_session_panel(
                 "chat refresh_view loaded workspace state"
             );
 
+            let preferred_thread = *selected_thread.borrow();
+            let active_thread = {
+                let current = thread_state.borrow();
+                preferred_thread_for_selected_chat(
+                    &current,
+                    preferred_thread,
+                    *selected_harness.borrow(),
+                )
+            };
+            apply_thread_selection(
+                selected_thread.as_ref(),
+                active_thread,
+                |thread_id| app_state.set_selected_chat_thread(thread_id),
+                || {
+                    restore_composer_draft();
+                    update_composer_for_view();
+                },
+            );
+            if let Some(thread_id) = *selected_thread.borrow() {
+                if let Some(thread) = thread_state
+                    .borrow()
+                    .iter()
+                    .find(|thread| thread.id == thread_id)
+                    .cloned()
+                {
+                    let (kind, model) = selected_thread_harness_state(&thread);
+                    *selected_harness.borrow_mut() = kind;
+                    if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+                        *reasoning_mode.borrow_mut() = Some("high".to_owned());
+                    }
+                    *selected_model.borrow_mut() = model.clone();
+                    let index = selected_provider_model_choice_index(
+                        provider_model_choices.as_ref(),
+                        kind,
+                        model.as_deref(),
+                    );
+                    if let Some(choice) = provider_model_choices.get(index) {
+                        provider_model_menu_set_child(&provider_model_btn, choice);
+                        provider_model_btn.set_tooltip_text(Some(&choice.button_label()));
+                    }
+                    if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
+                        sync();
+                    }
+                }
+                restore_composer_draft();
+            }
             let current_kind = *selected_harness.borrow();
             let selected_thread_id = *selected_thread.borrow();
             let mut archcar_changed = false;
@@ -1034,38 +1113,6 @@ pub fn agent_session_panel(
                 );
                 update_composer_for_view();
             }
-
-            let preferred_thread = *selected_thread.borrow();
-            let active_thread = {
-                let current = thread_state.borrow();
-                preferred_thread_for_kind(&current, preferred_thread, current_kind)
-            };
-            apply_thread_selection(
-                selected_thread.as_ref(),
-                active_thread,
-                |thread_id| app_state.set_selected_chat_thread(thread_id),
-                || update_composer_for_view(),
-            );
-            if let Some(thread_id) = *selected_thread.borrow() {
-                if let Some(thread) = thread_state
-                    .borrow()
-                    .iter()
-                    .find(|thread| thread.id == thread_id)
-                    .cloned()
-                {
-                    let model = chat_thread_model(&thread);
-                    *selected_model.borrow_mut() = model.clone();
-                    let index = selected_provider_model_choice_index(
-                        provider_model_choices.as_ref(),
-                        session_kind_from_provider(&thread.provider),
-                        model.as_deref(),
-                    );
-                    if let Some(choice) = provider_model_choices.get(index) {
-                        provider_model_menu_set_child(&provider_model_btn, choice);
-                        provider_model_btn.set_tooltip_text(Some(&choice.button_label()));
-                    }
-                }
-            }
             if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
                 (external_chat_tabs.on_threads_changed)(
                     thread_state.borrow().clone(),
@@ -1096,12 +1143,16 @@ pub fn agent_session_panel(
                             let refresh_chat_surface = refresh_chat_surface_for_view.clone();
                             let app_state = app_state_for_thread_select.clone();
                             let update_composer_state = update_composer_for_view.clone();
+                            let restore_composer_draft = restore_composer_draft.clone();
                             move |thread_id| {
                                 apply_thread_selection(
                                     selected_thread.as_ref(),
                                     Some(thread_id),
                                     |selected| app_state.set_selected_chat_thread(selected),
-                                    || update_composer_state(),
+                                    || {
+                                        restore_composer_draft();
+                                        update_composer_state();
+                                    },
                                 );
                                 if let Some(refresh_view) =
                                     refresh_chat_surface.borrow().as_ref().cloned()
@@ -1975,6 +2026,7 @@ pub fn agent_session_panel(
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
         let update_composer_for_switch = update_composer_state.clone();
+        let restore_composer_draft_for_switch = restore_composer_draft.clone();
         let toast_for_switch = toast_manager.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
@@ -2022,7 +2074,10 @@ pub fn agent_session_panel(
                 selected_thread_for_switch.as_ref(),
                 next_thread,
                 |thread_id| app_state_for_switch.set_selected_chat_thread(thread_id),
-                || update_composer_for_switch(),
+                || {
+                    restore_composer_draft_for_switch();
+                    update_composer_for_switch();
+                },
             );
             let next_process = next_thread.and_then(|thread_id| {
                 let thread_records = records
@@ -2057,12 +2112,16 @@ pub fn agent_session_panel(
         let refresh_chat_surface = refresh_chat_surface.clone();
         let app_state = app_state.clone();
         let update_composer_state = update_composer_state.clone();
+        let restore_composer_draft = restore_composer_draft.clone();
         *external_chat_tabs.selection_controller.borrow_mut() = Some(Rc::new(move |thread_id| {
             apply_thread_selection(
                 selected_thread.as_ref(),
                 thread_id,
                 |selected| app_state.set_selected_chat_thread(selected),
-                || update_composer_state(),
+                || {
+                    restore_composer_draft();
+                    update_composer_state();
+                },
             );
             if let Some(refresh_view) = refresh_chat_surface.borrow().as_ref().cloned() {
                 refresh_view();
@@ -2278,6 +2337,7 @@ pub fn agent_session_panel(
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
+        let restore_composer_draft = restore_composer_draft.clone();
         let setup_readiness = setup_readiness.clone();
         let toast_manager = toast_manager.clone();
         move |_| {
@@ -2305,7 +2365,10 @@ pub fn agent_session_panel(
                         selected_thread.as_ref(),
                         Some(thread.id),
                         |thread_id| app_state.set_selected_chat_thread(thread_id),
-                        || update_composer_state(),
+                        || {
+                            restore_composer_draft();
+                            update_composer_state();
+                        },
                     );
                     refresh_view();
                 }
@@ -2316,11 +2379,6 @@ pub fn agent_session_panel(
             }
         }
     });
-    input_view.buffer().connect_changed({
-        let update = update_composer_state.clone();
-        move |_| update()
-    });
-
     root
 }
 
@@ -4614,6 +4672,57 @@ fn preferred_thread_for_kind(
                 .find(|thread| thread.provider == provider && thread.status == "active")
                 .map(|thread| thread.id)
         })
+}
+
+fn preferred_thread_for_selected_chat(
+    threads: &[ChatThreadRecord],
+    preferred: Option<i64>,
+    fallback_kind: SessionKind,
+) -> Option<i64> {
+    preferred
+        .filter(|id| {
+            threads
+                .iter()
+                .any(|thread| thread.id == *id && thread.status == "active")
+        })
+        .or_else(|| preferred_thread_for_kind(threads, None, fallback_kind))
+}
+
+fn selected_thread_harness_state(thread: &ChatThreadRecord) -> (SessionKind, Option<String>) {
+    (
+        session_kind_from_provider(&thread.provider),
+        chat_thread_model(thread),
+    )
+}
+
+fn text_buffer_text(buffer: &TextBuffer) -> String {
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), true)
+        .to_string()
+}
+
+fn remember_composer_draft(
+    drafts: &RefCell<HashMap<i64, String>>,
+    thread_id: Option<i64>,
+    text: &str,
+) {
+    let Some(thread_id) = thread_id else {
+        return;
+    };
+    if text.trim().is_empty() {
+        drafts.borrow_mut().remove(&thread_id);
+    } else {
+        drafts.borrow_mut().insert(thread_id, text.to_owned());
+    }
+}
+
+fn composer_draft_for_thread(
+    drafts: &RefCell<HashMap<i64, String>>,
+    thread_id: Option<i64>,
+) -> String {
+    thread_id
+        .and_then(|thread_id| drafts.borrow().get(&thread_id).cloned())
+        .unwrap_or_default()
 }
 
 fn default_chat_thread_title(kind: SessionKind, threads: &[ChatThreadRecord]) -> String {
@@ -10958,6 +11067,63 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*selected_thread.borrow(), Some(7));
         assert_eq!(*app_state.borrow(), None);
         assert_eq!(*composer_updates.borrow(), 0);
+    }
+
+    #[test]
+    fn selected_chat_thread_wins_over_current_provider_when_refreshing() {
+        let threads = vec![
+            ChatThreadRecord {
+                id: 7,
+                workspace_id: 1,
+                provider: "codex".to_owned(),
+                title: "Codex".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+            ChatThreadRecord {
+                id: 8,
+                workspace_id: 1,
+                provider: "claude".to_owned(),
+                title: "Claude".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: Some("model=claude-sonnet-4-20250514".to_owned()),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+        ];
+
+        assert_eq!(
+            preferred_thread_for_selected_chat(&threads, Some(8), SessionKind::Codex),
+            Some(8)
+        );
+        assert_eq!(
+            selected_thread_harness_state(&threads[1]),
+            (
+                SessionKind::Claude,
+                Some("claude-sonnet-4-20250514".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn composer_drafts_are_stored_per_thread() {
+        let drafts = RefCell::new(HashMap::<i64, String>::new());
+
+        remember_composer_draft(&drafts, Some(7), "codex draft");
+        remember_composer_draft(&drafts, Some(8), "claude draft");
+
+        assert_eq!(composer_draft_for_thread(&drafts, Some(7)), "codex draft");
+        assert_eq!(composer_draft_for_thread(&drafts, Some(8)), "claude draft");
+
+        remember_composer_draft(&drafts, Some(7), "   ");
+        assert_eq!(composer_draft_for_thread(&drafts, Some(7)), "");
+        assert_eq!(composer_draft_for_thread(&drafts, Some(8)), "claude draft");
     }
 
     #[test]
