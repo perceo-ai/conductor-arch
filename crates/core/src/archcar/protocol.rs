@@ -44,6 +44,11 @@ pub enum ArchcarRequest {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
+    SetSessionModel {
+        session_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     ResizeSession {
         session_id: i64,
         rows: u16,
@@ -148,6 +153,10 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             "send_input session_id={session_id} kind={} chars={}",
             input_kind_label(kind),
             input.chars().count()
+        ),
+        ArchcarRequest::SetSessionModel { session_id, model } => format!(
+            "set_session_model session_id={session_id} model={}",
+            model.as_deref().unwrap_or("<default>")
         ),
         ArchcarRequest::ResizeSession {
             session_id,
@@ -337,6 +346,19 @@ mod tests {
         assert_eq!(
             archcar_request_summary(&request),
             "send_input session_id=9 kind=user chars=9"
+        );
+    }
+
+    #[test]
+    fn request_summary_describes_set_session_model() {
+        let request = ArchcarRequest::SetSessionModel {
+            session_id: 9,
+            model: Some("gpt-5.6-terra".to_owned()),
+        };
+
+        assert_eq!(
+            archcar_request_summary(&request),
+            "set_session_model session_id=9 model=gpt-5.6-terra"
         );
     }
 

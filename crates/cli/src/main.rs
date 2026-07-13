@@ -174,6 +174,10 @@ enum ArchcarCommand {
         visible_input: Option<String>,
         input: Vec<String>,
     },
+    Model {
+        session_id: i64,
+        model: String,
+    },
     Resize {
         session_id: i64,
         rows: u16,
@@ -599,6 +603,12 @@ fn main() -> Result<()> {
                         input: input.join(" "),
                         visible_input,
                         kind: kind.into(),
+                    })?);
+                }
+                ArchcarCommand::Model { session_id, model } => {
+                    print_archcar_response(client.send(ArchcarRequest::SetSessionModel {
+                        session_id,
+                        model: Some(model),
                     })?);
                 }
                 ArchcarCommand::Resize {
@@ -2472,6 +2482,21 @@ mod tests {
         assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
+    }
+
+    #[test]
+    fn cli_archcar_model_uses_structured_model_request() {
+        let cli =
+            Cli::try_parse_from(["archductor", "archcar", "model", "7", "gpt-5.6-terra"]).unwrap();
+
+        let Command::Archcar {
+            command: ArchcarCommand::Model { session_id, model },
+        } = cli.command
+        else {
+            panic!("expected archcar model");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(model, "gpt-5.6-terra");
     }
 
     #[test]

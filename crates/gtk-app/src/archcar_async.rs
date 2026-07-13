@@ -37,6 +37,10 @@ pub enum AsyncArchcarRequestKind {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
+    SetSessionModel {
+        session_id: i64,
+        model: Option<String>,
+    },
     ResizeSession {
         session_id: i64,
         rows: u16,
@@ -180,6 +184,10 @@ impl AsyncArchcarBridge {
             visible_input,
             kind,
         })
+    }
+
+    pub fn set_session_model(&self, session_id: i64, model: Option<String>) -> Option<u64> {
+        self.submit(ArchcarRequest::SetSessionModel { session_id, model })
     }
 
     pub fn kill_session(&self, session_id: i64) -> Option<u64> {
@@ -457,6 +465,12 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             visible_input: visible_input.clone(),
             kind: kind.clone(),
         },
+        ArchcarRequest::SetSessionModel { session_id, model } => {
+            AsyncArchcarRequestKind::SetSessionModel {
+                session_id: *session_id,
+                model: model.clone(),
+            }
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -544,6 +558,22 @@ mod tests {
                 input: "hello".to_owned(),
                 visible_input: Some("visible hello".to_owned()),
                 kind: ArchcarInputKind::ReviewPrompt,
+            }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_set_session_model_metadata() {
+        let request = ArchcarRequest::SetSessionModel {
+            session_id: 9,
+            model: Some("gpt-5.6-terra".to_owned()),
+        };
+
+        assert_eq!(
+            request_kind(&request),
+            AsyncArchcarRequestKind::SetSessionModel {
+                session_id: 9,
+                model: Some("gpt-5.6-terra".to_owned()),
             }
         );
     }

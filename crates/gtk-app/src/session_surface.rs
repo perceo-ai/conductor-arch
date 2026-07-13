@@ -511,11 +511,6 @@ pub fn agent_session_panel(
                         }
                         if let Some(thread_id) = *selected_thread.borrow() {
                             if current_kind == SessionKind::Codex {
-                                replace_pending_model_command(
-                                    &pending_commands,
-                                    thread_id,
-                                    choice.model.as_deref(),
-                                );
                                 if let Ok(records) = WorkspaceStore::open(database_path.clone())
                                     .and_then(|store| store.list_thread_processes(thread_id))
                                 {
@@ -523,6 +518,13 @@ pub fn agent_session_panel(
                                         &records,
                                         &archcar_ready_cache,
                                     ) {
+                                        queue_archcar_model_update(
+                                            &archcar_bridge,
+                                            inflight_archcar_actions.as_ref(),
+                                            thread_id,
+                                            session_id,
+                                            choice.model.clone(),
+                                        );
                                         let pending_controls = flush_pending_commands_for_send(
                                             &pending_commands,
                                             thread_id,
@@ -626,13 +628,6 @@ pub fn agent_session_panel(
                                     |thread_id| app_state.set_selected_chat_thread(thread_id),
                                     || {},
                                 );
-                                if kind == SessionKind::Codex {
-                                    replace_pending_model_command(
-                                        &pending_commands,
-                                        thread.id,
-                                        choice.model.as_deref(),
-                                    );
-                                }
                                 if let Some(refresh_view) =
                                     refresh_chat_surface.borrow().as_ref().cloned()
                                 {
@@ -1579,15 +1574,6 @@ pub fn agent_session_panel(
         ) {
             Ok(thread_id) => {
                 app_state_for_send.set_selected_chat_thread(Some(thread_id));
-                if matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
-                    && selected_model_for_send.borrow().is_some()
-                {
-                    replace_pending_model_command(
-                        &pending_commands_for_send,
-                        thread_id,
-                        selected_model_for_send.borrow().as_deref(),
-                    );
-                }
                 thread_id
             }
             Err(err) => {
@@ -5053,28 +5039,6 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
     }
 }
 
-fn codex_model_command(model: Option<&str>) -> Option<String> {
-    model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .map(|model| format!("/model {model}"))
-}
-
-fn replace_pending_model_command(
-    pending: &RefCell<HashMap<i64, Vec<String>>>,
-    thread_id: i64,
-    model: Option<&str>,
-) {
-    pending
-        .borrow_mut()
-        .entry(thread_id)
-        .or_default()
-        .retain(|existing| !existing.starts_with("/model "));
-    if let Some(command) = codex_model_command(model) {
-        queue_thread_command(pending, thread_id, command);
-    }
-}
-
 fn codex_reasoning_command(level: &str) -> Option<String> {
     match level.trim().to_ascii_lowercase().as_str() {
         "low" | "medium" | "high" => Some(format!("/thinking {}", level.trim())),
@@ -7119,6 +7083,11 @@ enum PendingArchcarAction {
         session_id: i64,
         command: String,
     },
+    ModelUpdate {
+        thread_id: i64,
+        session_id: i64,
+        model: Option<String>,
+    },
     UserSend {
         thread_id: i64,
         session_id: i64,
@@ -7302,6 +7271,29 @@ fn queue_archcar_control_send(
                 thread_id,
                 session_id,
                 command,
+            },
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn queue_archcar_model_update(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+    session_id: i64,
+    model: Option<String>,
+) -> bool {
+    let token = bridge.set_session_model(session_id, model.clone());
+    if let Some(token) = token {
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::ModelUpdate {
+                thread_id,
+                session_id,
+                model,
             },
         );
         true
@@ -7631,6 +7623,64 @@ fn handle_archcar_response(
             Err(err) => {
                 warn!(thread_id, session_id, control = %command, error = %err, "archcar control send failed");
                 queue_thread_command(pending_commands, thread_id, command);
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message: err,
+                    },
+                );
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
+                request_archcar_ensure(
+                    &bridge,
+                    inflight_actions,
+                    workspace.to_owned(),
+                    Some(thread_id),
+                );
+            }
+        },
+        PendingArchcarAction::ModelUpdate {
+            thread_id,
+            session_id,
+            model,
+        } => match response.result {
+            Ok(ArchcarResponse::Ack) => {
+                debug!(
+                    thread_id,
+                    session_id,
+                    ?model,
+                    "archcar model update accepted"
+                );
+            }
+            Ok(other) => {
+                warn!(
+                    thread_id,
+                    session_id,
+                    ?model,
+                    ?other,
+                    "unexpected archcar model update response"
+                );
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar model update response: {other:?}");
+                toast_manager.error(message.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error { thread_id, message },
+                );
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
+                request_archcar_ensure(
+                    &bridge,
+                    inflight_actions,
+                    workspace.to_owned(),
+                    Some(thread_id),
+                );
+            }
+            Err(err) => {
+                warn!(thread_id, session_id, ?model, error = %err, "archcar model update failed");
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 toast_manager.error(err.clone());
                 apply_codex_startup_signal(
@@ -8173,20 +8223,6 @@ mod tests {
         assert!(choices.iter().all(|choice| choice.model.is_some()));
         assert!(!models.contains(&"gpt-5"));
         assert!(!models.contains(&"gpt-5-mini"));
-    }
-
-    #[test]
-    fn empty_model_choice_does_not_queue_default_model_command() {
-        let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 7, "/model gpt-5.6-sol".to_owned());
-        queue_thread_command(&pending, 7, "/thinking high".to_owned());
-
-        replace_pending_model_command(&pending, 7, None);
-
-        assert_eq!(
-            pending.borrow().get(&7).cloned().unwrap_or_default(),
-            vec!["/thinking high".to_owned()]
-        );
     }
 
     #[test]

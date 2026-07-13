@@ -274,7 +274,7 @@ pub const WORKFLOW_ACTIONS: &[WorkflowAction] = &[
     },
     WorkflowAction {
         id: ACTION_SESSION_CONTROL_MODEL,
-        cli_route: "archcar send <session-id> --kind control-command /model <model>",
+        cli_route: "archcar model <session-id> <model>",
         mutates_state: true,
     },
     WorkflowAction {
@@ -474,7 +474,7 @@ mod tests {
 
         let model = workflow_action_by_id(ACTION_SESSION_CONTROL_MODEL).unwrap();
         let thinking = workflow_action_by_id(ACTION_SESSION_CONTROL_THINKING).unwrap();
-        assert!(model.cli_route.contains("--kind control-command"));
+        assert!(model.cli_route.starts_with("archcar model "));
         assert!(thinking.cli_route.contains("--kind control-command"));
     }
 }

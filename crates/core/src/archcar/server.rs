@@ -251,6 +251,35 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 message: err.to_string(),
             },
         },
+        ArchcarRequest::SetSessionModel { session_id, model } => {
+            match load_or_restore_session_handle(state, session_id) {
+                Ok(Some(handle)) => {
+                    let kind = handle.snapshot.lock().ok().map(|snapshot| snapshot.kind);
+                    if kind != Some(crate::workspace::SessionKind::Codex) {
+                        return ArchcarResponse::Error {
+                            message: format!(
+                                "set_session_model is only supported for codex sessions; got {kind:?}"
+                            ),
+                        };
+                    }
+                    match handle
+                        .command_tx
+                        .send(crate::archcar::session::SessionCommand::SetModel { model })
+                    {
+                        Ok(_) => ArchcarResponse::Ack,
+                        Err(err) => ArchcarResponse::Error {
+                            message: err.to_string(),
+                        },
+                    }
+                }
+                Ok(None) => ArchcarResponse::Error {
+                    message: format!("unknown session {session_id}"),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,

@@ -43,6 +43,9 @@ pub enum SessionCommand {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
+    SetModel {
+        model: Option<String>,
+    },
     Resize {
         rows: u16,
         cols: u16,
@@ -771,6 +774,13 @@ fn sanitize_harness_text(value: Option<&str>) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+fn set_provider_connection_model(
+    connection: &mut ProviderProcessConnection,
+    model: Option<String>,
+) {
+    connection.model = sanitize_harness_text(model.as_deref());
+}
+
 fn sanitize_metadata_value(value: &str) -> String {
     value.replace(';', ",").replace('\n', " ")
 }
@@ -1249,6 +1259,7 @@ fn run_session_loop(
                         );
                     }
                 }
+                SessionCommand::SetModel { .. } => {}
             }
         }
 
@@ -1528,6 +1539,9 @@ fn run_codex_app_server_session_loop(
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
                 }
+                SessionCommand::SetModel { model } => {
+                    set_provider_connection_model(&mut connection, model);
+                }
                 SessionCommand::Resize { .. } => {}
             }
         }
@@ -1665,6 +1679,9 @@ fn run_claude_stream_session_loop(
                 }
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
+                }
+                SessionCommand::SetModel { model } => {
+                    set_provider_connection_model(&mut connection, model);
                 }
                 SessionCommand::Resize { .. } => {}
             }
@@ -2270,6 +2287,39 @@ mod tests {
         assert_eq!(third["params"]["threadId"], "thr_existing");
         assert_eq!(third["params"]["cwd"], "/tmp/workspace");
         assert_eq!(third["params"]["serviceName"], "archductor");
+
+        let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn codex_app_server_model_update_changes_future_turn_model() {
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stdout_rx = spawn_stdout_line_reader(stdout);
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx,
+            next_read_line: 0,
+            native_thread_id: Some("thr_existing".to_owned()),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("gpt-5.6-sol".to_owned()),
+            approval_policy: None,
+        };
+
+        set_provider_connection_model(&mut connection, Some(" gpt-5.6-terra ".to_owned()));
+
+        assert_eq!(connection.model.as_deref(), Some("gpt-5.6-terra"));
+
+        set_provider_connection_model(&mut connection, Some("   ".to_owned()));
+
+        assert_eq!(connection.model, None);
 
         let _ = connection.child.kill();
     }
