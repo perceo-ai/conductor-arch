@@ -184,11 +184,14 @@ impl ClaudeProviderEventDraft {
             .provider_tool_use_id
             .clone()
             .or_else(|| self.provider_message_id.clone());
-        let body = self
-            .content_delta
-            .clone()
-            .or_else(|| string_at(&self.raw_json, &["result"]))
-            .unwrap_or_default();
+        let body = if self.kind == ClaudeProviderEventKind::Hook {
+            claude_hook_body(&self.raw_json).unwrap_or_default()
+        } else {
+            self.content_delta
+                .clone()
+                .or_else(|| string_at(&self.raw_json, &["result"]))
+                .unwrap_or_default()
+        };
         let provider_subtype = self
             .subtype
             .clone()
@@ -213,7 +216,7 @@ impl ClaudeProviderEventDraft {
                 .and_then(|value| i64::try_from(value).ok()),
             occurred_at_ms: context.occurred_at_ms,
             normalized_payload: json!({
-                "title": claude_title_for(self.kind, self.tool_name.as_deref()),
+                "title": claude_event_title(self.kind, self.tool_name.as_deref(), &self.raw_json),
                 "body": body,
                 "tool_name": self.tool_name,
                 "cost_usd": self.cost_usd,
@@ -474,6 +477,51 @@ fn claude_title_for(kind: ClaudeProviderEventKind, tool_name: Option<&str>) -> S
     }
 }
 
+fn claude_event_title(
+    kind: ClaudeProviderEventKind,
+    tool_name: Option<&str>,
+    raw_json: &Value,
+) -> String {
+    if kind == ClaudeProviderEventKind::Hook {
+        return string_at(raw_json, &["hook_event_name"])
+            .or_else(|| string_at(raw_json, &["hook", "name"]))
+            .or_else(|| string_at(raw_json, &["event", "hook_event_name"]))
+            .unwrap_or_else(|| claude_title_for(kind, tool_name));
+    }
+
+    claude_title_for(kind, tool_name)
+}
+
+fn claude_hook_body(raw_json: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(tool_name) = string_at(raw_json, &["tool_name"]) {
+        if !tool_name.trim().is_empty() {
+            parts.push(tool_name);
+        }
+    }
+    if let Some(message) = string_at(raw_json, &["message"])
+        .or_else(|| string_at(raw_json, &["event", "message"]))
+        .or_else(|| string_at(raw_json, &["result"]))
+    {
+        if !message.trim().is_empty() {
+            parts.push(message);
+        }
+    }
+    if let Some(input) = raw_json
+        .get("tool_input")
+        .or_else(|| raw_json.pointer("/event/tool_input"))
+        .or_else(|| raw_json.pointer("/hook/tool_input"))
+    {
+        if let Ok(display) = serde_json::to_string_pretty(input) {
+            if !display.trim().is_empty() {
+                parts.push(display);
+            }
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +670,36 @@ mod tests {
         assert_eq!(
             canonical.normalized_payload["body"],
             r#"{"command":"cargo test"}"#
+        );
+    }
+
+    #[test]
+    fn canonical_conversion_renders_hook_event_details() {
+        let events = parse_claude_stream_json_lines(
+            r#"{"type":"hook_event","session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"},"message":"approved by hook"}"#,
+        )
+        .unwrap();
+
+        let canonical = events[0].clone().into_provider_event_draft(
+            crate::provider_events::ProviderEventContext {
+                workspace_id: Some(1),
+                chat_thread_id: Some(7),
+                process_id: Some(9),
+                occurred_at_ms: 42,
+                schema_version: 1,
+                adapter_version: "claude-stream-json-test".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            canonical.kind,
+            crate::provider_events::ProviderEventKind::SkillPluginHook
+        );
+        assert_eq!(canonical.provider_subtype.as_deref(), Some("hook_event"));
+        assert_eq!(canonical.normalized_payload["title"], "PreToolUse");
+        assert_eq!(
+            canonical.normalized_payload["body"],
+            "Bash\napproved by hook\n{\n  \"command\": \"cargo test\"\n}"
         );
     }
 

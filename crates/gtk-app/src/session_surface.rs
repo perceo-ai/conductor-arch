@@ -13,13 +13,13 @@ use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_
 use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
+#[cfg(test)]
+use archductor_core::provider_projection::ProviderProjectionCategory;
 use archductor_core::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     ProjectionRenderClass, ProviderProjectionItem, ProviderProjectionStatus,
     ProviderProjectionStreamState,
 };
-#[cfg(test)]
-use archductor_core::provider_projection::ProviderProjectionCategory;
 #[cfg(test)]
 use archductor_core::session_state::AgentSessionState;
 use archductor_core::settings::load_repository_settings;
@@ -44,7 +44,8 @@ use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs as stdfs};
 use tracing::{debug, error, info, trace, warn};
@@ -72,6 +73,7 @@ const CONTEXT_DETAIL_HISTORY_LIMIT: usize = 6;
 #[cfg(test)]
 const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
+const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 33;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -226,6 +228,7 @@ type ChatRenderThreadSignature = (i64, String, String, String, String);
 type ChatRenderMessageSignature = (i64, String, Option<i64>, String, String);
 type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
 type ChatRenderProviderEventSignature = (String, i64, ProviderEventKind, ProviderEventPhase, usize);
+type ChatRenderPendingInputSignature = (usize, String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChatRenderSignature {
@@ -239,6 +242,7 @@ struct ChatRenderSignature {
     messages: Vec<ChatRenderMessageSignature>,
     events: Vec<ChatRenderEventSignature>,
     provider_events: Vec<ChatRenderProviderEventSignature>,
+    pending_inputs: Vec<ChatRenderPendingInputSignature>,
     transcript_display: String,
     render_state: &'static str,
     runtime_summary: Option<String>,
@@ -817,6 +821,7 @@ pub fn agent_session_panel(
         let bridge_error_state = bridge_error_state.clone();
         let codex_ready = codex_ready.clone();
         let update_composer_for_view = update_composer_state.clone();
+        let queued_chat_inputs = queued_chat_inputs.clone();
         let external_chat_tabs = external_chat_tabs.clone();
         let context_usage = context_usage.clone();
         let toast_manager = toast_manager.clone();
@@ -1146,6 +1151,7 @@ pub fn agent_session_panel(
                             &[],
                             &[],
                             &[],
+                            &[],
                             "structured",
                             "missing_thread",
                             None,
@@ -1269,6 +1275,13 @@ pub fn agent_session_panel(
                                 };
                             let transcript_display =
                                 transcript_display_for_workspace(&database_path, &workspace);
+                            let pending_user_inputs = pending_user_input_texts_for_thread(
+                                thread_id,
+                                pending_archcar_inputs.as_ref(),
+                                queued_chat_inputs.as_ref(),
+                                inflight_archcar_actions.as_ref(),
+                                &thread_messages,
+                            );
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(
                                     &thread_events,
@@ -1297,6 +1310,7 @@ pub fn agent_session_panel(
                                     &thread_messages,
                                     &thread_events,
                                     &provider_events,
+                                    &pending_user_inputs,
                                     &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
@@ -1356,6 +1370,7 @@ pub fn agent_session_panel(
                                         &provider_projection_item_widget(&item),
                                     );
                                 }
+                                append_pending_user_input_rows(&messages, &pending_user_inputs);
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
                             }
@@ -1373,6 +1388,13 @@ pub fn agent_session_panel(
                         &[],
                         &[],
                         &[],
+                        &pending_user_input_texts_for_thread(
+                            thread_id,
+                            pending_archcar_inputs.as_ref(),
+                            queued_chat_inputs.as_ref(),
+                            inflight_archcar_actions.as_ref(),
+                            &[],
+                        ),
                         "structured",
                         "empty",
                         runtime_summary.clone(),
@@ -1391,11 +1413,22 @@ pub fn agent_session_panel(
                         append_chat_refresh_row(&messages, &widget);
                     }
                     let empty = Label::new(Some("No messages yet."));
-                    empty.add_css_class("chat-agent-text");
-                    empty.set_selectable(true);
-                    empty.set_wrap(true);
-                    empty.set_xalign(0.0);
-                    append_chat_refresh_row(&messages, &empty);
+                    let pending_user_inputs = pending_user_input_texts_for_thread(
+                        thread_id,
+                        pending_archcar_inputs.as_ref(),
+                        queued_chat_inputs.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        &[],
+                    );
+                    if pending_user_inputs.is_empty() {
+                        empty.add_css_class("chat-agent-text");
+                        empty.set_selectable(true);
+                        empty.set_wrap(true);
+                        empty.set_xalign(0.0);
+                        append_chat_refresh_row(&messages, &empty);
+                    } else {
+                        append_pending_user_input_rows(&messages, &pending_user_inputs);
+                    }
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
@@ -1407,6 +1440,7 @@ pub fn agent_session_panel(
                         None,
                         &current,
                         &thread_state.borrow(),
+                        &[],
                         &[],
                         &[],
                         &[],
@@ -2098,7 +2132,7 @@ pub fn agent_session_panel(
         let record_state = record_state.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let working_threads = working_threads.clone();
-        let messages = messages.clone();
+        let refresh_view = refresh_view.clone();
         let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let interrupt_current_session = interrupt_current_session.clone();
@@ -2147,10 +2181,7 @@ pub fn agent_session_panel(
                         ArchcarInputKind::User,
                     );
                     buffer.set_text("");
-                    append_session_status_message(
-                        &messages,
-                        "[queued] Message held locally. Interrupt or wait for the current run, then press send to submit queued messages.",
-                    );
+                    refresh_view();
                     update_composer_state();
                 }
                 ComposerAction::Interrupt => {
@@ -2420,6 +2451,7 @@ fn reveal_existing_chat_refresh_rows() -> bool {
 
 fn install_archcar_wake(root: &GBox, bridge: &AsyncArchcarBridge, refresh_view: Rc<dyn Fn()>) {
     let wake_id = NEXT_CHAT_WAKE_ID.fetch_add(1, Ordering::Relaxed);
+    let wake_pending = Arc::new(AtomicBool::new(false));
     CHAT_WAKE_REGISTRY.with(|registry| {
         registry.borrow_mut().insert(wake_id, refresh_view);
     });
@@ -2432,21 +2464,42 @@ fn install_archcar_wake(root: &GBox, bridge: &AsyncArchcarBridge, refresh_view: 
     let main_context = gtk::glib::MainContext::default();
     let root_ref = gtk::glib::SendWeakRef::from(root.downgrade());
     bridge.set_waker(move || {
+        if !mark_chat_refresh_wake_pending(wake_pending.as_ref()) {
+            return;
+        }
         let root_ref = root_ref.clone();
+        let wake_pending = Arc::clone(&wake_pending);
         main_context.invoke(move || {
-            if root_ref.upgrade().is_none() {
-                CHAT_WAKE_REGISTRY.with(|registry| {
-                    registry.borrow_mut().remove(&wake_id);
-                });
-                return;
-            }
-            let refresh =
-                CHAT_WAKE_REGISTRY.with(|registry| registry.borrow().get(&wake_id).cloned());
-            if let Some(refresh) = refresh {
-                refresh();
-            }
+            // PER-190: One-shot debounce for Archcar event bursts; the pending
+            // flag is cleared when the scheduled refresh runs or the surface is
+            // already gone.
+            gtk::glib::timeout_add_local_once(
+                Duration::from_millis(CHAT_REFRESH_WAKE_DELAY_MS),
+                move || {
+                    clear_chat_refresh_wake_pending(wake_pending.as_ref());
+                    if root_ref.upgrade().is_none() {
+                        CHAT_WAKE_REGISTRY.with(|registry| {
+                            registry.borrow_mut().remove(&wake_id);
+                        });
+                        return;
+                    }
+                    let refresh = CHAT_WAKE_REGISTRY
+                        .with(|registry| registry.borrow().get(&wake_id).cloned());
+                    if let Some(refresh) = refresh {
+                        refresh();
+                    }
+                },
+            );
         });
     });
+}
+
+fn mark_chat_refresh_wake_pending(pending: &AtomicBool) -> bool {
+    !pending.swap(true, Ordering::AcqRel)
+}
+
+fn clear_chat_refresh_wake_pending(pending: &AtomicBool) {
+    pending.store(false, Ordering::Release);
 }
 
 fn install_working_indicator_tick(
@@ -2647,6 +2700,7 @@ fn chat_render_signature(
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
     provider_events: &[ProviderEventRecord],
+    pending_inputs: &[String],
     transcript_display: &str,
     render_state: &'static str,
     runtime_summary: Option<String>,
@@ -2717,6 +2771,11 @@ fn chat_render_signature(
                     event.normalized_payload.to_string().len() + event.raw_json.to_string().len(),
                 )
             })
+            .collect(),
+        pending_inputs: pending_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| (index, input.clone()))
             .collect(),
         transcript_display: transcript_display.to_owned(),
         render_state,
@@ -2861,6 +2920,12 @@ fn provider_projection_item_has_persisted_message(
             .any(|message| message.role == "user" && message.content.trim() == item.body.trim())
 }
 
+fn append_pending_user_input_rows(container: &GBox, pending_inputs: &[String]) {
+    for input in pending_inputs {
+        append_chat_refresh_row(container, &chat_user_bubble(input));
+    }
+}
+
 fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
     match item.render_class {
         ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
@@ -2868,18 +2933,27 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
         _ => {
             let container = GBox::new(Orientation::Vertical, 4);
             container.set_hexpand(true);
-            let status = Label::new(Some(&provider_projection_status_line(item)));
-            status.add_css_class("card-meta");
-            status.add_css_class(provider_projection_status_css_class(item.status));
-            status.set_xalign(0.0);
-            status.set_wrap(true);
-            container.append(&status);
+            if provider_projection_item_shows_status_chrome(item) {
+                let status = Label::new(Some(&provider_projection_status_line(item)));
+                status.add_css_class("card-meta");
+                status.add_css_class(provider_projection_status_css_class(item.status));
+                status.set_xalign(0.0);
+                status.set_wrap(true);
+                container.append(&status);
+            }
             container.append(&provider_projection_text_widget(
                 &provider_projection_card_text(item),
             ));
             container.upcast()
         }
     }
+}
+
+fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -> bool {
+    matches!(
+        item.status,
+        ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
+    )
 }
 
 fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
@@ -2907,11 +2981,7 @@ fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
 }
 
 fn provider_projection_status_line(item: &ProviderProjectionItem) -> String {
-    format!(
-        "{} · {}",
-        provider_projection_status_label(item.status),
-        provider_projection_stream_state_label(item.stream_state)
-    )
+    provider_projection_status_label(item.status).to_owned()
 }
 
 fn provider_projection_status_label(status: ProviderProjectionStatus) -> &'static str {
@@ -4581,6 +4651,68 @@ fn queue_archcar_input(
             visible_input,
             kind,
         });
+}
+
+fn queued_archcar_input_visible_text(input: &QueuedArchcarInput) -> String {
+    input
+        .visible_input
+        .as_deref()
+        .unwrap_or(&input.input)
+        .trim()
+        .to_owned()
+}
+
+fn pending_user_input_texts_for_thread(
+    thread_id: i64,
+    pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    queued_chat_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    persisted_messages: &[ChatMessageRecord],
+) -> Vec<String> {
+    let persisted = persisted_messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.trim().to_owned())
+        .collect::<HashSet<_>>();
+    let mut inputs = Vec::new();
+
+    for input in queued_chat_inputs
+        .borrow()
+        .get(&thread_id)
+        .into_iter()
+        .flat_map(|inputs| inputs.iter())
+    {
+        inputs.push(queued_archcar_input_visible_text(input));
+    }
+    for input in pending_archcar_inputs
+        .borrow()
+        .get(&thread_id)
+        .into_iter()
+        .flat_map(|inputs| inputs.iter())
+    {
+        inputs.push(queued_archcar_input_visible_text(input));
+    }
+    for action in inflight_actions.borrow().values() {
+        if let PendingArchcarAction::UserSend {
+            thread_id: action_thread_id,
+            input,
+            visible_input,
+            ..
+        } = action
+        {
+            if *action_thread_id == thread_id {
+                inputs.push(visible_input.as_deref().unwrap_or(input).trim().to_owned());
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    inputs
+        .into_iter()
+        .filter(|input| !input.is_empty())
+        .filter(|input| !persisted.contains(input))
+        .filter(|input| seen.insert(input.clone()))
+        .collect()
 }
 
 fn queued_chat_inputs_count(
@@ -8253,6 +8385,79 @@ fix it
     }
 
     #[test]
+    fn pending_user_input_texts_include_local_starting_and_inflight_sends() {
+        let local_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let starting_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::from([(
+            11,
+            PendingArchcarAction::UserSend {
+                thread_id: 7,
+                session_id: 9,
+                input: "[metadata]\nreal inflight".to_owned(),
+                visible_input: Some("real inflight".to_owned()),
+                kind: ArchcarInputKind::User,
+                checkpoint_id: None,
+            },
+        )]));
+        queue_archcar_input(
+            &local_queue,
+            7,
+            "queued while busy".to_owned(),
+            None,
+            ArchcarInputKind::User,
+        );
+        queue_archcar_input(
+            &starting_queue,
+            7,
+            "[metadata]\nqueued while starting".to_owned(),
+            Some("queued while starting".to_owned()),
+            ArchcarInputKind::User,
+        );
+
+        let pending =
+            pending_user_input_texts_for_thread(7, &starting_queue, &local_queue, &inflight, &[]);
+
+        assert_eq!(
+            pending,
+            vec![
+                "queued while busy".to_owned(),
+                "queued while starting".to_owned(),
+                "real inflight".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_user_input_texts_skip_persisted_messages() {
+        let local_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let starting_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::<u64, PendingArchcarAction>::new());
+        queue_archcar_input(
+            &local_queue,
+            7,
+            "already persisted".to_owned(),
+            None,
+            ArchcarInputKind::User,
+        );
+        let persisted = vec![chat_message_record(
+            1,
+            "user",
+            "already persisted",
+            "user_send",
+        )];
+
+        let pending = pending_user_input_texts_for_thread(
+            7,
+            &starting_queue,
+            &local_queue,
+            &inflight,
+            &persisted,
+        );
+
+        assert!(pending.is_empty());
+    }
+
+    #[test]
     fn queue_archcar_input_preserves_trimmed_input_and_kind() {
         let pending = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
 
@@ -8924,13 +9129,79 @@ I summarized the result.
         let text = provider_projection_card_text(&projection.items[0]);
 
         assert!(status.contains("Failed"));
-        assert!(status.contains("Complete"));
+        assert!(!status.contains("Complete"));
+        assert!(!status.contains("Streaming"));
         assert_eq!(
             provider_projection_status_css_class(projection.items[0].status),
             "status-error"
         );
         assert!(!text.contains("raw-secret"));
         assert!(!text.contains("\"type\""));
+    }
+
+    #[test]
+    fn provider_projection_action_cards_do_not_render_running_streaming_chrome() {
+        let mut record =
+            provider_event_record(ProviderEventKind::Tool, ProviderEventPhase::Progress);
+        record.normalized_payload = serde_json::json!({
+            "title": "Read",
+            "body": "crates/core/src/lib.rs"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let item = &projection.items[0];
+
+        assert!(!provider_projection_item_shows_status_chrome(item));
+        assert_eq!(
+            provider_projection_card_text(item),
+            "Read\ncrates/core/src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn provider_projection_keeps_failure_status_chrome() {
+        let record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Failed,
+        );
+        let projection = provider_projection_from_records(&[record]);
+
+        assert!(provider_projection_item_shows_status_chrome(
+            &projection.items[0]
+        ));
+    }
+
+    #[test]
+    fn hook_events_render_as_action_content_without_status_chrome() {
+        let mut record = provider_event_record(
+            ProviderEventKind::SkillPluginHook,
+            ProviderEventPhase::Progress,
+        );
+        record.provider_subtype = Some("hook_event".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "PreToolUse",
+            "body": "Bash: cargo test"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let item = &projection.items[0];
+
+        assert_eq!(item.render_class, ProjectionRenderClass::HookCard);
+        assert_eq!(
+            provider_projection_card_text(item),
+            "PreToolUse\nBash: cargo test"
+        );
+        assert!(!provider_projection_item_shows_status_chrome(item));
+    }
+
+    #[test]
+    fn chat_wake_coalesces_event_bursts() {
+        let pending = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(mark_chat_refresh_wake_pending(&pending));
+        assert!(!mark_chat_refresh_wake_pending(&pending));
+        clear_chat_refresh_wake_pending(&pending);
+        assert!(mark_chat_refresh_wake_pending(&pending));
     }
 
     #[test]
