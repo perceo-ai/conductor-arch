@@ -639,7 +639,11 @@ impl CodexProviderEventDraft {
         let raw_json = serde_json::from_str(&self.raw_json)
             .unwrap_or_else(|_| Value::String(self.raw_json.clone()));
         let kind = codex_category_to_provider_kind(self.category);
-        let phase = codex_phase_for(&self.name, self.message_kind);
+        let phase = if is_mcp_startup_status_event(&self.name) {
+            codex_mcp_startup_status_phase(&self.payload)
+        } else {
+            codex_phase_for(&self.name, self.message_kind)
+        };
         let provider_event_id = self.correlation_id.clone().or_else(|| {
             string_at_any(
                 &self.payload,
@@ -652,19 +656,23 @@ impl CodexProviderEventDraft {
                 ],
             )
         });
-        let provider_item_id = string_at_any(
-            &self.payload,
-            &[
-                "/params/item/id",
-                "/params/itemId",
-                "/params/item_id",
-                "/params/message/id",
-                "/params/toolCall/id",
-                "/params/tool_call/id",
-                "/result/item/id",
-                "/result/message/id",
-            ],
-        );
+        let provider_item_id = if is_mcp_startup_status_event(&self.name) {
+            Some("mcp-startup-status".to_owned())
+        } else {
+            string_at_any(
+                &self.payload,
+                &[
+                    "/params/item/id",
+                    "/params/itemId",
+                    "/params/item_id",
+                    "/params/message/id",
+                    "/params/toolCall/id",
+                    "/params/tool_call/id",
+                    "/result/item/id",
+                    "/result/message/id",
+                ],
+            )
+        };
         let provider_thread_id = string_at_any(
             &self.payload,
             &[
@@ -717,6 +725,14 @@ impl CodexProviderEventDraft {
             ],
         )
         .unwrap_or_default();
+        let title = codex_event_title(&self.name, kind, &self.payload);
+        let body = if is_mcp_startup_status_event(&self.name) {
+            codex_mcp_startup_status_body(&self.payload, phase)
+        } else if body.is_empty() {
+            codex_payload_body(&self.payload)
+        } else {
+            body
+        };
 
         ProviderEventDraft {
             provider: self.provider,
@@ -744,12 +760,8 @@ impl CodexProviderEventDraft {
             .and_then(|value| i64::try_from(value).ok()),
             occurred_at_ms: context.occurred_at_ms,
             normalized_payload: json!({
-                "title": codex_event_title(&self.name, kind, &self.payload),
-                "body": if body.is_empty() {
-                    codex_payload_body(&self.payload)
-                } else {
-                    body
-                },
+                "title": title,
+                "body": body,
                 "message_kind": self.message_kind,
             }),
             raw_json,
@@ -760,6 +772,10 @@ impl CodexProviderEventDraft {
 }
 
 fn codex_event_title(name: &str, kind: ProviderEventKind, payload: &Value) -> String {
+    if is_mcp_startup_status_event(name) {
+        return codex_mcp_startup_status_title(payload);
+    }
+
     match string_at_any(payload, &["/params/item/type"]).as_deref() {
         Some("agentMessage") => "Assistant".to_owned(),
         Some("userMessage") => "User input".to_owned(),
@@ -886,6 +902,104 @@ fn tool_title_from_payload(payload: &Value) -> Option<String> {
             "/params/item/path",
         ],
     )
+}
+
+fn is_mcp_startup_status_event(name: &str) -> bool {
+    name == "mcpServer/startupStatus/updated"
+}
+
+fn codex_mcp_startup_status_title(payload: &Value) -> String {
+    match codex_mcp_startup_status_phase(payload) {
+        ProviderEventPhase::Failed => "MCP failed".to_owned(),
+        ProviderEventPhase::Completed => "MCP loaded".to_owned(),
+        _ => "MCP loading".to_owned(),
+    }
+}
+
+fn codex_mcp_startup_status_phase(payload: &Value) -> ProviderEventPhase {
+    let status = string_at_any(payload, &["/params/status"])
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let error = string_at_any(
+        payload,
+        &[
+            "/params/error/message",
+            "/params/error",
+            "/params/failureReason",
+            "/params/failure_reason",
+        ],
+    );
+
+    if error
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || status_contains_any(&status, &["fail", "error", "unavailable"])
+    {
+        ProviderEventPhase::Failed
+    } else if status_contains_any(
+        &status,
+        &[
+            "ready",
+            "loaded",
+            "complete",
+            "completed",
+            "success",
+            "connected",
+            "running",
+            "disabled",
+            "skipped",
+            "stopped",
+        ],
+    ) {
+        ProviderEventPhase::Completed
+    } else {
+        ProviderEventPhase::Progress
+    }
+}
+
+fn codex_mcp_startup_status_body(payload: &Value, phase: ProviderEventPhase) -> String {
+    if phase == ProviderEventPhase::Progress {
+        return String::new();
+    }
+
+    let server = string_at_any(payload, &["/params/name", "/params/serverName"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let status = string_at_any(payload, &["/params/status"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let error = string_at_any(
+        payload,
+        &[
+            "/params/error/message",
+            "/params/error",
+            "/params/failureReason",
+            "/params/failure_reason",
+        ],
+    )
+    .unwrap_or_default()
+    .trim()
+    .to_owned();
+
+    let mut parts = Vec::new();
+    if !server.is_empty() && !status.is_empty() {
+        parts.push(format!("{server}: {status}"));
+    } else if !server.is_empty() {
+        parts.push(server);
+    } else if !status.is_empty() {
+        parts.push(status);
+    }
+    if !error.is_empty() {
+        parts.push(error);
+    }
+
+    parts.join("\n")
+}
+
+fn status_contains_any(status: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| status.contains(needle))
 }
 
 pub fn classify_codex_method(
@@ -1373,6 +1487,71 @@ mod tests {
             assert_eq!(event.provider_turn_id.as_deref(), Some("turn_1"));
             assert_eq!(event.normalized_payload["body"], body);
         }
+    }
+
+    #[test]
+    fn mcp_startup_status_normalizes_to_one_readable_status_item() {
+        let loading = parse_jsonl_message(
+            r#"{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","name":"github","status":"starting","error":null,"failureReason":null}}"#,
+            1,
+        )
+        .unwrap()
+        .to_provider_event_draft()
+        .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            occurred_at_ms: 42,
+            schema_version: 1,
+            adapter_version: "codex-app-server-test".to_owned(),
+        });
+
+        assert_eq!(loading.kind, crate::provider_events::ProviderEventKind::Mcp);
+        assert_eq!(
+            loading.phase,
+            crate::provider_events::ProviderEventPhase::Progress
+        );
+        assert_eq!(
+            loading.provider_item_id.as_deref(),
+            Some("mcp-startup-status")
+        );
+        assert_eq!(loading.provider_thread_id.as_deref(), Some("thr_1"));
+        assert_eq!(
+            loading.provider_subtype.as_deref(),
+            Some("mcpServer/startupStatus/updated")
+        );
+        assert_eq!(loading.normalized_payload["title"], "MCP loading");
+        assert_eq!(loading.normalized_payload["body"], "");
+
+        let loaded = parse_jsonl_message(
+            r#"{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","name":"github","status":"ready","error":null,"failureReason":null}}"#,
+            1,
+        )
+        .unwrap()
+        .to_provider_event_draft()
+        .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            occurred_at_ms: 43,
+            schema_version: 1,
+            adapter_version: "codex-app-server-test".to_owned(),
+        });
+
+        assert_eq!(
+            loaded.phase,
+            crate::provider_events::ProviderEventPhase::Completed
+        );
+        assert_eq!(
+            loaded.provider_item_id.as_deref(),
+            Some("mcp-startup-status")
+        );
+        assert_eq!(loaded.normalized_payload["title"], "MCP loaded");
+        assert_eq!(loaded.normalized_payload["body"], "github: ready");
+        assert_ne!(
+            loaded.normalized_payload["title"],
+            "mcpServer/startupStatus/updated"
+        );
     }
 
     #[test]

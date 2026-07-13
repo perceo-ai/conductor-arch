@@ -298,6 +298,152 @@ fn cli_archcar_messages_renders_projected_provider_events() {
         .stdout(predicates::str::contains("raw lifecycle").not());
 }
 
+#[test]
+fn cli_archcar_messages_updates_mcp_startup_status_provider_event() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    let db_path = app_database_path(temp.path());
+    let store = WorkspaceStore::open(&db_path).unwrap();
+    let thread = store
+        .create_chat_thread("berlin", "codex", "Codex", None)
+        .unwrap();
+    let provider_store = ProviderEventStore::new(&db_path);
+    provider_store
+        .upsert_event(&provider_event(
+            thread.id,
+            "mcp-startup-status",
+            ProviderEventKind::Mcp,
+            ProviderEventPhase::Progress,
+            "mcpServer/startupStatus/updated",
+            "MCP loading",
+            "",
+        ))
+        .unwrap();
+    provider_store
+        .upsert_event(&provider_event(
+            thread.id,
+            "mcp-startup-status",
+            ProviderEventKind::Mcp,
+            ProviderEventPhase::Completed,
+            "mcpServer/startupStatus/updated",
+            "MCP loaded",
+            "github: ready",
+        ))
+        .unwrap();
+
+    app(temp.path())
+        .args(["archcar", "messages", &thread.id.to_string()])
+        .assert()
+        .success()
+        .stdout(contains("Tool\nMCP loaded\ngithub: ready\n\n"))
+        .stdout(predicates::str::contains("MCP loading").not())
+        .stdout(predicates::str::contains("mcpServer/startupStatus/updated").not());
+}
+
+#[test]
+fn cli_archcar_messages_renders_claude_projected_provider_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    let db_path = app_database_path(temp.path());
+    let store = WorkspaceStore::open(&db_path).unwrap();
+    let thread = store
+        .create_chat_thread("berlin", "claude", "Claude", None)
+        .unwrap();
+    let provider_store = ProviderEventStore::new(&db_path);
+    let mut assistant_event = provider_event(
+        thread.id,
+        "assistant-1",
+        ProviderEventKind::AssistantOutput,
+        ProviderEventPhase::Completed,
+        "assistant_message",
+        "Assistant",
+        "Claude answer",
+    );
+    assistant_event.provider = "claude".to_owned();
+    provider_store.upsert_event(&assistant_event).unwrap();
+    let mut tool_event = provider_event(
+        thread.id,
+        "tool-1",
+        ProviderEventKind::Tool,
+        ProviderEventPhase::Completed,
+        "tool_result",
+        "Tool",
+        "Read file",
+    );
+    tool_event.provider = "claude".to_owned();
+    provider_store.upsert_event(&tool_event).unwrap();
+
+    app(temp.path())
+        .args(["archcar", "messages", &thread.id.to_string()])
+        .assert()
+        .success()
+        .stdout(contains("Assistant\nClaude answer\n\n"))
+        .stdout(contains("Tool\nRead file\n\n"))
+        .stdout(predicates::str::contains("\"method\"").not());
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command

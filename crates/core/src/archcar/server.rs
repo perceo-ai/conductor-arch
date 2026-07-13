@@ -1186,6 +1186,49 @@ mod tests {
     }
 
     #[test]
+    fn session_messages_update_mcp_startup_status_as_one_provider_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let provider_store = ProviderEventStore::new(&db_path);
+        provider_store
+            .upsert_event(&provider_event(
+                thread.id,
+                "mcp-startup-status",
+                ProviderEventKind::Mcp,
+                ProviderEventPhase::Progress,
+                "mcpServer/startupStatus/updated",
+                "MCP loading",
+                "",
+            ))
+            .unwrap();
+        provider_store
+            .upsert_event(&provider_event(
+                thread.id,
+                "mcp-startup-status",
+                ProviderEventKind::Mcp,
+                ProviderEventPhase::Completed,
+                "mcpServer/startupStatus/updated",
+                "MCP loaded",
+                "github: ready",
+            ))
+            .unwrap();
+
+        let messages = session_messages_for_thread(&db_path, thread.id).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "tool");
+        assert_eq!(messages[0].source, "provider_event");
+        assert_eq!(messages[0].content, "MCP loaded\ngithub: ready");
+        assert!(!messages[0]
+            .content
+            .contains("mcpServer/startupStatus/updated"));
+    }
+
+    #[test]
     fn ensure_default_session_reuses_existing_running_session() {
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 9,

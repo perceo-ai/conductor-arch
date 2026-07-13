@@ -1071,19 +1071,15 @@ fn main() -> Result<()> {
                         codex_goals,
                         codex_skills,
                     };
-                    let process = if matches!(kind, CliSessionKind::Codex) {
+                    let process = if cli_session_start_uses_archcar(kind) {
                         let client = ArchcarClient::from_paths(&paths);
+                        let kind: SessionKind = kind.into();
                         print_archcar_response(client.send(ArchcarRequest::SpawnSession {
                             workspace: workspace.clone(),
-                            kind: SessionKind::Codex,
+                            kind,
                             harness: Some(harness.clone()),
                         })?);
-                        wait_for_session_process(
-                            &store,
-                            &workspace,
-                            SessionKind::Codex,
-                            Duration::from_secs(5),
-                        )?
+                        wait_for_session_process(&store, &workspace, kind, Duration::from_secs(5))?
                     } else {
                         store.start_session_with_options(&workspace, kind.into(), harness)?
                     };
@@ -1132,11 +1128,18 @@ fn main() -> Result<()> {
                 }
                 SessionCommand::Stop { workspace } => {
                     let sessions = store.list_sessions(&workspace)?;
-                    let codex = sessions.iter().find(|record| {
-                        record.status == ProcessStatus::Running
-                            && command_session_kind_label(&record.command) == "codex"
-                    });
-                    if let Some(record) = codex {
+                    let mut provider_native = None;
+                    for record in &sessions {
+                        if record.status == ProcessStatus::Running
+                            && cli_session_stop_uses_archcar(session_kind_from_process_record(
+                                &store, record,
+                            )?)
+                        {
+                            provider_native = Some(record);
+                            break;
+                        }
+                    }
+                    if let Some(record) = provider_native {
                         let client = ArchcarClient::from_paths(&paths);
                         let _ = client.send(ArchcarRequest::KillSession {
                             session_id: record.id,
@@ -1410,6 +1413,14 @@ fn print_archcar_response(response: ArchcarResponse) {
             eprintln!("{message}");
         }
     }
+}
+
+fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
+    matches!(kind, CliSessionKind::Codex | CliSessionKind::Claude)
+}
+
+fn cli_session_stop_uses_archcar(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::Codex | SessionKind::Claude)
 }
 
 fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
@@ -1960,12 +1971,27 @@ fn session_record_matches_kind(
     record: &ProcessRecord,
     kind: SessionKind,
 ) -> Result<bool> {
+    Ok(session_kind_from_process_record(store, record)? == kind)
+}
+
+fn session_kind_from_process_record(
+    store: &WorkspaceStore,
+    record: &ProcessRecord,
+) -> Result<SessionKind> {
     if let Some(thread_id) = record.chat_thread_id {
         let thread = store.get_chat_thread_record(thread_id)?;
-        return Ok(thread.provider == session_kind_label(kind));
+        return Ok(match thread.provider.as_str() {
+            "codex" => SessionKind::Codex,
+            "claude" => SessionKind::Claude,
+            _ => SessionKind::Shell,
+        });
     }
 
-    Ok(command_session_kind_label(&record.command) == session_kind_label(kind))
+    Ok(match command_session_kind_label(&record.command) {
+        "codex" => SessionKind::Codex,
+        "claude" => SessionKind::Claude,
+        _ => SessionKind::Shell,
+    })
 }
 
 fn ensure_session_send_target(
@@ -2339,6 +2365,20 @@ mod tests {
             panic!("expected session open");
         };
         assert_eq!(open_model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn cli_session_start_routes_provider_native_agents_through_archcar() {
+        assert!(cli_session_start_uses_archcar(CliSessionKind::Codex));
+        assert!(cli_session_start_uses_archcar(CliSessionKind::Claude));
+        assert!(!cli_session_start_uses_archcar(CliSessionKind::Shell));
+    }
+
+    #[test]
+    fn cli_session_stop_routes_provider_native_agents_through_archcar() {
+        assert!(cli_session_stop_uses_archcar(SessionKind::Codex));
+        assert!(cli_session_stop_uses_archcar(SessionKind::Claude));
+        assert!(!cli_session_stop_uses_archcar(SessionKind::Shell));
     }
 
     #[test]
