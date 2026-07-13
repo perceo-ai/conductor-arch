@@ -3677,19 +3677,22 @@ fn inline_event_type_color(event: &CodexInlineEvent) -> &'static str {
     }
 }
 
-fn inline_event_chip_label_min_width_chars() -> i32 {
-    1
-}
-
 fn inline_event_chip_label_max_width_chars() -> i32 {
-    140
+    96
 }
 
-fn configure_inline_event_chip_label(label: &Label) {
+fn inline_event_chip_label_width_chars(label: &str) -> i32 {
+    let width = label.chars().count().max(1);
+    i32::try_from(width)
+        .unwrap_or(i32::MAX)
+        .min(inline_event_chip_label_max_width_chars())
+}
+
+fn configure_inline_event_chip_label(label: &Label, text: &str) {
     label.set_xalign(0.0);
     label.set_wrap(true);
     label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    label.set_width_chars(inline_event_chip_label_min_width_chars());
+    label.set_width_chars(inline_event_chip_label_width_chars(text));
     label.set_max_width_chars(inline_event_chip_label_max_width_chars());
 }
 
@@ -3980,7 +3983,10 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
     let toggle_label = Label::new(None);
     toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
-    configure_inline_event_chip_label(&toggle_label);
+    configure_inline_event_chip_label(
+        &toggle_label,
+        &inline_event_chip_label(event, expand_by_default),
+    );
     toggle.set_child(Some(&toggle_label));
     root.append(&toggle);
 
@@ -8698,13 +8704,26 @@ fix it
             status: CodexInlineEventStatus::Complete,
         };
 
-        assert_eq!(inline_event_chip_label_min_width_chars(), 1);
-        assert_eq!(inline_event_chip_label_max_width_chars(), 140);
+        assert_eq!(inline_event_chip_label_max_width_chars(), 96);
+        assert_eq!(
+            inline_event_chip_label_width_chars(&inline_event_chip_label(&event, false)),
+            96
+        );
         assert_eq!(
             inline_event_type_css_class(&event),
             "chat-inline-event-command"
         );
         assert!(inline_event_chip_markup(&event, false).contains("foreground=\"#e7e7e7\">pnpm"));
+    }
+
+    #[test]
+    fn inline_event_chip_label_short_names_do_not_request_one_char_width() {
+        let label = "+ Used MCP Loaded";
+
+        assert_eq!(
+            inline_event_chip_label_width_chars(label),
+            label.chars().count() as i32
+        );
     }
 
     #[test]
