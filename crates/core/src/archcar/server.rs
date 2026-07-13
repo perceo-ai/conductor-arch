@@ -19,7 +19,11 @@ use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
 };
 use crate::paths::AppPaths;
-use crate::provider_events::{ProviderEventKind, ProviderEventStore};
+use crate::provider_events::ProviderEventStore;
+use crate::provider_projection::{
+    provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
+    provider_projection_item_text,
+};
 use crate::workspace::{SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
@@ -358,23 +362,26 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
         })
         .collect();
 
+    let provider_records = ProviderEventStore::new(db_path).list_for_chat_thread(thread_id)?;
+    let projection = provider_projection_from_records(&provider_records);
     let mut next_provider_message_id = -1;
-    for item in ProviderEventStore::new(db_path)
-        .project_timeline_for_chat_thread(thread_id)?
+    for item in projection
+        .items
         .into_iter()
-        .filter(|item| item.kind == ProviderEventKind::AssistantOutput)
+        .filter(provider_projection_item_is_relevant_chat_event)
     {
-        let content = item.body.trim();
+        let content = provider_projection_item_text(&item);
+        let content = content.trim();
         if content.is_empty()
-            || messages
-                .iter()
-                .any(|message| message.role == "agent" && message.content == content)
+            || messages.iter().any(|message| {
+                message.role == item.render_class.role_label() && message.content == content
+            })
         {
             continue;
         }
         messages.push(ArchcarMessage {
             id: next_provider_message_id,
-            role: "agent".to_owned(),
+            role: item.render_class.role_label().to_owned(),
             content: content.to_owned(),
             source: "provider_event".to_owned(),
             inline_event: None,
@@ -996,6 +1003,7 @@ fn broadcast(state: &mut ServerState, event: ArchcarEvent) {
 mod tests {
     use super::*;
     use crate::archcar::protocol::ArchcarInputKind;
+    use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -1005,6 +1013,7 @@ mod tests {
     use crate::paths::AppPaths;
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessStatus};
+    use serde_json::json;
 
     #[test]
     fn ensure_default_session_debounces_repeat_requests() {
@@ -1113,6 +1122,67 @@ mod tests {
         assert!(!payload.contains("sk-secret"));
         assert!(!payload.contains("ghp_secret"));
         assert!(!payload.contains("swordfish"));
+    }
+
+    #[test]
+    fn session_messages_project_provider_events_into_semantic_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Run tests", "cli")
+            .unwrap();
+        let provider_store = ProviderEventStore::new(&db_path);
+        provider_store
+            .upsert_event(&provider_event(
+                thread.id,
+                "assistant-1",
+                ProviderEventKind::AssistantOutput,
+                ProviderEventPhase::Completed,
+                "agent_message",
+                "Assistant",
+                "Tests passed",
+            ))
+            .unwrap();
+        provider_store
+            .upsert_event(&provider_event(
+                thread.id,
+                "reasoning-1",
+                ProviderEventKind::PlanningReasoning,
+                ProviderEventPhase::Progress,
+                "reasoning_summary",
+                "Reasoning",
+                "Checking failure output",
+            ))
+            .unwrap();
+        provider_store
+            .upsert_event(&provider_event(
+                thread.id,
+                "turn-1",
+                ProviderEventKind::Turn,
+                ProviderEventPhase::Started,
+                "turn_started",
+                "Turn started",
+                "raw lifecycle",
+            ))
+            .unwrap();
+
+        let messages = session_messages_for_thread(&db_path, thread.id).unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user", "Run tests"),
+                ("assistant", "Tests passed"),
+                ("reasoning", "Reasoning\nChecking failure output"),
+            ]
+        );
     }
 
     #[test]
@@ -1542,6 +1612,38 @@ mod tests {
             })
             .unwrap();
         store
+    }
+
+    fn provider_event(
+        thread_id: i64,
+        item_id: &str,
+        kind: ProviderEventKind,
+        phase: ProviderEventPhase,
+        subtype: &str,
+        title: &str,
+        body: &str,
+    ) -> ProviderEventDraft {
+        ProviderEventDraft {
+            provider: "codex".to_owned(),
+            provider_event_id: Some(format!("evt-{item_id}")),
+            provider_item_id: Some(item_id.to_owned()),
+            provider_thread_id: Some("thread-1".to_owned()),
+            provider_turn_id: Some("turn-1".to_owned()),
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: None,
+            chat_thread_id: Some(thread_id),
+            process_id: None,
+            phase,
+            kind,
+            provider_subtype: Some(subtype.to_owned()),
+            provider_sequence: Some(1),
+            occurred_at_ms: 42,
+            normalized_payload: json!({"title": title, "body": body}),
+            raw_json: json!({"method": subtype, "params": {"body": body}}),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
+        }
     }
 
     fn spawn_fake_managed_codex_process() -> std::process::Child {

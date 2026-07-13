@@ -15,6 +15,7 @@ pub mod model_registry;
 pub mod paths;
 pub mod provider_adapters;
 pub mod provider_events;
+pub mod provider_projection;
 pub mod pty;
 pub mod redaction;
 pub mod repository;

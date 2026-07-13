@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use archductor_core::archcar::client::ArchcarClient;
-use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest, ArchcarResponse};
+use archductor_core::archcar::protocol::{
+    ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
+};
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
@@ -1402,14 +1404,115 @@ fn print_archcar_response(response: ArchcarResponse) {
         }
         ArchcarResponse::SessionScreen { screen, .. } => print!("{screen}"),
         ArchcarResponse::SessionMessages { messages, .. } => {
-            for message in messages {
-                println!("[{}] {}", message.role, message.content);
-            }
+            print!("{}", render_archcar_protocol_messages(&messages));
         }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
     }
+}
+
+fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let label = archcar_role_label(&message.role);
+        let content = archcar_message_content_without_duplicate_title(&label, &message.content);
+        let content = content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{label}\n{content}\n\n"));
+    }
+    out
+}
+
+#[cfg(test)]
+fn render_archcar_messages(
+    items: &[archductor_core::provider_projection::ProviderProjectionItem],
+) -> String {
+    let mut out = String::new();
+    for item in items {
+        if !archcar_projection_item_is_relevant(item) {
+            continue;
+        }
+        let content = item.body.trim();
+        if content.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "{}{}\n{}\n\n",
+            archcar_projection_title(item),
+            archcar_projection_state_suffix(item.status, item.stream_state),
+            content
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+fn archcar_projection_item_is_relevant(
+    item: &archductor_core::provider_projection::ProviderProjectionItem,
+) -> bool {
+    use archductor_core::provider_projection::ProjectionRenderClass;
+
+    !matches!(
+        item.render_class,
+        ProjectionRenderClass::FallbackCard | ProjectionRenderClass::StatusCard
+    )
+}
+
+#[cfg(test)]
+fn archcar_projection_title(
+    item: &archductor_core::provider_projection::ProviderProjectionItem,
+) -> String {
+    use archductor_core::provider_projection::ProjectionRenderClass;
+
+    match item.render_class {
+        ProjectionRenderClass::UserChat => "You".to_owned(),
+        ProjectionRenderClass::AssistantChat => "Assistant".to_owned(),
+        _ => item.title.trim().to_owned(),
+    }
+}
+
+#[cfg(test)]
+fn archcar_projection_state_suffix(
+    status: archductor_core::provider_projection::ProviderProjectionStatus,
+    stream_state: archductor_core::provider_projection::ProviderProjectionStreamState,
+) -> String {
+    use archductor_core::provider_projection::{
+        ProviderProjectionStatus, ProviderProjectionStreamState,
+    };
+
+    if status == ProviderProjectionStatus::Complete
+        && stream_state == ProviderProjectionStreamState::Complete
+    {
+        return String::new();
+    }
+    format!(" [{}, {}]", status.as_str(), stream_state.as_str())
+}
+
+fn archcar_role_label(role: &str) -> String {
+    match role {
+        "user" => "You".to_owned(),
+        "agent" | "assistant" => "Assistant".to_owned(),
+        other => title_case_label(other),
+    }
+}
+
+fn archcar_message_content_without_duplicate_title<'a>(label: &str, content: &'a str) -> &'a str {
+    content
+        .strip_prefix(label)
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .unwrap_or(content)
+}
+
+fn title_case_label(value: &str) -> String {
+    let label = value.replace(['_', '-'], " ");
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_uppercase(), chars.as_str())
 }
 
 fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
@@ -2400,6 +2503,65 @@ mod tests {
 
         assert!(text.contains("You\nrun tests\n\n"));
         assert!(text.contains("Agent\ntests passed\n\n"));
+    }
+
+    #[test]
+    fn archcar_messages_render_projected_provider_events_without_raw_payloads() {
+        use archductor_core::provider_projection::{
+            ProjectionRenderClass, ProviderProjectionItem, ProviderProjectionStatus,
+            ProviderProjectionStreamState,
+        };
+
+        let text = render_archcar_messages(&[
+            ProviderProjectionItem {
+                id: "assistant-1".to_owned(),
+                sequence: 1,
+                category: archductor_core::provider_projection::ProviderProjectionCategory::AssistantMessage,
+                render_class: ProjectionRenderClass::AssistantChat,
+                title: "Assistant".to_owned(),
+                body: "Here is the answer".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "reasoning-1".to_owned(),
+                sequence: 2,
+                category: archductor_core::provider_projection::ProviderProjectionCategory::Reasoning,
+                render_class: ProjectionRenderClass::ReasoningCard,
+                title: "Reasoning".to_owned(),
+                body: "Checking constraints".to_owned(),
+                status: ProviderProjectionStatus::Running,
+                stream_state: ProviderProjectionStreamState::Streaming,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: Some("{\"token\":\"secret\"}".to_owned()),
+                inspectable: true,
+            },
+            ProviderProjectionItem {
+                id: "status-1".to_owned(),
+                sequence: 3,
+                category: archductor_core::provider_projection::ProviderProjectionCategory::Status,
+                render_class: ProjectionRenderClass::StatusCard,
+                title: "turn started".to_owned(),
+                body: "raw lifecycle".to_owned(),
+                status: ProviderProjectionStatus::Running,
+                stream_state: ProviderProjectionStreamState::Streaming,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: Some("{\"method\":\"turn/started\"}".to_owned()),
+                inspectable: true,
+            },
+        ]);
+
+        assert!(text.contains("Assistant\nHere is the answer\n\n"));
+        assert!(text.contains("Reasoning [running, streaming]\nChecking constraints\n\n"));
+        assert!(!text.contains("turn started"));
+        assert!(!text.contains("secret"));
+        assert!(!text.contains("method"));
     }
 
     #[test]

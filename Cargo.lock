@@ -87,6 +87,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "serde_json",
  "tempfile",
 ]
 

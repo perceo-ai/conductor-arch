@@ -1,5 +1,11 @@
+use archductor_core::provider_events::{
+    ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
+};
+use archductor_core::workspace::WorkspaceStore;
 use assert_cmd::Command as AssertCommand;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -203,6 +209,95 @@ fn cli_session_open_print_command_uses_explicit_provider_models() {
         .stdout(contains("exec claude --model claude-sonnet-5"));
 }
 
+#[test]
+fn cli_archcar_messages_renders_projected_provider_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    let db_path = app_database_path(temp.path());
+    let store = WorkspaceStore::open(&db_path).unwrap();
+    let thread = store
+        .create_chat_thread("berlin", "codex", "Codex", None)
+        .unwrap();
+    store
+        .append_chat_message(thread.id, "user", "Run tests", "cli")
+        .unwrap();
+    let provider_store = ProviderEventStore::new(&db_path);
+    provider_store
+        .upsert_event(&provider_event(
+            thread.id,
+            "assistant-1",
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Completed,
+            "agent_message",
+            "Assistant",
+            "Tests passed",
+        ))
+        .unwrap();
+    provider_store
+        .upsert_event(&provider_event(
+            thread.id,
+            "reasoning-1",
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Progress,
+            "reasoning_summary",
+            "Reasoning",
+            "Checking failure output",
+        ))
+        .unwrap();
+    provider_store
+        .upsert_event(&provider_event(
+            thread.id,
+            "turn-1",
+            ProviderEventKind::Turn,
+            ProviderEventPhase::Started,
+            "turn_started",
+            "Turn started",
+            "raw lifecycle",
+        ))
+        .unwrap();
+
+    app(temp.path())
+        .args(["archcar", "messages", &thread.id.to_string()])
+        .assert()
+        .success()
+        .stdout(contains("You\nRun tests\n\n"))
+        .stdout(contains("Assistant\nTests passed\n\n"))
+        .stdout(contains("Reasoning\nChecking failure output\n\n"))
+        .stdout(predicates::str::contains("turn_started").not())
+        .stdout(predicates::str::contains("raw lifecycle").not());
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command
@@ -211,6 +306,42 @@ fn app(root: &Path) -> AssertCommand {
         .env("XDG_STATE_HOME", root.join("xdg/state"))
         .env("XDG_CACHE_HOME", root.join("xdg/cache"));
     command
+}
+
+fn app_database_path(root: &Path) -> PathBuf {
+    root.join("xdg/data/archductor/archductor.db")
+}
+
+fn provider_event(
+    thread_id: i64,
+    item_id: &str,
+    kind: ProviderEventKind,
+    phase: ProviderEventPhase,
+    subtype: &str,
+    title: &str,
+    body: &str,
+) -> ProviderEventDraft {
+    ProviderEventDraft {
+        provider: "codex".to_owned(),
+        provider_event_id: Some(format!("evt-{item_id}")),
+        provider_item_id: Some(item_id.to_owned()),
+        provider_thread_id: Some("thread-1".to_owned()),
+        provider_turn_id: Some("turn-1".to_owned()),
+        parent_provider_item_id: None,
+        parent_provider_thread_id: None,
+        workspace_id: None,
+        chat_thread_id: Some(thread_id),
+        process_id: None,
+        phase,
+        kind,
+        provider_subtype: Some(subtype.to_owned()),
+        provider_sequence: Some(1),
+        occurred_at_ms: 42,
+        normalized_payload: json!({"title": title, "body": body}),
+        raw_json: json!({"method": subtype, "params": {"body": body}}),
+        schema_version: 1,
+        adapter_version: "test".to_owned(),
+    }
 }
 
 fn init_repo(path: PathBuf) -> PathBuf {
