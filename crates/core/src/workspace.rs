@@ -5350,6 +5350,21 @@ mutation($threadId: ID!) {{
         self.get_chat_thread(self.conn.last_insert_rowid())
     }
 
+    pub fn update_chat_thread_harness_metadata(
+        &self,
+        thread_id: i64,
+        harness_metadata: Option<&str>,
+    ) -> Result<ChatThreadRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET harness_metadata = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![harness_metadata, now, thread_id],
+        )?;
+        self.get_chat_thread(thread_id)
+    }
+
     pub fn list_chat_threads(&self, workspace_name: &str) -> Result<Vec<ChatThreadRecord>> {
         let workspace = self.get_by_name(workspace_name)?;
         let mut stmt = self.conn.prepare(
@@ -17667,6 +17682,31 @@ spotlight_testing = true
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].source, "control_command");
         assert_eq!(messages[2].role, "agent");
+    }
+
+    #[test]
+    fn chat_thread_harness_metadata_updates_per_thread_model() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+
+        let updated = store
+            .update_chat_thread_harness_metadata(thread.id, Some("model=gpt-5.6-luna"))
+            .unwrap();
+
+        assert_eq!(
+            updated.harness_metadata.as_deref(),
+            Some("model=gpt-5.6-luna")
+        );
+        assert_eq!(
+            store
+                .get_chat_thread_record(thread.id)
+                .unwrap()
+                .harness_metadata
+                .as_deref(),
+            Some("model=gpt-5.6-luna")
+        );
     }
 
     #[test]

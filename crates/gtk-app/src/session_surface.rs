@@ -392,72 +392,168 @@ pub fn agent_session_panel(
             selected_model.borrow().as_deref(),
         ),
         {
+            let provider_model_choices_for_menu = provider_model_choices.clone();
             let database_path = database_path.to_path_buf();
             let current_workspace_name = current_workspace_name.clone();
             let selected_harness = selected_harness.clone();
             let reasoning_mode = reasoning_mode.clone();
             let refresh_chat_surface = refresh_chat_surface.clone();
-            let switch_chat_harness = switch_chat_harness.clone();
             let selected_model = selected_model.clone();
             let pending_commands = pending_commands.clone();
             let selected_thread = selected_thread.clone();
+            let thread_state = thread_state.clone();
+            let app_state = app_state.clone();
             let sync_live_controls = sync_live_controls.clone();
             let archcar_bridge = archcar_bridge.clone();
             let archcar_ready_cache = archcar_ready_cache.clone();
             let inflight_archcar_actions = inflight_archcar_actions.clone();
+            let toast_manager = toast_manager.clone();
             Rc::new(move |index| {
-                let Some(choice) = provider_model_choices.get(index).cloned() else {
+                let Some(choice) = provider_model_choices_for_menu.get(index).cloned() else {
                     return;
                 };
                 let workspace_name = current_workspace_name.borrow().clone();
-                let kind = session_kind_from_provider(&choice.provider);
-                persist_selected_provider(&database_path, &workspace_name, &choice.provider);
-                select_harness_and_dispatch(
-                    selected_harness.as_ref(),
-                    reasoning_mode.as_ref(),
-                    kind,
-                    switch_chat_harness.borrow().as_ref(),
-                    refresh_chat_surface.borrow().as_ref(),
-                    None,
-                );
-                *selected_model.borrow_mut() = choice.model.clone();
-                if let Some(thread_id) = *selected_thread.borrow() {
-                    if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
-                        replace_pending_model_command(
-                            &pending_commands,
-                            thread_id,
-                            choice.model.as_deref(),
-                        );
-                        if let Ok(records) = WorkspaceStore::open(database_path.clone())
-                            .and_then(|store| store.list_thread_processes(thread_id))
-                        {
-                            if let Some(session_id) =
-                                any_running_archcar_codex_ready(&records, &archcar_ready_cache)
-                            {
-                                let pending_controls =
-                                    flush_pending_commands_for_send(&pending_commands, thread_id);
-                                for (index, control) in pending_controls.iter().enumerate() {
-                                    if !queue_archcar_control_send(
-                                        &archcar_bridge,
-                                        inflight_archcar_actions.as_ref(),
+                let current_kind = *selected_harness.borrow();
+                match model_selection_route(current_kind, &choice) {
+                    ModelSelectionRoute::SameProvider => {
+                        *selected_model.borrow_mut() = choice.model.clone();
+                        if let Some(thread_id) = *selected_thread.borrow() {
+                            let metadata = provider_model_harness_metadata(choice.model.as_deref());
+                            match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+                                store.update_chat_thread_harness_metadata(
+                                    thread_id,
+                                    metadata.as_deref(),
+                                )
+                            }) {
+                                Ok(updated) => {
+                                    replace_thread_state_record(thread_state.as_ref(), updated)
+                                }
+                                Err(err) => {
+                                    toast_manager.error(format!("Save chat model failed: {err:#}"));
+                                    warn!(
+                                        workspace = %workspace_name,
                                         thread_id,
-                                        session_id,
-                                        control.clone(),
+                                        error = %err,
+                                        "failed to persist selected chat model"
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(thread_id) = *selected_thread.borrow() {
+                            if current_kind == SessionKind::Codex {
+                                replace_pending_model_command(
+                                    &pending_commands,
+                                    thread_id,
+                                    choice.model.as_deref(),
+                                );
+                                if let Ok(records) = WorkspaceStore::open(database_path.clone())
+                                    .and_then(|store| store.list_thread_processes(thread_id))
+                                {
+                                    if let Some(session_id) = any_running_archcar_codex_ready(
+                                        &records,
+                                        &archcar_ready_cache,
                                     ) {
-                                        requeue_pending_controls(
+                                        let pending_controls = flush_pending_commands_for_send(
                                             &pending_commands,
                                             thread_id,
-                                            &pending_controls,
-                                            index,
                                         );
-                                        warn!(
-                                            thread_id,
-                                            session_id,
-                                            "archcar control send failed; requeued pending controls"
-                                        );
-                                        break;
+                                        for (index, control) in pending_controls.iter().enumerate()
+                                        {
+                                            if !queue_archcar_control_send(
+                                                &archcar_bridge,
+                                                inflight_archcar_actions.as_ref(),
+                                                thread_id,
+                                                session_id,
+                                                control.clone(),
+                                            ) {
+                                                requeue_pending_controls(
+                                                    &pending_commands,
+                                                    thread_id,
+                                                    &pending_controls,
+                                                    index,
+                                                );
+                                                warn!(
+                                                    thread_id,
+                                                    session_id,
+                                                    "archcar control send failed; requeued pending controls"
+                                                );
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    ModelSelectionRoute::CrossProvider(kind) => {
+                        let source_provider = session_kind_provider(current_kind);
+                        let source_messages = selected_thread.borrow().and_then(|thread_id| {
+                            WorkspaceStore::open(database_path.clone())
+                                .and_then(|store| store.list_chat_messages(thread_id))
+                                .ok()
+                        });
+                        let metadata = provider_model_harness_metadata(choice.model.as_deref());
+                        let title = default_chat_thread_title(kind, &thread_state.borrow());
+                        match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+                            let thread = store.create_chat_thread(
+                                &workspace_name,
+                                &choice.provider,
+                                &title,
+                                metadata.as_deref(),
+                            )?;
+                            if let Some(attachment) =
+                                source_messages.as_deref().and_then(|messages| {
+                                    model_switch_context_attachment(
+                                        source_provider,
+                                        &choice.provider,
+                                        messages,
+                                    )
+                                })
+                            {
+                                store.append_chat_message(
+                                    thread.id,
+                                    "system",
+                                    &attachment,
+                                    "model_switch_context",
+                                )?;
+                            }
+                            Ok(thread)
+                        }) {
+                            Ok(thread) => {
+                                *selected_harness.borrow_mut() = kind;
+                                if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+                                    *reasoning_mode.borrow_mut() = Some("high".to_owned());
+                                }
+                                *selected_model.borrow_mut() = choice.model.clone();
+                                thread_state.borrow_mut().insert(0, thread.clone());
+                                apply_thread_selection(
+                                    selected_thread.as_ref(),
+                                    Some(thread.id),
+                                    |thread_id| app_state.set_selected_chat_thread(thread_id),
+                                    || {},
+                                );
+                                if kind == SessionKind::Codex {
+                                    replace_pending_model_command(
+                                        &pending_commands,
+                                        thread.id,
+                                        choice.model.as_deref(),
+                                    );
+                                }
+                                if let Some(refresh_view) =
+                                    refresh_chat_surface.borrow().as_ref().cloned()
+                                {
+                                    refresh_view();
+                                }
+                            }
+                            Err(err) => {
+                                toast_manager
+                                    .error(format!("Create provider chat failed: {err:#}"));
+                                warn!(
+                                    workspace = %workspace_name,
+                                    provider = %choice.provider,
+                                    error = %err,
+                                    "failed to create provider chat for model selection"
+                                );
                             }
                         }
                     }
@@ -624,6 +720,9 @@ pub fn agent_session_panel(
         let selected_thread = selected_thread.clone();
         let last_render_signature = last_render_signature.clone();
         let selected_harness = selected_harness.clone();
+        let selected_model = selected_model.clone();
+        let provider_model_btn = provider_model_btn.clone();
+        let provider_model_choices = provider_model_choices.clone();
         let active_sessions = active_sessions.clone();
         let last_output = last_output.clone();
         let app_state = app_state.clone();
@@ -824,6 +923,26 @@ pub fn agent_session_panel(
                 |thread_id| app_state.set_selected_chat_thread(thread_id),
                 || update_composer_for_view(),
             );
+            if let Some(thread_id) = *selected_thread.borrow() {
+                if let Some(thread) = thread_state
+                    .borrow()
+                    .iter()
+                    .find(|thread| thread.id == thread_id)
+                    .cloned()
+                {
+                    let model = chat_thread_model(&thread);
+                    *selected_model.borrow_mut() = model.clone();
+                    let index = selected_provider_model_choice_index(
+                        provider_model_choices.as_ref(),
+                        session_kind_from_provider(&thread.provider),
+                        model.as_deref(),
+                    );
+                    if let Some(choice) = provider_model_choices.get(index) {
+                        provider_model_menu_set_child(&provider_model_btn, choice);
+                        provider_model_btn.set_tooltip_text(Some(&choice.button_label()));
+                    }
+                }
+            }
             if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
                 (external_chat_tabs.on_threads_changed)(
                     thread_state.borrow().clone(),
@@ -1290,7 +1409,10 @@ pub fn agent_session_panel(
                         &workspace_for_send,
                         session_kind_provider(selected_kind),
                         &title,
-                        None,
+                        provider_model_harness_metadata(
+                            selected_model_for_send.borrow().as_deref(),
+                        )
+                        .as_deref(),
                     )
                 })
             },
@@ -1342,17 +1464,22 @@ pub fn agent_session_panel(
                 return false;
             }
         };
+        let thread_messages_for_send = WorkspaceStore::open(db_for_send.clone())
+            .and_then(|store| store.list_chat_messages(thread_id))
+            .unwrap_or_default();
         let should_request_agent_metadata = !staged_review
             && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
-            && WorkspaceStore::open(db_for_send.clone())
-                .and_then(|store| store.list_chat_messages(thread_id))
-                .map(|messages| messages.is_empty() && is_default_chat_thread_title(&thread.title))
-                .unwrap_or(false);
-        let send_input = if should_request_agent_metadata {
+            && thread_messages_for_send.is_empty()
+            && is_default_chat_thread_title(&thread.title);
+        let mut send_input = if should_request_agent_metadata {
             archductor_metadata_injected_prompt(&command, &workspace_for_send)
         } else {
             command.clone()
         };
+        if let Some(attachment) = pending_model_switch_context_attachment(&thread_messages_for_send)
+        {
+            send_input = format!("{send_input}\n\n[Attachment: prior chat context]\n{attachment}");
+        }
         let visible_input = (send_input != command).then_some(command.clone());
         debug!(
             workspace = %workspace_for_send,
@@ -1988,6 +2115,7 @@ pub fn agent_session_panel(
         let database_path = database_path.clone();
         let current_workspace_name = current_workspace_name.clone();
         let selected_harness = selected_harness.clone();
+        let selected_model = selected_model.clone();
         let thread_state = thread_state.clone();
         let selected_thread = selected_thread.clone();
         let app_state = app_state.clone();
@@ -2004,12 +2132,13 @@ pub fn agent_session_panel(
                 return;
             }
             let title = default_chat_thread_title(kind, &thread_state.borrow());
+            let metadata = provider_model_harness_metadata(selected_model.borrow().as_deref());
             match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                 store.create_chat_thread(
                     &workspace_name,
                     session_kind_provider(kind),
                     &title,
-                    None,
+                    metadata.as_deref(),
                 )
             }) {
                 Ok(thread) => {
@@ -4008,6 +4137,12 @@ struct ProviderModelChoice {
     model: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelSelectionRoute {
+    SameProvider,
+    CrossProvider(SessionKind),
+}
+
 impl ProviderModelChoice {
     fn provider_label(&self) -> &'static str {
         provider_display_name(&self.provider)
@@ -4024,6 +4159,88 @@ impl ProviderModelChoice {
     fn icon_name(&self) -> &'static str {
         provider_icon_name(&self.provider)
     }
+}
+
+fn model_selection_route(
+    current_kind: SessionKind,
+    choice: &ProviderModelChoice,
+) -> ModelSelectionRoute {
+    let current_provider = session_kind_provider(current_kind);
+    if choice.provider == current_provider {
+        ModelSelectionRoute::SameProvider
+    } else {
+        ModelSelectionRoute::CrossProvider(session_kind_from_provider(&choice.provider))
+    }
+}
+
+fn provider_model_harness_metadata(model: Option<&str>) -> Option<String> {
+    SessionHarnessOptions {
+        model: model.map(str::to_owned),
+        ..SessionHarnessOptions::default()
+    }
+    .metadata()
+}
+
+fn chat_thread_model(thread: &ChatThreadRecord) -> Option<String> {
+    SessionHarnessOptions::from_metadata(thread.harness_metadata.as_deref()).model
+}
+
+fn replace_thread_state_record(
+    thread_state: &RefCell<Vec<ChatThreadRecord>>,
+    updated: ChatThreadRecord,
+) {
+    let mut threads = thread_state.borrow_mut();
+    if let Some(existing) = threads.iter_mut().find(|thread| thread.id == updated.id) {
+        *existing = updated;
+    }
+}
+
+fn model_switch_context_attachment(
+    source_provider: &str,
+    target_provider: &str,
+    messages: &[ChatMessageRecord],
+) -> Option<String> {
+    let history = messages
+        .iter()
+        .filter_map(|message| match message.role.as_str() {
+            "user" | "agent" => Some((message.role.as_str(), message.content.trim())),
+            _ => None,
+        })
+        .filter(|(_, body)| !body.is_empty())
+        .collect::<Vec<_>>();
+    if history.is_empty() {
+        return None;
+    }
+
+    let mut attachment = format!(
+        "Attached prior chat context from {} to {}.\n\
+Do not answer this attachment. Use it only for continuity and wait for the next real user message.\n\n\
+# Attached Transcript\n\n",
+        provider_display_name(source_provider),
+        provider_display_name(target_provider)
+    );
+    for (role, body) in history {
+        attachment.push_str(match role {
+            "user" => "## User\n",
+            "agent" => "## Agent\n",
+            _ => continue,
+        });
+        attachment.push_str(body);
+        attachment.push_str("\n\n");
+    }
+    Some(attachment.trim_end().to_owned())
+}
+
+fn pending_model_switch_context_attachment(messages: &[ChatMessageRecord]) -> Option<&str> {
+    let (attachment_index, attachment) = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.source == "model_switch_context")?;
+    let has_later_real_message = messages[attachment_index + 1..]
+        .iter()
+        .any(|message| matches!(message.role.as_str(), "user" | "agent"));
+    (!has_later_real_message).then_some(attachment.content.as_str())
 }
 
 fn provider_model_choices(
@@ -4064,7 +4281,12 @@ fn selected_provider_model_choice_index(
         .iter()
         .position(|choice| {
             choice.provider == provider
-                && choice.model.as_deref().unwrap_or("") == model.unwrap_or("")
+                && model.is_some_and(|model| choice.model.as_deref() == Some(model))
+        })
+        .or_else(|| {
+            choices
+                .iter()
+                .position(|choice| choice.provider == provider)
         })
         .unwrap_or(0)
 }
@@ -7005,6 +7227,19 @@ mod tests {
         }
     }
 
+    fn chat_message_record(id: i64, role: &str, content: &str, source: &str) -> ChatMessageRecord {
+        ChatMessageRecord {
+            id,
+            thread_id: 7,
+            role: role.to_owned(),
+            content: content.to_owned(),
+            source: source.to_owned(),
+            timeline_seq: Some(id),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
     #[test]
     fn harness_selection_updates_state_before_switch_callback() {
         let selected_harness = RefCell::new(SessionKind::Codex);
@@ -7027,6 +7262,72 @@ mod tests {
         assert_eq!(*selected_harness.borrow(), SessionKind::Claude);
         assert_eq!(reasoning_mode.borrow().as_deref(), Some("high"));
         assert_eq!(*observed.borrow(), Some(SessionKind::Claude));
+    }
+
+    #[test]
+    fn same_provider_model_selection_does_not_switch_chat_harness() {
+        let current = ProviderModelChoice {
+            provider: "codex".to_owned(),
+            model: Some("gpt-5.6-luna".to_owned()),
+        };
+
+        assert_eq!(
+            model_selection_route(SessionKind::Codex, &current),
+            ModelSelectionRoute::SameProvider
+        );
+    }
+
+    #[test]
+    fn cross_provider_model_selection_opens_provider_chat() {
+        let current = ProviderModelChoice {
+            provider: "claude".to_owned(),
+            model: Some("claude-fable-5".to_owned()),
+        };
+
+        assert_eq!(
+            model_selection_route(SessionKind::Codex, &current),
+            ModelSelectionRoute::CrossProvider(SessionKind::Claude)
+        );
+    }
+
+    #[test]
+    fn model_switch_attachment_keeps_only_user_and_agent_messages() {
+        let messages = vec![
+            chat_message_record(1, "user", "Fix auth", "user_send"),
+            chat_message_record(2, "system", "/model gpt-5.6-sol", "control_command"),
+            chat_message_record(3, "agent", "I found the callback bug.", "agent_reply"),
+        ];
+
+        let attachment = model_switch_context_attachment("codex", "claude", &messages).unwrap();
+
+        assert!(attachment.contains("Attached prior chat context"));
+        assert!(attachment.contains("from Codex to Claude"));
+        assert!(attachment.contains("## User"));
+        assert!(attachment.contains("Fix auth"));
+        assert!(attachment.contains("## Agent"));
+        assert!(attachment.contains("I found the callback bug."));
+        assert!(!attachment.contains("/model gpt-5.6-sol"));
+        assert!(!attachment.contains("control_command"));
+    }
+
+    #[test]
+    fn model_switch_attachment_is_pending_only_until_first_real_message() {
+        let pending = vec![ChatMessageRecord {
+            source: "model_switch_context".to_owned(),
+            role: "system".to_owned(),
+            content: "Attached context".to_owned(),
+            ..chat_message_record(1, "system", "Attached context", "model_switch_context")
+        }];
+        assert_eq!(
+            pending_model_switch_context_attachment(&pending),
+            Some("Attached context")
+        );
+
+        let consumed = vec![
+            chat_message_record(1, "system", "Attached context", "model_switch_context"),
+            chat_message_record(2, "user", "Continue", "user_send"),
+        ];
+        assert_eq!(pending_model_switch_context_attachment(&consumed), None);
     }
 
     #[test]
