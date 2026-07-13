@@ -3417,6 +3417,11 @@ fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -
 fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<CodexInlineEvent> {
     let title = provider_projection_display_title(item);
     let body = provider_projection_inline_event_body(item);
+    if item.render_class == ProjectionRenderClass::DiffCard {
+        if let Some(event) = provider_projection_file_change_inline_event(item, body.as_deref()) {
+            return Some(event);
+        }
+    }
     if matches!(
         item.render_class,
         ProjectionRenderClass::CommandCard
@@ -3455,6 +3460,175 @@ fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<Cod
         path: None,
         status: codex_inline_status_from_provider_projection(item.status),
     })
+}
+
+#[derive(Debug, Clone)]
+struct ProviderFileChangeSummary {
+    action: CoreCodexFileChangeAction,
+    path: String,
+    additions: Option<u32>,
+    deletions: Option<u32>,
+    diff: Option<String>,
+}
+
+fn provider_projection_file_change_inline_event(
+    item: &ProviderProjectionItem,
+    body: Option<&str>,
+) -> Option<CodexInlineEvent> {
+    let change = provider_file_change_from_raw_payload(item.raw_payload.as_deref())
+        .or_else(|| provider_file_change_from_body(body.unwrap_or_default()))?;
+    let display_name = read_value_display_name(&change.path);
+    let title = format!(
+        "{} {}",
+        codex_file_change_action_label(change.action),
+        display_name
+    );
+    let counts = codex_file_change_counts(change.additions, change.deletions);
+    let body = provider_file_change_body(&change);
+
+    Some(CodexInlineEvent {
+        kind: CodexInlineEventKind::Tool,
+        title,
+        subtitle: counts,
+        body: Some(body),
+        path: Some(PathBuf::from(change.path)),
+        status: codex_inline_status_from_provider_projection(item.status),
+    })
+}
+
+fn provider_file_change_body(change: &ProviderFileChangeSummary) -> String {
+    let mut header = format!(
+        "{} {}",
+        codex_file_change_action_label(change.action),
+        change.path
+    );
+    if let Some(counts) = codex_file_change_counts(change.additions, change.deletions) {
+        header.push_str(&format!(" ({counts})"));
+    }
+    if let Some(diff) = change
+        .diff
+        .as_deref()
+        .map(str::trim)
+        .filter(|diff| !diff.is_empty())
+    {
+        format!("{header}\n{diff}")
+    } else {
+        header
+    }
+}
+
+fn provider_file_change_from_raw_payload(
+    raw_payload: Option<&str>,
+) -> Option<ProviderFileChangeSummary> {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload?).ok()?;
+    let changes = payload.pointer("/params/item/changes")?.as_array()?;
+    let change = changes.first()?;
+    let path = change.get("path").and_then(serde_json::Value::as_str)?;
+    let action = provider_file_change_action(
+        change
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+    );
+    let diff = change
+        .get("diff")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .filter(|diff| !diff.trim().is_empty());
+    let (diff_additions, diff_deletions) = diff
+        .as_deref()
+        .map(provider_diff_counts)
+        .unwrap_or((None, None));
+
+    Some(ProviderFileChangeSummary {
+        action,
+        path: path.to_owned(),
+        additions: change
+            .get("additions")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .or(diff_additions),
+        deletions: change
+            .get("deletions")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .or(diff_deletions),
+        diff,
+    })
+}
+
+fn provider_file_change_from_body(body: &str) -> Option<ProviderFileChangeSummary> {
+    body.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (action, path) = provider_file_change_body_line(trimmed)?;
+        Some(ProviderFileChangeSummary {
+            action,
+            path: path.to_owned(),
+            additions: parse_file_change_count_from_text(trimmed, '+'),
+            deletions: parse_file_change_count_from_text(trimmed, '-'),
+            diff: None,
+        })
+    })
+}
+
+fn provider_file_change_body_line(line: &str) -> Option<(CoreCodexFileChangeAction, &str)> {
+    for (prefix, action) in [
+        ("added ", CoreCodexFileChangeAction::Added),
+        ("created ", CoreCodexFileChangeAction::Added),
+        ("edited ", CoreCodexFileChangeAction::Edited),
+        ("modified ", CoreCodexFileChangeAction::Edited),
+        ("changed ", CoreCodexFileChangeAction::Edited),
+        ("deleted ", CoreCodexFileChangeAction::Deleted),
+        ("removed ", CoreCodexFileChangeAction::Deleted),
+    ] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            return Some((action, path.split_whitespace().next()?));
+        }
+        let title_prefix = title_case_prefix(prefix);
+        if let Some(path) = line.strip_prefix(&title_prefix) {
+            return Some((action, path.split_whitespace().next()?));
+        }
+    }
+    None
+}
+
+fn title_case_prefix(prefix: &str) -> String {
+    let mut chars = prefix.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+}
+
+fn provider_file_change_action(kind: &str) -> CoreCodexFileChangeAction {
+    match kind.to_ascii_lowercase().as_str() {
+        "added" | "add" | "created" | "create" | "new" => CoreCodexFileChangeAction::Added,
+        "deleted" | "delete" | "removed" | "remove" => CoreCodexFileChangeAction::Deleted,
+        _ => CoreCodexFileChangeAction::Edited,
+    }
+}
+
+fn provider_diff_counts(diff: &str) -> (Option<u32>, Option<u32>) {
+    let mut additions = 0_u32;
+    let mut deletions = 0_u32;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            additions = additions.saturating_add(1);
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions = deletions.saturating_add(1);
+        }
+    }
+    (Some(additions), Some(deletions))
+}
+
+fn parse_file_change_count_from_text(text: &str, sign: char) -> Option<u32> {
+    text.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
+        .find_map(|token| {
+            let digits = token.strip_prefix(sign)?;
+            (!digits.is_empty())
+                .then(|| digits.parse::<u32>().ok())
+                .flatten()
+        })
 }
 
 fn provider_projection_inline_event_title(item: &ProviderProjectionItem) -> String {
@@ -3755,7 +3929,6 @@ fn chat_text_label(text: &str) -> Label {
     label.set_wrap(true);
     label.set_xalign(0.0);
     label.set_hexpand(true);
-    label.set_margin_bottom(18);
     label
 }
 
@@ -10892,6 +11065,43 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
+    fn provider_projection_file_change_items_render_as_edits_with_counts() {
+        let mut record = provider_event_record(
+            ProviderEventKind::DiffFileChange,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "File changes",
+            "body": "modified src/main.rs"
+        });
+        record.raw_json = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "changes": [
+                        {
+                            "path": "src/main.rs",
+                            "kind": "modified",
+                            "diff": "@@ -1 +1 @@\n-old\n+new\n"
+                        }
+                    ]
+                }
+            }
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Edited main.rs");
+        assert_eq!(inline.subtitle.as_deref(), Some("+1 -1"));
+        assert_eq!(inline_event_chip_label(&inline, false), "+ Edited main.rs");
+        assert!(inline_event_body_text(&inline).contains("-old"));
+        assert!(inline_event_body_text(&inline).contains("+new"));
+    }
+
+    #[test]
     fn subagent_projection_items_render_as_collapsible_inline_output() {
         let mut record = provider_event_record(
             ProviderEventKind::SubagentCollaboration,
@@ -10913,6 +11123,14 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             "+ Ran Review agent"
         );
         assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
+    }
+
+    #[test]
+    fn chat_text_labels_do_not_reserve_extra_bottom_gap() {
+        let source = include_str!("session_surface.rs");
+        let forbidden = ["set_margin_bottom", "(18)"].join("");
+
+        assert!(!source.contains(&forbidden));
     }
 
     #[test]

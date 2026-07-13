@@ -2046,7 +2046,7 @@ popover.context-menu-popover arrow {
 .chat-agent-text {
     color: #c6c6c6;
     line-height: 1.55;
-    margin-bottom: 10px;
+    margin-bottom: 0;
 }
 .chat-reasoning-text {
     color: #8f8f8f;
@@ -2072,6 +2072,17 @@ popover.context-menu-popover arrow {
     min-height: 14px;
     min-width: 0;
     padding: 0 2px;
+}
+button.chat-inline-event-chip {
+    margin: 0;
+    min-height: 14px;
+    min-width: 0;
+    padding: 0 2px;
+}
+.chat-inline-event-chip label {
+    margin: 0;
+    min-height: 0;
+    padding: 0;
 }
 .chat-inline-event-tool .chat-inline-event-chip {
     border-color: #2dd4bf;
@@ -2731,11 +2742,15 @@ mod tests {
         assert!(css.contains("min-height: 14px;"));
         assert!(css.contains("padding: 0 2px;"));
         assert!(css.contains("min-width: 0;"));
+        assert!(css.contains("button.chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-chip label"));
+        assert!(css.contains("margin: 0;"));
         assert!(css.contains(".chat-inline-event-command .chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-subagent .chat-inline-event-chip"));
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-bottom: 10px;"));
+        assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
         assert!(css.contains(".chat-inline-event {\n    background-color: transparent;"));
         assert!(css.contains("margin-bottom: 0;"));
         assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
