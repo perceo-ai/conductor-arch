@@ -2058,7 +2058,7 @@ popover.context-menu-popover arrow {
     background-color: transparent;
     border: none;
     border-radius: 0;
-    margin-bottom: 8px;
+    margin-bottom: 4px;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -2069,9 +2069,9 @@ popover.context-menu-popover arrow {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     font-weight: 600;
-    min-height: 24px;
+    min-height: 20px;
     min-width: 0;
-    padding: 2px 8px;
+    padding: 1px 6px;
 }
 .chat-inline-event-tool .chat-inline-event-chip {
     border-color: #2dd4bf;
@@ -2113,7 +2113,7 @@ popover.context-menu-popover arrow {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     line-height: 1.45;
-    padding: 10px;
+    padding: 8px;
 }
 .chat-inline-event-loading {
     color: #b6c7e8;
@@ -2728,6 +2728,8 @@ mod tests {
         assert!(css.contains(".chat-inline-event-chip"));
         assert!(css.contains("border-radius: 6px;"));
         assert!(css.contains("font-size: 11px;"));
+        assert!(css.contains("min-height: 20px;"));
+        assert!(css.contains("padding: 1px 6px;"));
         assert!(css.contains("min-width: 0;"));
         assert!(css.contains(".chat-inline-event-command .chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
@@ -2735,7 +2737,7 @@ mod tests {
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-inline-event {\n    background-color: transparent;"));
-        assert!(css.contains("margin-bottom: 8px;"));
+        assert!(css.contains("margin-bottom: 4px;"));
         assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
         assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
         assert!(!css.contains(".lc-accent-green .suggested-action"));

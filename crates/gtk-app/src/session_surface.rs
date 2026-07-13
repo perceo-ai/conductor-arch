@@ -2658,6 +2658,9 @@ fn parse_session_transcript_inline_event(
     body: &str,
 ) -> Option<CodexInlineEvent> {
     if let Some(command) = header.trim().strip_prefix("Ran ") {
+        if let Some(event) = read_only_command_inline_event(command, body) {
+            return Some(event);
+        }
         return Some(CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
             title: command.trim().to_owned(),
@@ -2694,19 +2697,28 @@ fn read_file_inline_event(
     body: &str,
 ) -> Option<CodexInlineEvent> {
     let path = read_file_path_from_header(header)?;
-    let title = match role {
-        SessionTranscriptRole::Skill => skill_name_from_read_header(header)
-            .map(str::to_owned)
-            .unwrap_or_else(|| path.display().to_string()),
-        _ => format!("Read {}", path.display()),
+    let title = if let Some(skill_name) = skill_name_for_skill_md_read(
+        &path,
+        skill_name_from_read_header(header).map(str::to_owned),
+    ) {
+        format!("Read SKILL.md for {skill_name}")
+    } else {
+        format!("Read {}", read_path_display_name(&path))
     };
+    let is_skill_read =
+        role == SessionTranscriptRole::Skill || skill_name_for_skill_md_read(&path, None).is_some();
     Some(CodexInlineEvent {
-        kind: match role {
-            SessionTranscriptRole::Skill => CodexInlineEventKind::Skill,
-            _ => CodexInlineEventKind::Tool,
+        kind: if is_skill_read {
+            CodexInlineEventKind::Skill
+        } else {
+            CodexInlineEventKind::Tool
         },
         title,
-        subtitle: Some("File preview".to_owned()),
+        subtitle: Some(if is_skill_read {
+            "Skill".to_owned()
+        } else {
+            "File preview".to_owned()
+        }),
         body: Some(body.to_owned()),
         path: Some(path),
         status: CodexInlineEventStatus::Complete,
@@ -2741,6 +2753,101 @@ fn skill_name_from_read_header(header: &str) -> Option<&str> {
     let end = header[start + 1..].find(')')? + start + 1;
     let skill = header[start + 1..end].trim();
     (!skill.is_empty()).then_some(skill)
+}
+
+fn read_only_command_inline_event(command: &str, body: &str) -> Option<CodexInlineEvent> {
+    let path = read_only_command_path(command)?;
+    let title = if let Some(skill_name) = skill_name_for_skill_md_read(&path, None) {
+        format!("Read SKILL.md for {skill_name}")
+    } else {
+        format!("Read {}", read_path_display_name(&path))
+    };
+    let is_skill_read = skill_name_for_skill_md_read(&path, None).is_some();
+    Some(CodexInlineEvent {
+        kind: if is_skill_read {
+            CodexInlineEventKind::Skill
+        } else {
+            CodexInlineEventKind::Tool
+        },
+        title,
+        subtitle: Some(if is_skill_read {
+            "Skill".to_owned()
+        } else {
+            "File preview".to_owned()
+        }),
+        body: Some(body.to_owned()),
+        path: Some(path),
+        status: codex_event_status_from_line(body),
+    })
+}
+
+fn read_only_command_path(command: &str) -> Option<PathBuf> {
+    let trimmed = command.trim();
+    let executable = trimmed.split_whitespace().next()?;
+    if !matches!(
+        executable,
+        "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "batcat" | "less" | "more"
+    ) {
+        return None;
+    }
+    trimmed
+        .split_whitespace()
+        .filter_map(clean_read_command_path_token)
+        .find(|token| is_readable_path_token(token))
+        .map(PathBuf::from)
+}
+
+fn clean_read_command_path_token(token: &str) -> Option<&str> {
+    let trimmed = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    });
+    if let Some(index) = trimmed.find("SKILL.md") {
+        return Some(&trimmed[..index + "SKILL.md".len()]);
+    }
+    Some(trimmed).filter(|value| {
+        !value.starts_with('-')
+            && !value.chars().all(|ch| ch.is_ascii_digit() || ch == ',')
+            && !matches!(*value, "|" | "&&" | "||" | "\\")
+    })
+}
+
+fn read_path_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| read_value_display_name(&path.display().to_string()))
+}
+
+fn read_value_display_name(value: &str) -> String {
+    let trimmed = value.trim().trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    });
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+fn skill_name_for_skill_md_read(path: &Path, explicit_name: Option<String>) -> Option<String> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+        return None;
+    }
+    explicit_name.or_else(|| {
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 fn merge_chat_timeline_for_render(
@@ -3114,6 +3221,23 @@ fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -
 }
 
 fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<CodexInlineEvent> {
+    let title = provider_projection_display_title(item);
+    let body = provider_projection_inline_event_body(item);
+    if matches!(
+        item.render_class,
+        ProjectionRenderClass::CommandCard
+            | ProjectionRenderClass::ProcessCard
+            | ProjectionRenderClass::BackgroundCard
+    ) {
+        if let Some(mut event) =
+            read_only_command_inline_event(&title, body.as_deref().unwrap_or_default())
+        {
+            event.body = body;
+            event.status = codex_inline_status_from_provider_projection(item.status);
+            return Some(event);
+        }
+    }
+
     let kind = match item.render_class {
         ProjectionRenderClass::SkillCard => CodexInlineEventKind::Skill,
         ProjectionRenderClass::CommandCard
@@ -3128,7 +3252,6 @@ fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<Cod
         _ => return None,
     };
     let title = provider_projection_inline_event_title(item);
-    let body = provider_projection_inline_event_body(item);
 
     Some(CodexInlineEvent {
         kind,
@@ -3148,7 +3271,7 @@ fn provider_projection_inline_event_title(item: &ProviderProjectionItem) -> Stri
             format!("Ran {trimmed}")
         }
         ProjectionRenderClass::FileCard | ProjectionRenderClass::DiffCard => {
-            format!("Read {trimmed}")
+            format!("Read {}", read_value_display_name(trimmed))
         }
         ProjectionRenderClass::SkillCard => format!("Read {trimmed}"),
         ProjectionRenderClass::PluginCard => format!("Used {trimmed}"),
@@ -3762,6 +3885,9 @@ fn configure_inline_event_chip_label(label: &Label, text: &str) {
 }
 
 fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
+    if inline_event_title_is_action_label(&event.title) {
+        return event.title.clone();
+    }
     event
         .path
         .as_ref()
@@ -3770,6 +3896,12 @@ fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| event.title.clone())
+}
+
+fn inline_event_title_is_action_label(title: &str) -> bool {
+    ["Ran ", "Read ", "Used ", "Opened "]
+        .iter()
+        .any(|prefix| title.starts_with(prefix))
 }
 
 fn raw_write_tool_inline_event(header: &str, body: &str) -> Option<CodexInlineEvent> {
@@ -4023,9 +4155,9 @@ fn extract_local_path(line: &str) -> Option<PathBuf> {
 }
 
 fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
-    let group = GBox::new(Orientation::Vertical, 8);
+    let group = GBox::new(Orientation::Vertical, 4);
     group.set_hexpand(true);
-    group.set_margin_bottom(18);
+    group.set_margin_bottom(8);
     for event in events {
         group.append(&inline_event_widget(event));
     }
@@ -4033,7 +4165,7 @@ fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
 }
 
 fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
-    let root = GBox::new(Orientation::Vertical, 8);
+    let root = GBox::new(Orientation::Vertical, 4);
     root.add_css_class("chat-inline-event");
     root.add_css_class(inline_event_type_css_class(event));
     if let Some(class) = inline_event_status_css_class(event.status) {
@@ -4063,7 +4195,7 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     body.set_selectable(true);
     body.set_wrap(true);
     body.set_xalign(0.0);
-    body.set_margin_top(2);
+    body.set_margin_top(0);
     let body_revealer = Revealer::new();
     body_revealer.set_transition_type(RevealerTransitionType::None);
     body_revealer.set_transition_duration(0);
@@ -8891,11 +9023,66 @@ fix it
         .unwrap();
 
         assert_eq!(tool.kind, CodexInlineEventKind::Tool);
+        assert_eq!(tool.title, "Read result.txt");
         assert_eq!(tool.path.as_deref(), Some(tool_path.as_path()));
+        assert_eq!(inline_event_chip_label(&tool, false), "+ Read result.txt");
         assert!(inline_event_body_text(&tool).contains("tool file contents"));
         assert_eq!(skill.kind, CodexInlineEventKind::Skill);
+        assert_eq!(skill.title, "Read SKILL.md for graphify");
         assert_eq!(skill.path.as_deref(), Some(skill_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&skill, false),
+            "+ Read SKILL.md for graphify"
+        );
         assert!(inline_event_body_text(&skill).contains("name: graphify"));
+    }
+
+    #[test]
+    fn read_only_shell_commands_render_as_file_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("session_surface.rs");
+        fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!("Ran sed -n '1,220p' {}", source_path.display()),
+            "fn main() {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Tool);
+        assert_eq!(read.title, "Read session_surface.rs");
+        assert_eq!(read.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn read_only_shell_commands_render_skill_md_as_skill_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("graphify");
+        fs::create_dir(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        fs::write(&skill_path, "---\nname: graphify\n---").unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!("Ran cat '{}'", skill_path.display()),
+            "---\nname: graphify\n---",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Skill);
+        assert_eq!(read.title, "Read SKILL.md for graphify");
+        assert_eq!(read.subtitle.as_deref(), Some("Skill"));
+        assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read SKILL.md for graphify"
+        );
     }
 
     #[test]
@@ -9755,7 +9942,7 @@ I summarized the result.
         let edit_events = session_transcript_inline_events(&edit);
 
         assert_eq!(skill_events[0].kind, CodexInlineEventKind::Skill);
-        assert_eq!(skill_events[0].title, "graphify");
+        assert_eq!(skill_events[0].title, "Read SKILL.md for graphify");
         assert!(skill_events[0]
             .body
             .as_deref()
@@ -10235,6 +10422,12 @@ I summarized the result.
                 "+ Read README.md",
             ),
             (
+                ProviderEventKind::FileSystem,
+                Some("read"),
+                serde_json::json!({"title": "/tmp/archductor/session_surface.rs", "body": "fn main() {}"}),
+                "+ Read session_surface.rs",
+            ),
+            (
                 ProviderEventKind::SkillPluginHook,
                 None,
                 serde_json::json!({"title": "skill-creator", "body": "loaded"}),
@@ -10252,6 +10445,29 @@ I summarized the result.
             assert_eq!(inline_event_chip_label(&inline, false), label);
             assert!(!inline_event_expands_body_by_default(&inline));
         }
+    }
+
+    #[test]
+    fn provider_projection_read_only_commands_render_as_reads() {
+        let mut record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "sed -n '1,220p' crates/gtk-app/src/session_surface.rs",
+            "body": "fn agent_session_panel() {}"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Read session_surface.rs");
+        assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Read session_surface.rs"
+        );
     }
 
     #[test]
