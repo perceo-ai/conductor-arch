@@ -1,0 +1,60 @@
+README.md
+  s_02f6ea75142afc::t_bc596be7a52964 46,81
+crates/gtk-app/src/pty_inspector.rs
+  s_02f6ea75142afc::t_bc596be7a52964 209-213
+  s_02f6ea75142afc::t_4d43b49ce306f7 1158-1162
+  s_02f6ea75142afc::t_6ea799e1b8c020 1157
+crates/gtk-app/src/theme.rs
+  s_02f6ea75142afc::t_c701bcb5b6de9a 2713,2716-2720,2748-2753,2763-2765,2788,2790,2792,2794
+  s_02f6ea75142afc::t_a1c4cf456e7fad 2714-2715
+crates/core/src/archcar/session.rs
+  s_02f6ea75142afc::t_9f67b99e04c50e 230,555
+  s_02f6ea75142afc::t_86ebc39d9e44d2 1612,1615-1617,1625,1627,1631,1634-1655
+  s_02f6ea75142afc::t_7add95d7a96fe6 1837,1848-1860
+  s_02f6ea75142afc::t_0b162a87613b5e 1897-1911,1924,2542
+  s_02f6ea75142afc::t_699cb2c3371d0b 2379-2381,2446-2448,2503,2505-2511,2513-2518,2564-2566
+  s_02f6ea75142afc::t_957d82f5baf782 1775,1779-1800
+  s_02f6ea75142afc::t_0f5635c3946dc5 8,99-109
+  s_02f6ea75142afc::t_dbf596f4d0795d 2520-2530
+  s_02f6ea75142afc::t_62d8a9e2497f5f 839,1912,1921-1922,1925-1938,1945,1956-1961
+  s_02f6ea75142afc::t_d568a2be9dc828 2532
+  s_02f6ea75142afc::t_851d99a64a60f5 2360,2392-2403,2459-2468,2492-2498,2500,2519,2531,2533
+  s_02f6ea75142afc::t_ca3397b91add7d 2054
+  s_02f6ea75142afc::t_ed2cd3805c567a 96-98,364-366,766-768,829-838
+  s_02f6ea75142afc::t_a3c4daef8a8018 1497
+  s_02f6ea75142afc::t_e24ed3b682b1eb 1515-1563,1567
+  s_02f6ea75142afc::t_1868cac72976fc 2501-2502,2504,2512,2534-2541
+  s_02f6ea75142afc::t_7d48a65c8461fd 2499
+  s_02f6ea75142afc::t_22dc6f7a2fbfff 840,1962,2543
+CLAUDE.md
+  s_02f6ea75142afc::t_bc596be7a52964 7
+crates/core/src/codex_tui.rs
+  s_02f6ea75142afc::t_bf5d1ea8106047 2018-2020
+  s_02f6ea75142afc::t_bc596be7a52964 854-856
+  s_02f6ea75142afc::t_1aee590f8982c7 2017
+crates/gtk-app/src/sidebar.rs
+  s_02f6ea75142afc::t_2e04ec48b73ee8 926,1440-1445,1604
+  s_02f6ea75142afc::t_4f13ea266ecb93 1557,1593-1603
+  s_02f6ea75142afc::t_c205d075d2a73e 836-838,922-924,927,992-993,1004-1010
+  s_02f6ea75142afc::t_e8c235d286495a 1446-1447
+docs/conductor-gui-mvp-handoff.md
+  s_02f6ea75142afc::t_bc596be7a52964 14,53
+crates/cli/src/main.rs
+  s_02f6ea75142afc::t_bc596be7a52964 1464,1475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "516d0be63db358c31bb072900928dba5021a76dc",
+  "prompts": {},
+  "sessions": {
+    "s_02f6ea75142afc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5ae0-30c7-7a82-8ac3-bbe19368b8bd",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
