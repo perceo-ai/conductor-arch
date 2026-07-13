@@ -1,0 +1,159 @@
+Makefile
+  s_2fd338f0b53281::t_34d70059276efc 20,25,32,35
+docs/release-readiness.md
+  s_2fd338f0b53281::t_34d70059276efc 3,23,43,79-80,86,89
+packaging/flatpak/io.github.pranavkannepalli.archductor.desktop
+  s_2fd338f0b53281::t_05ccc954ecf5bd 2,4-6
+crates/gtk-app/src/archcar_async.rs
+  s_2fd338f0b53281::t_34d70059276efc 10-11,14-15
+  s_2fd338f0b53281::t_41951d6b0dc596 16
+crates/core/tests/fixtures/pty_corpus/raw/success_ansi_tool_output.json
+  s_2fd338f0b53281::t_34d70059276efc 6
+crates/cli/src/main.rs
+  s_2fd338f0b53281::t_b7527440052ca2 28
+  s_2fd338f0b53281::t_34d70059276efc 2-3,5,7-9,12,27,905,1351,1359,1403,1504,1526,2043,2064,2089,2117,2215,2244,2271,2301
+  s_2fd338f0b53281::t_1c8b69a0d1b069 4,6,17,2207
+crates/gtk-app/src/pty_inspector.rs
+  s_2fd338f0b53281::t_41951d6b0dc596 1-3
+  s_2fd338f0b53281::t_34d70059276efc 483,1013,1017
+crates/gtk-app/src/settings.rs
+  s_2fd338f0b53281::t_34d70059276efc 2-4,293,366
+  s_2fd338f0b53281::t_41951d6b0dc596 11-14
+  s_2fd338f0b53281::t_a0542b67bceb0e 15
+crates/gtk-app/src/setup.rs
+  s_2fd338f0b53281::t_34d70059276efc 36
+  s_2fd338f0b53281::t_41951d6b0dc596 2,278-280
+  s_2fd338f0b53281::t_e750d09fc67ab9 281
+crates/cli/tests/cli_sessions.rs
+  s_2fd338f0b53281::t_34d70059276efc 202,230,232,249
+crates/core/tests/pty_parser_fixture_corpus.rs
+  s_2fd338f0b53281::t_34d70059276efc 4
+crates/gtk-app/src/history.rs
+  s_2fd338f0b53281::t_41951d6b0dc596 1-2
+  s_2fd338f0b53281::t_34d70059276efc 527,550,646
+docs/deploy-and-local-test.md
+  s_2fd338f0b53281::t_07a85bb4a5e059 304-306
+  s_2fd338f0b53281::t_34d70059276efc 3,55,62-63,69-70,76,82-85,236-241,247-251,257-263,269-279,290-292,294-295,302-303,307-309,315-316,323,331-333,368-371,374-375,381-382
+claude/CLAUDE.md
+  s_2fd338f0b53281::t_34d70059276efc 27
+packaging/aur/PKGBUILD
+  s_2fd338f0b53281::t_05ccc954ecf5bd 5
+  s_2fd338f0b53281::t_34d70059276efc 2,21-26
+docs/superpowers/specs/2026-06-21-settings-redesign-design.md
+  s_2fd338f0b53281::t_34d70059276efc 114
+crates/archcar/Cargo.toml
+  s_2fd338f0b53281::t_34d70059276efc 14
+crates/core/src/workspace.rs
+  s_2fd338f0b53281::t_34d70059276efc 3350,4220,8074,8099,8103,8457,8459,9179,9181,9531,9533,10123,10125,10192,10194,10259,10261,10367,10369,10696,10698,10766,10768,10857,10859,10929,10931,10995,10997,11065,11067,11139,11141,11223,11225,11300,11302,12306,12308,12386,12388,12460,12462,12527,12529,12637,12639,12741,12743,12825,12827,12923,12925,13010,13012,13099,13101,13185,13187,13258,13260,13341,13343,13452,13454,13583,13585,14577,14579,14622,14624,14673,14675,14764,14766,16414,16416,16509,16626,16628,16973,16975,17077,17322,17324,17500,17508,17525,18657,18659,18861,18863
+  s_2fd338f0b53281::t_41951d6b0dc596 8122-8123,16506
+crates/core/tests/fixtures/pty_corpus/raw/failure_command_error.json
+  s_2fd338f0b53281::t_34d70059276efc 6
+crates/gtk-app/src/logger.rs
+  s_2fd338f0b53281::t_34d70059276efc 2,60,183
+  s_2fd338f0b53281::t_e2d9224104f0d7 58-59
+packaging/archductor-gtk.desktop
+  s_2fd338f0b53281::t_05ccc954ecf5bd 2,4-6
+docs/superpowers/specs/2026-07-02-premium-project-setup-flow-design.md
+  s_2fd338f0b53281::t_34d70059276efc 5
+packaging/flatpak/io.github.pranavkannepalli.archductor.appdata.xml
+  s_2fd338f0b53281::t_05ccc954ecf5bd 3,6-7,10,45-46
+crates/gtk-app/src/terminal.rs
+  s_2fd338f0b53281::t_34d70059276efc 221,257,289,443,2859
+  s_2fd338f0b53281::t_41951d6b0dc596 2-6
+crates/gtk-app/src/sidebar.rs
+  s_2fd338f0b53281::t_41951d6b0dc596 2-4
+packaging/appimage/archductor.AppDir/archductor.desktop
+  s_2fd338f0b53281::t_05ccc954ecf5bd 2,4-5,9
+scripts/release-readiness.sh
+  s_2fd338f0b53281::t_34d70059276efc 8,13,86-87,90,117-118,137-139,141
+crates/core/src/paths.rs
+  s_2fd338f0b53281::t_34d70059276efc 20,23,26
+  s_2fd338f0b53281::t_41951d6b0dc596 21-22
+docs/manual-testing-checklist.md
+  s_2fd338f0b53281::t_34d70059276efc 1,14,16-17,28,30,81,103,147,162,166,252-253,265,277,281,283,297,299,301,342,344
+crates/core/tests/fixtures/pty_corpus/expected/failure_command_error.json
+  s_2fd338f0b53281::t_34d70059276efc 4-5
+docs/superpowers/specs/2026-06-21-archductor-docs-parity-design.md
+  s_2fd338f0b53281::t_34d70059276efc 5,109,397
+docs/archductor-docs-parity-map.md
+  s_2fd338f0b53281::t_34d70059276efc 3
+progress.md
+  s_2fd338f0b53281::t_34d70059276efc 5,35-40,42,59-61,64,69-71,73-75,77,80-81,90,93,104,121,134-137,146-147,154-155,161-165,176-178,182-183,186-188,197-199,208,217-218,221,223,226-227
+README.md
+  s_2fd338f0b53281::t_34d70059276efc 1,3,76,97-100,106,137,156-157,319-321,510-562,568-571
+crates/gtk-app/src/workspace_command_center.rs
+  s_2fd338f0b53281::t_41951d6b0dc596 10,5740,5748,8923-8924,8933
+  s_2fd338f0b53281::t_34d70059276efc 2-6,364,2005,2269,5319,5324-5325,5706,5757-5758,7179,7642,8008-8009,8035-8036,8050,8052-8053,8153,8161,8225,8240,8261,8272,8295,8303,8594,8616,8707,8717,8722,8729,8776,8781,8879,8902,8997,9007,9012,9019,9055,9066,9102,9112,9117,9136,9146,9154,9191
+  s_2fd338f0b53281::t_3f6444cbef0df6 7-9
+crates/gtk-app/Cargo.toml
+  s_2fd338f0b53281::t_34d70059276efc 2,9,13
+crates/core/src/lib.rs
+  s_2fd338f0b53281::t_34d70059276efc 41
+crates/cli/Cargo.toml
+  s_2fd338f0b53281::t_34d70059276efc 2,9,15
+crates/gtk-app/src/projects.rs
+  s_2fd338f0b53281::t_34d70059276efc 1064,1225,1233-1234,1823,1839,1870,1966,2203,2209
+  s_2fd338f0b53281::t_41951d6b0dc596 2-4
+crates/archcar/src/main.rs
+  s_2fd338f0b53281::t_45abf28a756d4f 4
+  s_2fd338f0b53281::t_34d70059276efc 5
+crates/core/src/archcar/session.rs
+  s_2fd338f0b53281::t_34d70059276efc 1254,1256
+crates/core/src/codex_tui.rs
+  s_2fd338f0b53281::t_34d70059276efc 2077,2156,2249,2271,2295,2394,2412,2604,2627,2647,2662
+crates/gtk-app/src/dashboard.rs
+  s_2fd338f0b53281::t_34d70059276efc 1-3
+packaging/README.md
+  s_2fd338f0b53281::t_34d70059276efc 55,62,74-77,81-82,89,112,115
+docs/ui-sketches/archductor-ui-sketches.md
+  s_2fd338f0b53281::t_05ccc954ecf5bd 1,3,15-17
+crates/gtk-app/src/state.rs
+  s_2fd338f0b53281::t_34d70059276efc 5
+crates/core/tests/fixtures/pty_corpus/expected/success_ansi_tool_output.json
+  s_2fd338f0b53281::t_34d70059276efc 4
+crates/core/Cargo.toml
+  s_2fd338f0b53281::t_34d70059276efc 2
+crates/core/tests/session_event_model.rs
+  s_2fd338f0b53281::t_34d70059276efc 1,4,9,12,184
+crates/gtk-app/src/session_surface.rs
+  s_2fd338f0b53281::t_41951d6b0dc596 26-31,2809,2811,2848
+  s_2fd338f0b53281::t_34d70059276efc 1,4-5,11-12,15,19-22,2810,2814,2829,2862-2864,5801,6814-6815,7417,7434,8188,8209
+crates/core/src/archcar/server.rs
+  s_2fd338f0b53281::t_34d70059276efc 1367,1369,1486
+crates/gtk-app/src/main.rs
+  s_2fd338f0b53281::t_34d70059276efc 51,256,272-273,337,615,1469,1471,1560-1561,1654,1661,1778,1780
+  s_2fd338f0b53281::t_41951d6b0dc596 28-30,1610-1612,1621-1623,1632
+crates/core/tests/fixtures/codex_tool_skill_file_events.txt
+  s_2fd338f0b53281::t_34d70059276efc 1
+nfpm.yaml
+  s_2fd338f0b53281::t_05ccc954ecf5bd 10
+  s_2fd338f0b53281::t_34d70059276efc 1,13,18-19,23-24,28-29,33-34,39
+Cargo.lock
+  s_2fd338f0b53281::t_73b8e3099fdf2b 75,81-133
+docs/ui-sketches/archductor-main-workspace.svg
+  s_2fd338f0b53281::t_4e18f62814ac40 2,91
+docs/ui-sketches/archductor-new-workspace.svg
+  s_2fd338f0b53281::t_5870279aa57505 2
+docs/ui-sketches/archductor-review-checks.svg
+  s_2fd338f0b53281::t_3583b037d119e8 2
+packaging/appimage/archductor.AppDir/AppRun
+  s_2fd338f0b53281::t_81cad9ac55f734 2,8,10
+packaging/flatpak/io.github.pranavkannepalli.archductor.yml
+  s_2fd338f0b53281::t_4f1f02f3d68b09 1,8,26,30,34-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "856af9089335158ee464dd82d9ef7d9a6a2dae97",
+  "prompts": {},
+  "sessions": {
+    "s_2fd338f0b53281": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5852-b907-7720-b006-3980f27dafb1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
