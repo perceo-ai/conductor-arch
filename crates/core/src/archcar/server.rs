@@ -403,9 +403,10 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
         .into_iter()
         .filter(provider_projection_item_is_relevant_chat_event)
         .collect::<Vec<_>>();
-    let has_provider_user_anchors = provider_items
-        .iter()
-        .any(|item| item.render_class.role_label() == "user");
+    let has_provider_user_anchors = provider_items.iter().any(|item| {
+        item.render_class.role_label() == "user"
+            && !provider_projection_item_text(item).trim().is_empty()
+    });
     if !has_provider_user_anchors {
         messages.append(&mut persisted_messages);
     }
@@ -1733,6 +1734,37 @@ mod tests {
                 "assistant:provider_event:native answer",
             ]
         );
+    }
+
+    #[test]
+    fn session_messages_ignore_empty_provider_user_anchors() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "persisted prompt", "user_send")
+            .unwrap();
+        let event_store = ProviderEventStore::new(&db_path);
+        event_store
+            .upsert_event(&provider_event_with_sequence(
+                thread.id,
+                1,
+                ProviderEventKind::UserInput,
+                "user-1",
+                "",
+            ))
+            .unwrap();
+
+        let rendered = session_messages_for_thread(&db_path, thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|message| format!("{}:{}:{}", message.role, message.source, message.content))
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["user:user_send:persisted prompt"]);
     }
 
     #[test]

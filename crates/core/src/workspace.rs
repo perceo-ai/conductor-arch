@@ -33,7 +33,7 @@ use crate::terminal_logs::{
     terminal_log_preview,
 };
 use crate::todos::parse_context_todos;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -6376,9 +6376,12 @@ mutation($threadId: ID!) {{
             port_block_size > 0,
             "workspace port block size must be greater than 0"
         );
+        let occupied_port_bases = self.workspace_port_bases()?;
         let mut port = WORKSPACE_PORT_START;
         loop {
-            if workspace_port_block_available(port, port_block_size, &port_available) {
+            if !workspace_port_block_conflicts_existing(port, port_block_size, &occupied_port_bases)
+                && workspace_port_block_available(port, port_block_size, &port_available)
+            {
                 return Ok(port);
             }
             let next = u32::from(port) + u32::from(port_block_size);
@@ -6388,6 +6391,19 @@ mutation($threadId: ID!) {{
             );
             port = next as u16;
         }
+    }
+
+    fn workspace_port_bases(&self) -> Result<std::collections::HashSet<u16>> {
+        let mut stmt = self.conn.prepare("SELECT port_base FROM workspaces")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|port_base| {
+                u16::try_from(port_base)
+                    .map_err(|err| anyhow!("invalid workspace port_base {port_base}: {err}"))
+            })
+            .collect()
     }
 
     fn resolve_workspace_name(
@@ -8778,6 +8794,29 @@ fn workspace_port_block_available(
     (0..port_block_size).all(|offset| port_base.checked_add(offset).is_some_and(&port_available))
 }
 
+fn workspace_port_block_conflicts_existing(
+    port_base: u16,
+    port_block_size: u16,
+    occupied_port_bases: &std::collections::HashSet<u16>,
+) -> bool {
+    occupied_port_bases.iter().copied().any(|occupied| {
+        workspace_port_ranges_overlap(port_base, port_block_size, occupied, port_block_size)
+    })
+}
+
+fn workspace_port_ranges_overlap(
+    left_start: u16,
+    left_size: u16,
+    right_start: u16,
+    right_size: u16,
+) -> bool {
+    let left_start = u32::from(left_start);
+    let right_start = u32::from(right_start);
+    let left_end = left_start + u32::from(left_size).saturating_sub(1);
+    let right_end = right_start + u32::from(right_size).saturating_sub(1);
+    left_start <= right_end && right_start <= left_end
+}
+
 #[cfg(unix)]
 fn process_group_matches_pid(pid: u32) -> bool {
     Command::new("ps")
@@ -9980,6 +10019,7 @@ claude_code_executable_path = "/opt/bin/claude-custom"
 
         assert!(first.port_base >= WORKSPACE_PORT_START);
         assert!(second.port_base >= WORKSPACE_PORT_START);
+        assert_ne!(first.port_base, second.port_base);
     }
 
     #[test]
@@ -9995,7 +10035,7 @@ claude_code_executable_path = "/opt/bin/claude-custom"
     }
 
     #[test]
-    fn workspace_port_base_reuses_lowest_open_port_despite_existing_workspace_rows() {
+    fn workspace_port_base_skips_existing_workspace_rows() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -10023,7 +10063,40 @@ claude_code_executable_path = "/opt/bin/claude-custom"
 
         assert_eq!(
             store.next_port_base_with_checker(10, |_| true).unwrap(),
-            42000
+            42010
+        );
+    }
+
+    #[test]
+    fn workspace_port_base_skips_existing_overlapping_port_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.next_port_base_with_checker(25, |_| true).unwrap(),
+            42025
         );
     }
 

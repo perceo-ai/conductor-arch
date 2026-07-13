@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn gtk_live_controls_map_to_cli_backed_workflow_actions() {
+    fn gtk_live_controls_reference_cli_backed_workflow_actions() {
         for control in GTK_LIVE_CONTROLS {
             let action = workflow_action_by_id(control.workflow_action_id).unwrap_or_else(|| {
                 panic!(

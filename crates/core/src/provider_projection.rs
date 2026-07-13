@@ -201,6 +201,13 @@ pub fn provider_projection_from_records(records: &[ProviderEventRecord]) -> Prov
 pub fn render_provider_event_projection(
     events: Vec<ProviderProjectionEvent>,
 ) -> ProviderProjection {
+    let mut events = events;
+    events.sort_by(|left, right| {
+        left.sequence
+            .cmp(&right.sequence)
+            .then_with(|| left.canonical_id.cmp(&right.canonical_id))
+    });
+
     let mut items = Vec::<ProviderProjectionItem>::new();
     let mut positions = HashMap::<String, usize>::new();
 
@@ -662,6 +669,36 @@ mod tests {
         });
 
         let projection = provider_projection_from_records(&[streaming, completed]);
+
+        assert_eq!(projection.items.len(), 1);
+        assert_eq!(projection.items[0].body, "streamed answer");
+        assert_eq!(
+            projection.items[0].status,
+            ProviderProjectionStatus::Complete
+        );
+    }
+
+    #[test]
+    fn projection_dedupes_in_sequence_order_before_latest_update_wins() {
+        let mut streaming = record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+            "assistant",
+        );
+        streaming.normalized_payload = json!({
+            "title": "Assistant",
+            "body": "streamed answer"
+        });
+        let mut completed = streaming.clone();
+        completed.identity_key = "codex:thread-1:item-1:complete".to_owned();
+        completed.phase = ProviderEventPhase::Completed;
+        completed.received_sequence = 2;
+        completed.normalized_payload = json!({
+            "title": "Assistant",
+            "body": ""
+        });
+
+        let projection = provider_projection_from_records(&[completed, streaming]);
 
         assert_eq!(projection.items.len(), 1);
         assert_eq!(projection.items[0].body, "streamed answer");

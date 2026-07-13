@@ -494,6 +494,17 @@ mod tests {
     }
 
     #[test]
+    fn palette_hides_session_logs_outside_debug_mode() {
+        let keybindings = Keybindings::default();
+        let commands = palette_commands(true, false, &keybindings, &[]);
+
+        assert!(commands
+            .iter()
+            .all(|command| command.label != "Session Logs"));
+        assert!(filter_palette_commands(&commands, "session logs").is_empty());
+    }
+
+    #[test]
     fn palette_filter_hides_workspace_commands_without_workspace() {
         let keybindings = Keybindings::default();
         let commands = palette_commands(false, false, &keybindings, &[]);

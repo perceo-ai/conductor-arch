@@ -284,6 +284,9 @@ impl ClaudeStreamParser {
     }
 
     fn kind_for(&self, value: &Value) -> ClaudeProviderEventKind {
+        if claude_system_hook_event(value) {
+            return ClaudeProviderEventKind::Hook;
+        }
         match string_at(value, &["type"]).as_deref() {
             Some("system") => ClaudeProviderEventKind::Session,
             Some("user") => ClaudeProviderEventKind::UserMessage,
@@ -404,6 +407,13 @@ fn number_at(value: &Value, path: &[&str]) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
+fn claude_system_hook_event(value: &Value) -> bool {
+    string_at(value, &["subtype"]).is_some_and(|subtype| subtype.starts_with("hook_"))
+        || string_at(value, &["hook_event"]).is_some()
+        || string_at(value, &["hook_name"]).is_some()
+        || string_at(value, &["hook_event_name"]).is_some()
+}
+
 fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventKind {
     match kind {
         ClaudeProviderEventKind::Session => ProviderEventKind::ThreadSession,
@@ -484,6 +494,8 @@ fn claude_event_title(
 ) -> String {
     if kind == ClaudeProviderEventKind::Hook {
         return string_at(raw_json, &["hook_event_name"])
+            .or_else(|| string_at(raw_json, &["hook_name"]))
+            .or_else(|| string_at(raw_json, &["hook_event"]))
             .or_else(|| string_at(raw_json, &["hook", "name"]))
             .or_else(|| string_at(raw_json, &["event", "hook_event_name"]))
             .unwrap_or_else(|| claude_title_for(kind, tool_name));
@@ -501,6 +513,7 @@ fn claude_hook_body(raw_json: &Value) -> Option<String> {
     }
     if let Some(message) = string_at(raw_json, &["message"])
         .or_else(|| string_at(raw_json, &["event", "message"]))
+        .or_else(|| string_at(raw_json, &["output"]))
         .or_else(|| string_at(raw_json, &["result"]))
     {
         if !message.trim().is_empty() {
@@ -691,6 +704,37 @@ mod tests {
             },
         );
 
+        assert_eq!(
+            canonical.kind,
+            crate::provider_events::ProviderEventKind::SkillPluginHook
+        );
+        assert_eq!(canonical.provider_subtype.as_deref(), Some("hook_event"));
+        assert_eq!(canonical.normalized_payload["title"], "PreToolUse");
+        assert_eq!(
+            canonical.normalized_payload["body"],
+            "Bash\napproved by hook\n{\n  \"command\": \"cargo test\"\n}"
+        );
+    }
+
+    #[test]
+    fn system_hook_events_render_real_sdk_details() {
+        let events = parse_claude_stream_json_lines(
+            r#"{"type":"system","subtype":"hook_event","session_id":"s1","hook_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"},"output":"approved by hook"}"#,
+        )
+        .unwrap();
+
+        let canonical = events[0].clone().into_provider_event_draft(
+            crate::provider_events::ProviderEventContext {
+                workspace_id: Some(1),
+                chat_thread_id: Some(7),
+                process_id: Some(9),
+                occurred_at_ms: 42,
+                schema_version: 1,
+                adapter_version: "claude-stream-json-test".to_owned(),
+            },
+        );
+
+        assert_eq!(events[0].kind, ClaudeProviderEventKind::Hook);
         assert_eq!(
             canonical.kind,
             crate::provider_events::ProviderEventKind::SkillPluginHook

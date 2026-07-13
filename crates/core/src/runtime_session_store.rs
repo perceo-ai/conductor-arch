@@ -96,7 +96,13 @@ impl RuntimeSessionStore {
             .max_provider_sequence_for_process_subtypes(
                 process_id,
                 ProviderEventKind::UserInput,
-                &["user_input", "review_prompt", "control_command"],
+                &[
+                    "user_send",
+                    "staged_review_send",
+                    "control_command",
+                    "user_input",
+                    "review_prompt",
+                ],
             )?
             .unwrap_or(0))
     }
