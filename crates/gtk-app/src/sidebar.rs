@@ -414,7 +414,7 @@ pub(crate) fn build_app_sidebar(
                             line.diff_deletions,
                             &ws.updated_at,
                         );
-                        if ws.status == "active" {
+                        if workspace_status_allows_sidebar_actions(&ws.status) {
                             attach_workspace_row_context_menu(
                                 &row,
                                 ws.name.clone(),
@@ -1414,6 +1414,10 @@ fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
     matches!(page, AppPage::Workspace | AppPage::Review)
 }
 
+fn workspace_status_allows_sidebar_actions(status: &str) -> bool {
+    matches!(status, "active" | "failed")
+}
+
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
@@ -1521,7 +1525,10 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection};
+    use super::{
+        primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
+        workspace_status_allows_sidebar_actions,
+    };
     use crate::state::AppPage;
 
     #[test]
@@ -1548,5 +1555,12 @@ mod tests {
         assert!(!sidebar_should_restore_workspace_selection(
             &AppPage::History
         ));
+    }
+
+    #[test]
+    fn failed_workspace_rows_keep_sidebar_actions() {
+        assert!(workspace_status_allows_sidebar_actions("active"));
+        assert!(workspace_status_allows_sidebar_actions("failed"));
+        assert!(!workspace_status_allows_sidebar_actions("archived"));
     }
 }
