@@ -1,0 +1,102 @@
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_2fd338f0b53281::t_6d3974371b27a5 52,62,88,126-150,152,163-166,198,302-305,315,320,599,602,828-840,842-862
+  s_2fd338f0b53281::t_dccf743924ce52 160-162
+  s_2fd338f0b53281::t_691e91f0c2811d 596,646-655
+  s_2fd338f0b53281::t_2d451454109baf 932,983-1026,1094-1100
+  s_2fd338f0b53281::t_3dbf1888a6e271 644-645,1101
+crates/core/src/workspace.rs
+  s_2fd338f0b53281::t_bf545d7c63152f 13717,13801,13965
+  s_2fd338f0b53281::t_5c827dd8773190 13742-13743
+  s_2fd338f0b53281::t_c9cf538cd415d7 1669-1674
+  s_2fd338f0b53281::t_c81c33cb2d529a 9034-9050,10486-10508,10533-10536,10539
+  s_2fd338f0b53281::t_28ae2efb53d5ef 519
+  s_2fd338f0b53281::t_eb9f8a2078845e 1668
+  s_2fd338f0b53281::t_bc4913be1b74df 9033
+crates/core/src/archcar/harness.rs
+  s_2fd338f0b53281::t_85ddb7abbd29e6 121,123-124
+crates/core/src/archcar/session.rs
+  s_2fd338f0b53281::t_cccba673dccb49 642
+  s_2fd338f0b53281::t_8585aba45d25cc 250,259-262,265-268,270-271,299,312-335,575,579,587-603,664,666-668,672,678-680,718-722,726,740-742,747-748,857-871,889-899,901-903
+  s_2fd338f0b53281::t_4cffe491587bf6 1008-1035,1082,1118
+  s_2fd338f0b53281::t_23396556117838 888,900
+  s_2fd338f0b53281::t_0113f3e42469d6 604-605
+  s_2fd338f0b53281::t_e76624781dd4e9 1007
+.github/workflows/publish.yml
+  s_2fd338f0b53281::t_200160e249d185 76-77,112-115,121,123,167
+crates/core/src/provider_events.rs
+  s_2fd338f0b53281::t_26a3403db287cc 382,386-388,469-470,548,634-644,646,652,657-680,685-710,714-718
+  s_2fd338f0b53281::t_8acb9702ea85a9 719,853-858,1003,1014-1062
+  s_2fd338f0b53281::t_dccf743924ce52 681-684,711-713
+  s_2fd338f0b53281::t_8ab89167478677 720,1063
+crates/gtk-app/src/main.rs
+  s_2fd338f0b53281::t_7951a283230b2c 704,708,716-718,808
+  s_2fd338f0b53281::t_8e552de81a30e9 714-715
+crates/gtk-app/src/projects.rs
+  s_2fd338f0b53281::t_f2290cf5aff365 1016-1056
+  s_2fd338f0b53281::t_bfe7bb8d1fb072 441-445
+  s_2fd338f0b53281::t_892e4d6f290320 970-974
+docs/ui-sketches/archductor-ui-sketches.md
+  s_2fd338f0b53281::t_200160e249d185 3
+crates/core/src/harness.rs
+  s_2fd338f0b53281::t_95214cdf4c3766 396,453
+  s_2fd338f0b53281::t_34729f8e150d8f 419-420
+  s_2fd338f0b53281::t_2c2384a2c06df0 102-103,174,210,222-226,230,234,238,246,280,309,334
+crates/gtk-app/src/session_projection.rs
+  s_2fd338f0b53281::t_a42afdbf6b438c 707-733
+  s_2fd338f0b53281::t_3fae6ce9c0c8df 4,340,353-357
+  s_2fd338f0b53281::t_10ba193a68dc27 706
+crates/gtk-app/src/session_surface.rs
+  s_2fd338f0b53281::t_2d999e9cd0ff27 1123-1126,2603,2605,2627-2649,2656-2661,2666-2671,2678-2679,2681-2683,2694-2697,2725-2739,2743-2744,2750-2757,2761,2766-2814,2816
+  s_2fd338f0b53281::t_6b8ecc4ac32d1a 8532,8535-8540
+  s_2fd338f0b53281::t_dccf743924ce52 2675-2677,2740-2742,2758-2760,8445-8448,8522-8525
+  s_2fd338f0b53281::t_f7d626f8ed31ea 2815,8443-8444,8449-8521,8526-8531,8533-8534,8541-8569
+  s_2fd338f0b53281::t_7205ae66c351c1 2817
+.github/workflows/ci.yml
+  s_2fd338f0b53281::t_200160e249d185 75-76
+crates/core/src/storage.rs
+  s_2fd338f0b53281::t_94176229bc0fa0 189-191
+crates/gtk-app/src/workspace_command_center.rs
+  s_2fd338f0b53281::t_1530b9001a2983 9339-9340,9343,9346
+  s_2fd338f0b53281::t_a9cf9bb8121cca 9335-9338,9341-9342,9344-9345,9347-9354
+  s_2fd338f0b53281::t_28e9b71538f278 2833,2845-2848
+crates/cli/tests/cli_sessions.rs
+  s_2fd338f0b53281::t_a05458fb47060c 179-180
+  s_2fd338f0b53281::t_5e03f71005a917 188
+  s_2fd338f0b53281::t_c9725ee6ed1979 185-187
+docs/superpowers/plans/2026-06-21-archductor-docs-parity.md
+  s_2fd338f0b53281::t_8c470faaa04675 5,39,80,100,189,211,284,307,375,397,460,481,534,555-556,577,591,605
+docs/superpowers/plans/2026-06-21-ci-cd-hardening.md
+  s_2fd338f0b53281::t_571b5546d97c6a 5
+docs/superpowers/plans/2026-06-21-settings-redesign.md
+  s_2fd338f0b53281::t_d8a4ccc0847e5d 9,41,50,70,86,109,124,135,140
+docs/superpowers/plans/2026-06-23-agent-harnesses.md
+  s_2fd338f0b53281::t_c20f73ed70e9d5 34,52,81,92,120,137,165,177
+docs/superpowers/plans/2026-06-23-github-integrations-everywhere.md
+  s_2fd338f0b53281::t_4162286bb297ca 88,148,186,199,223,267,308,346,398,441,494,544,580,612,659,665,671
+docs/superpowers/plans/2026-06-27-chat-threads-and-codex-resume.md
+  s_2fd338f0b53281::t_ddb32d8f489685 9,75,157,218,279,325,373,415,466,504,533,561,565,569,578
+docs/superpowers/plans/2026-06-28-archcar-harness-migration.md
+  s_2fd338f0b53281::t_189e180bf985a1 27,39-40,53,67,80
+docs/superpowers/plans/2026-06-28-workspace-open-chat-loading-and-archcar-recovery.md
+  s_2fd338f0b53281::t_c841820657d82b 23,31,56,93,100,117,143,176,193,215,238,255,287,324,344,351
+docs/superpowers/plans/2026-07-01-codex-tools-skills-context-ui.md
+  s_2fd338f0b53281::t_047a91457208c6 27,56,72,101,119,143,162-163
+docs/superpowers/plans/2026-07-01-theme-and-icons-refresh.md
+  s_2fd338f0b53281::t_f6f9fdbcdef766 22,31,39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "44579173fa7f3cf729ccf8dfefedf0bde35b5a12",
+  "prompts": {},
+  "sessions": {
+    "s_2fd338f0b53281": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5852-b907-7720-b006-3980f27dafb1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
