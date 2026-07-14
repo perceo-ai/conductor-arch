@@ -1628,7 +1628,6 @@ pub fn agent_session_panel(
     let selected_session_for_send = selected_session.clone();
     let record_state_for_send = record_state.clone();
     let refresh_view_for_send = refresh_view.clone();
-    let refresh_for_send = refresh.clone();
     let app_state_for_send = app_state.clone();
     let messages_for_send = messages.clone();
     let archcar_bridge_for_send = archcar_bridge.clone();
@@ -1910,7 +1909,6 @@ pub fn agent_session_panel(
                         "archcar send queued"
                     );
                     refresh_view_for_send();
-                    refresh_for_send();
                     return true;
                 }
             }
@@ -1975,7 +1973,6 @@ pub fn agent_session_panel(
                 app_state_for_send.set_staged_review_prompt(None);
             }
             refresh_view_for_send();
-            refresh_for_send();
             return true;
         }
         let running_record = thread_records
@@ -2023,7 +2020,6 @@ pub fn agent_session_panel(
             queued.set_xalign(0.0);
             append_revealed(&messages_for_send, &queued);
             refresh_view_for_send();
-            refresh_for_send();
             return true;
         };
 
@@ -12036,6 +12032,22 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(ready_scope, (true, false));
         assert_eq!(status_scope, (false, false));
         assert_eq!(started_scope, (true, true));
+    }
+
+    #[test]
+    fn chat_send_paths_do_not_refresh_outer_workspace_chrome() {
+        let source = include_str!("session_surface.rs");
+        let send_start = source.find("let send_text = Rc::new").unwrap();
+        let send_end = source[send_start..]
+            .find("*send_text_after_ready_queue")
+            .map(|offset| send_start + offset)
+            .unwrap();
+        let send_body = &source[send_start..send_end];
+
+        assert!(
+            !send_body.contains("refresh_for_send();"),
+            "chat send should repaint the chat surface locally, not refresh outer chrome/right panels"
+        );
     }
 
     #[test]

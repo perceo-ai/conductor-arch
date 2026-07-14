@@ -9,6 +9,7 @@ struct NavigationEntry {
     selected_workspace: Option<String>,
     active_page: AppPage,
     active_workspace_tab: WorkspaceTab,
+    active_workspace_right_panel_tab: WorkspaceRightPanelTab,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,12 @@ pub enum WorkspaceTab {
     Todos,
     Processes,
     Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceRightPanelTab {
+    Browse,
+    Changes,
 }
 
 impl WorkspaceTab {
@@ -64,6 +71,7 @@ pub struct AppStateSnapshot {
     pub selected_project: Option<String>,
     pub active_page: AppPage,
     pub active_workspace_tab: WorkspaceTab,
+    pub active_workspace_right_panel_tab: WorkspaceRightPanelTab,
     pub selected_chat_thread: Option<i64>,
     pub selected_agent_session: Option<i64>,
     pub staged_review_prompt: Option<String>,
@@ -116,6 +124,7 @@ impl AppState {
                 selected_project: None,
                 active_page,
                 active_workspace_tab: initial_tab,
+                active_workspace_right_panel_tab: WorkspaceRightPanelTab::Browse,
                 selected_chat_thread: None,
                 selected_agent_session: None,
                 staged_review_prompt: None,
@@ -302,6 +311,14 @@ impl AppState {
         self.inner.borrow_mut().active_workspace_tab = tab;
     }
 
+    pub fn active_workspace_right_panel_tab(&self) -> WorkspaceRightPanelTab {
+        self.inner.borrow().active_workspace_right_panel_tab
+    }
+
+    pub fn set_active_workspace_right_panel_tab(&self, tab: WorkspaceRightPanelTab) {
+        self.inner.borrow_mut().active_workspace_right_panel_tab = tab;
+    }
+
     pub fn navigate_back(&self) -> bool {
         let mut state = self.inner.borrow_mut();
         let Some(entry) = state.navigation_back.pop() else {
@@ -346,6 +363,7 @@ fn snapshot_navigation_entry(state: &AppStateSnapshot) -> NavigationEntry {
         selected_workspace: state.selected_workspace.clone(),
         active_page: state.active_page.clone(),
         active_workspace_tab: state.active_workspace_tab.clone(),
+        active_workspace_right_panel_tab: state.active_workspace_right_panel_tab,
     }
 }
 
@@ -401,6 +419,7 @@ fn apply_navigation_entry(state: &mut AppStateSnapshot, entry: NavigationEntry) 
     state.selected_workspace = entry.selected_workspace;
     state.active_page = entry.active_page;
     state.active_workspace_tab = entry.active_workspace_tab;
+    state.active_workspace_right_panel_tab = entry.active_workspace_right_panel_tab;
 }
 
 #[cfg(test)]
@@ -580,11 +599,13 @@ mod tests {
             selected_workspace: None,
             active_page: AppPage::History,
             active_workspace_tab: WorkspaceTab::Chats,
+            active_workspace_right_panel_tab: WorkspaceRightPanelTab::Browse,
         };
         let settings = NavigationEntry {
             selected_workspace: None,
             active_page: AppPage::Settings,
             active_workspace_tab: WorkspaceTab::Chats,
+            active_workspace_right_panel_tab: WorkspaceRightPanelTab::Browse,
         };
         let berlin_history = NavigationEntry {
             selected_workspace: Some("berlin".to_owned()),
@@ -656,5 +677,27 @@ mod tests {
         assert_eq!(snapshot.staged_review_prompt, None);
         assert_eq!(snapshot.pending_chat_prompt, None);
         assert_eq!(snapshot.active_page, AppPage::Dashboard);
+    }
+
+    #[test]
+    fn workspace_right_panel_tab_persists_across_workspace_refreshes() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        assert_eq!(
+            state.active_workspace_right_panel_tab(),
+            WorkspaceRightPanelTab::Browse
+        );
+
+        state.set_active_workspace_right_panel_tab(WorkspaceRightPanelTab::Changes);
+
+        assert_eq!(
+            state.snapshot().active_workspace_right_panel_tab,
+            WorkspaceRightPanelTab::Changes
+        );
     }
 }

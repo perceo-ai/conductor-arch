@@ -40,7 +40,7 @@ fn clone_external_thread_selection_controller(
 }
 
 use crate::refresh::{RefreshHub, RefreshScope};
-use crate::state::{AppState, WorkspaceTab};
+use crate::state::{AppState, WorkspaceRightPanelTab, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
@@ -1369,7 +1369,6 @@ fn ws_right_panel(
 
     let all_btn = text_button("Browse");
     all_btn.add_css_class("nav-button");
-    all_btn.add_css_class("nav-button-active");
     let files_widget = ws_simple_file_list(db_path, ws, open_file.clone());
     content.add_named(&files_widget, Some("files"));
 
@@ -1387,8 +1386,10 @@ fn ws_right_panel(
         let c = content.clone();
         let all_btn_for_click = all_btn.clone();
         let changes_btn_for_click = changes_btn.clone();
+        let state = state.clone();
         changes_btn.connect_clicked(move |_| {
             c.set_visible_child_name("changes");
+            state.set_active_workspace_right_panel_tab(WorkspaceRightPanelTab::Changes);
             changes_btn_for_click.add_css_class("nav-button-active");
             all_btn_for_click.remove_css_class("nav-button-active");
         });
@@ -1397,8 +1398,10 @@ fn ws_right_panel(
         let c = content.clone();
         let all_btn_for_click = all_btn.clone();
         let changes_btn_for_click = changes_btn.clone();
+        let state = state.clone();
         all_btn.connect_clicked(move |_| {
             c.set_visible_child_name("files");
+            state.set_active_workspace_right_panel_tab(WorkspaceRightPanelTab::Browse);
             all_btn_for_click.add_css_class("nav-button-active");
             changes_btn_for_click.remove_css_class("nav-button-active");
         });
@@ -1406,7 +1409,18 @@ fn ws_right_panel(
     tab_strip.append(&all_btn);
     tab_strip.append(&changes_btn);
 
-    content.set_visible_child_name("files");
+    match state.active_workspace_right_panel_tab() {
+        WorkspaceRightPanelTab::Browse => {
+            content.set_visible_child_name("files");
+            all_btn.add_css_class("nav-button-active");
+            changes_btn.remove_css_class("nav-button-active");
+        }
+        WorkspaceRightPanelTab::Changes => {
+            content.set_visible_child_name("changes");
+            changes_btn.add_css_class("nav-button-active");
+            all_btn.remove_css_class("nav-button-active");
+        }
+    }
     panel.append(&tab_strip);
     panel.append(&Separator::new(Orientation::Horizontal));
     panel.append(&content);
