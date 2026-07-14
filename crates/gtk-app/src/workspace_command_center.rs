@@ -1367,7 +1367,7 @@ fn ws_right_panel(
     let content = Stack::new();
     content.set_vexpand(true);
 
-    let all_btn = text_button("All files");
+    let all_btn = text_button("Browse");
     all_btn.add_css_class("nav-button");
     all_btn.add_css_class("nav-button-active");
     let files_widget = ws_simple_file_list(db_path, ws, open_file.clone());
@@ -1440,7 +1440,6 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
     files.sort();
 
     let rows: Rc<RefCell<Vec<FileTreeRow>>> = Rc::new(RefCell::new(Vec::new()));
-    let collapsed_dirs: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let mut dir_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut file_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
@@ -1468,6 +1467,9 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
             .or_default()
             .insert(file_name);
     }
+
+    let collapsed_dirs: Rc<RefCell<HashSet<String>>> =
+        Rc::new(RefCell::new(initial_collapsed_dirs(&dir_children)));
 
     append_file_tree_rows(
         &list,
@@ -1511,6 +1513,16 @@ fn tree_join_path(parent: &str, child: &str) -> String {
     } else {
         format!("{parent}/{child}")
     }
+}
+
+fn initial_collapsed_dirs(dir_children: &BTreeMap<String, BTreeSet<String>>) -> HashSet<String> {
+    let mut collapsed = HashSet::new();
+    for (parent, children) in dir_children {
+        for child in children {
+            collapsed.insert(tree_join_path(parent, child));
+        }
+    }
+    collapsed
 }
 
 fn tree_row_visible(path: &str, _is_dir: bool, collapsed_dirs: &HashSet<String>) -> bool {
@@ -1561,14 +1573,17 @@ fn append_file_tree_rows(
             let dir_path = tree_join_path(parent_key, child);
             let row_box = GBox::new(Orientation::Horizontal, 6);
             row_box.add_css_class("ws-dir-row");
-            row_box.set_margin_start((depth as i32) * 16);
-            let toggle = text_button("▾");
+            row_box.set_margin_start((depth as i32) * 12);
+            let toggle = Label::new(Some("▸"));
             toggle.add_css_class("ws-folder-toggle");
+            let icon = Image::from_icon_name(file_tree_icon_name(true, &dir_path));
+            icon.add_css_class("ws-folder-icon");
             let name_lbl = Label::new(Some(child));
             name_lbl.add_css_class("ws-folder-name");
             name_lbl.set_xalign(0.0);
             name_lbl.set_hexpand(true);
             row_box.append(&toggle);
+            row_box.append(&icon);
             row_box.append(&name_lbl);
             let row = ListBoxRow::builder().child(&row_box).build();
             row.set_selectable(false);
@@ -1579,22 +1594,31 @@ fn append_file_tree_rows(
                 is_dir: true,
             });
 
-            let rows_for_toggle = rows.clone();
-            let collapsed_for_toggle = collapsed_dirs.clone();
-            let dir_path_for_toggle = dir_path.clone();
-            toggle.connect_clicked(move |btn| {
+            let row_toggle = GestureClick::new();
+            let rows_for_row_toggle = rows.clone();
+            let collapsed_for_row_toggle = collapsed_dirs.clone();
+            let dir_path_for_row_toggle = dir_path.clone();
+            let toggle_for_row = toggle.clone();
+            let icon_for_row_toggle = icon.clone();
+            row_toggle.connect_released(move |_, _, _, _| {
                 let collapsed_now = {
-                    let mut collapsed = collapsed_for_toggle.borrow_mut();
-                    if !collapsed.remove(&dir_path_for_toggle) {
-                        collapsed.insert(dir_path_for_toggle.clone());
+                    let mut collapsed = collapsed_for_row_toggle.borrow_mut();
+                    if !collapsed.remove(&dir_path_for_row_toggle) {
+                        collapsed.insert(dir_path_for_row_toggle.clone());
                         true
                     } else {
                         false
                     }
                 };
-                btn.set_label(if collapsed_now { "▸" } else { "▾" });
-                update_tree_visibility(&rows_for_toggle, &collapsed_for_toggle);
+                toggle_for_row.set_text(if collapsed_now { "▸" } else { "▾" });
+                icon_for_row_toggle.set_icon_name(Some(if collapsed_now {
+                    "folder-symbolic"
+                } else {
+                    "folder-open-symbolic"
+                }));
+                update_tree_visibility(&rows_for_row_toggle, &collapsed_for_row_toggle);
             });
+            row_box.add_controller(row_toggle);
 
             append_file_tree_rows(
                 list,
@@ -1613,11 +1637,11 @@ fn append_file_tree_rows(
             let file_path = tree_join_path(parent_key, file);
             let row_box = GBox::new(Orientation::Horizontal, 6);
             row_box.add_css_class("ws-file-row");
-            row_box.set_margin_start((depth as i32) * 16);
+            row_box.set_margin_start((depth as i32) * 12);
 
-            let ext_lbl = Label::new(Some(file_type_badge(&file_path)));
-            ext_lbl.add_css_class("ws-file-badge");
-            row_box.append(&ext_lbl);
+            let icon = Image::from_icon_name(file_tree_icon_name(false, &file_path));
+            icon.add_css_class("ws-file-icon");
+            row_box.append(&icon);
 
             let name_lbl = Label::new(Some(file));
             name_lbl.add_css_class("ws-file-name");
@@ -1641,27 +1665,20 @@ fn append_file_tree_rows(
     }
 }
 
-fn file_type_badge(path: &str) -> &'static str {
+fn file_tree_icon_name(is_dir: bool, path: &str) -> &'static str {
+    if is_dir {
+        return "folder-symbolic";
+    }
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
     match ext {
-        "rs" => "rs",
-        "ts" | "tsx" => "ts",
-        "js" | "jsx" => "js",
-        "py" => "py",
-        "md" => "md",
-        "toml" => "ml",
-        "yaml" | "yml" => "yl",
-        "json" => "{}",
-        "css" | "scss" => "cs",
-        "html" => "ht",
-        "sh" | "bash" => "sh",
-        "go" => "go",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "cxx" => "c+",
-        _ => "  ",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => "image-x-generic-symbolic",
+        "sh" | "bash" | "zsh" | "fish" | "toml" | "yaml" | "yml" | "json" => {
+            "text-x-script-symbolic"
+        }
+        _ => "text-x-generic-symbolic",
     }
 }
 
@@ -7335,6 +7352,42 @@ mod tests {
         let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
 
         assert_eq!(rendered, "Staged changes\nNo changes.\n");
+    }
+
+    #[test]
+    fn browse_file_tree_starts_with_every_directory_collapsed() {
+        let mut dir_children = BTreeMap::new();
+        dir_children.insert(
+            String::new(),
+            BTreeSet::from(["src".to_owned(), "tests".to_owned()]),
+        );
+        dir_children.insert("src".to_owned(), BTreeSet::from(["ui".to_owned()]));
+
+        let collapsed = initial_collapsed_dirs(&dir_children);
+
+        assert!(collapsed.contains("src"));
+        assert!(collapsed.contains("src/ui"));
+        assert!(collapsed.contains("tests"));
+        assert!(!tree_row_visible("src/lib.rs", false, &collapsed));
+        assert!(!tree_row_visible("src/ui/panel.rs", false, &collapsed));
+        assert!(tree_row_visible("README.md", false, &collapsed));
+    }
+
+    #[test]
+    fn browse_file_tree_uses_file_browser_icons() {
+        assert_eq!(file_tree_icon_name(true, "src"), "folder-symbolic");
+        assert_eq!(
+            file_tree_icon_name(false, "README.md"),
+            "text-x-generic-symbolic"
+        );
+        assert_eq!(
+            file_tree_icon_name(false, "assets/logo.png"),
+            "image-x-generic-symbolic"
+        );
+        assert_eq!(
+            file_tree_icon_name(false, "Cargo.toml"),
+            "text-x-script-symbolic"
+        );
     }
 
     #[test]

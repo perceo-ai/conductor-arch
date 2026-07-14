@@ -1727,39 +1727,55 @@ separator {
 .ws-file-list {
     background: transparent;
 }
+.ws-file-list row {
+    min-height: 0;
+}
 .ws-dir-row {
-    padding: 5px 11px 2px;
+    padding: 2px 9px;
 }
 .ws-folder-icon {
-    font-size: 10px;
-    color: #888888;
+    color: #c39b50;
     min-width: 14px;
+    min-height: 14px;
+}
+.ws-folder-toggle {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #777777;
+    font-size: 10px;
 }
 .ws-folder-name {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
-    font-weight: 600;
-    color: #909090;
+    font-weight: 500;
+    color: #b0b0b0;
 }
 .ws-file-row {
-    padding: 5px 11px;
+    padding: 2px 9px;
 }
-.ws-file-badge {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 10px;
-    font-weight: 600;
-    color: #5d5d5d;
-    min-width: 18px;
+.ws-file-icon {
+    color: #8091a7;
+    min-width: 14px;
+    min-height: 14px;
 }
 .ws-file-name {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 13px;
-    color: #b2b2b2;
+    font-size: 12px;
+    color: #c0c0c0;
 }
 .ws-file-dir {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 11px;
     color: #5d5d5d;
+}
+.ws-file-list row:selected {
+    background-color: #293243;
+}
+.ws-file-list row:hover {
+    background-color: #20242b;
 }
 row:selected .ws-file-name,
 row:selected .ws-folder-name {
