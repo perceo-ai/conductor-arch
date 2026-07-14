@@ -378,6 +378,8 @@ button {
     text-shadow: none;
     padding: 7px 12px;
     min-height: 34px;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
 }
@@ -391,6 +393,8 @@ button.icon-button {
     border-radius: 7px;
     box-shadow: none;
     text-shadow: none;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
 }
@@ -1537,6 +1541,7 @@ separator {
     font-weight: 600;
 }
 .ws-mode-switcher button {
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
     font-size: 12px;
     padding: 3px 10px;
     border-radius: 5px;
@@ -1558,6 +1563,7 @@ separator {
     border: none;
     border-radius: 7px;
     padding: 4px 11px;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
     font-size: 13px;
     color: #8e8e8e;
 }
@@ -1656,6 +1662,8 @@ separator {
 .ws-pr-action-button {
     min-height: 32px;
     padding: 0 14px;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-size: 13px;
 }
 .ws-pr-action-button.ws-pr-status-muted,
 .ws-pr-action-button.ws-pr-status-missing,
@@ -1685,7 +1693,8 @@ separator {
     border: none;
     box-shadow: none;
     color: #8e8e8e;
-    font-size: 16px;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-size: 13px;
     min-width: 30px;
     min-height: 30px;
     border-radius: 6px;
@@ -2805,6 +2814,22 @@ mod tests {
         assert!(!css.contains("#0f172a"));
         assert!(!css.contains("#1e293b"));
         assert!(!css.contains("#334155"));
+    }
+
+    #[test]
+    fn workspace_buttons_use_standard_app_font_stack_and_size() {
+        let css = app_css();
+        let text_button_block = selector_block(css, "button.text-button,\nbutton.icon-button");
+        assert!(text_button_block.contains("font-family: \"Mona Sans\""));
+        assert!(text_button_block.contains("font-size: 13px;"));
+
+        let right_tab_block = selector_block(css, ".ws-right-tab-btn");
+        assert!(right_tab_block.contains("font-family: \"Mona Sans\""));
+        assert!(right_tab_block.contains("font-size: 13px;"));
+
+        let changes_menu_block = selector_block(css, ".ws-changes-menu-btn,\n.ws-run-collapse-btn");
+        assert!(changes_menu_block.contains("font-family: \"Mona Sans\""));
+        assert!(changes_menu_block.contains("font-size: 13px;"));
     }
 
     #[test]

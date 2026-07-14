@@ -1175,7 +1175,12 @@ impl WorkspaceStore {
             .unwrap_or(&repository.default_branch)
             .to_owned();
         let base_ref = if let Some(base_ref) = input.base_ref {
-            base_ref
+            resolve_source_base_ref(
+                &repository.root_path,
+                &repository.remote_name,
+                &base_ref,
+                remote_available,
+            )?
         } else if remote_available {
             sync_repository_default_branch(
                 &repository.root_path,
@@ -2876,6 +2881,13 @@ impl WorkspaceStore {
 
     pub fn set_workspace_base_ref(&self, name: &str, base_ref: &str) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let base_ref = resolve_source_base_ref(
+            &repository.root_path,
+            &repository.remote_name,
+            base_ref,
+            remote_exists(&repository.root_path, &repository.remote_name),
+        )?;
         let base_ref = base_ref.trim();
         validate_branch_name(base_ref)?;
         let commit_ref = format!("{base_ref}^{{commit}}");
@@ -8387,6 +8399,36 @@ fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn resolve_source_base_ref(
+    root_path: &Path,
+    remote_name: &str,
+    base_ref: &str,
+    remote_available: bool,
+) -> Result<String> {
+    let base_ref = base_ref.trim();
+    if !remote_available || base_ref.starts_with("refs/") {
+        return Ok(base_ref.to_owned());
+    }
+    if let Some(remote_branch) = base_ref.strip_prefix(&format!("{remote_name}/")) {
+        let _ = fetch_remote_source_branch(root_path, remote_name, remote_branch)?;
+        return Ok(base_ref.to_owned());
+    }
+    if fetch_remote_source_branch(root_path, remote_name, base_ref)? {
+        Ok(format!("{remote_name}/{base_ref}"))
+    } else {
+        Ok(base_ref.to_owned())
+    }
+}
+
+fn fetch_remote_source_branch(root_path: &Path, remote_name: &str, branch: &str) -> Result<bool> {
+    if branch.trim().is_empty() {
+        return Ok(false);
+    }
+    let _ = git_dynamic(root_path, &["fetch", remote_name, branch, "--prune"]);
+    let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
+    Ok(git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref]).is_ok())
+}
+
 fn sync_repository_default_branch(
     root_path: &Path,
     remote_name: &str,
@@ -8398,44 +8440,7 @@ fn sync_repository_default_branch(
     )?;
     let remote_ref = format!("refs/remotes/{remote_name}/{default_branch}");
     git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref])?;
-    let local_ref = format!("refs/heads/{default_branch}");
-    if git_dynamic(root_path, &["rev-parse", "--verify", &local_ref]).is_ok()
-        && git_dynamic(
-            root_path,
-            &["merge-base", "--is-ancestor", &local_ref, &remote_ref],
-        )
-        .is_err()
-    {
-        warn!(
-            repository = %root_path.display(),
-            branch = default_branch,
-            "local default branch is ahead or diverged; using remote branch as workspace base"
-        );
-        return Ok(format!("{remote_name}/{default_branch}"));
-    }
-    let current_branch = git_output_dynamic(root_path, &["branch", "--show-current"])
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    if current_branch == default_branch {
-        git_dynamic(
-            root_path,
-            &["pull", "--ff-only", remote_name, default_branch],
-        )?;
-        return Ok(default_branch.to_owned());
-    }
-    match git_dynamic(root_path, &["update-ref", &local_ref, &remote_ref]) {
-        Ok(()) => Ok(default_branch.to_owned()),
-        Err(err) => {
-            warn!(
-                repository = %root_path.display(),
-                branch = default_branch,
-                error = %err,
-                "failed to fast-forward local default branch; using remote branch as workspace base"
-            );
-            Ok(format!("{remote_name}/{default_branch}"))
-        }
-    }
+    Ok(format!("{remote_name}/{default_branch}"))
 }
 
 #[cfg(test)]
@@ -9752,10 +9757,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(workspace.status, "active");
-        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(workspace.base_ref, "origin/main");
         assert!(workspace.path.join("REMOTE.md").exists());
         assert_eq!(
-            git_output(&repo_path, ["rev-parse", "main"]),
+            git_output(&repo_path, ["rev-parse", "origin/main"]),
             git_output(&seed_path, ["rev-parse", "main"])
         );
     }
@@ -11286,6 +11291,81 @@ CUSTOM_VALUE = "from-settings"
             .unwrap();
 
         assert_eq!(workspace.base_ref, "main");
+    }
+
+    #[test]
+    fn create_with_explicit_local_base_ref_uses_remote_source_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("local-only.txt"), "local\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "local-only.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local only",
+            ])
+            .status()
+            .unwrap();
+        let local_head = git_output(&repo_path, ["rev-parse", "main"]);
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(workspace.base_ref, "origin/main");
+        assert!(!workspace.path.join("local-only.txt").exists());
+        assert_eq!(git_output(&repo_path, ["rev-parse", "main"]), local_head);
     }
 
     #[test]
