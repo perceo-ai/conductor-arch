@@ -366,6 +366,7 @@ pub fn write_turn_start_request_with_id<W: Write>(
 pub struct CodexAppServerTurnSteerParams {
     pub thread_id: String,
     pub input: Vec<CodexAppServerUserInput>,
+    pub expected_turn_id: Option<String>,
 }
 
 impl CodexAppServerTurnSteerParams {
@@ -381,6 +382,11 @@ impl CodexAppServerTurnSteerParams {
                     .collect(),
             ),
         );
+        insert_string(
+            &mut params,
+            "expectedTurnId",
+            self.expected_turn_id.as_deref(),
+        );
         Value::Object(params)
     }
 }
@@ -395,6 +401,36 @@ pub fn write_turn_steer_request_with_id<W: Write>(
         &json!({
             "id": request_id,
             "method": "turn/steer",
+            "params": params.to_value(),
+        }),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerTurnInterruptParams {
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+impl CodexAppServerTurnInterruptParams {
+    fn to_value(&self) -> Value {
+        json!({
+            "threadId": self.thread_id.clone(),
+            "turnId": self.turn_id.clone(),
+        })
+    }
+}
+
+pub fn write_turn_interrupt_request_with_id<W: Write>(
+    writer: &mut W,
+    request_id: u64,
+    params: &CodexAppServerTurnInterruptParams,
+) -> Result<()> {
+    write_jsonl(
+        writer,
+        &json!({
+            "id": request_id,
+            "method": "turn/interrupt",
             "params": params.to_value(),
         }),
     )
@@ -1890,6 +1926,7 @@ mod tests {
                 input: vec![CodexAppServerUserInput::Text {
                     text: "Adjust course".to_owned(),
                 }],
+                expected_turn_id: Some("turn_456".to_owned()),
             },
         )
         .unwrap();
@@ -1903,5 +1940,27 @@ mod tests {
             line["params"]["input"][0],
             json!({"type": "text", "text": "Adjust course"})
         );
+        assert_eq!(line["params"]["expectedTurnId"], "turn_456");
+    }
+
+    #[test]
+    fn turn_interrupt_request_uses_documented_active_turn_method() {
+        let mut output = Vec::new();
+        write_turn_interrupt_request_with_id(
+            &mut output,
+            32,
+            &CodexAppServerTurnInterruptParams {
+                thread_id: "thr_123".to_owned(),
+                turn_id: "turn_456".to_owned(),
+            },
+        )
+        .unwrap();
+
+        let line: Value = serde_json::from_slice(&output).unwrap();
+        assert!(line.get("jsonrpc").is_none());
+        assert_eq!(line["id"], 32);
+        assert_eq!(line["method"], "turn/interrupt");
+        assert_eq!(line["params"]["threadId"], "thr_123");
+        assert_eq!(line["params"]["turnId"], "turn_456");
     }
 }

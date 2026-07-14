@@ -2288,17 +2288,15 @@ pub fn agent_session_panel(
     }
 
     let interrupt_current_session = Rc::new({
-        let database_path = database_path.clone();
-        let current_workspace_name = current_workspace_name.clone();
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
-        let active_sessions = active_sessions.clone();
-        let last_output = last_output.clone();
         let archcar_bridge = archcar_bridge.clone();
-        let refresh_chat_surface = refresh_chat_surface.clone();
+        let inflight_archcar_actions = inflight_archcar_actions.clone();
+        let archcar_ready_cache = archcar_ready_cache.clone();
+        let codex_ready = codex_ready.clone();
+        let toast_manager = toast_manager.clone();
         move || {
-            let workspace_name = current_workspace_name.borrow().clone();
             let Some(thread_id) = *selected_thread.borrow() else {
                 return;
             };
@@ -2309,16 +2307,67 @@ pub fn agent_session_panel(
             ) else {
                 return;
             };
-            let _ = archcar_bridge.kill_session(session_id);
-            let _ = stop_active_chat_session(
-                &database_path,
-                &workspace_name,
+            if queue_archcar_turn_interrupt(
+                &archcar_bridge,
+                inflight_archcar_actions.as_ref(),
+                thread_id,
                 session_id,
-                &active_sessions,
-                &last_output,
-            );
-            if let Some(refresh) = clone_refresh_chat_surface_controller(&refresh_chat_surface) {
-                refresh();
+            ) {
+                note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
+                set_codex_ready_state(codex_ready.as_ref(), &|| {}, false);
+            } else {
+                toast_manager.error(
+                    "Could not interrupt the active Codex turn because archcar is unavailable."
+                        .to_owned(),
+                );
+            }
+        }
+    });
+
+    let send_active_turn_steer = Rc::new({
+        let selected_thread = selected_thread.clone();
+        let selected_harness = selected_harness.clone();
+        let record_state = record_state.clone();
+        let archcar_bridge = archcar_bridge.clone();
+        let inflight_archcar_actions = inflight_archcar_actions.clone();
+        let archcar_ready_cache = archcar_ready_cache.clone();
+        let working_threads = working_threads.clone();
+        let refresh_view = refresh_view.clone();
+        let toast_manager = toast_manager.clone();
+        move |command: String| -> bool {
+            if command.trim().is_empty() || *selected_harness.borrow() != SessionKind::Codex {
+                return false;
+            }
+            let Some(thread_id) = *selected_thread.borrow() else {
+                return false;
+            };
+            let Some(session_id) = running_session_for_thread(
+                &record_state.borrow(),
+                thread_id,
+                *selected_harness.borrow(),
+            ) else {
+                return false;
+            };
+            if queue_archcar_user_send(
+                &archcar_bridge,
+                inflight_archcar_actions.as_ref(),
+                thread_id,
+                session_id,
+                command,
+                None,
+                ArchcarInputKind::User,
+                None,
+            ) {
+                note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
+                mark_thread_working(working_threads.as_ref(), thread_id);
+                refresh_view();
+                true
+            } else {
+                toast_manager.error(
+                    "Could not steer the active Codex turn because archcar is unavailable."
+                        .to_owned(),
+                );
+                false
             }
         }
     });
@@ -2336,7 +2385,8 @@ pub fn agent_session_panel(
         let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let interrupt_current_session = interrupt_current_session.clone();
-        move || {
+        let send_active_turn_steer = send_active_turn_steer.clone();
+        move |intent: ComposerSubmitIntent| {
             let command = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), true)
                 .to_string();
@@ -2375,13 +2425,14 @@ pub fn agent_session_panel(
             let codex_waiting_for_startup = *selected_harness.borrow() == SessionKind::Codex
                 && !codex_thread_ready
                 && !has_active_generation;
-            match composer_action_for_startup_state(
+            let action = composer_action_for_startup_state(
                 has_text,
                 has_active_generation,
                 latest_status == Some(ProcessStatus::Stopped),
                 queued_count,
                 codex_waiting_for_startup,
-            ) {
+            );
+            match composer_action_for_submit_intent(action, intent) {
                 ComposerAction::Queue => {
                     let Some(thread_id) = thread_id else {
                         buffer.set_text("");
@@ -2430,7 +2481,11 @@ pub fn agent_session_panel(
                 ComposerAction::Send => {
                     if has_text {
                         buffer.set_text("");
-                        (send_text)(command, false);
+                        if intent == ComposerSubmitIntent::Steer && has_active_generation {
+                            let _ = send_active_turn_steer(command);
+                        } else {
+                            (send_text)(command, false);
+                        }
                     }
                     update_composer_state();
                 }
@@ -2448,7 +2503,7 @@ pub fn agent_session_panel(
                     return gtk::glib::Propagation::Proceed;
                 }
 
-                submit_composer_action();
+                submit_composer_action(composer_submit_intent_for_modifiers(modifiers));
                 gtk::glib::Propagation::Stop
             })
         }
@@ -2481,7 +2536,7 @@ pub fn agent_session_panel(
     send_btn.connect_clicked({
         let submit_composer_action = submit_composer_action.clone();
         move |_| {
-            submit_composer_action();
+            submit_composer_action(ComposerSubmitIntent::Default);
         }
     });
     new_chat_btn.connect_clicked({
@@ -6075,6 +6130,12 @@ enum ComposerAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerSubmitIntent {
+    Default,
+    Steer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueuedComposerAction {
     Delete,
     Edit,
@@ -6136,15 +6197,42 @@ fn composer_action_for_startup_state(
     }
 }
 
-fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
-    let (icon, tooltip, sensitive) = match action {
+fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> ComposerSubmitIntent {
+    if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        ComposerSubmitIntent::Steer
+    } else {
+        ComposerSubmitIntent::Default
+    }
+}
+
+fn composer_action_for_submit_intent(
+    action: ComposerAction,
+    intent: ComposerSubmitIntent,
+) -> ComposerAction {
+    if action == ComposerAction::Queue && intent == ComposerSubmitIntent::Steer {
+        ComposerAction::Send
+    } else {
+        action
+    }
+}
+
+fn composer_send_button_presentation(action: ComposerAction) -> (&'static str, &'static str, bool) {
+    match action {
         ComposerAction::Disabled => ("send-symbolic", "Send message", false),
         ComposerAction::Send => ("send-symbolic", "Send message", true),
         ComposerAction::Queue => ("send-symbolic", "Queue message locally", true),
-        ComposerAction::Interrupt => ("process-stop-symbolic", "Interrupt active session", true),
+        ComposerAction::Interrupt => (
+            "media-playback-stop-symbolic",
+            "Interrupt active turn",
+            true,
+        ),
         ComposerAction::SendQueued => ("send-symbolic", "Send queued messages", true),
         ComposerAction::Retry => ("view-refresh-symbolic", "Retry interrupted session", true),
-    };
+    }
+}
+
+fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
+    let (icon, tooltip, sensitive) = composer_send_button_presentation(action);
     let image = Image::from_icon_name(resolve_icon_name(icon));
     button.set_child(Some(&image));
     button.set_tooltip_text(Some(tooltip));
@@ -8028,6 +8116,10 @@ enum PendingArchcarAction {
         session_id: i64,
         command: String,
     },
+    TurnInterrupt {
+        thread_id: i64,
+        session_id: i64,
+    },
     ModelUpdate {
         thread_id: i64,
         session_id: i64,
@@ -8201,6 +8293,27 @@ fn queue_archcar_control_send(
                 thread_id,
                 session_id,
                 command,
+            },
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn queue_archcar_turn_interrupt(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+    session_id: i64,
+) -> bool {
+    let token = bridge.interrupt_turn(session_id);
+    if let Some(token) = token {
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::TurnInterrupt {
+                thread_id,
+                session_id,
             },
         );
         true
@@ -8589,6 +8702,43 @@ fn handle_archcar_response(
                     workspace.to_owned(),
                     Some(thread_id),
                 );
+            }
+        },
+        PendingArchcarAction::TurnInterrupt {
+            thread_id,
+            session_id,
+        } => match response.result {
+            Ok(ArchcarResponse::Ack) => {
+                debug!(thread_id, session_id, "archcar turn interrupt accepted");
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+            }
+            Ok(other) => {
+                warn!(
+                    thread_id,
+                    session_id,
+                    ?other,
+                    "unexpected archcar turn interrupt response"
+                );
+                let message = format!("Unexpected archcar turn interrupt response: {other:?}");
+                toast_manager.error(message.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error { thread_id, message },
+                );
+                changed = true;
+            }
+            Err(err) => {
+                warn!(thread_id, session_id, error = %err, "archcar turn interrupt failed");
+                toast_manager.error(err.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message: err,
+                    },
+                );
+                changed = true;
             }
         },
         PendingArchcarAction::ModelUpdate {
@@ -9390,6 +9540,36 @@ fix it
         assert_eq!(
             composer_action_for_state(false, false, false, 0),
             ComposerAction::Disabled
+        );
+    }
+
+    #[test]
+    fn composer_interrupt_uses_square_stop_icon() {
+        let (icon, tooltip, sensitive) =
+            composer_send_button_presentation(ComposerAction::Interrupt);
+
+        assert_eq!(icon, "media-playback-stop-symbolic");
+        assert_eq!(tooltip, "Interrupt active turn");
+        assert!(sensitive);
+    }
+
+    #[test]
+    fn composer_ctrl_enter_steers_active_turn_instead_of_queueing() {
+        assert_eq!(
+            composer_submit_intent_for_modifiers(gtk::gdk::ModifierType::empty()),
+            ComposerSubmitIntent::Default
+        );
+        assert_eq!(
+            composer_submit_intent_for_modifiers(gtk::gdk::ModifierType::CONTROL_MASK),
+            ComposerSubmitIntent::Steer
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(ComposerAction::Queue, ComposerSubmitIntent::Default),
+            ComposerAction::Queue
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(ComposerAction::Queue, ComposerSubmitIntent::Steer),
+            ComposerAction::Send
         );
     }
 

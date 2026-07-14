@@ -37,6 +37,9 @@ pub enum AsyncArchcarRequestKind {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
+    InterruptTurn {
+        session_id: i64,
+    },
     SetSessionModel {
         session_id: i64,
         model: Option<String>,
@@ -188,6 +191,10 @@ impl AsyncArchcarBridge {
 
     pub fn set_session_model(&self, session_id: i64, model: Option<String>) -> Option<u64> {
         self.submit(ArchcarRequest::SetSessionModel { session_id, model })
+    }
+
+    pub fn interrupt_turn(&self, session_id: i64) -> Option<u64> {
+        self.submit(ArchcarRequest::InterruptTurn { session_id })
     }
 
     pub fn kill_session(&self, session_id: i64) -> Option<u64> {
@@ -465,6 +472,9 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             visible_input: visible_input.clone(),
             kind: kind.clone(),
         },
+        ArchcarRequest::InterruptTurn { session_id } => AsyncArchcarRequestKind::InterruptTurn {
+            session_id: *session_id,
+        },
         ArchcarRequest::SetSessionModel { session_id, model } => {
             AsyncArchcarRequestKind::SetSessionModel {
                 session_id: *session_id,
@@ -575,6 +585,16 @@ mod tests {
                 session_id: 9,
                 model: Some("gpt-5.6-terra".to_owned()),
             }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_interrupt_turn_metadata() {
+        let request = ArchcarRequest::InterruptTurn { session_id: 9 };
+
+        assert_eq!(
+            request_kind(&request),
+            AsyncArchcarRequestKind::InterruptTurn { session_id: 9 }
         );
     }
 

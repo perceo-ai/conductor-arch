@@ -20,10 +20,11 @@ use crate::codex_tui::codex_screen_ready_for_input;
 use crate::provider_adapters::claude_stream::{build_claude_stream_args, ClaudeStreamLaunchConfig};
 use crate::provider_adapters::codex_app_server::{
     parse_jsonl_message, write_initialize_request_with_id, write_initialized_notification,
-    write_thread_start_request_with_id, write_turn_start_request_with_id,
-    write_turn_steer_request_with_id, CodexAppServerInitializeParams, CodexAppServerMessage,
-    CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
-    CodexAppServerUserInput, CODEX_APP_SERVER_DEFAULT_ARGS,
+    write_thread_start_request_with_id, write_turn_interrupt_request_with_id,
+    write_turn_start_request_with_id, write_turn_steer_request_with_id,
+    CodexAppServerInitializeParams, CodexAppServerMessage, CodexAppServerThreadStartParams,
+    CodexAppServerTurnInterruptParams, CodexAppServerTurnStartParams,
+    CodexAppServerTurnSteerParams, CodexAppServerUserInput, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -51,6 +52,7 @@ pub enum SessionCommand {
         rows: u16,
         cols: u16,
     },
+    InterruptTurn,
     Kill,
 }
 
@@ -1344,6 +1346,7 @@ fn run_session_loop(
                         );
                     }
                 }
+                SessionCommand::InterruptTurn => {}
                 SessionCommand::Resize { rows, cols } => {
                     let current = snapshot.lock().unwrap().clone();
                     info!(
@@ -1547,6 +1550,8 @@ fn run_codex_app_server_session_loop(
     let mut user_input_sequence = runtime_store
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
+    let mut control_request_sequence = 0_u64;
+    let mut active_turn_id: Option<String> = None;
 
     loop {
         while let Ok(line) = connection.stdout_rx.try_recv() {
@@ -1622,7 +1627,11 @@ fn run_codex_app_server_session_loop(
                             thread_id: started.thread_id,
                         });
                     }
+                    if let Some(turn_id) = codex_turn_id_from_message(&message) {
+                        active_turn_id = Some(turn_id);
+                    }
                     if message.method.as_deref() == Some("turn/completed") {
+                        active_turn_id = None;
                         mark_snapshot_ready(&snapshot);
                         let _ = event_tx.send(ArchcarEvent::TurnCompleted {
                             session_id: started.session_id,
@@ -1669,6 +1678,14 @@ fn run_codex_app_server_session_loop(
                             .map(|_| json!({"type": "dangerFullAccess"}));
                     let effort = codex_turn_effort(&connection);
                     let write_result = if active_turn {
+                        let Some(turn_id) = active_turn_id.as_deref() else {
+                            let _ = event_tx.send(ArchcarEvent::SessionError {
+                                session_id: Some(started.session_id),
+                                thread_id: Some(started.thread_id),
+                                message: "No active Codex turn id is available to steer".to_owned(),
+                            });
+                            continue;
+                        };
                         write_turn_steer_request_with_id(
                             &mut connection.stdin,
                             request_id,
@@ -1677,6 +1694,7 @@ fn run_codex_app_server_session_loop(
                                 input: vec![CodexAppServerUserInput::Text {
                                     text: input.clone(),
                                 }],
+                                expected_turn_id: Some(turn_id.to_owned()),
                             },
                         )
                     } else {
@@ -1725,6 +1743,46 @@ fn run_codex_app_server_session_loop(
                 }
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
+                }
+                SessionCommand::InterruptTurn => {
+                    let Some(thread_id) = provider_thread_id.as_deref() else {
+                        let _ = event_tx.send(ArchcarEvent::SessionError {
+                            session_id: Some(started.session_id),
+                            thread_id: Some(started.thread_id),
+                            message: "Codex app-server thread is not initialized yet".to_owned(),
+                        });
+                        continue;
+                    };
+                    let Some(turn_id) = active_turn_id.as_deref() else {
+                        let _ = event_tx.send(ArchcarEvent::SessionError {
+                            session_id: Some(started.session_id),
+                            thread_id: Some(started.thread_id),
+                            message: "No active Codex turn id is available to interrupt".to_owned(),
+                        });
+                        continue;
+                    };
+                    control_request_sequence = control_request_sequence.saturating_add(1);
+                    let request_id = next_control_request_id(control_request_sequence);
+                    if let Err(err) = write_turn_interrupt_request_with_id(
+                        &mut connection.stdin,
+                        request_id,
+                        &CodexAppServerTurnInterruptParams {
+                            thread_id: thread_id.to_owned(),
+                            turn_id: turn_id.to_owned(),
+                        },
+                    ) {
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Codex turn interrupt failed: {err:#}"),
+                        );
+                    } else if let Ok(mut state) = snapshot.lock() {
+                        state.ready = false;
+                        state.runtime_state = AgentSessionState::Running;
+                    }
                 }
                 SessionCommand::SetModel { model } => {
                     set_provider_connection_model(&mut connection, model);
@@ -1871,6 +1929,7 @@ fn run_claude_stream_session_loop(
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
                 }
+                SessionCommand::InterruptTurn => {}
                 SessionCommand::SetModel { model } => {
                     set_provider_connection_model(&mut connection, model);
                 }
@@ -2028,6 +2087,28 @@ fn codex_turn_completed_status(message: &CodexAppServerMessage) -> Option<String
     None
 }
 
+fn codex_turn_id_from_message(message: &CodexAppServerMessage) -> Option<String> {
+    for pointer in [
+        "/params/turn/id",
+        "/params/turnId",
+        "/params/turn_id",
+        "/result/turn/id",
+        "/result/turnId",
+        "/result/turn_id",
+    ] {
+        if let Some(turn_id) = message
+            .value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|turn_id| !turn_id.is_empty())
+        {
+            return Some(turn_id.to_owned());
+        }
+    }
+    None
+}
+
 fn codex_thread_id_from_startup_response(
     message: &CodexAppServerMessage,
     startup_request_id: u64,
@@ -2153,6 +2234,10 @@ fn mark_provider_session_failed(
 
 fn next_turn_request_id(sequence: u64) -> u64 {
     sequence.saturating_add(10)
+}
+
+fn next_control_request_id(sequence: u64) -> u64 {
+    sequence.saturating_add(1_000_000)
 }
 
 fn write_provider_json_line<W: Write>(writer: &mut W, value: &serde_json::Value) -> Result<()> {

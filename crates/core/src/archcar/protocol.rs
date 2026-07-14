@@ -44,6 +44,9 @@ pub enum ArchcarRequest {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
     },
+    InterruptTurn {
+        session_id: i64,
+    },
     SetSessionModel {
         session_id: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             input_kind_label(kind),
             input.chars().count()
         ),
+        ArchcarRequest::InterruptTurn { session_id } => {
+            format!("interrupt_turn session_id={session_id}")
+        }
         ArchcarRequest::SetSessionModel { session_id, model } => format!(
             "set_session_model session_id={session_id} model={}",
             if model
@@ -412,6 +418,20 @@ mod tests {
             archcar_request_summary(&request),
             "resize_session session_id=9 rows=33 cols=111"
         );
+    }
+
+    #[test]
+    fn request_summary_describes_and_round_trips_interrupt_turn() {
+        let request = ArchcarRequest::InterruptTurn { session_id: 9 };
+
+        assert_eq!(
+            archcar_request_summary(&request),
+            "interrupt_turn session_id=9"
+        );
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"interrupt_turn\""));
+        let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
     }
 
     #[test]
