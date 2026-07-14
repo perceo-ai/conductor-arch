@@ -1624,6 +1624,11 @@ fn run_codex_app_server_session_loop(
                     }
                     if message.method.as_deref() == Some("turn/completed") {
                         mark_snapshot_ready(&snapshot);
+                        let _ = event_tx.send(ArchcarEvent::TurnCompleted {
+                            session_id: started.session_id,
+                            thread_id: started.thread_id,
+                            status: codex_turn_completed_status(&message),
+                        });
                         let _ = event_tx.send(ArchcarEvent::SessionReady {
                             session_id: started.session_id,
                             thread_id: started.thread_id,
@@ -1999,6 +2004,28 @@ fn codex_response_error(message: &CodexAppServerMessage) -> Option<String> {
         .or_else(|| error.as_str())
         .unwrap_or("Codex app-server request failed");
     Some(message.to_owned())
+}
+
+fn codex_turn_completed_status(message: &CodexAppServerMessage) -> Option<String> {
+    for pointer in [
+        "/params/status",
+        "/params/turn/status",
+        "/params/finalStatus",
+        "/params/final_status",
+        "/result/status",
+        "/result/turn/status",
+    ] {
+        if let Some(status) = message
+            .value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|status| !status.is_empty())
+        {
+            return Some(status.to_owned());
+        }
+    }
+    None
 }
 
 fn codex_thread_id_from_startup_response(
@@ -2604,6 +2631,20 @@ mod tests {
         assert_eq!(
             events[1].provider_event_id.as_deref(),
             Some(format!("{}:2", second_process.id).as_str())
+        );
+    }
+
+    #[test]
+    fn codex_turn_completed_status_reads_final_status_payload() {
+        let message = parse_jsonl_message(
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"cancelled"}}}"#,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_turn_completed_status(&message).as_deref(),
+            Some("cancelled")
         );
     }
 

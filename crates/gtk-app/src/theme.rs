@@ -2195,6 +2195,44 @@ button.chat-inline-event-chip:checked {
     padding: 0 16px 16px;
     background-color: transparent;
 }
+.chat-queue-overlay {
+    margin: 0 8px 6px;
+    padding: 4px;
+    border: 1px solid #2d2d2d;
+    border-radius: 8px;
+    background-color: rgba(18, 18, 18, 0.96);
+}
+.chat-queued-composer-row {
+    padding: 5px 6px;
+    border-radius: 6px;
+    background-color: #181818;
+}
+.chat-queued-composer-body {
+    color: #d6d6d6;
+    font-size: 13px;
+    padding: 0;
+}
+.chat-queued-actions {
+    opacity: 0;
+}
+.chat-queued-composer-row:hover .chat-queued-actions,
+.chat-queued-actions:hover {
+    opacity: 1;
+}
+.chat-queued-action-btn {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+    border-radius: 5px;
+    background-color: transparent;
+    color: #a7a7a7;
+    border: none;
+    box-shadow: none;
+}
+.chat-queued-action-btn:hover {
+    background-color: #2a2a2a;
+    color: #f0f0f0;
+}
 .chat-composer-box {
     border: 1px solid #2a2a2a;
     border-radius: 14px;
@@ -2221,11 +2259,6 @@ button.chat-inline-event-chip:checked {
 .chat-toolbar {
     padding: 6px 8px 8px;
     background-color: transparent;
-}
-.chat-queue-status {
-    padding: 0 10px 8px;
-    color: #9ca7b7;
-    font-size: 12px;
 }
 .chat-footer-toggle .chat-mode-label,
 .chat-footer-toggle .chat-mode-arrow {
@@ -2852,16 +2885,23 @@ mod tests {
     }
 
     #[test]
-    fn queued_chat_rows_are_not_styled_like_sent_user_bubbles() {
+    fn queued_chat_overlay_floats_above_composer_with_hover_actions() {
         let css = app_css();
-        let queued_row = selector_block(css, ".chat-queued-row");
+        let queue_overlay = selector_block(css, ".chat-queue-overlay");
+        assert!(queue_overlay.contains("background-color: rgba(18, 18, 18, 0.96);"));
+        assert!(queue_overlay.contains("margin: 0 8px 6px;"));
+
+        let queued_row = selector_block(css, ".chat-queued-composer-row");
         assert!(queued_row.contains("background-color: #181818;"));
-        assert!(queued_row.contains("border: 1px solid #2d2d2d;"));
         assert!(queued_row.contains("border-radius: 6px;"));
 
-        let queued_body = selector_block(css, ".chat-queued-body");
+        let queued_body = selector_block(css, ".chat-queued-composer-body");
         assert!(queued_body.contains("font-size: 13px;"));
         assert!(queued_body.contains("padding: 0;"));
+
+        let actions = selector_block(css, ".chat-queued-actions");
+        assert!(actions.contains("opacity: 0;"));
+        assert!(css.contains(".chat-queued-composer-row:hover .chat-queued-actions"));
 
         let user_bubble = selector_block(css, ".chat-user-bubble");
         assert!(user_bubble.contains("background-color: #2e2e2e;"));

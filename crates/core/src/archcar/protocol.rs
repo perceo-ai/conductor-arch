@@ -246,6 +246,14 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             session_id,
             thread_id,
         } => format!("session_ready session_id={session_id} thread_id={thread_id}"),
+        ArchcarEvent::TurnCompleted {
+            session_id,
+            thread_id,
+            status,
+        } => format!(
+            "turn_completed session_id={session_id} thread_id={thread_id} status={}",
+            status.as_deref().unwrap_or("unknown")
+        ),
         ArchcarEvent::SessionScreenUpdated { session_id } => {
             format!("session_screen_updated session_id={session_id}")
         }
@@ -300,6 +308,12 @@ pub enum ArchcarEvent {
     SessionReady {
         session_id: i64,
         thread_id: i64,
+    },
+    TurnCompleted {
+        session_id: i64,
+        thread_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     SessionScreenUpdated {
         session_id: i64,
@@ -489,6 +503,20 @@ mod tests {
         assert_eq!(
             archcar_event_summary(&event),
             "session_ready session_id=11 thread_id=5"
+        );
+    }
+
+    #[test]
+    fn event_summary_describes_completed_turn_boundary() {
+        let event = ArchcarEvent::TurnCompleted {
+            session_id: 11,
+            thread_id: 5,
+            status: Some("cancelled".to_owned()),
+        };
+
+        assert_eq!(
+            archcar_event_summary(&event),
+            "turn_completed session_id=11 thread_id=5 status=cancelled"
         );
     }
 
