@@ -243,6 +243,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           summary TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS workspace_ui_state (
+          workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+          changes_scope TEXT,
+          updated_at TEXT NOT NULL
+        );
         ",
     )?;
     remove_chat_events_exact_unique_constraint(conn)?;

@@ -1719,6 +1719,10 @@ impl WorkspaceStore {
             [workspace_id],
         )?;
         self.conn.execute(
+            "DELETE FROM workspace_ui_state WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
             "DELETE FROM pull_requests WHERE workspace_id = ?1",
             [workspace_id],
         )?;
@@ -5502,6 +5506,38 @@ mutation($threadId: ID!) {{
         let workspace = self.get_by_name(workspace_name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         load_repository_settings(&repository.root_path)
+    }
+
+    pub fn workspace_changes_scope(&self, workspace_name: &str) -> Result<Option<String>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        self.conn
+            .query_row(
+                "SELECT changes_scope FROM workspace_ui_state WHERE workspace_id = ?1",
+                [workspace.id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .context("load workspace changes scope")
+    }
+
+    pub fn set_workspace_changes_scope(
+        &self,
+        workspace_name: &str,
+        scope: Option<&str>,
+    ) -> Result<()> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let scope = scope.map(str::trim).filter(|value| !value.is_empty());
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO workspace_ui_state (workspace_id, changes_scope, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace_id) DO UPDATE SET
+               changes_scope = excluded.changes_scope,
+               updated_at = excluded.updated_at",
+            params![workspace.id, scope, now],
+        )?;
+        Ok(())
     }
 
     pub fn create_chat_thread(
@@ -13220,6 +13256,46 @@ accent = "#0ea5e9"
         );
         assert!(defaults.agent_profile_names.is_empty());
         assert!(defaults.notification_rules.is_empty());
+    }
+
+    #[test]
+    fn workspace_changes_scope_persists_across_store_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        WorkspaceStore::open(&db_path)
+            .unwrap()
+            .set_workspace_changes_scope("berlin", Some("turn:thread:7:user:42"))
+            .unwrap();
+
+        assert_eq!(
+            WorkspaceStore::open(&db_path)
+                .unwrap()
+                .workspace_changes_scope("berlin")
+                .unwrap()
+                .as_deref(),
+            Some("turn:thread:7:user:42")
+        );
     }
 
     #[test]

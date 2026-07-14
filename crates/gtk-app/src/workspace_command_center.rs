@@ -76,6 +76,14 @@ struct FileTreeRow {
     is_dir: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceChangesScopeItem {
+    label: String,
+    stack_key: String,
+    menu_label: String,
+    persisted_scope: String,
+}
+
 pub(crate) fn build_workspace_command_center(
     app_state: &AppState,
     refresh_hub: RefreshHub,
@@ -3987,7 +3995,7 @@ fn apply_diff_tags(buffer: &gtk::TextBuffer) {
 }
 
 fn workspace_changes_panel(
-    _db_path: &Path,
+    db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
     _refresh_hub: RefreshHub,
@@ -4016,11 +4024,12 @@ fn workspace_changes_panel(
         Some("uncommitted"),
     );
 
-    let mut scope_items = vec![(
-        "Uncommitted changes".to_owned(),
-        "uncommitted".to_owned(),
-        "Uncommitted".to_owned(),
-    )];
+    let mut scope_items = vec![WorkspaceChangesScopeItem {
+        label: "Uncommitted changes".to_owned(),
+        stack_key: "uncommitted".to_owned(),
+        menu_label: "Uncommitted".to_owned(),
+        persisted_scope: "uncommitted".to_owned(),
+    }];
 
     match store.turn_file_change_summaries(name, WORKSPACE_TURN_CHANGE_LIMIT) {
         Ok(turns) => {
@@ -4031,7 +4040,12 @@ fn workspace_changes_panel(
                     &workspace_file_summary_scope_view(&turn.files, false),
                     Some(&key),
                 );
-                scope_items.push((label.clone(), key, label));
+                scope_items.push(WorkspaceChangesScopeItem {
+                    label: label.clone(),
+                    stack_key: key,
+                    menu_label: label,
+                    persisted_scope: persisted_turn_changes_scope(&turn.provider_turn_id),
+                });
             }
             if turns.is_empty() {
                 body_stack.add_named(
@@ -4040,11 +4054,12 @@ fn workspace_changes_panel(
                     ),
                     Some("turns_empty"),
                 );
-                scope_items.push((
-                    "Latest turn".to_owned(),
-                    "turns_empty".to_owned(),
-                    "Latest turn".to_owned(),
-                ));
+                scope_items.push(WorkspaceChangesScopeItem {
+                    label: "Latest turn".to_owned(),
+                    stack_key: "turns_empty".to_owned(),
+                    menu_label: "Latest turn".to_owned(),
+                    persisted_scope: "turn:latest".to_owned(),
+                });
             }
         }
         Err(err) => {
@@ -4054,15 +4069,20 @@ fn workspace_changes_panel(
                 )),
                 Some("turns_error"),
             );
-            scope_items.push((
-                "Latest turn".to_owned(),
-                "turns_error".to_owned(),
-                "Latest turn".to_owned(),
-            ));
+            scope_items.push(WorkspaceChangesScopeItem {
+                label: "Latest turn".to_owned(),
+                stack_key: "turns_error".to_owned(),
+                menu_label: "Latest turn".to_owned(),
+                persisted_scope: "turn:latest".to_owned(),
+            });
         }
     }
 
-    body_stack.set_visible_child_name("uncommitted");
+    let saved_scope = store.workspace_changes_scope(name).unwrap_or_default();
+    let selected_scope =
+        workspace_changes_selected_scope(&scope_items, saved_scope.as_deref()).clone();
+    body_stack.set_visible_child_name(&selected_scope.stack_key);
+    menu_btn.set_label(&selected_scope.menu_label);
     panel.append(&body_stack);
 
     let popover = gtk::Popover::new();
@@ -4071,14 +4091,24 @@ fn workspace_changes_panel(
     let menu = GBox::new(Orientation::Vertical, 4);
     menu.add_css_class("chat-menu-list");
 
-    for (label, target, scope_text) in scope_items {
-        let item = menu_text_button(&label);
+    for scope_item in scope_items {
+        let item = menu_text_button(&scope_item.label);
         let body_stack_for_item = body_stack.clone();
         let menu_btn_for_item = menu_btn.clone();
         let popover_for_item = popover.clone();
+        let db_path_for_item = db_path.to_path_buf();
+        let workspace_name_for_item = name.to_owned();
         item.connect_clicked(move |_| {
-            body_stack_for_item.set_visible_child_name(&target);
-            menu_btn_for_item.set_label(&scope_text);
+            body_stack_for_item.set_visible_child_name(&scope_item.stack_key);
+            menu_btn_for_item.set_label(&scope_item.menu_label);
+            if let Err(err) = WorkspaceStore::open(&db_path_for_item).and_then(|store| {
+                store.set_workspace_changes_scope(
+                    &workspace_name_for_item,
+                    Some(&scope_item.persisted_scope),
+                )
+            }) {
+                error!("persist workspace changes scope failed: {err:#}");
+            }
             popover_for_item.popdown();
         });
         menu.append(&item);
@@ -4172,6 +4202,35 @@ fn turn_scope_label(index: usize) -> String {
         1 => "1 turn before".to_owned(),
         value => format!("{value} turns before"),
     }
+}
+
+fn persisted_turn_changes_scope(provider_turn_id: &str) -> String {
+    format!("turn:{provider_turn_id}")
+}
+
+fn workspace_changes_selected_scope<'a>(
+    items: &'a [WorkspaceChangesScopeItem],
+    saved_scope: Option<&str>,
+) -> &'a WorkspaceChangesScopeItem {
+    if let Some(saved_scope) = saved_scope {
+        if let Some(item) = items
+            .iter()
+            .find(|item| item.persisted_scope == saved_scope)
+        {
+            return item;
+        }
+        if saved_scope.starts_with("turn:") {
+            if let Some(item) = items
+                .iter()
+                .find(|item| item.persisted_scope.starts_with("turn:"))
+            {
+                return item;
+            }
+        }
+    }
+    items
+        .first()
+        .expect("workspace changes scope menu should include uncommitted changes")
 }
 
 fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
@@ -7592,6 +7651,58 @@ mod tests {
         assert_eq!(turn_scope_label(0), "Latest turn");
         assert_eq!(turn_scope_label(1), "1 turn before");
         assert_eq!(turn_scope_label(24), "24 turns before");
+    }
+
+    #[test]
+    fn workspace_changes_scope_selects_saved_turn_after_restart() {
+        let items = vec![
+            WorkspaceChangesScopeItem {
+                label: "Uncommitted changes".to_owned(),
+                stack_key: "uncommitted".to_owned(),
+                menu_label: "Uncommitted".to_owned(),
+                persisted_scope: "uncommitted".to_owned(),
+            },
+            WorkspaceChangesScopeItem {
+                label: "Latest turn".to_owned(),
+                stack_key: "turn_0".to_owned(),
+                menu_label: "Latest turn".to_owned(),
+                persisted_scope: persisted_turn_changes_scope("thread:7:user:42"),
+            },
+            WorkspaceChangesScopeItem {
+                label: "1 turn before".to_owned(),
+                stack_key: "turn_1".to_owned(),
+                menu_label: "1 turn before".to_owned(),
+                persisted_scope: persisted_turn_changes_scope("thread:7:user:41"),
+            },
+        ];
+
+        let selected = workspace_changes_selected_scope(&items, Some("turn:thread:7:user:41"));
+
+        assert_eq!(selected.stack_key, "turn_1");
+        assert_eq!(selected.menu_label, "1 turn before");
+    }
+
+    #[test]
+    fn workspace_changes_scope_falls_back_to_latest_turn_when_saved_turn_rolls_out() {
+        let items = vec![
+            WorkspaceChangesScopeItem {
+                label: "Uncommitted changes".to_owned(),
+                stack_key: "uncommitted".to_owned(),
+                menu_label: "Uncommitted".to_owned(),
+                persisted_scope: "uncommitted".to_owned(),
+            },
+            WorkspaceChangesScopeItem {
+                label: "Latest turn".to_owned(),
+                stack_key: "turn_0".to_owned(),
+                menu_label: "Latest turn".to_owned(),
+                persisted_scope: persisted_turn_changes_scope("thread:7:user:52"),
+            },
+        ];
+
+        let selected = workspace_changes_selected_scope(&items, Some("turn:thread:7:user:41"));
+
+        assert_eq!(selected.stack_key, "turn_0");
+        assert_eq!(selected.menu_label, "Latest turn");
     }
 
     #[test]
