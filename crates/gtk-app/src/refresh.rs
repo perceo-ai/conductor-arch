@@ -67,8 +67,25 @@ impl RefreshHub {
     }
 
     fn run(&self, slot: &Rc<RefCell<Option<RefreshHandler>>>) {
-        if let Some(handler) = slot.borrow().as_ref() {
+        let handler = slot.borrow().as_ref().cloned();
+        if let Some(handler) = handler {
             handler();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_handler_can_replace_same_scope_without_refcell_panic() {
+        let hub = RefreshHub::default();
+        let hub_for_handler = hub.clone();
+        hub.set_workspace(move || {
+            hub_for_handler.set_workspace(|| {});
+        });
+
+        hub.refresh(RefreshScope::Workspace);
     }
 }

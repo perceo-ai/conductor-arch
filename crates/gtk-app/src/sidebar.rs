@@ -1,20 +1,23 @@
 use adw::ApplicationWindow;
+use archductor_core::archcar::protocol::ArchcarRequest;
+use archductor_core::repository::RepositoryStore;
+use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
     Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
     RevealerTransitionType, ScrolledWindow, Spinner, Stack,
 };
-use linux_archductor_core::archcar::protocol::ArchcarRequest;
-use linux_archductor_core::repository::RepositoryStore;
-use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use tracing::error;
 
-use crate::archcar_async::{spawn_archcar_request, spawn_background_job};
+use crate::archcar_async::{
+    spawn_archcar_request, spawn_background_job, spawn_background_job_with_progress,
+};
 use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -138,7 +141,7 @@ pub(crate) fn build_app_sidebar(
     nav_group.append(&history_nav_btn);
     if debug_mode {
         let pty_inspector_nav_btn =
-            sidebar_nav_button("utilities-terminal-symbolic", "PTY Inspector");
+            sidebar_nav_button("utilities-terminal-symbolic", "Session Logs");
         {
             let stack_p = stack.clone();
             let state_p = app_state.clone();
@@ -313,19 +316,56 @@ pub(crate) fn build_app_sidebar(
                             let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
                             let repo_name_for_callback = repo_name.clone();
                             let toast_create = toast_create.clone();
-                            spawn_background_job(
+                            let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
+                            spawn_background_job_with_progress(
                                 {
                                     let db_path = db_path.clone();
                                     let repo_name = repo_name.clone();
-                                    move || {
+                                    let inserted_workspace_name = inserted_workspace_name.clone();
+                                    move |progress| {
                                         WorkspaceStore::open(db_path).and_then(|store| {
-                                            store.create(CreateWorkspace {
-                                                repository_name: repo_name,
-                                                name: String::new(),
-                                                branch: String::new(),
-                                                base_ref: None,
-                                            })
+                                            store.create_with_progress(
+                                                CreateWorkspace {
+                                                    repository_name: repo_name,
+                                                    name: String::new(),
+                                                    branch: String::new(),
+                                                    base_ref: None,
+                                                },
+                                                |workspace| {
+                                                    if let Ok(mut name) =
+                                                        inserted_workspace_name.lock()
+                                                    {
+                                                        *name = Some(workspace.name.clone());
+                                                    }
+                                                    progress();
+                                                },
+                                            )
                                         })
+                                    }
+                                },
+                                {
+                                    let inserted_workspace_name = inserted_workspace_name.clone();
+                                    let app_state = app_state.clone();
+                                    let stack = stack.clone();
+                                    let refresh_hub = refresh_hub.clone();
+                                    let refresh_workspace = refresh_workspace.clone();
+                                    let refresh_view_preferences = refresh_view_preferences.clone();
+                                    move || {
+                                        let workspace_name = inserted_workspace_name
+                                            .lock()
+                                            .ok()
+                                            .and_then(|name| name.clone());
+                                        if let Some(workspace_name) = workspace_name {
+                                            app_state.navigate_to_workspace_with_default_tab(
+                                                Some(workspace_name),
+                                                Some(WorkspaceTab::Chats),
+                                            );
+                                            stack.set_visible_child_name("workspace");
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            refresh_hub.refresh(RefreshScope::Dashboard);
+                                            refresh_workspace();
+                                            refresh_view_preferences();
+                                        }
                                     }
                                 },
                                 move |result| {
@@ -336,18 +376,9 @@ pub(crate) fn build_app_sidebar(
                                     add_btn.set_tooltip_text(Some("Create workspace"));
                                     match result {
                                         Ok(workspace) => {
-                                            let default_tab = WorkspaceStore::open(
-                                                app_state.workspace_database_path(),
-                                            )
-                                            .and_then(|store| {
-                                                store.workspace_view_defaults(&workspace.name)
-                                            })
-                                            .ok()
-                                            .and_then(|defaults| defaults.default_visible_tab)
-                                            .and_then(|tab| WorkspaceTab::from_config(&tab));
                                             app_state.navigate_to_workspace_with_default_tab(
                                                 Some(workspace.name),
-                                                default_tab,
+                                                Some(WorkspaceTab::Chats),
                                             );
                                             stack.set_visible_child_name("workspace");
                                             refresh_hub.refresh(RefreshScope::Projects);
@@ -383,10 +414,11 @@ pub(crate) fn build_app_sidebar(
                             line.diff_deletions,
                             &ws.updated_at,
                         );
-                        if ws.status == "active" {
+                        if workspace_status_allows_sidebar_actions(&ws.status) {
                             attach_workspace_row_context_menu(
                                 &row,
                                 ws.name.clone(),
+                                ws.status.clone(),
                                 app_state.clone(),
                                 stack.clone(),
                                 window.clone(),
@@ -739,6 +771,7 @@ fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
 fn attach_workspace_row_context_menu(
     row: &ListBoxRow,
     workspace_name: String,
+    workspace_status: String,
     state: AppState,
     stack: Stack,
     window: ApplicationWindow,
@@ -800,7 +833,9 @@ fn attach_workspace_row_context_menu(
             );
         });
     }
-    menu.append(&rename_btn);
+    if workspace_status != "failed" {
+        menu.append(&rename_btn);
+    }
 
     let duplicate_btn = menu_text_button("Duplicate");
     {
@@ -884,10 +919,12 @@ fn attach_workspace_row_context_menu(
             );
         });
     }
-    menu.append(&duplicate_btn);
+    if workspace_status != "failed" {
+        menu.append(&duplicate_btn);
+    }
 
-    for (label, destructive, action) in [("Archive", false, "archive"), ("Delete", true, "delete")]
-    {
+    let workspace_actions = workspace_context_actions(&workspace_status);
+    for (label, destructive, action) in workspace_actions {
         let item = menu_text_button(label);
         if destructive {
             item.add_css_class("destructive-action");
@@ -902,6 +939,7 @@ fn attach_workspace_row_context_menu(
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
         let toast_manager = toast_manager.clone();
+        let workspace_status_for_action = workspace_status.clone();
         item.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -918,6 +956,8 @@ fn attach_workspace_row_context_menu(
             };
             let message = if action == "archive" {
                 format!("Archive {workspace_name}?")
+            } else if workspace_status_for_action == "failed" {
+                format!("Delete {workspace_name}? This removes failed workspace metadata and any created worktree, but leaves the local branch alone.")
             } else {
                 format!(
                     "Delete {workspace_name}? This removes the worktree, deletes the local branch, and can discard unmerged commits."
@@ -932,6 +972,7 @@ fn attach_workspace_row_context_menu(
                 toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
+                    let workspace_status = workspace_status_for_action.clone();
                     let refresh_hub = refresh_hub.clone();
                     let refresh_workspace = refresh_workspace.clone();
                     let refresh_view_preferences = refresh_view_preferences.clone();
@@ -948,8 +989,87 @@ fn attach_workspace_row_context_menu(
                         let stack = stack.clone();
                         let row = row.clone();
                         let workspace_name = workspace_name.clone();
+	                        let force_delete_workspace = workspace_status == "failed";
+	                        let delete_branch_after_delete = workspace_status != "failed";
                         let window = window.clone();
                         let toast_manager = toast_manager.clone();
+                        if action == "delete" {
+                            row.set_sensitive(false);
+
+                            spawn_background_job(
+                                {
+                                    let db_path = state.workspace_database_path().to_path_buf();
+                                    let workspace_name = workspace_name.clone();
+                                    move || {
+	                                        WorkspaceStore::open(db_path).and_then(|store| {
+	                                            store.delete(
+	                                                &workspace_name,
+	                                                force_delete_workspace,
+	                                                delete_branch_after_delete,
+	                                            )
+	                                        })
+                                            .map_err(|err| format!("{err:#}"))
+                                    }
+                                },
+                                move |result| match result {
+                                    Ok(deleted) => {
+                                        let snapshot = state.snapshot();
+                                        let was_selected_workspace =
+                                            snapshot.selected_workspace.as_deref()
+                                                == Some(workspace_name.as_str())
+                                                && matches!(
+                                                    snapshot.active_page,
+                                                    AppPage::Workspace | AppPage::Review
+                                                );
+                                        state.remove_workspace_from_navigation(
+                                            &workspace_name,
+                                            AppPage::Dashboard,
+                                        );
+                                        if was_selected_workspace {
+                                            stack.set_visible_child_name("dashboard");
+                                        }
+                                        if let Some(list) = row.parent().and_downcast::<ListBox>() {
+                                            list.remove(&row);
+                                        }
+                                        refresh_view_preferences();
+                                        refresh_workspace();
+                                        refresh_hub.refresh(RefreshScope::All);
+                                        let db_cleanup =
+                                            state.workspace_database_path().to_path_buf();
+                                        std::thread::spawn(move || {
+                                            if let Err(err) =
+                                                WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                                    store.cleanup_deleted_workspace_artifacts(
+                                                        &deleted,
+                                                        true,
+                                                        delete_branch_after_delete,
+                                                    )
+                                                })
+                                            {
+                                                error!(
+                                                    workspace = %deleted.name,
+                                                    error = %err,
+                                                    "background workspace artifact cleanup failed after delete"
+                                                );
+                                            }
+                                        });
+                                    }
+                                    Err(err) => {
+                                        row.set_sensitive(true);
+                                        refresh_view_preferences();
+                                        refresh_workspace();
+                                        refresh_hub.refresh(RefreshScope::All);
+                                        show_workspace_error_dialog(
+                                            &window,
+                                            "Workspace action failed",
+                                            &err,
+                                            &toast_manager,
+                                        );
+                                    }
+                                },
+                            );
+                            return Ok(());
+                        }
                         spawn_background_job(
                             {
                                 let db_path = state.workspace_database_path().to_path_buf();
@@ -958,9 +1078,6 @@ fn attach_workspace_row_context_menu(
                                     WorkspaceStore::open(db_path).and_then(|store| match action {
                                         "archive" => {
                                             store.archive(&workspace_name, false).map(|_| ())
-                                        }
-                                        "delete" => {
-                                            store.delete(&workspace_name, true, true).map(|_| ())
                                         }
                                         _ => unreachable!(),
                                     })
@@ -1307,13 +1424,25 @@ fn show_workspace_error_dialog(
 fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
     let mut labels = vec!["Dashboard", "History"];
     if debug_mode {
-        labels.push("PTY Inspector");
+        labels.push("Session Logs");
     }
     labels
 }
 
 fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
     matches!(page, AppPage::Workspace | AppPage::Review)
+}
+
+fn workspace_status_allows_sidebar_actions(status: &str) -> bool {
+    matches!(status, "active" | "failed")
+}
+
+fn workspace_context_actions(status: &str) -> Vec<(&'static str, bool, &'static str)> {
+    if status == "failed" {
+        vec![("Delete", true, "delete")]
+    } else {
+        vec![("Archive", false, "archive"), ("Delete", true, "delete")]
+    }
 }
 
 fn section_header_row(
@@ -1423,18 +1552,21 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection};
+    use super::{
+        primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
+        workspace_context_actions, workspace_status_allows_sidebar_actions,
+    };
     use crate::state::AppPage;
 
     #[test]
-    fn primary_sidebar_nav_labels_gate_pty_inspector_under_history() {
+    fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
         assert_eq!(
             primary_sidebar_nav_labels(false),
             vec!["Dashboard", "History"]
         );
         assert_eq!(
             primary_sidebar_nav_labels(true),
-            vec!["Dashboard", "History", "PTY Inspector"]
+            vec!["Dashboard", "History", "Session Logs"]
         );
     }
 
@@ -1450,5 +1582,24 @@ mod tests {
         assert!(!sidebar_should_restore_workspace_selection(
             &AppPage::History
         ));
+    }
+
+    #[test]
+    fn failed_workspace_rows_keep_sidebar_actions() {
+        assert!(workspace_status_allows_sidebar_actions("active"));
+        assert!(workspace_status_allows_sidebar_actions("failed"));
+        assert!(!workspace_status_allows_sidebar_actions("archived"));
+    }
+
+    #[test]
+    fn failed_workspace_rows_offer_only_safe_delete_action() {
+        assert_eq!(
+            workspace_context_actions("failed"),
+            vec![("Delete", true, "delete")]
+        );
+        assert_eq!(
+            workspace_context_actions("active"),
+            vec![("Archive", false, "archive"), ("Delete", true, "delete")]
+        );
     }
 }

@@ -1,19 +1,19 @@
 use adw::ToastOverlay;
+use archductor_core::agent_tools::launchable_provider_key;
+use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
+use archductor_core::doctor::SetupReadiness;
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::{
+    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
+    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
+    WorkspaceStore, WorkspaceTimelineEvent,
+};
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
-    Paned, PolicyType, Popover, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag, TextView,
-    WrapMode,
-};
-use linux_archductor_core::agent_tools::launchable_provider_key;
-use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
-use linux_archductor_core::doctor::SetupReadiness;
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
-    WorkspaceStore, WorkspaceTimelineEvent,
+    Paned, PolicyType, Popover, ScrolledWindow, Separator, Spinner, Stack, StackSwitcher, TextTag,
+    TextView, WrapMode,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -25,7 +25,7 @@ use tracing::error;
 
 const WORKSPACE_SPLIT_MIN_START: i32 = 280;
 const WORKSPACE_SPLIT_MIN_END: i32 = 260;
-const WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH: i32 = 820;
+const WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH: i32 = 1280;
 const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
@@ -34,11 +34,17 @@ const WORKSPACE_TURN_DIFF_MAX_KIB: usize = 64;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
+fn clone_external_thread_selection_controller(
+    controller: &session_surface::ExternalThreadSelectionController,
+) -> Option<Rc<dyn Fn(Option<i64>)>> {
+    controller.borrow().as_ref().cloned()
+}
+
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
-    archcar_async::spawn_archcar_request,
+    archcar_async::{spawn_archcar_request, spawn_background_job},
     buttons::{menu_text_button, resolve_icon_name, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
@@ -115,6 +121,17 @@ pub(crate) fn build_workspace_command_center(
             return;
         };
 
+        if matches!(line.workspace.status.as_str(), "creating" | "failed") {
+            body.append(&workspace_creation_status_shell(
+                &db_path,
+                &line.workspace,
+                &state,
+                refresh_hub.clone(),
+                toast_overlay.clone(),
+            ));
+            return;
+        }
+
         body.append(&simple_workspace_shell(
             &db_path,
             &store,
@@ -129,6 +146,129 @@ pub(crate) fn build_workspace_command_center(
     };
     refresh();
     (root, refresh)
+}
+
+fn workspace_creation_status_shell(
+    db_path: &Path,
+    ws: &Workspace,
+    state: &AppState,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let shell = GBox::new(Orientation::Vertical, 0);
+    shell.set_vexpand(true);
+    shell.set_hexpand(true);
+    shell.add_css_class("chat-surface");
+
+    let header = GBox::new(Orientation::Horizontal, 8);
+    header.add_css_class("session-header-row");
+    header.set_margin_top(14);
+    header.set_margin_bottom(14);
+    header.set_margin_start(14);
+    header.set_margin_end(14);
+
+    if ws.status == "creating" {
+        let spinner = Spinner::new();
+        spinner.start();
+        header.append(&spinner);
+    }
+
+    let title_box = GBox::new(Orientation::Vertical, 2);
+    title_box.set_hexpand(true);
+    let title = Label::new(Some(&title_case_workspace(&ws.name)));
+    title.add_css_class("session-title");
+    title.set_xalign(0.0);
+    title_box.append(&title);
+    let meta = Label::new(Some(&format!("{} · {}", ws.branch, ws.status)));
+    meta.add_css_class("workspace-meta");
+    meta.set_xalign(0.0);
+    title_box.append(&meta);
+    header.append(&title_box);
+    shell.append(&header);
+
+    let body = GBox::new(Orientation::Vertical, 8);
+    body.set_vexpand(true);
+    body.set_valign(Align::Center);
+    body.set_halign(Align::Center);
+    let status = if ws.status == "failed" {
+        "Workspace creation failed."
+    } else {
+        "Creating workspace..."
+    };
+    let label = Label::new(Some(status));
+    label.add_css_class(if ws.status == "failed" {
+        "status-error"
+    } else {
+        "workspace-empty-label"
+    });
+    body.append(&label);
+    if workspace_creation_status_allows_delete(&ws.status) {
+        let confirm = CheckButton::with_label("Confirm delete");
+        let delete_btn = destructive_button("Delete");
+        let progress = Label::new(None);
+        progress.add_css_class("card-meta");
+        progress.set_wrap(true);
+        progress.set_xalign(0.0);
+
+        let db_delete = db_path.to_path_buf();
+        let workspace_delete = ws.name.clone();
+        let refresh_after_delete = refresh_hub.clone();
+        let progress_after_delete = progress.clone();
+        let toast_after_delete = toast_overlay.clone();
+        let state_after_delete = state.clone();
+        let confirm_delete = confirm.clone();
+        delete_btn.connect_clicked(move |_| {
+            if !confirm_delete.is_active() {
+                progress_after_delete.set_text("Check confirm before delete.");
+                return;
+            }
+            progress_after_delete.set_text("Deleting in background...");
+            let db_delete_job = db_delete.clone();
+            let workspace_delete_job = workspace_delete.clone();
+            let refresh_done = refresh_after_delete.clone();
+            let progress_done = progress_after_delete.clone();
+            let toast_done = toast_after_delete.clone();
+            let state_done = state_after_delete.clone();
+            spawn_background_job(
+                move || {
+                    WorkspaceStore::open(db_delete_job)
+                        .and_then(|store| store.delete(&workspace_delete_job, true, false))
+                        .map_err(|err| format!("{err:#}"))
+                },
+                move |result| {
+                    match result {
+                        Ok(deleted) => {
+                            progress_done.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                            apply_workspace_delete_navigation_result(&state_done, &Ok(deleted));
+                        }
+                        Err(err) => {
+                            let err = anyhow::anyhow!(err);
+                            apply_runtime_action_feedback(
+                                &progress_done,
+                                &toast_done,
+                                lifecycle_action_failure_feedback("Delete", &err),
+                            );
+                        }
+                    }
+                    refresh_done.refresh(RefreshScope::All);
+                },
+            );
+        });
+
+        let actions = GBox::new(Orientation::Horizontal, 8);
+        actions.set_halign(Align::Center);
+        actions.append(&confirm);
+        actions.append(&delete_btn);
+        body.append(&actions);
+        body.append(&progress);
+    }
+    shell.append(&body);
+
+    shell
+}
+
+fn workspace_creation_status_allows_delete(status: &str) -> bool {
+    status == "failed"
 }
 
 fn simple_workspace_shell(
@@ -154,7 +294,10 @@ fn simple_workspace_shell(
     main_split.set_resize_end_child(false);
     main_split.set_shrink_start_child(true);
     main_split.set_shrink_end_child(true);
-    main_split.set_position(WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH);
+    main_split.set_position(workspace_split_position_for_width(
+        WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH,
+    ));
+    install_workspace_split_ratio(&main_split);
     main_split.set_vexpand(true);
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
@@ -213,6 +356,30 @@ fn split_position_for_ratio(
     let preferred = total_width.saturating_mul(start_weight) / total_weight;
     let max_start = (total_width - min_end).max(min_start);
     preferred.clamp(min_start, max_start)
+}
+
+fn workspace_split_position_for_width(total_width: i32) -> i32 {
+    split_position_for_ratio(
+        total_width,
+        5,
+        3,
+        WORKSPACE_SPLIT_MIN_START,
+        WORKSPACE_SPLIT_MIN_END,
+    )
+}
+
+fn install_workspace_split_ratio(split: &Paned) {
+    // Keep the workspace center and detail pane at the product's fixed 5:3
+    // ratio whenever the allocated width changes.
+    let last_width = Rc::new(RefCell::new(0));
+    split.add_tick_callback(move |paned, _| {
+        let width = paned.allocated_width();
+        if width > 0 && *last_width.borrow() != width {
+            paned.set_position(workspace_split_position_for_width(width));
+            *last_width.borrow_mut() = width;
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 fn make_action_row() -> GBox {
@@ -303,7 +470,7 @@ impl WorkspaceRunConsoleTerminalConnection {
             ));
         };
         crate::archcar_async::spawn_archcar_request(
-            linux_archductor_core::paths::AppPaths::from_env(),
+            archductor_core::paths::AppPaths::from_env(),
             ArchcarRequest::SendInput {
                 session_id: record.id,
                 input: input.to_owned(),
@@ -565,7 +732,7 @@ fn ws_center_panel(
                     state.set_selected_chat_thread(Some(thread_id));
                     content.set_visible_child_name("chat");
                     if let Some(select_thread) =
-                        external_thread_selection.borrow().as_ref().cloned()
+                        clone_external_thread_selection_controller(&external_thread_selection)
                     {
                         select_thread(Some(thread_id));
                     }
@@ -599,7 +766,9 @@ fn ws_center_panel(
                     content_for_click.set_visible_child_name("chat");
                     sync_workspace_chat_tabs(chat_tab_buttons_for_click.as_ref(), Some(thread_id));
                     sync_workspace_file_tabs(file_tab_buttons_for_click.as_ref(), None);
-                    if let Some(select_thread) = controller_for_click.borrow().as_ref().cloned() {
+                    if let Some(select_thread) =
+                        clone_external_thread_selection_controller(&controller_for_click)
+                    {
                         select_thread(Some(thread_id));
                     }
                 });
@@ -652,7 +821,7 @@ fn ws_center_panel(
                         sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), next);
                         sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
                         if let Some(select_thread) =
-                            external_thread_selection.borrow().as_ref().cloned()
+                            clone_external_thread_selection_controller(&external_thread_selection)
                         {
                             select_thread(next);
                         }
@@ -754,7 +923,9 @@ fn ws_center_panel(
             state.set_selected_chat_thread(Some(thread.id));
             content.set_visible_child_name("chat");
             (on_threads_changed)(threads, Some(thread.id));
-            if let Some(select_thread) = external_thread_selection.borrow().as_ref().cloned() {
+            if let Some(select_thread) =
+                clone_external_thread_selection_controller(&external_thread_selection)
+            {
                 select_thread(Some(thread.id));
             }
         });
@@ -873,7 +1044,7 @@ fn ws_center_panel(
                     sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), selected);
                     sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
                     if let Some(select_thread) =
-                        external_thread_selection.borrow().as_ref().cloned()
+                        clone_external_thread_selection_controller(&external_thread_selection)
                     {
                         select_thread(selected);
                     }
@@ -1944,7 +2115,7 @@ fn spawn_workspace_terminal_session(
     let store = WorkspaceStore::open(db_path)?;
     let _ = store.session_launch(workspace_name, SessionKind::Shell)?;
     crate::archcar_async::spawn_archcar_request(
-        linux_archductor_core::paths::AppPaths::from_env(),
+        archductor_core::paths::AppPaths::from_env(),
         ArchcarRequest::SpawnSession {
             workspace: workspace_name.to_owned(),
             kind: SessionKind::Shell,
@@ -2208,13 +2379,12 @@ fn toolbar_label(text: &str) -> Label {
 
 fn workspace_status_strip(
     ws: &Workspace,
-    checks: Option<&linux_archductor_core::workspace::ChecksSummary>,
+    checks: Option<&archductor_core::workspace::ChecksSummary>,
 ) -> GBox {
     let strip = GBox::new(Orientation::Horizontal, 10);
     strip.add_css_class("command-center-strip");
     strip.add_css_class("workspace-summary-strip");
     strip.append(&metric_card("Status", &ws.status));
-    strip.append(&metric_card("Port", &ws.port_base.to_string()));
     strip.append(&metric_card(
         "Files",
         &checks
@@ -2765,32 +2935,58 @@ fn lifecycle_panel(
             }
             progress_action.set_text(&format!("{action} in progress..."));
             if action == "delete" {
-                match WorkspaceStore::open(db_action.clone())
-                    .and_then(|store| store.delete(&workspace, false, false))
-                {
-                    Ok(deleted) => {
-                        progress_action.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
-                        state_after_action.set_selected_workspace(None);
-                        refresh_after_action.refresh(RefreshScope::All);
-                        let db_cleanup = db_action.clone();
-                        std::thread::spawn(move || {
-                            if let Err(err) = WorkspaceStore::open(db_cleanup).and_then(|store| {
-                                store.cleanup_deleted_workspace_artifacts(&deleted, true, true)
-                            }) {
-                                error!(
-                                    workspace = %deleted.name,
-                                    error = %err,
-                                    "background workspace artifact cleanup failed after delete"
+                progress_action.set_text("Deleting in background...");
+                let db_delete = db_action.clone();
+                let workspace_delete = workspace.clone();
+                let refresh_after_delete = refresh_after_action.clone();
+                let progress_after_delete = progress_action.clone();
+                let toast_after_delete = toast_action.clone();
+                let db_cleanup_after_delete = db_action.clone();
+                let state_after_delete = state_after_action.clone();
+                spawn_background_job(
+                    move || {
+                        WorkspaceStore::open(db_delete)
+                            .and_then(|store| store.delete(&workspace_delete, false, false))
+                            .map_err(|err| format!("{err:#}"))
+                    },
+                    move |result| {
+                        match result {
+                            Ok(deleted) => {
+                                progress_after_delete
+                                    .set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                                apply_workspace_delete_navigation_result(
+                                    &state_after_delete,
+                                    &Ok(deleted.clone()),
+                                );
+                                let db_cleanup = db_cleanup_after_delete.clone();
+                                std::thread::spawn(move || {
+                                    if let Err(err) =
+                                        WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                            store.cleanup_deleted_workspace_artifacts(
+                                                &deleted, true, true,
+                                            )
+                                        })
+                                    {
+                                        error!(
+                                            workspace = %deleted.name,
+                                            error = %err,
+                                            "background workspace artifact cleanup failed after delete"
+                                        );
+                                    }
+                                });
+                            }
+                            Err(err) => {
+                                let err = anyhow::anyhow!(err);
+                                apply_runtime_action_feedback(
+                                    &progress_after_delete,
+                                    &toast_after_delete,
+                                    lifecycle_action_failure_feedback("Delete", &err),
                                 );
                             }
-                        });
-                    }
-                    Err(err) => apply_runtime_action_feedback(
-                        &progress_action,
-                        &toast_action,
-                        lifecycle_action_failure_feedback("Delete", &err),
-                    ),
-                }
+                        }
+                        refresh_after_delete.refresh(RefreshScope::All);
+                    },
+                );
                 return;
             }
             let result = WorkspaceStore::open(db_action.clone()).and_then(|store| match action {
@@ -5234,13 +5430,13 @@ impl PullRequestStatusSummary {
 struct WorkspacePrStatusSnapshot {
     pr: Option<PullRequest>,
     status: Option<PullRequestStatusSummary>,
-    summary: Option<linux_archductor_core::workspace::ChecksSummary>,
+    summary: Option<archductor_core::workspace::ChecksSummary>,
 }
 
 pub(crate) fn pull_request_status_summary(
     pr: &PullRequest,
-    readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
-    summary: &linux_archductor_core::workspace::ChecksSummary,
+    readiness: Option<&archductor_core::workspace::PullRequestReadiness>,
+    summary: &archductor_core::workspace::ChecksSummary,
 ) -> PullRequestStatusSummary {
     if pr.state.eq_ignore_ascii_case("merged") {
         return PullRequestStatusSummary {
@@ -5621,7 +5817,7 @@ fn workspace_pr_status_title(
 
 fn pull_request_status_summary_without_checks_summary(
     pr: &PullRequest,
-    readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
+    readiness: Option<&archductor_core::workspace::PullRequestReadiness>,
 ) -> PullRequestStatusSummary {
     if pr.state.eq_ignore_ascii_case("merged") {
         return PullRequestStatusSummary {
@@ -5655,9 +5851,7 @@ fn pull_request_status_summary_without_checks_summary(
     }
 }
 
-fn pull_request_is_failed(
-    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
-) -> bool {
+fn pull_request_is_failed(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
     readiness.checks.iter().any(|check| check.is_failure())
         || readiness
             .deployments
@@ -5665,9 +5859,7 @@ fn pull_request_is_failed(
             .any(|deployment| deployment.is_failure())
 }
 
-fn pull_request_is_pending(
-    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
-) -> bool {
+fn pull_request_is_pending(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
     readiness.checks.iter().any(|check| check.is_pending())
         || readiness
             .deployments
@@ -5676,8 +5868,8 @@ fn pull_request_is_pending(
 }
 
 fn pull_request_is_ready(
-    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
-    summary: &linux_archductor_core::workspace::ChecksSummary,
+    readiness: &archductor_core::workspace::PullRequestReadiness,
+    summary: &archductor_core::workspace::ChecksSummary,
 ) -> bool {
     readiness.review_decision.as_deref() == Some("APPROVED")
         && readiness
@@ -7098,7 +7290,7 @@ fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
 }
 
 fn pull_request_merge_and_archive_feedback(
-    result: anyhow::Result<linux_archductor_core::workspace::MergePullRequestResult>,
+    result: anyhow::Result<archductor_core::workspace::MergePullRequestResult>,
 ) -> String {
     match result {
         Ok(result) => {
@@ -7197,6 +7389,24 @@ fn workspace_delete_feedback(result: anyhow::Result<Workspace>) -> String {
     match result {
         Ok(workspace) => format!("Deleted workspace {}.", workspace.name),
         Err(err) => format!("Delete failed: {err:#}"),
+    }
+}
+
+fn workspace_delete_navigation_target(
+    result: &std::result::Result<Workspace, String>,
+) -> Option<&str> {
+    result
+        .as_ref()
+        .ok()
+        .map(|workspace| workspace.name.as_str())
+}
+
+fn apply_workspace_delete_navigation_result(
+    state: &crate::state::AppState,
+    result: &std::result::Result<Workspace, String>,
+) {
+    if let Some(workspace_name) = workspace_delete_navigation_target(result) {
+        state.remove_workspace_from_navigation(workspace_name, crate::state::AppPage::Dashboard);
     }
 }
 
@@ -7561,7 +7771,7 @@ fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
     entry.set_hexpand(true);
     let add_btn = text_button("Add Todo");
     add_btn.add_css_class("suggested-action");
-    let db_path = linux_archductor_core::paths::AppPaths::from_env().database_path;
+    let db_path = archductor_core::paths::AppPaths::from_env().database_path;
     let workspace = name.to_owned();
     let entry_clone = entry.clone();
     add_btn.connect_clicked(move |_| {
@@ -7927,8 +8137,8 @@ fn apply_action_feedback(
 mod tests {
     use super::*;
 
-    fn test_checkpoint(id: i64, message: &str) -> linux_archductor_core::workspace::Checkpoint {
-        linux_archductor_core::workspace::Checkpoint {
+    fn test_checkpoint(id: i64, message: &str) -> archductor_core::workspace::Checkpoint {
+        archductor_core::workspace::Checkpoint {
             id,
             workspace_id: 1,
             session_id: None,
@@ -7954,8 +8164,8 @@ mod tests {
         }
     }
 
-    fn test_pull_request(state: &str) -> linux_archductor_core::workspace::PullRequest {
-        linux_archductor_core::workspace::PullRequest {
+    fn test_pull_request(state: &str) -> archductor_core::workspace::PullRequest {
+        archductor_core::workspace::PullRequest {
             id: 1,
             workspace_id: 2,
             provider: "github".to_owned(),
@@ -7969,10 +8179,10 @@ mod tests {
 
     fn test_checks_summary(
         changed_files: usize,
-        branch_push_state: Option<linux_archductor_core::workspace::BranchPushState>,
+        branch_push_state: Option<archductor_core::workspace::BranchPushState>,
         conflicting_workspaces: Vec<(String, Vec<String>)>,
-    ) -> linux_archductor_core::workspace::ChecksSummary {
-        linux_archductor_core::workspace::ChecksSummary {
+    ) -> archductor_core::workspace::ChecksSummary {
+        archductor_core::workspace::ChecksSummary {
             workspace: test_workspace(),
             changed_files,
             run_status: None,
@@ -8072,7 +8282,7 @@ mod tests {
     #[test]
     fn diff_file_summary_renders_review_scan_rows() {
         let summaries = vec![
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "README.md".to_owned(),
                 additions: Some(2),
                 deletions: Some(1),
@@ -8080,7 +8290,7 @@ mod tests {
                 unstaged: true,
                 untracked: false,
             },
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "assets/logo.png".to_owned(),
                 additions: None,
                 deletions: None,
@@ -8144,7 +8354,7 @@ mod tests {
 
     #[test]
     fn hunk_action_label_includes_state_and_counts() {
-        let label = hunk_action_label(&linux_archductor_core::workspace::DiffHunkSummary {
+        let label = hunk_action_label(&archductor_core::workspace::DiffHunkSummary {
             index: 1,
             header: "@@ -10,2 +10,3 @@".to_owned(),
             additions: 3,
@@ -8159,7 +8369,7 @@ mod tests {
 
     #[test]
     fn review_comment_summary_marks_open_comments_resolvable() {
-        let comment = linux_archductor_core::workspace::ReviewComment {
+        let comment = archductor_core::workspace::ReviewComment {
             id: 7,
             workspace_id: 1,
             file_path: "src/lib.rs".to_owned(),
@@ -8180,7 +8390,7 @@ mod tests {
     #[test]
     fn file_inline_comments_text_filters_to_selected_file() {
         let comments = vec![
-            linux_archductor_core::workspace::ReviewComment {
+            archductor_core::workspace::ReviewComment {
                 id: 7,
                 workspace_id: 1,
                 file_path: "src/lib.rs".to_owned(),
@@ -8191,7 +8401,7 @@ mod tests {
                 created_at: "2026-06-19T00:00:00Z".to_owned(),
                 updated_at: "2026-06-19T00:00:00Z".to_owned(),
             },
-            linux_archductor_core::workspace::ReviewComment {
+            archductor_core::workspace::ReviewComment {
                 id: 8,
                 workspace_id: 1,
                 file_path: "README.md".to_owned(),
@@ -8214,7 +8424,7 @@ mod tests {
     #[test]
     fn diff_tree_rows_insert_directory_headers_once() {
         let summaries = vec![
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "src/lib.rs".to_owned(),
                 additions: Some(1),
                 deletions: Some(0),
@@ -8222,7 +8432,7 @@ mod tests {
                 unstaged: true,
                 untracked: false,
             },
-            linux_archductor_core::workspace::DiffFileSummary {
+            archductor_core::workspace::DiffFileSummary {
                 path: "src/ui/panel.rs".to_owned(),
                 additions: Some(3),
                 deletions: Some(1),
@@ -8273,37 +8483,10 @@ mod tests {
     }
 
     #[test]
-    fn split_position_for_ratio_prefers_chat_dominant_layout_and_clamps() {
-        assert_eq!(
-            split_position_for_ratio(
-                1280,
-                7,
-                3,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END
-            ),
-            896
-        );
-        assert_eq!(
-            split_position_for_ratio(
-                700,
-                7,
-                3,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END
-            ),
-            440
-        );
-        assert_eq!(
-            split_position_for_ratio(
-                500,
-                7,
-                3,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END
-            ),
-            280
-        );
+    fn workspace_split_position_uses_five_three_center_right_ratio() {
+        assert_eq!(workspace_split_position_for_width(1280), 800);
+        assert_eq!(workspace_split_position_for_width(700), 437);
+        assert_eq!(workspace_split_position_for_width(500), 280);
     }
 
     #[test]
@@ -8513,7 +8696,7 @@ mod tests {
             status: None,
             summary: Some(test_checks_summary(
                 0,
-                Some(linux_archductor_core::workspace::BranchPushState {
+                Some(archductor_core::workspace::BranchPushState {
                     ahead: 2,
                     behind: 0,
                     has_upstream: true,
@@ -8535,7 +8718,7 @@ mod tests {
             status: None,
             summary: Some(test_checks_summary(
                 0,
-                Some(linux_archductor_core::workspace::BranchPushState {
+                Some(archductor_core::workspace::BranchPushState {
                     ahead: 0,
                     behind: 0,
                     has_upstream: false,
@@ -8626,7 +8809,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_marks_pending_checks() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -8636,19 +8819,19 @@ mod tests {
                 created_at: "then".to_owned(),
                 updated_at: "now".to_owned(),
             },
-            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+            Some(&archductor_core::workspace::PullRequestReadiness {
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
                 review_threads: Vec::new(),
-                checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                checks: vec![archductor_core::workspace::PullRequestCheckRun {
                     name: "ci".to_owned(),
                     status: "in_progress".to_owned(),
                     detail: None,
                 }],
                 deployments: Vec::new(),
             }),
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -8695,12 +8878,12 @@ mod tests {
 
     #[test]
     fn review_thread_row_format_includes_state_location_and_comment_count() {
-        let thread = linux_archductor_core::workspace::PullRequestReviewThread {
+        let thread = archductor_core::workspace::PullRequestReviewThread {
             id: Some("PRRT_fake".to_owned()),
             path: Some("src/lib.rs".to_owned()),
             line: Some(42),
             resolved: false,
-            comments: vec![linux_archductor_core::workspace::PullRequestThreadComment {
+            comments: vec![archductor_core::workspace::PullRequestThreadComment {
                 author: "alice".to_owned(),
                 body: "Need a test.".to_owned(),
                 url: None,
@@ -8798,7 +8981,7 @@ mod tests {
     #[test]
     fn pull_request_merge_and_archive_feedback_reports_archive_state() {
         let success = pull_request_merge_and_archive_feedback(Ok(
-            linux_archductor_core::workspace::MergePullRequestResult {
+            archductor_core::workspace::MergePullRequestResult {
                 merge_output: "Merged pull request #42\n".to_owned(),
                 archived_workspace: Some(Workspace {
                     id: 1,
@@ -8821,7 +9004,7 @@ mod tests {
         );
 
         let no_archive = pull_request_merge_and_archive_feedback(Ok(
-            linux_archductor_core::workspace::MergePullRequestResult {
+            archductor_core::workspace::MergePullRequestResult {
                 merge_output: "Merged pull request #42\n".to_owned(),
                 archived_workspace: None,
             },
@@ -8842,8 +9025,8 @@ mod tests {
 
     #[test]
     fn pull_request_refresh_feedback_summarizes_state() {
-        let success = pull_request_refresh_feedback(Ok(Some(
-            linux_archductor_core::workspace::PullRequest {
+        let success =
+            pull_request_refresh_feedback(Ok(Some(archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -8852,8 +9035,7 @@ mod tests {
                 state: "MERGED".to_owned(),
                 created_at: "now".to_owned(),
                 updated_at: "now".to_owned(),
-            },
-        )));
+            })));
         assert_eq!(success, "PR #42 state: MERGED");
 
         let missing = pull_request_refresh_feedback(Ok(None));
@@ -8917,7 +9099,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_prefers_failed_checks() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -8927,19 +9109,19 @@ mod tests {
                 created_at: "then".to_owned(),
                 updated_at: "now".to_owned(),
             },
-            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+            Some(&archductor_core::workspace::PullRequestReadiness {
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
                 review_threads: Vec::new(),
-                checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                checks: vec![archductor_core::workspace::PullRequestCheckRun {
                     name: "ci".to_owned(),
                     status: "failure".to_owned(),
                     detail: None,
                 }],
                 deployments: Vec::new(),
             }),
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -8975,7 +9157,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_open_state_is_not_attention() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -8986,7 +9168,7 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             None,
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -9022,7 +9204,7 @@ mod tests {
 
     #[test]
     fn pull_request_status_summary_keeps_failed_attention_without_checks_summary() {
-        let pr = linux_archductor_core::workspace::PullRequest {
+        let pr = archductor_core::workspace::PullRequest {
             id: 1,
             workspace_id: 2,
             provider: "github".to_owned(),
@@ -9032,12 +9214,12 @@ mod tests {
             created_at: "then".to_owned(),
             updated_at: "now".to_owned(),
         };
-        let readiness = linux_archductor_core::workspace::PullRequestReadiness {
+        let readiness = archductor_core::workspace::PullRequestReadiness {
             review_decision: None,
             latest_reviews: Vec::new(),
             comments: Vec::new(),
             review_threads: Vec::new(),
-            checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+            checks: vec![archductor_core::workspace::PullRequestCheckRun {
                 name: "ci".to_owned(),
                 status: "failure".to_owned(),
                 detail: None,
@@ -9056,7 +9238,7 @@ mod tests {
     #[test]
     fn pull_request_status_summary_keeps_review_blocked_state_grey() {
         let status = pull_request_status_summary(
-            &linux_archductor_core::workspace::PullRequest {
+            &archductor_core::workspace::PullRequest {
                 id: 1,
                 workspace_id: 2,
                 provider: "github".to_owned(),
@@ -9066,7 +9248,7 @@ mod tests {
                 created_at: "then".to_owned(),
                 updated_at: "now".to_owned(),
             },
-            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+            Some(&archductor_core::workspace::PullRequestReadiness {
                 review_decision: Some("CHANGES_REQUESTED".to_owned()),
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -9074,7 +9256,7 @@ mod tests {
                 checks: Vec::new(),
                 deployments: Vec::new(),
             }),
-            &linux_archductor_core::workspace::ChecksSummary {
+            &archductor_core::workspace::ChecksSummary {
                 workspace: Workspace {
                     id: 1,
                     repository_id: 2,
@@ -9111,7 +9293,7 @@ mod tests {
     fn pull_request_review_thread_action_feedback_reports_state_and_id() {
         let success = pull_request_review_thread_action_feedback(
             "Resolve",
-            Ok(linux_archductor_core::workspace::PullRequestReviewThread {
+            Ok(archductor_core::workspace::PullRequestReviewThread {
                 id: Some("PRRT_fake".to_owned()),
                 path: Some("src/lib.rs".to_owned()),
                 line: Some(42),
@@ -9169,6 +9351,13 @@ mod tests {
 
         let failure = workspace_delete_feedback(Err(anyhow::anyhow!("worktree remove failed")));
         assert_eq!(failure, "Delete failed: worktree remove failed");
+    }
+
+    #[test]
+    fn failed_workspace_creation_status_exposes_delete_action() {
+        assert!(workspace_creation_status_allows_delete("failed"));
+        assert!(!workspace_creation_status_allows_delete("creating"));
+        assert!(!workspace_creation_status_allows_delete("active"));
     }
 
     #[test]
@@ -9252,5 +9441,74 @@ mod tests {
             feedback.toast_text.as_deref(),
             Some("Rename failed: bad name")
         );
+    }
+
+    #[test]
+    fn workspace_delete_navigation_target_is_only_returned_for_successful_delete() {
+        let success = Ok(test_workspace());
+        assert_eq!(workspace_delete_navigation_target(&success), Some("berlin"));
+
+        let failure: std::result::Result<Workspace, String> =
+            Err("worktree remove failed".to_owned());
+        assert_eq!(workspace_delete_navigation_target(&failure), None);
+    }
+
+    #[test]
+    fn workspace_delete_navigation_result_mutates_state_only_after_success() {
+        let state = crate::state::AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            crate::state::AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(42));
+        state.navigate_to_page(crate::state::AppPage::History);
+
+        let failure: std::result::Result<Workspace, String> =
+            Err("worktree remove failed".to_owned());
+        apply_workspace_delete_navigation_result(&state, &failure);
+        let failed_snapshot = state.snapshot();
+
+        assert_eq!(
+            failed_snapshot.selected_workspace.as_deref(),
+            Some("berlin")
+        );
+        assert_eq!(failed_snapshot.selected_chat_thread, Some(42));
+        assert_eq!(failed_snapshot.active_page, crate::state::AppPage::History);
+
+        apply_workspace_delete_navigation_result(&state, &Ok(test_workspace()));
+        let success_snapshot = state.snapshot();
+
+        assert_eq!(success_snapshot.selected_workspace, None);
+        assert_eq!(success_snapshot.selected_chat_thread, None);
+        assert_eq!(success_snapshot.active_page, crate::state::AppPage::History);
+        while state.navigate_back() {
+            assert_ne!(
+                state.snapshot().selected_workspace.as_deref(),
+                Some("berlin")
+            );
+        }
+    }
+
+    #[test]
+    fn cloned_external_thread_selection_drops_borrow_before_callback_runs() {
+        let controller: session_surface::ExternalThreadSelectionController =
+            Rc::new(RefCell::new(None));
+        let observed = Rc::new(RefCell::new(None));
+        *controller.borrow_mut() = Some(Rc::new({
+            let controller = controller.clone();
+            let observed = observed.clone();
+            move |thread_id| {
+                let _same_controller = clone_external_thread_selection_controller(&controller);
+                *observed.borrow_mut() = thread_id;
+            }
+        }));
+
+        let Some(select_thread) = clone_external_thread_selection_controller(&controller) else {
+            panic!("expected selection controller");
+        };
+        select_thread(Some(42));
+
+        assert_eq!(*observed.borrow(), Some(42));
     }
 }

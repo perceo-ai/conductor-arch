@@ -1,35 +1,34 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
-use linux_archductor_core::archcar::client::ArchcarClient;
-use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest, ArchcarResponse};
-use linux_archductor_core::archcar::server::{
-    reconcile_managed_sessions_on_startup, ArchcarServer,
+use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::protocol::{
+    ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
 };
-use linux_archductor_core::doctor;
-use linux_archductor_core::import::{
-    default_conductor_app_database, import_conductor_app_database,
-};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::repository::{AddRepository, RepositoryStore};
-use linux_archductor_core::settings::{
+use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::doctor;
+use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
+use archductor_core::paths::AppPaths;
+use archductor_core::repository::{AddRepository, RepositoryStore};
+use archductor_core::settings::{
     repository_settings_from_toml, save_repository_settings, SettingsLayer,
 };
-use linux_archductor_core::workspace::{
+use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
     WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
 };
+use clap::{Parser, Subcommand, ValueEnum};
+use std::collections::HashSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
-#[command(name = "linux-archductor")]
-#[command(about = "Linux-native Git worktree workflow for parallel coding agents")]
+#[command(name = "archductor")]
+#[command(about = "Archductor Git worktree workflow for parallel coding agents")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -164,9 +163,20 @@ enum ArchcarCommand {
     Screen {
         session_id: i64,
     },
+    Messages {
+        thread_id: i64,
+    },
     Send {
         session_id: i64,
+        #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
+        kind: CliArchcarInputKind,
+        #[arg(long)]
+        visible_input: Option<String>,
         input: Vec<String>,
+    },
+    Model {
+        session_id: i64,
+        model: String,
     },
     Resize {
         session_id: i64,
@@ -338,6 +348,8 @@ enum SessionCommand {
         #[arg(long)]
         fast_mode: bool,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         approval_mode: Option<String>,
         #[arg(long)]
         reasoning_mode: Option<String>,
@@ -363,6 +375,8 @@ enum SessionCommand {
         #[arg(long)]
         fast_mode: bool,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         approval_mode: Option<String>,
         #[arg(long)]
         reasoning_mode: Option<String>,
@@ -384,6 +398,20 @@ enum SessionCommand {
         process_id: Option<i64>,
         #[arg(long)]
         print_pty_path: bool,
+    },
+    Send {
+        workspace: String,
+        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
+        kind: CliSessionKind,
+        #[arg(long)]
+        thread_id: Option<i64>,
+        #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
+        input_kind: CliArchcarInputKind,
+        #[arg(long)]
+        visible_input: Option<String>,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        message: Vec<String>,
     },
     List {
         workspace: String,
@@ -463,11 +491,18 @@ enum CheckpointCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliSessionKind {
     Shell,
     Codex,
     Claude,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliArchcarInputKind {
+    User,
+    ReviewPrompt,
+    ControlCommand,
 }
 
 fn main() -> Result<()> {
@@ -551,13 +586,33 @@ fn main() -> Result<()> {
                         client.send(ArchcarRequest::GetSessionScreen { session_id })?,
                     );
                 }
-                ArchcarCommand::Send { session_id, input } => {
+                ArchcarCommand::Messages { thread_id } => {
+                    match client.send(ArchcarRequest::GetSessionMessages { thread_id })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    input,
+                } => {
                     print_archcar_response(client.send(ArchcarRequest::SendInput {
                         session_id,
                         input: input.join(" "),
-                        visible_input: None,
-                        kind: ArchcarInputKind::User,
+                        visible_input,
+                        kind: kind.into(),
                     })?);
+                }
+                ArchcarCommand::Model { session_id, model } => {
+                    match client.send(ArchcarRequest::SetSessionModel {
+                        session_id,
+                        model: Some(model),
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
                 }
                 ArchcarCommand::Resize {
                     session_id,
@@ -729,12 +784,11 @@ fn main() -> Result<()> {
                         })?
                     };
                     println!(
-                        "Created {} at {} (branch: {}, base: {}, port: {})",
+                        "Created {} at {} (branch: {}, base: {})",
                         workspace.name,
                         workspace.path.display(),
                         workspace.branch,
-                        workspace.base_ref,
-                        workspace.port_base
+                        workspace.base_ref
                     );
                 }
                 WorkspaceCommand::List { active } => {
@@ -743,12 +797,11 @@ fn main() -> Result<()> {
                             continue;
                         }
                         println!(
-                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            "{}\t{}\t{}\t{}\t{}",
                             workspace.name,
                             workspace.path.display(),
                             workspace.branch,
                             workspace.base_ref,
-                            workspace.port_base,
                             workspace.status
                         );
                     }
@@ -886,7 +939,7 @@ fn main() -> Result<()> {
         } => {
             if run == session {
                 anyhow::bail!(
-                    "choose exactly one log stream, for example: linux-archductor logs {workspace} --run"
+                    "choose exactly one log stream, for example: archductor logs {workspace} --run"
                 );
             }
             let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
@@ -1012,6 +1065,7 @@ fn main() -> Result<()> {
                     kind,
                     plan_mode,
                     fast_mode,
+                    model,
                     approval_mode,
                     reasoning_mode,
                     effort_mode,
@@ -1022,6 +1076,7 @@ fn main() -> Result<()> {
                     let harness = SessionHarnessOptions {
                         plan_mode,
                         fast_mode,
+                        model,
                         approval_mode,
                         reasoning_mode,
                         effort_mode,
@@ -1029,17 +1084,20 @@ fn main() -> Result<()> {
                         codex_goals,
                         codex_skills,
                     };
-                    let process = if matches!(kind, CliSessionKind::Codex) {
+                    let process = if cli_session_start_uses_archcar(kind) {
+                        let existing_ids = running_session_ids(&store, &workspace)?;
                         let client = ArchcarClient::from_paths(&paths);
+                        let kind: SessionKind = kind.into();
                         print_archcar_response(client.send(ArchcarRequest::SpawnSession {
                             workspace: workspace.clone(),
-                            kind: SessionKind::Codex,
+                            kind,
                             harness: Some(harness.clone()),
                         })?);
-                        wait_for_session_process(
+                        wait_for_new_session_process(
                             &store,
                             &workspace,
-                            SessionKind::Codex,
+                            kind,
+                            &existing_ids,
                             Duration::from_secs(5),
                         )?
                     } else {
@@ -1059,6 +1117,7 @@ fn main() -> Result<()> {
                     print_command,
                     plan_mode,
                     fast_mode,
+                    model,
                     approval_mode,
                     reasoning_mode,
                     effort_mode,
@@ -1072,6 +1131,7 @@ fn main() -> Result<()> {
                         SessionHarnessOptions {
                             plan_mode,
                             fast_mode,
+                            model,
                             approval_mode,
                             reasoning_mode,
                             effort_mode,
@@ -1088,17 +1148,18 @@ fn main() -> Result<()> {
                 }
                 SessionCommand::Stop { workspace } => {
                     let sessions = store.list_sessions(&workspace)?;
-                    let codex = sessions.iter().find(|record| {
-                        record.status == ProcessStatus::Running
-                            && command_session_kind_label(&record.command) == "codex"
-                    });
-                    if let Some(record) = codex {
+                    let record = latest_running_session(&sessions).with_context(|| {
+                        format!("no running session found for workspace {workspace}")
+                    })?;
+                    if cli_session_stop_uses_archcar(session_kind_from_process_record(
+                        &store, record,
+                    )?) {
                         let client = ArchcarClient::from_paths(&paths);
                         let _ = client.send(ArchcarRequest::KillSession {
                             session_id: record.id,
                         });
                     }
-                    let process = store.stop_session(&workspace)?;
+                    let process = store.stop_session_process(&workspace, record.id)?;
                     println!("Stopped session for {} (pid {})", workspace, process.pid);
                 }
                 SessionCommand::Attach {
@@ -1112,6 +1173,48 @@ fn main() -> Result<()> {
                         println!("{}", pty_path.display());
                     } else {
                         attach_to_session_pty(&pty_path)?;
+                    }
+                }
+                SessionCommand::Send {
+                    workspace,
+                    kind,
+                    thread_id,
+                    input_kind,
+                    visible_input,
+                    timeout_ms,
+                    message,
+                } => {
+                    let kind: SessionKind = kind.into();
+                    anyhow::ensure!(
+                        matches!(kind, SessionKind::Codex | SessionKind::Claude),
+                        "session send supports codex and claude"
+                    );
+                    let input = message_text_or_stdin(message)?;
+                    let client = ArchcarClient::from_paths(&paths);
+                    let (session_id, resolved_thread_id) = ensure_session_send_target(
+                        &client,
+                        &store,
+                        &workspace,
+                        kind,
+                        thread_id,
+                        Duration::from_millis(timeout_ms),
+                    )?;
+                    match client.send(ArchcarRequest::SendInput {
+                        session_id,
+                        input,
+                        visible_input,
+                        kind: input_kind.into(),
+                    })? {
+                        ArchcarResponse::Ack => {
+                            println!(
+                                "sent {} message to session {} thread {}",
+                                session_kind_label(kind),
+                                session_id,
+                                resolved_thread_id
+                            );
+                        }
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        other => print_archcar_response(other),
                     }
                 }
                 SessionCommand::List { workspace } => {
@@ -1318,9 +1421,7 @@ fn print_archcar_response(response: ArchcarResponse) {
         }
         ArchcarResponse::SessionScreen { screen, .. } => print!("{screen}"),
         ArchcarResponse::SessionMessages { messages, .. } => {
-            for message in messages {
-                println!("[{}] {}", message.role, message.content);
-            }
+            print!("{}", render_archcar_protocol_messages(&messages));
         }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
@@ -1328,7 +1429,59 @@ fn print_archcar_response(response: ArchcarResponse) {
     }
 }
 
-fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary) {
+fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
+    matches!(kind, CliSessionKind::Codex | CliSessionKind::Claude)
+}
+
+fn cli_session_stop_uses_archcar(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::Codex | SessionKind::Claude)
+}
+
+fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let label = archcar_role_label(&message.role);
+        let content = if message.source == "provider_event"
+            && !matches!(message.role.as_str(), "user" | "agent" | "assistant")
+        {
+            archcar_message_content_without_duplicate_title(&label, &message.content)
+        } else {
+            &message.content
+        };
+        let content = content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{label}\n{content}\n\n"));
+    }
+    out
+}
+
+fn archcar_role_label(role: &str) -> String {
+    match role {
+        "user" => "You".to_owned(),
+        "agent" | "assistant" => "Assistant".to_owned(),
+        other => sentence_case_label(other),
+    }
+}
+
+fn archcar_message_content_without_duplicate_title<'a>(label: &str, content: &'a str) -> &'a str {
+    content
+        .strip_prefix(label)
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .unwrap_or(content)
+}
+
+fn sentence_case_label(value: &str) -> String {
+    let label = value.replace(['_', '-'], " ");
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_uppercase(), chars.as_str())
+}
+
+fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
     println!(
         "Workspace: {} ({})",
         summary.workspace.name, summary.workspace.status
@@ -1336,7 +1489,7 @@ fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary
     println!("Branch:    {}", summary.workspace.branch);
     match &summary.branch_push_state {
         Some(state) if !state.has_upstream => {
-            println!("Push:      no upstream set (push with: linux-archductor pr create)");
+            println!("Push:      no upstream set (push with: archductor pr create)");
         }
         Some(state) => println!(
             "Push:      {} ahead, {} behind upstream",
@@ -1380,7 +1533,7 @@ fn print_checks_summary(summary: linux_archductor_core::workspace::ChecksSummary
     }
 }
 
-fn print_source_preflight(preflight: linux_archductor_core::workspace::WorkspaceSourcePreflight) {
+fn print_source_preflight(preflight: archductor_core::workspace::WorkspaceSourcePreflight) {
     println!("Workspace source preflight");
     println!("GitHub: {}", preflight.github_status());
     println!("Linear: {}", preflight.linear_status());
@@ -1481,7 +1634,7 @@ fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
     }
 }
 
-fn print_mcp_status(status: linux_archductor_core::mcp::McpStatus) {
+fn print_mcp_status(status: archductor_core::mcp::McpStatus) {
     println!("MCP status for {}", status.workspace_path.display());
     let groups = [
         ("Claude user (~/.claude.json)", &status.claude_user),
@@ -1503,7 +1656,7 @@ fn print_mcp_status(status: linux_archductor_core::mcp::McpStatus) {
 
 fn print_status(lines: Vec<WorkspaceStatusLine>) {
     if lines.is_empty() {
-        println!("No workspaces found. Run: linux-archductor workspace create <repo> --name <name> --branch <branch>");
+        println!("No workspaces found. Run: archductor workspace create <repo> --name <name> --branch <branch>");
         return;
     }
     for line in lines {
@@ -1540,6 +1693,16 @@ impl From<CliSessionKind> for SessionKind {
             CliSessionKind::Shell => Self::Shell,
             CliSessionKind::Codex => Self::Codex,
             CliSessionKind::Claude => Self::Claude,
+        }
+    }
+}
+
+impl From<CliArchcarInputKind> for ArchcarInputKind {
+    fn from(value: CliArchcarInputKind) -> Self {
+        match value {
+            CliArchcarInputKind::User => Self::User,
+            CliArchcarInputKind::ReviewPrompt => Self::ReviewPrompt,
+            CliArchcarInputKind::ControlCommand => Self::ControlCommand,
         }
     }
 }
@@ -1738,13 +1901,47 @@ fn wait_for_session_process(
     kind: SessionKind,
     timeout: Duration,
 ) -> Result<ProcessRecord> {
-    let started = std::time::Instant::now();
+    wait_for_session_process_matching(store, workspace, kind, None, None, timeout)
+}
+
+fn wait_for_new_session_process(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    existing_ids: &HashSet<i64>,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    wait_for_session_process_matching(store, workspace, kind, None, Some(existing_ids), timeout)
+}
+
+fn wait_for_thread_session_process(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    thread_id: i64,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    wait_for_session_process_matching(store, workspace, kind, Some(thread_id), None, timeout)
+}
+
+fn wait_for_session_process_matching(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    thread_id: Option<i64>,
+    excluded_ids: Option<&HashSet<i64>>,
+    timeout: Duration,
+) -> Result<ProcessRecord> {
+    let started = Instant::now();
     loop {
-        if let Some(record) = store.list_sessions(workspace)?.into_iter().find(|record| {
-            record.status == ProcessStatus::Running
-                && command_session_kind_label(&record.command) == session_kind_label(kind)
-        }) {
-            return Ok(record);
+        for record in store.list_sessions(workspace)? {
+            if record.status == ProcessStatus::Running
+                && session_record_matches_kind(store, &record, kind)?
+                && thread_id.is_none_or(|thread_id| record.chat_thread_id == Some(thread_id))
+                && excluded_ids.is_none_or(|ids| !ids.contains(&record.id))
+            {
+                return Ok(record);
+            }
         }
         if started.elapsed() >= timeout {
             anyhow::bail!(
@@ -1755,6 +1952,168 @@ fn wait_for_session_process(
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn running_session_ids(store: &WorkspaceStore, workspace: &str) -> Result<HashSet<i64>> {
+    Ok(store
+        .list_sessions(workspace)?
+        .into_iter()
+        .filter(|record| record.status == ProcessStatus::Running)
+        .map(|record| record.id)
+        .collect())
+}
+
+fn latest_running_session(sessions: &[ProcessRecord]) -> Option<&ProcessRecord> {
+    sessions
+        .iter()
+        .filter(|session| session.status == ProcessStatus::Running)
+        .max_by_key(|session| session.id)
+}
+
+fn session_record_matches_kind(
+    store: &WorkspaceStore,
+    record: &ProcessRecord,
+    kind: SessionKind,
+) -> Result<bool> {
+    Ok(session_kind_from_process_record(store, record)? == kind)
+}
+
+fn session_kind_from_process_record(
+    store: &WorkspaceStore,
+    record: &ProcessRecord,
+) -> Result<SessionKind> {
+    if let Some(thread_id) = record.chat_thread_id {
+        let thread = store.get_chat_thread_record(thread_id)?;
+        return Ok(match thread.provider.as_str() {
+            "codex" => SessionKind::Codex,
+            "claude" => SessionKind::Claude,
+            _ => SessionKind::Shell,
+        });
+    }
+
+    Ok(match command_session_kind_label(&record.command) {
+        "codex" => SessionKind::Codex,
+        "claude" => SessionKind::Claude,
+        _ => SessionKind::Shell,
+    })
+}
+
+fn ensure_session_send_target(
+    client: &ArchcarClient,
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    thread_id: Option<i64>,
+    timeout: Duration,
+) -> Result<(i64, i64)> {
+    let deadline = Instant::now() + timeout;
+    let response = if let Some(thread_id) = thread_id {
+        client.send(ArchcarRequest::EnsureChatThreadSession {
+            workspace: workspace.to_owned(),
+            thread_id,
+            kind,
+            harness: None,
+        })?
+    } else {
+        client.send(ArchcarRequest::EnsureWorkspaceDefaultSession {
+            workspace: workspace.to_owned(),
+            kind,
+            harness: None,
+        })?
+    };
+
+    let target = match response {
+        ArchcarResponse::SessionSpawned {
+            session_id,
+            thread_id,
+            ..
+        } => (session_id, thread_id),
+        ArchcarResponse::SessionSpawnQueued { .. } => {
+            let remaining = remaining_duration(deadline)?;
+            let process = if let Some(thread_id) = thread_id {
+                wait_for_thread_session_process(store, workspace, kind, thread_id, remaining)?
+            } else {
+                wait_for_session_process(store, workspace, kind, remaining)?
+            };
+            let thread_id = process
+                .chat_thread_id
+                .context("queued provider session did not record a chat thread id")?;
+            (process.id, thread_id)
+        }
+        ArchcarResponse::Error { message } => anyhow::bail!(message),
+        other => anyhow::bail!("unexpected archcar response: {:?}", other),
+    };
+    wait_for_archcar_session_ready(client, target.0, deadline)?;
+    Ok(target)
+}
+
+fn wait_for_archcar_session_ready(
+    client: &ArchcarClient,
+    session_id: i64,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        match client.send(ArchcarRequest::GetSessionStatus { session_id })? {
+            ArchcarResponse::SessionStatus { ready: true, .. } => return Ok(()),
+            ArchcarResponse::SessionStatus {
+                status,
+                runtime_state,
+                ..
+            } if archcar_status_is_terminal(&status, runtime_state) => {
+                anyhow::bail!(
+                    "session {session_id} exited before becoming ready: status={} state={}",
+                    status,
+                    runtime_state.as_str()
+                );
+            }
+            ArchcarResponse::SessionStatus { .. } => {}
+            ArchcarResponse::Error { message } if message.contains("unknown session") => {
+                anyhow::bail!("session {session_id} disappeared before becoming ready: {message}");
+            }
+            ArchcarResponse::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("unexpected archcar response: {:?}", other),
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for session {session_id} to become ready");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn remaining_duration(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .context("timed out waiting for provider session")
+}
+
+fn archcar_status_is_terminal(
+    status: &str,
+    runtime_state: archductor_core::session_state::AgentSessionState,
+) -> bool {
+    !matches!(status, "running")
+        || matches!(
+            runtime_state,
+            archductor_core::session_state::AgentSessionState::Interrupted
+                | archductor_core::session_state::AgentSessionState::Failed
+                | archductor_core::session_state::AgentSessionState::Exited
+                | archductor_core::session_state::AgentSessionState::Archived
+        )
+}
+
+fn message_text_or_stdin(message: Vec<String>) -> Result<String> {
+    if !message.is_empty() {
+        let input = message.join(" ");
+        anyhow::ensure!(!input.trim().is_empty(), "message is required");
+        return Ok(input);
+    }
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .context("read message from stdin")?;
+    let input = input.trim_end_matches(['\r', '\n']).to_owned();
+    anyhow::ensure!(!input.trim().is_empty(), "message is required");
+    Ok(input)
 }
 
 fn resolve_attachable_session(
@@ -1984,7 +2343,7 @@ mod tests {
         let launch = SessionLaunch {
             kind: SessionKind::Codex,
             program: PathBuf::from("codex"),
-            args: Vec::new(),
+            args: vec!["--model".to_owned(), "gpt-5.6-sol".to_owned()],
             cwd: PathBuf::from("/tmp/work"),
             env: vec![
                 (
@@ -2002,9 +2361,210 @@ mod tests {
 
         let command = render_manual_session_command(&launch);
         assert!(command.contains("ARCHDUCTOR_SESSION_BOOTSTRAP"));
-        assert!(command.contains("exec codex"));
+        assert!(command.contains("exec codex --model gpt-5.6-sol"));
         assert!(!command.ends_with("'[archductor bootstrap for codex]\n/plan\n'"));
         assert!(!command.contains("exec codex '[archductor bootstrap for codex]"));
+    }
+
+    #[test]
+    fn cli_session_start_and_open_accept_explicit_model() {
+        let start = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "start",
+            "berlin",
+            "--kind",
+            "codex",
+            "--model",
+            "gpt-5.6-luna",
+        ])
+        .unwrap();
+        let Command::Session {
+            command: SessionCommand::Start {
+                model: start_model, ..
+            },
+        } = start.command
+        else {
+            panic!("expected session start");
+        };
+        assert_eq!(start_model.as_deref(), Some("gpt-5.6-luna"));
+
+        let open = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "open",
+            "berlin",
+            "--kind",
+            "claude",
+            "--model",
+            "claude-sonnet-5",
+            "--print-command",
+        ])
+        .unwrap();
+        let Command::Session {
+            command: SessionCommand::Open {
+                model: open_model, ..
+            },
+        } = open.command
+        else {
+            panic!("expected session open");
+        };
+        assert_eq!(open_model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn cli_session_start_routes_provider_native_agents_through_archcar() {
+        assert!(cli_session_start_uses_archcar(CliSessionKind::Codex));
+        assert!(cli_session_start_uses_archcar(CliSessionKind::Claude));
+        assert!(!cli_session_start_uses_archcar(CliSessionKind::Shell));
+    }
+
+    #[test]
+    fn cli_session_stop_routes_provider_native_agents_through_archcar() {
+        assert!(cli_session_stop_uses_archcar(SessionKind::Codex));
+        assert!(cli_session_stop_uses_archcar(SessionKind::Claude));
+        assert!(!cli_session_stop_uses_archcar(SessionKind::Shell));
+    }
+
+    #[test]
+    fn cli_archcar_send_accepts_automation_input_kinds() {
+        let control = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "send",
+            "7",
+            "--kind",
+            "control-command",
+            "/model",
+            "gpt-5.6-sol",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    input,
+                },
+        } = control.command
+        else {
+            panic!("expected archcar send");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(kind, CliArchcarInputKind::ControlCommand);
+        assert_eq!(visible_input, None);
+        assert_eq!(input, vec!["/model".to_owned(), "gpt-5.6-sol".to_owned()]);
+
+        let review = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "send",
+            "8",
+            "--kind",
+            "review-prompt",
+            "--visible-input",
+            "Review selected comments",
+            "address",
+            "comments",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    input,
+                },
+        } = review.command
+        else {
+            panic!("expected archcar send");
+        };
+        assert_eq!(session_id, 8);
+        assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
+        assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
+        assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
+    }
+
+    #[test]
+    fn cli_archcar_model_uses_structured_model_request() {
+        let cli =
+            Cli::try_parse_from(["archductor", "archcar", "model", "7", "gpt-5.6-terra"]).unwrap();
+
+        let Command::Archcar {
+            command: ArchcarCommand::Model { session_id, model },
+        } = cli.command
+        else {
+            panic!("expected archcar model");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(model, "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn cli_archcar_messages_reads_thread_messages() {
+        let cli = Cli::try_parse_from(["archductor", "archcar", "messages", "42"]).unwrap();
+
+        let Command::Archcar {
+            command: ArchcarCommand::Messages { thread_id },
+        } = cli.command
+        else {
+            panic!("expected archcar messages");
+        };
+
+        assert_eq!(thread_id, 42);
+    }
+
+    #[test]
+    fn cli_session_send_accepts_provider_thread_and_message() {
+        let cli = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--thread-id",
+            "42",
+            "--input-kind",
+            "review-prompt",
+            "--visible-input",
+            "Review selected comments",
+            "--timeout-ms",
+            "2500",
+            "fix",
+            "the",
+            "bug",
+        ])
+        .unwrap();
+
+        let Command::Session {
+            command:
+                SessionCommand::Send {
+                    workspace,
+                    kind,
+                    thread_id,
+                    input_kind,
+                    visible_input,
+                    timeout_ms,
+                    message,
+                },
+        } = cli.command
+        else {
+            panic!("expected session send");
+        };
+
+        assert_eq!(workspace, "berlin");
+        assert_eq!(kind, CliSessionKind::Claude);
+        assert_eq!(thread_id, Some(42));
+        assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
+        assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
+        assert_eq!(timeout_ms, 2500);
+        assert_eq!(
+            message,
+            vec!["fix".to_owned(), "the".to_owned(), "bug".to_owned()]
+        );
     }
 
     #[test]
@@ -2046,6 +2606,63 @@ mod tests {
     }
 
     #[test]
+    fn archcar_messages_render_projected_provider_events_without_raw_payloads() {
+        let text = render_archcar_protocol_messages(&[
+            ArchcarMessage {
+                id: -1,
+                role: "assistant".to_owned(),
+                content: "Here is the answer".to_owned(),
+                source: "provider_event".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            },
+            ArchcarMessage {
+                id: -2,
+                role: "reasoning".to_owned(),
+                content: "Reasoning\nChecking constraints".to_owned(),
+                source: "provider_event".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            },
+        ]);
+
+        assert!(text.contains("Assistant\nHere is the answer\n\n"));
+        assert!(text.contains("Reasoning\nChecking constraints\n\n"));
+    }
+
+    #[test]
+    fn archcar_message_render_preserves_chat_content_that_starts_with_label() {
+        let text = render_archcar_protocol_messages(&[
+            ArchcarMessage {
+                id: 1,
+                role: "user".to_owned(),
+                content: "You\nshould keep this heading".to_owned(),
+                source: "user_send".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            },
+            ArchcarMessage {
+                id: -1,
+                role: "reasoning".to_owned(),
+                content: "Reasoning\nbut projection titles can be stripped".to_owned(),
+                source: "provider_event".to_owned(),
+                inline_event: None,
+                context_usage: None,
+            },
+        ]);
+
+        assert!(text.contains("You\nYou\nshould keep this heading\n\n"));
+        assert!(text.contains("Reasoning\nbut projection titles can be stripped\n\n"));
+    }
+
+    #[test]
+    fn message_text_or_stdin_rejects_blank_positional_message() {
+        let err = message_text_or_stdin(vec!["   ".to_owned(), "\t".to_owned()]).unwrap_err();
+
+        assert!(err.to_string().contains("message is required"));
+    }
+
+    #[test]
     fn linked_directory_render_lists_target_and_context_link() {
         let text = render_linked_directories(&[LinkedDirectory {
             id: 1,
@@ -2067,8 +2684,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_removed_internal_run_codex_session_command() {
-        let parse =
-            Cli::try_parse_from(["linux-archductor", "internal", "run-codex-session", "demo"]);
+        let parse = Cli::try_parse_from(["archductor", "internal", "run-codex-session", "demo"]);
 
         assert!(parse.is_err());
     }
@@ -2076,7 +2692,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_delete_cleanup_flags() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "delete",
             "berlin",
@@ -2105,7 +2721,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_branch_actions() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "branch",
             "berlin",
@@ -2132,7 +2748,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_duplicate_branch() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "duplicate",
             "berlin",
@@ -2162,7 +2778,7 @@ mod tests {
     #[test]
     fn cli_parses_workspace_timeline_filter() {
         let parse = Cli::try_parse_from([
-            "linux-archductor",
+            "archductor",
             "workspace",
             "timeline",
             "berlin",

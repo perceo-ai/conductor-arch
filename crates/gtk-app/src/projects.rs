@@ -1,17 +1,18 @@
 use anyhow::{Context, Result};
+use archductor_core::paths::AppPaths;
+use archductor_core::repository::{AddRepository, RepositoryStore};
+use archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, ComboBoxText, Entry, Image, Label, ListBox, ListBoxRow, Orientation,
     PolicyType, Popover, ScrolledWindow, Stack,
 };
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::repository::{AddRepository, RepositoryStore};
-use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::archcar_async::spawn_background_job_with_progress;
 use crate::buttons::{resolve_icon_name, text_button};
@@ -23,6 +24,7 @@ pub(crate) fn build_projects_page(
     paths: &AppPaths,
     refresh_dashboard: impl Fn() + Clone + 'static,
     refresh_workspace: impl Fn() + Clone + 'static,
+    navigate_created_workspace: Rc<dyn Fn(String)>,
     toast_manager: ToastManager,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -392,6 +394,7 @@ pub(crate) fn build_projects_page(
     let create_btn_inline = create_btn.clone();
     let result_inline = result.clone();
     let toast_create_inline = toast_manager.clone();
+    let navigate_created_workspace_inline = navigate_created_workspace.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
         let typed_name = name_entry.text().trim().to_owned();
@@ -434,16 +437,12 @@ pub(crate) fn build_projects_page(
         let refresh_dashboard_inline = refresh_dashboard_inline.clone();
         let refresh_workspace_inline = refresh_workspace_inline.clone();
         let toast_create_inline = toast_create_inline.clone();
-        spawn_background_job_with_progress(
-            {
-                let db_path_create = db_path_create.clone();
-                let repo = repo.clone();
-                move |progress| {
-                    WorkspaceStore::open(db_path_create).and_then(|store| {
-                        request.create_workspace_with_progress(&store, &repo, progress)
-                    })
-                }
-            },
+        let navigate_created_workspace_inline = navigate_created_workspace_inline.clone();
+        spawn_workspace_create_with_navigation(
+            db_path_create.clone(),
+            repo.clone(),
+            request,
+            navigate_created_workspace_inline,
             {
                 let refresh_after_create = refresh_after_create.clone();
                 let refresh_dashboard_inline = refresh_dashboard_inline.clone();
@@ -473,6 +472,7 @@ pub(crate) fn build_projects_page(
     let refresh_after_modal_workspace = refresh.clone();
     let refresh_dashboard_modal_workspace = refresh_dashboard.clone();
     let refresh_workspace_modal_workspace = refresh_workspace.clone();
+    let navigate_modal_workspace = navigate_created_workspace.clone();
     let toast_modal_workspace = toast_manager.clone();
     open_workspace_modal_btn.connect_clicked(move |_| {
         show_create_workspace_dialog(
@@ -480,6 +480,7 @@ pub(crate) fn build_projects_page(
             Rc::new(refresh_after_modal_workspace.clone()),
             Rc::new(refresh_dashboard_modal_workspace.clone()),
             Rc::new(refresh_workspace_modal_workspace.clone()),
+            navigate_modal_workspace.clone(),
             None,
             toast_modal_workspace.clone(),
         );
@@ -494,6 +495,7 @@ pub(crate) fn show_create_workspace_dialog(
     refresh: Rc<dyn Fn()>,
     refresh_dashboard: Rc<dyn Fn()>,
     refresh_workspace: Rc<dyn Fn()>,
+    navigate_created_workspace: Rc<dyn Fn(String)>,
     preselected_repo: Option<String>,
     toast_manager: ToastManager,
 ) {
@@ -964,16 +966,12 @@ pub(crate) fn show_create_workspace_dialog(
         let refresh_workspace_for_create = refresh_workspace_for_create.clone();
         let dialog_for_create = dialog_for_create.clone();
         let toast_create = toast_create.clone();
-        spawn_background_job_with_progress(
-            {
-                let db_path_for_create = db_path_for_create.clone();
-                let repo = repo.clone();
-                move |progress| {
-                    WorkspaceStore::open(db_path_for_create).and_then(|store| {
-                        request.create_workspace_with_progress(&store, &repo, progress)
-                    })
-                }
-            },
+        let navigate_created_workspace = navigate_created_workspace.clone();
+        spawn_workspace_create_with_navigation(
+            db_path_for_create.clone(),
+            repo.clone(),
+            request,
+            navigate_created_workspace,
             {
                 let refresh_for_create = refresh_for_create.clone();
                 let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
@@ -1015,6 +1013,47 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
 }
 
+fn spawn_workspace_create_with_navigation<P, C>(
+    db_path: PathBuf,
+    repository_name: String,
+    request: WorkspaceSourceRequest,
+    navigate_created_workspace: Rc<dyn Fn(String)>,
+    on_inserted_progress: P,
+    on_complete: C,
+) where
+    P: Fn() + 'static,
+    C: FnOnce(anyhow::Result<archductor_core::workspace::Workspace>) + 'static,
+{
+    let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
+    spawn_background_job_with_progress(
+        {
+            let inserted_workspace_name = inserted_workspace_name.clone();
+            move |progress| {
+                WorkspaceStore::open(db_path).and_then(|store| {
+                    request.create_workspace_with_progress(&store, &repository_name, |workspace| {
+                        if let Ok(mut name) = inserted_workspace_name.lock() {
+                            *name = Some(workspace.name.clone());
+                        }
+                        progress();
+                    })
+                })
+            }
+        },
+        {
+            let inserted_workspace_name = inserted_workspace_name.clone();
+            move || {
+                if let Ok(mut name) = inserted_workspace_name.lock() {
+                    if let Some(name) = name.take() {
+                        navigate_created_workspace(name);
+                    }
+                }
+                on_inserted_progress();
+            }
+        },
+        on_complete,
+    );
+}
+
 fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {
     format!(
         "Source readiness: GitHub {}. Linear {}.",
@@ -1025,7 +1064,7 @@ fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {
 
 fn workspace_source_create_feedback(
     source: &str,
-    result: anyhow::Result<linux_archductor_core::workspace::Workspace>,
+    result: anyhow::Result<archductor_core::workspace::Workspace>,
 ) -> String {
     match result {
         Ok(workspace) => format!(
@@ -1186,16 +1225,16 @@ impl WorkspaceSourceRequest {
         &self,
         store: &WorkspaceStore,
         repository_name: &str,
-    ) -> anyhow::Result<linux_archductor_core::workspace::Workspace> {
-        self.create_workspace_with_progress(store, repository_name, || {})
+    ) -> anyhow::Result<archductor_core::workspace::Workspace> {
+        self.create_workspace_with_progress(store, repository_name, |_| {})
     }
 
     fn create_workspace_with_progress(
         &self,
         store: &WorkspaceStore,
         repository_name: &str,
-        after_insert: impl FnOnce(),
-    ) -> anyhow::Result<linux_archductor_core::workspace::Workspace> {
+        after_insert: impl FnOnce(&archductor_core::workspace::Workspace),
+    ) -> anyhow::Result<archductor_core::workspace::Workspace> {
         match self {
             Self::Branch { name, branch, base } => store.create_with_progress(
                 CreateWorkspace {
@@ -1784,7 +1823,7 @@ fn add_repository_from_path(
     database_path: &Path,
     path: &str,
     explicit_name: Option<String>,
-) -> Result<linux_archductor_core::repository::Repository> {
+) -> Result<archductor_core::repository::Repository> {
     let trimmed = path.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Local repository path is required.");
     RepositoryStore::open(database_path)?.add(AddRepository {
@@ -1800,7 +1839,7 @@ fn clone_repository_into_default_parent(
     database_path: &Path,
     url: &str,
     explicit_name: Option<String>,
-) -> Result<linux_archductor_core::repository::Repository> {
+) -> Result<archductor_core::repository::Repository> {
     let trimmed = url.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Git URL is required.");
     let name = explicit_name.unwrap_or_else(|| repo_name_from_url(trimmed));
@@ -1831,7 +1870,7 @@ fn create_repository_from_template(
     parent_folder: &str,
     project_name: &str,
     template: &str,
-) -> Result<linux_archductor_core::repository::Repository> {
+) -> Result<archductor_core::repository::Repository> {
     let parent = parent_folder.trim();
     anyhow::ensure!(!parent.is_empty(), "Parent folder is required.");
     let path = scaffold_new_repository(Path::new(parent), project_name, template)?;
@@ -1927,7 +1966,7 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
 }
 
 fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
-    linux_archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
+    archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
         .into_iter()
         .filter_map(|choice| {
             let title = choice.title.trim();
@@ -2164,13 +2203,13 @@ mod tests {
 
     #[test]
     fn workspace_source_create_feedback_summarizes_success_and_failure() {
-        let workspace = linux_archductor_core::workspace::Workspace {
+        let workspace = archductor_core::workspace::Workspace {
             id: 1,
             repository_id: 2,
             name: "pr-10".to_owned(),
             path: PathBuf::from("/tmp/pr-10"),
             branch: "lc/pr-10".to_owned(),
-            base_ref: "refs/linux-archductor/pull-requests/10".to_owned(),
+            base_ref: "refs/archductor/pull-requests/10".to_owned(),
             port_base: 3000,
             status: "active".to_owned(),
             archived_at: None,

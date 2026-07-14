@@ -99,6 +99,9 @@ pub fn build_harness_metadata(
     if harness.fast_mode {
         entries.push("fast=true".to_owned());
     }
+    if let Some(value) = explicit_model(harness) {
+        entries.push(format!("model={}", sanitize_metadata_value(&value)));
+    }
     if let Some(value) = sanitize_text(harness.approval_mode.as_deref()) {
         entries.push(format!("approval={value}"));
     }
@@ -168,6 +171,8 @@ pub fn build_bootstrap_payload(
         }
     }
 
+    let model = explicit_model(harness);
+    push_line(optional_kv_line("model", model.as_deref()));
     push_line(optional_kv_line(
         "approval mode",
         harness.approval_mode.as_deref(),
@@ -202,7 +207,7 @@ fn codex_trust_level_config(cwd: &Path) -> String {
     format!(r#"projects."{escaped}".trust_level="trusted""#)
 }
 
-fn build_codex_args(cwd: &Path, _harness: &SessionHarnessOptions) -> Vec<String> {
+fn build_codex_args(cwd: &Path, harness: &SessionHarnessOptions) -> Vec<String> {
     let mut args = vec![
         "--no-alt-screen".to_owned(),
         "--dangerously-bypass-approvals-and-sandbox".to_owned(),
@@ -214,19 +219,23 @@ fn build_codex_args(cwd: &Path, _harness: &SessionHarnessOptions) -> Vec<String>
         cwd.to_string_lossy().to_string(),
     ];
 
-    if let Some(value) = sanitize_text(_harness.reasoning_mode.as_deref()) {
+    if let Some(value) = explicit_model(harness) {
+        args.push("--model".to_owned());
+        args.push(value);
+    }
+    if let Some(value) = sanitize_text(harness.reasoning_mode.as_deref()) {
         args.push("-c".to_owned());
         args.push(format!("model_reasoning_effort=\"{value}\""));
     }
-    if let Some(value) = sanitize_text(_harness.codex_personality.as_deref()) {
+    if let Some(value) = sanitize_text(harness.codex_personality.as_deref()) {
         args.push("-c".to_owned());
         args.push(format!("personality=\"{value}\""));
     }
-    if _harness.fast_mode {
+    if harness.fast_mode {
         args.push("-c".to_owned());
         args.push("service_tier=\"fast\"".to_owned());
     }
-    if let Some(value) = sanitize_text(_harness.approval_mode.as_deref()) {
+    if let Some(value) = sanitize_text(harness.approval_mode.as_deref()) {
         args.push("--ask-for-approval".to_owned());
         args.push(match value.as_str() {
             "never" => "never".to_owned(),
@@ -234,7 +243,7 @@ fn build_codex_args(cwd: &Path, _harness: &SessionHarnessOptions) -> Vec<String>
             _ => "on-request".to_owned(),
         });
     }
-    if let Some(value) = sanitize_text(_harness.codex_goals.as_deref()) {
+    if let Some(value) = sanitize_text(harness.codex_goals.as_deref()) {
         args.push("--enable".to_owned());
         args.push("goals".to_owned());
         args.push(value);
@@ -268,6 +277,10 @@ fn build_claude_args(
         args.push("--permission-mode".to_owned());
         args.push(value);
     }
+    if let Some(value) = explicit_model(harness) {
+        args.push("--model".to_owned());
+        args.push(value);
+    }
     if let Some(value) = claude_effort_mode(harness) {
         args.push("--effort".to_owned());
         args.push(value);
@@ -293,6 +306,10 @@ fn build_claude_resume_args(
         args.push("--permission-mode".to_owned());
         args.push(value);
     }
+    if let Some(value) = explicit_model(harness) {
+        args.push("--model".to_owned());
+        args.push(value);
+    }
     if let Some(value) = claude_effort_mode(harness) {
         args.push("--effort".to_owned());
         args.push(value);
@@ -312,6 +329,10 @@ fn build_claude_resume_args(
 
 fn optional_kv_line(label: &str, value: Option<&str>) -> Option<String> {
     sanitize_text(value).map(|value| format!("{label}: {value}"))
+}
+
+fn explicit_model(harness: &SessionHarnessOptions) -> Option<String> {
+    sanitize_text(harness.model.as_deref())
 }
 
 fn claude_permission_mode(harness: &SessionHarnessOptions) -> Option<String> {
@@ -372,6 +393,7 @@ mod tests {
         let harness = SessionHarnessOptions {
             plan_mode: true,
             fast_mode: true,
+            model: Some("gpt-5.6-sol".to_owned()),
             approval_mode: Some("ask".to_owned()),
             reasoning_mode: Some("high".to_owned()),
             effort_mode: Some("medium".to_owned()),
@@ -394,6 +416,8 @@ mod tests {
                 r#"projects."/tmp/work".trust_level="trusted""#,
                 "-C",
                 "/tmp/work",
+                "--model",
+                "gpt-5.6-sol",
                 "-c",
                 r#"model_reasoning_effort="high""#,
                 "-c",
@@ -410,7 +434,7 @@ mod tests {
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;plan=true;fast=true;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
             )
         );
         assert!(launch.session_resume_id.is_none());
@@ -426,6 +450,7 @@ mod tests {
         let harness = SessionHarnessOptions {
             plan_mode: true,
             fast_mode: true,
+            model: Some("claude-fable-5".to_owned()),
             approval_mode: Some("never".to_owned()),
             reasoning_mode: Some("low".to_owned()),
             effort_mode: Some("high".to_owned()),
@@ -446,6 +471,8 @@ mod tests {
             &vec![
                 "--permission-mode",
                 "plan",
+                "--model",
+                "claude-fable-5",
                 "--effort",
                 "high",
                 "--session-id",
@@ -457,7 +484,7 @@ mod tests {
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=claude;plan=true;fast=true;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
+                "harness=claude;plan=true;fast=true;model=claude-fable-5;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
             )
         );
         assert!(launch.session_resume_id.is_some());

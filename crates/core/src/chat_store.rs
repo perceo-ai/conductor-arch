@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::session_pipeline::{PtyChunkInput, SessionPipelineOutput};
-use crate::session_state::AgentSessionState;
 use crate::workspace::{ChatMessageRecord, WorkspaceStore};
 
 #[derive(Debug, Clone)]
@@ -27,23 +25,6 @@ impl ChatStore {
             .append_chat_message(thread_id, role, content, source)
     }
 
-    pub fn persist_codex_pipeline_update(
-        &self,
-        thread_id: i64,
-        process_id: i64,
-        chunks: Vec<PtyChunkInput>,
-        screen: &str,
-        previous_state: AgentSessionState,
-    ) -> Result<SessionPipelineOutput> {
-        self.open()?.persist_codex_pipeline_update(
-            thread_id,
-            process_id,
-            chunks,
-            screen,
-            previous_state,
-        )
-    }
-
     pub fn resolve_codex_native_thread_id_for_process(
         &self,
         process_id: i64,
@@ -62,10 +43,14 @@ mod tests {
     #[test]
     fn chat_store_exposes_narrow_runtime_chat_boundary() {
         let source = include_str!("chat_store.rs");
+        let legacy_pipeline = concat!("persist_codex", "_pipeline_update");
 
         assert!(source.contains("pub struct ChatStore"));
         assert!(source.contains("append_message"));
-        assert!(source.contains("persist_codex_pipeline_update"));
         assert!(source.contains("resolve_codex_native_thread_id_for_process"));
+        assert!(
+            !source.contains(legacy_pipeline),
+            "ChatStore should not expose the old Codex PTY semantic pipeline"
+        );
     }
 }

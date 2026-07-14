@@ -850,6 +850,11 @@ fn parse_file_change_action(line: &str) -> Option<(CodexFileChangeAction, &str)>
     if let Some(rest) = line.strip_prefix("Edited ") {
         return Some((CodexFileChangeAction::Edited, rest));
     }
+    if let Some(rest) = line.strip_prefix("changed ") {
+        if !rest.is_empty() && !rest.chars().any(char::is_whitespace) {
+            return Some((CodexFileChangeAction::Edited, rest));
+        }
+    }
     if let Some(rest) = line.strip_prefix("Deleted ") {
         return Some((CodexFileChangeAction::Deleted, rest));
     }
@@ -1997,6 +2002,23 @@ mod tests {
             }))
         );
         assert_eq!(
+            parse_codex_inline_event(
+                "changed /home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md"
+            ),
+            Some(CodexInlineEvent::FileChange(CodexFileChange {
+                action: CodexFileChangeAction::Edited,
+                path: "/home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md"
+                    .to_owned(),
+                additions: None,
+                deletions: None,
+                lines: Vec::new(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("changed plans after reading the tests"),
+            None
+        );
+        assert_eq!(
             parse_codex_inline_event("Added docs/superpowers/plans/manual.md"),
             Some(CodexInlineEvent::FileChange(CodexFileChange {
                 action: CodexFileChangeAction::Added,
@@ -2074,7 +2096,7 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert!(
             matches!(&events[0], CodexTranscriptEvent::Tool { title, body }
-            if title == "cargo test -p linux-archductor-core codex_tui"
+            if title == "cargo test -p archductor-core codex_tui"
                 && body.contains("running 24 tests"))
         );
         assert!(
@@ -2153,7 +2175,7 @@ Do you trust the contents of this directory?
     #[test]
     fn parse_codex_screen_messages_skips_event_blocks() {
         let screen = "\
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 
 Read SKILL.md (graphify), SKILL.md (skill-creator)
@@ -2246,7 +2268,7 @@ This is the read body.
     #[test]
     fn screen_delta_skips_events_before_multiline_latest_known_user_message() {
         let screen = "\
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 
 ╭─ You ───────────────╮
@@ -2268,7 +2290,7 @@ running 24 tests
     fn screen_delta_emits_events_after_latest_known_user_message() {
         let screen = "\
 › latest question
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 
@@ -2292,7 +2314,7 @@ Edited crates/core/src/codex_tui.rs (+2 -1)
             delta.items,
             vec![
                 CodexParsedItem::Event(CodexTranscriptEvent::Tool {
-                    title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+                    title: "cargo test -p archductor-core codex_tui".to_owned(),
                     body: "running 24 tests\n\
 test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
                         .to_owned(),
@@ -2391,7 +2413,7 @@ This is the read body.
         };
         let tool_screen = "\
 › latest question
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 
@@ -2409,7 +2431,7 @@ Edited crates/core/src/codex_tui.rs (+2 -1)
         assert_eq!(
             tool_delta.items,
             vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
-                title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+                title: "cargo test -p archductor-core codex_tui".to_owned(),
                 body: "running 24 tests\n\
 test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
                     .to_owned(),
@@ -2601,7 +2623,7 @@ running
     #[test]
     fn screen_delta_skips_events_before_latest_known_agent_message_in_boxed_transcript() {
         let screen = "\
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 
 ╭─ You ─────────────────╮
@@ -2624,7 +2646,7 @@ running 24 tests
     #[test]
     fn screen_delta_respects_live_user_prompt_boundary_before_latest_known_agent_message() {
         let screen = "\
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 
 › latest question
@@ -2644,7 +2666,7 @@ running 24 tests
     fn screen_delta_suppresses_exact_same_screen_when_previous_cursor_matches() {
         let screen = "\
 › latest question
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 24 tests
 test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 ";
@@ -2659,7 +2681,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
         assert_eq!(
             first.cursor.fingerprint.as_deref(),
             Some(
-                "› latest question\nRan cargo test -p linux-archductor-core codex_tui\nrunning 24 tests\ntest codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
+                "› latest question\nRan cargo test -p archductor-core codex_tui\nrunning 24 tests\ntest codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
             )
         );
         assert!(second.items.is_empty());

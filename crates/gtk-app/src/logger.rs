@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use linux_archductor_core::paths::AppPaths;
+use archductor_core::paths::AppPaths;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -55,9 +55,9 @@ fn default_level() -> String {
 
 fn default_targets() -> Vec<String> {
     vec![
-        "linux_archductor_gtk::session_surface=debug".to_owned(),
-        "linux_archductor_gtk::terminal=debug".to_owned(),
-        "linux_archductor_core::pty=debug".to_owned(),
+        "archductor_gtk::session_surface=debug".to_owned(),
+        "archductor_gtk::terminal=debug".to_owned(),
+        "archductor_core::pty=debug".to_owned(),
     ]
 }
 
@@ -180,5 +180,5 @@ pub(crate) fn write_pty_screen_snapshot(source: &str, process_id: i64, screen: &
 }
 
 fn pty_screen_snapshot_logging_enabled() -> bool {
-    linux_archductor_core::env_flags::enabled("ARCHDUCTOR_LOG_PTY_SCREENS")
+    archductor_core::env_flags::enabled("ARCHDUCTOR_LOG_PTY_SCREENS")
 }

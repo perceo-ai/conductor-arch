@@ -1,17 +1,17 @@
 use crate::buttons::text_button;
-use gtk::prelude::*;
-use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
-    ScrolledWindow, Stack, TextView, ToggleButton,
-};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::repository::RepositoryStore;
-use linux_archductor_core::settings::{
+use archductor_core::paths::AppPaths;
+use archductor_core::repository::RepositoryStore;
+use archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml,
     default_repository_settings_toml, ensure_repository_config, inspect_repository_settings,
     load_repository_settings_for_layer, repository_settings_from_toml, save_repository_settings,
     AgentProfileSettings, FilePatternSource, GitSettings, PromptSettings, ProviderSettings,
     RepositorySettings, ScriptSettings, SettingsLayer,
+};
+use gtk::prelude::*;
+use gtk::{
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
+    ScrolledWindow, Stack, TextView, ToggleButton,
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -290,7 +290,7 @@ pub(crate) fn build_settings_page(
 
     let script_group = settings_group(
         "Workspace scripts",
-        "Commands Linux Archductor can run from the workspace context.",
+        "Commands Archductor can run from the workspace context.",
     );
     scripts_panel.append(&script_group.0);
     script_group.1.append(&settings_field_pair(
@@ -363,7 +363,7 @@ pub(crate) fn build_settings_page(
         ),
         settings_field(
             "Branch prefix",
-            "Short prefix used when Linux Archductor generates branch names.",
+            "Short prefix used when Archductor generates branch names.",
             &branch_prefix_entry,
         ),
     ));

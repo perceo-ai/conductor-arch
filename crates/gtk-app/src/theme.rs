@@ -1173,13 +1173,6 @@ separator {
     border-color: #be123c;
 }
 
-.lc-density-compact .nav-row,
-.lc-density-compact .nav-row-active,
-.lc-density-compact .nav-button,
-.lc-density-compact .nav-button-active {
-    padding: 8px 10px;
-}
-
 .lc-density-compact .project-row,
 .lc-density-compact .history-row,
 .lc-density-compact .detail-row,
@@ -1194,13 +1187,6 @@ separator {
 .lc-density-compact .kanban-board,
 .lc-density-compact .page-board {
     padding: 18px 22px;
-}
-
-.lc-density-comfortable .nav-row,
-.lc-density-comfortable .nav-row-active,
-.lc-density-comfortable .nav-button,
-.lc-density-comfortable .nav-button-active {
-    padding: 12px 16px;
 }
 
 .lc-density-comfortable .project-row,
@@ -1219,7 +1205,6 @@ separator {
     padding: 32px;
 }
 
-window.lc-theme-dark,
 .lc-theme-dark .dashboard,
 .lc-theme-dark .page-shell,
 .lc-theme-dark .history-view {
@@ -1227,9 +1212,7 @@ window.lc-theme-dark,
     color: #e4e4e4;
 }
 
-.lc-theme-dark .sidebar,
-.lc-theme-dark .page-header,
-.lc-theme-dark headerbar {
+.lc-theme-dark .page-header {
     background-color: #1e1e1e;
     border-color: #2a2a2a;
 }
@@ -1263,22 +1246,6 @@ window.lc-theme-dark,
     color: #8a8a8a;
 }
 
-.lc-theme-dark .nav-button,
-.lc-theme-dark .nav-row {
-    color: #b4b4b4;
-}
-
-.lc-theme-dark .nav-button-active,
-.lc-theme-dark .nav-row-active,
-.lc-theme-dark .nav-button:hover,
-.lc-theme-dark .workspace-list row:selected,
-.lc-theme-dark .workspace-list row:hover {
-    background-color: #2e2e2e;
-    color: #e4e4e4;
-    border-color: transparent;
-}
-
-.lc-theme-dark .sidebar-search,
 .lc-theme-dark .composer-bar entry,
 .lc-theme-dark entry {
     background-color: #191919;
@@ -1304,6 +1271,62 @@ window.lc-theme-dark,
 .lc-theme-dark .settings-group,
 .lc-theme-dark .settings-rail {
     border-color: #2a2a2a;
+}
+
+.lc-theme-light .dashboard,
+.lc-theme-light .page-shell,
+.lc-theme-light .history-view {
+    background-color: #f8fafc;
+    color: #1f2937;
+}
+
+.lc-theme-light .page-header {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .workspace-card,
+.lc-theme-light .command-panel,
+.lc-theme-light .metric-card,
+.lc-theme-light .detail-row,
+.lc-theme-light .settings-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .dashboard-title,
+.lc-theme-light .workspace-name,
+.lc-theme-light .card-title,
+.lc-theme-light .metric-value,
+.lc-theme-light .detail-value,
+.lc-theme-light .column-title {
+    color: #111827;
+}
+
+.lc-theme-light .card-meta,
+.lc-theme-light .workspace-meta,
+.lc-theme-light .detail-label,
+.lc-theme-light .project-tab,
+.lc-theme-light .column-count,
+.lc-theme-light .empty-label,
+.lc-theme-light .card-branch,
+.lc-theme-light .card-diff {
+    color: #667085;
+}
+
+.lc-theme-light .composer-bar entry,
+.lc-theme-light entry {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .chrome-button:hover,
+.lc-theme-light .panel-switcher button:hover,
+.lc-theme-light .panel-switcher button:checked {
+    background-color: #edf2f7;
+    border-color: transparent;
+    color: #111827;
 }
 
 /* ── Sidebar status dots ── */
@@ -2010,7 +2033,8 @@ popover.context-menu-popover arrow {
     padding: 22px 24px 180px;
 }
 .chat-user-row {
-    margin-bottom: 22px;
+    margin-top: 12px;
+    margin-bottom: 10px;
 }
 .chat-user-bubble {
     background-color: #2e2e2e;
@@ -2023,24 +2047,70 @@ popover.context-menu-popover arrow {
 .chat-agent-text {
     color: #c6c6c6;
     line-height: 1.55;
-    margin-bottom: 18px;
+    margin-bottom: 0;
+}
+.chat-reasoning-text {
+    color: #8f8f8f;
+    font-size: 13px;
+    line-height: 1.45;
+    margin: 0 0 8px 0;
 }
 .chat-inline-event {
     background-color: transparent;
     border: none;
     border-radius: 0;
+    margin-bottom: 0;
     padding: 0;
 }
 .chat-inline-event-chip {
-    background-color: #202020;
+    background-color: #171717;
     border: 1px solid #343434;
-    border-radius: 999px;
+    border-radius: 5px;
     color: #e7e7e7;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 12px;
-    font-weight: 650;
-    min-height: 28px;
-    padding: 3px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    min-height: 14px;
+    min-width: 0;
+    padding: 0 2px;
+}
+button.chat-inline-event-chip {
+    margin: 0;
+    min-height: 14px;
+    min-width: 0;
+    padding: 0 2px;
+}
+.chat-inline-event-chip label {
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+.chat-inline-event-tool .chat-inline-event-chip {
+    border-color: #2dd4bf;
+}
+.chat-inline-event-command .chat-inline-event-chip {
+    border-color: #60a5fa;
+}
+.chat-inline-event-file .chat-inline-event-chip {
+    border-color: #4ade80;
+}
+.chat-inline-event-diff .chat-inline-event-chip {
+    border-color: #e879f9;
+}
+.chat-inline-event-skill .chat-inline-event-chip {
+    border-color: #facc15;
+}
+.chat-inline-event-plugin .chat-inline-event-chip {
+    border-color: #a78bfa;
+}
+.chat-inline-event-subagent .chat-inline-event-chip {
+    border-color: #22d3ee;
+}
+.chat-inline-event-nested .chat-inline-event-chip {
+    border-color: #c084fc;
+}
+.chat-inline-event-background .chat-inline-event-chip {
+    border-color: #94a3b8;
 }
 .chat-inline-event-meta {
     color: #8f8f8f;
@@ -2050,12 +2120,12 @@ popover.context-menu-popover arrow {
 .chat-inline-event-body {
     background-color: #181818;
     border: 1px solid #2a2a2a;
-    border-radius: 6px;
+    border-radius: 5px;
     color: #c9c9c9;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 12px;
-    line-height: 1.45;
-    padding: 10px;
+    font-size: 10px;
+    line-height: 1.25;
+    padding: 0 2px;
 }
 .chat-inline-event-loading {
     color: #b6c7e8;
@@ -2641,6 +2711,14 @@ textview:focus,
 mod tests {
     use super::app_css;
 
+    fn selector_block<'a>(css: &'a str, selector: &str) -> &'a str {
+        let needle = format!("{selector} {{");
+        let start = css.find(&needle).expect("selector exists in CSS");
+        let rest = &css[start..];
+        let end = rest.find("\n}").expect("selector block closes");
+        &rest[..end]
+    }
+
     #[test]
     fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
         let css = app_css();
@@ -2668,6 +2746,24 @@ mod tests {
         ));
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
+        let chip_block = selector_block(css, ".chat-inline-event-chip");
+        assert!(chip_block.contains("border-radius: 5px;"));
+        assert!(chip_block.contains("font-size: 10px;"));
+        assert!(chip_block.contains("min-height: 14px;"));
+        assert!(chip_block.contains("padding: 0 2px;"));
+        assert!(chip_block.contains("min-width: 0;"));
+        assert!(css.contains("button.chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-chip label"));
+        assert!(css.contains("margin: 0;"));
+        assert!(css.contains(".chat-inline-event-command .chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-subagent .chat-inline-event-chip"));
+        assert!(css.contains(".chat-reasoning-text"));
+        assert!(css.contains(".chat-user-row {\n    margin-top: 12px;\n    margin-bottom: 10px;"));
+        assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
+        let inline_event_block = selector_block(css, ".chat-inline-event");
+        assert!(inline_event_block.contains("background-color: transparent;"));
+        assert!(inline_event_block.contains("margin-bottom: 0;"));
         assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
         assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
         assert!(!css.contains(".lc-accent-green .suggested-action"));
@@ -2678,5 +2774,30 @@ mod tests {
         assert!(!css.contains("#0f172a"));
         assert!(!css.contains("#1e293b"));
         assert!(!css.contains("#334155"));
+    }
+
+    #[test]
+    fn workspace_view_preferences_do_not_target_sidebar_chrome() {
+        let css = app_css();
+
+        assert!(!css.contains("window.lc-theme-dark"));
+        assert!(!css.contains(".lc-theme-dark .sidebar"));
+        assert!(!css.contains(".lc-theme-light .sidebar"));
+        assert!(!css.contains(".lc-theme-dark headerbar"));
+        assert!(!css.contains(".lc-theme-light headerbar"));
+        assert!(!css.contains(".lc-theme-dark .nav-button"));
+        assert!(!css.contains(".lc-theme-light .nav-button"));
+        assert!(!css.contains(".lc-theme-dark .nav-row"));
+        assert!(!css.contains(".lc-theme-light .nav-row"));
+        assert!(!css.contains(".lc-theme-dark .workspace-list"));
+        assert!(!css.contains(".lc-theme-light .workspace-list"));
+        assert!(!css.contains(".lc-theme-dark .sidebar-search"));
+        assert!(!css.contains(".lc-theme-light .sidebar-search"));
+        assert!(!css.contains(".lc-density-compact .sidebar"));
+        assert!(!css.contains(".lc-density-comfortable .sidebar"));
+        assert!(!css.contains(".lc-density-compact .nav-button"));
+        assert!(!css.contains(".lc-density-compact .nav-row"));
+        assert!(!css.contains(".lc-density-comfortable .nav-button"));
+        assert!(!css.contains(".lc-density-comfortable .nav-row"));
     }
 }

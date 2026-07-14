@@ -11,7 +11,11 @@ pub mod import;
 pub mod linear;
 pub mod local_chat;
 pub mod mcp;
+pub mod model_registry;
 pub mod paths;
+pub mod provider_adapters;
+pub mod provider_events;
+pub mod provider_projection;
 pub mod pty;
 pub mod redaction;
 pub mod repository;
@@ -23,6 +27,7 @@ pub mod settings;
 pub mod storage;
 pub mod terminal_logs;
 pub mod todos;
+pub mod workflow_actions;
 pub mod workspace;
 
 #[cfg(test)]
@@ -34,7 +39,7 @@ mod pty_tests {
     #[test]
     fn pty_session_accepts_input_and_streams_output() {
         let temp = tempfile::tempdir().unwrap();
-        let marker = "linux-archductor-pty-ready";
+        let marker = "archductor-pty-ready";
         let mut session = crate::pty::PtySession::spawn(
             PathBuf::from("/bin/sh"),
             Vec::new(),

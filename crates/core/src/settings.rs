@@ -2770,7 +2770,7 @@ post_merge = "just post-merge"
 
 [customization.agent_profiles.default]
 agent = "codex"
-model = "gpt-5-codex"
+model = "gpt-5.6-sol"
 approval_mode = "on-request"
 reasoning_mode = "medium"
 personality = "direct"
@@ -2867,7 +2867,7 @@ surface = "#102030"
                 .get("default")
                 .unwrap()
                 .model,
-            Some("gpt-5-codex".to_owned())
+            Some("gpt-5.6-sol".to_owned())
         );
         assert_eq!(
             settings

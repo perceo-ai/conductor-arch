@@ -33,7 +33,7 @@ use crate::terminal_logs::{
     terminal_log_preview,
 };
 use crate::todos::parse_context_todos;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -68,6 +68,7 @@ const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
+const WORKSPACE_PORT_START: u16 = 42000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -428,6 +429,7 @@ impl SessionLaunch {
 pub struct SessionHarnessOptions {
     pub plan_mode: bool,
     pub fast_mode: bool,
+    pub model: Option<String>,
     pub approval_mode: Option<String>,
     pub reasoning_mode: Option<String>,
     pub effort_mode: Option<String>,
@@ -440,6 +442,7 @@ impl SessionHarnessOptions {
     pub fn is_empty(&self) -> bool {
         !self.plan_mode
             && !self.fast_mode
+            && self.model.is_none()
             && self.approval_mode.is_none()
             && self.reasoning_mode.is_none()
             && self.effort_mode.is_none()
@@ -466,6 +469,9 @@ impl SessionHarnessOptions {
                 "ARCHDUCTOR_SESSION_APPROVAL_MODE".to_owned(),
                 OsString::from(value),
             ));
+        }
+        if let Some(value) = sanitize_empty_text(self.model.as_deref()) {
+            env.push(("ARCHDUCTOR_SESSION_MODEL".to_owned(), OsString::from(value)));
         }
         if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
             env.push((
@@ -510,6 +516,9 @@ impl SessionHarnessOptions {
         if let Some(value) = sanitize_empty_text(self.approval_mode.as_deref()) {
             entries.push(format!("approvals={value}"));
         }
+        if let Some(value) = sanitize_empty_text(self.model.as_deref()) {
+            entries.push(format!("model={}", sanitize_metadata_value(&value)));
+        }
         if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
             entries.push(format!("reasoning={value}"));
         }
@@ -549,6 +558,9 @@ impl SessionHarnessOptions {
                 "fast" => options.fast_mode = value.eq_ignore_ascii_case("true"),
                 "approval" | "approvals" => {
                     options.approval_mode = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "model" => {
+                    options.model = (!value.is_empty()).then(|| value.to_owned());
                 }
                 "reasoning" => {
                     options.reasoning_mode = (!value.is_empty()).then(|| value.to_owned());
@@ -1129,13 +1141,13 @@ impl WorkspaceStore {
     }
 
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
-        self.create_with_progress(input, || {})
+        self.create_with_progress(input, |_| {})
     }
 
     pub fn create_with_progress(
         &self,
         input: CreateWorkspace,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
         ensure_repository_config(&repository.root_path)?;
@@ -1143,6 +1155,7 @@ impl WorkspaceStore {
         let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
+        let (name, branch) = self.resolve_create_identity(&repository, &name, &branch)?;
         let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
         let default_base_branch = settings
             .customization
@@ -1197,7 +1210,7 @@ impl WorkspaceStore {
             "workspace.creating",
             &format!("Creating workspace on branch {}", workspace.branch),
         )?;
-        after_insert();
+        after_insert(&workspace);
 
         let create_result = (|| -> Result<()> {
             git_dynamic(
@@ -1652,6 +1665,25 @@ impl WorkspaceStore {
             "DELETE FROM checkpoints WHERE workspace_id = ?1 OR session_id IN (
                SELECT id FROM processes WHERE workspace_id = ?1
              )",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM provider_event_raw_payloads
+             WHERE identity_key IN (
+                SELECT identity_key FROM provider_events
+                WHERE workspace_id = ?1
+                   OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
+                   OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)
+             )
+                OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
+                OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM provider_events
+             WHERE workspace_id = ?1
+                OR chat_thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)
+                OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
             [workspace_id],
         )?;
         self.conn.execute(
@@ -3217,7 +3249,7 @@ impl WorkspaceStore {
         issue_number: u64,
         branch_prefix: Option<&str>,
     ) -> Result<Workspace> {
-        self.create_from_issue_with_progress(repository_name, issue_number, branch_prefix, || {})
+        self.create_from_issue_with_progress(repository_name, issue_number, branch_prefix, |_| {})
     }
 
     pub fn create_from_issue_with_progress(
@@ -3225,7 +3257,7 @@ impl WorkspaceStore {
         repository_name: &str,
         issue_number: u64,
         branch_prefix: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -3292,7 +3324,7 @@ impl WorkspaceStore {
             pr_number,
             workspace_name,
             branch_name,
-            || {},
+            |_| {},
         )
     }
 
@@ -3302,7 +3334,7 @@ impl WorkspaceStore {
         pr_number: u64,
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -3336,7 +3368,7 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(&title);
-        let remote_ref = format!("refs/linux-archductor/pull-requests/{pr_number}");
+        let remote_ref = format!("refs/archductor/pull-requests/{pr_number}");
         let fetch_refspec = format!("pull/{pr_number}/head:{remote_ref}");
         git_dynamic(
             &repository.root_path,
@@ -3399,7 +3431,7 @@ impl WorkspaceStore {
             workspace_name,
             branch_name,
             base_ref,
-            || {},
+            |_| {},
         )
     }
 
@@ -3410,7 +3442,7 @@ impl WorkspaceStore {
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
         base_ref: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let prompt = prompt.trim();
         anyhow::ensure!(!prompt.is_empty(), "prompt is required");
@@ -3457,7 +3489,7 @@ impl WorkspaceStore {
             workspace_name,
             branch_name,
             base_ref,
-            || {},
+            |_| {},
         )
     }
 
@@ -3468,7 +3500,7 @@ impl WorkspaceStore {
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
         base_ref: Option<&str>,
-        after_insert: impl FnOnce(),
+        after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let preflight = self.source_preflight();
         anyhow::ensure!(
@@ -4206,7 +4238,7 @@ mutation($threadId: ID!) {{
     fn spotlight_checkpoint(&self, workspace: &Workspace, patch: &str) -> Result<Checkpoint> {
         let now = timestamp_nanos();
         let git_ref = format!(
-            "refs/linux-archductor/checkpoints/{}/spotlight-{now}",
+            "refs/archductor/checkpoints/{}/spotlight-{now}",
             workspace.id
         );
         let message = "Spotlight checkpoint";
@@ -4809,6 +4841,36 @@ mutation($threadId: ID!) {{
         self.list_processes(name, ProcessKind::Session)
     }
 
+    pub fn list_all_sessions(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes WHERE kind = ?1
+             ORDER BY id DESC",
+        )?;
+        let records = stmt
+            .query_map([ProcessKind::Session.as_str()], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn list_running_sessions(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes WHERE kind = ?1 AND status = ?2
+             ORDER BY id DESC",
+        )?;
+        let records = stmt
+            .query_map(
+                [
+                    ProcessKind::Session.as_str(),
+                    ProcessStatus::Running.as_str(),
+                ],
+                row_to_process,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
     pub fn get_process_record(&self, id: i64) -> Result<ProcessRecord> {
         self.get_process(id)
     }
@@ -5308,6 +5370,21 @@ mutation($threadId: ID!) {{
         self.get_chat_thread(self.conn.last_insert_rowid())
     }
 
+    pub fn update_chat_thread_harness_metadata(
+        &self,
+        thread_id: i64,
+        harness_metadata: Option<&str>,
+    ) -> Result<ChatThreadRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET harness_metadata = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![harness_metadata, now, thread_id],
+        )?;
+        self.get_chat_thread(thread_id)
+    }
+
     pub fn list_chat_threads(&self, workspace_name: &str) -> Result<Vec<ChatThreadRecord>> {
         let workspace = self.get_by_name(workspace_name)?;
         let mut stmt = self.conn.prepare(
@@ -5407,27 +5484,34 @@ mutation($threadId: ID!) {{
         self.get_chat_message(self.conn.last_insert_rowid())
     }
 
+    pub fn apply_agent_chat_metadata_directive(
+        &self,
+        thread_id: i64,
+        content: &str,
+    ) -> Result<String> {
+        let accepts_metadata = !self.thread_has_agent_message(thread_id)?;
+        let (content, directive) = extract_archductor_metadata_directive(content);
+        if accepts_metadata {
+            if let Some(directive) = directive {
+                if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
+                    warn!(
+                        thread_id,
+                        error = %err,
+                        "failed to apply archductor metadata directive"
+                    );
+                }
+            }
+        }
+        Ok(content)
+    }
+
     fn append_agent_chat_message_with_metadata(
         &self,
         thread_id: i64,
         content: &str,
         source: &str,
     ) -> Result<()> {
-        let accepts_metadata = !self.thread_has_agent_message(thread_id)?;
-        let (content, directive) = if accepts_metadata {
-            extract_archductor_metadata_directive(content)
-        } else {
-            (content.to_owned(), None)
-        };
-        if let Some(directive) = directive {
-            if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
-                warn!(
-                    thread_id,
-                    error = %err,
-                    "failed to apply archductor metadata directive"
-                );
-            }
-        }
+        let content = self.apply_agent_chat_metadata_directive(thread_id, content)?;
         if !content.trim().is_empty() {
             self.append_chat_message(thread_id, "agent", &content, source)?;
         }
@@ -5455,31 +5539,57 @@ mutation($threadId: ID!) {{
             }
         }
 
-        let mut workspace = workspace;
-        if let Some(branch_name) = directive.branch_name.as_deref() {
-            let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
-            if branch_name != workspace.branch {
-                match self.rename_branch(&workspace.name, &branch_name) {
-                    Ok(updated) => workspace = updated,
-                    Err(err) => warn!(
-                        workspace = %workspace.name,
-                        branch = %branch_name,
-                        error = %err,
-                        "failed to apply archductor branch metadata"
-                    ),
+        let has_workspace_metadata =
+            directive.branch_name.is_some() || directive.workspace_name.is_some();
+        if has_workspace_metadata && !self.workspace_agent_metadata_applied(workspace.id)? {
+            let mut workspace = workspace;
+            if let Some(branch_name) = directive.branch_name.as_deref() {
+                let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
+                if branch_name != workspace.branch {
+                    match self.rename_branch(&workspace.name, &branch_name) {
+                        Ok(updated) => workspace = updated,
+                        Err(err) => warn!(
+                            workspace = %workspace.name,
+                            branch = %branch_name,
+                            error = %err,
+                            "failed to apply archductor branch metadata"
+                        ),
+                    }
                 }
             }
-        }
 
-        if let Some(workspace_name) = directive.workspace_name.as_deref() {
-            let repository = self.load_repository_by_id(workspace.repository_id)?;
-            let workspace_name =
-                self.metadata_workspace_name(&repository, workspace.id, workspace_name)?;
-            if workspace_name != workspace.name {
-                self.rename(&workspace.name, &workspace_name)?;
+            if let Some(workspace_name) = directive.workspace_name.as_deref() {
+                let repository = self.load_repository_by_id(workspace.repository_id)?;
+                let workspace_name =
+                    self.metadata_workspace_name(&repository, workspace.id, workspace_name)?;
+                if workspace_name != workspace.name {
+                    self.rename(&workspace.name, &workspace_name)?;
+                }
             }
+            self.mark_workspace_agent_metadata_applied(workspace.id)?;
         }
 
+        Ok(())
+    }
+
+    fn workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<bool> {
+        let applied_at: Option<String> = self.conn.query_row(
+            "SELECT agent_metadata_applied_at FROM workspaces WHERE id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        Ok(applied_at.is_some())
+    }
+
+    fn mark_workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces
+             SET agent_metadata_applied_at = COALESCE(agent_metadata_applied_at, ?1),
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, workspace_id],
+        )?;
         Ok(())
     }
 
@@ -5810,7 +5920,8 @@ mutation($threadId: ID!) {{
         }
     }
 
-    pub fn persist_codex_screen_delta(
+    /// Legacy PTY screen parser for debug/import paths only.
+    pub fn persist_legacy_codex_screen_delta_for_debug_import(
         &self,
         thread_id: i64,
         process_id: i64,
@@ -5849,7 +5960,8 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
-    pub fn persist_codex_pipeline_update(
+    /// Legacy PTY pipeline parser for debug/import paths only.
+    pub fn persist_legacy_codex_pipeline_update_for_debug_import(
         &self,
         thread_id: i64,
         process_id: i64,
@@ -6270,18 +6382,46 @@ mutation($threadId: ID!) {{
     }
 
     fn next_port_base(&self, port_block_size: u16) -> Result<u16> {
+        self.next_port_base_with_checker(port_block_size, |_| true)
+    }
+
+    fn next_port_base_with_checker(
+        &self,
+        port_block_size: u16,
+        port_available: impl Fn(u16) -> bool,
+    ) -> Result<u16> {
         anyhow::ensure!(
             port_block_size > 0,
             "workspace port block size must be greater than 0"
         );
-        let next = self
-            .conn
-            .query_row("SELECT MAX(port_base) FROM workspaces", [], |row| {
-                row.get::<_, Option<i64>>(0)
-            })?
-            .map(|port| port + i64::from(port_block_size))
-            .unwrap_or(3000);
-        u16::try_from(next).context("workspace port base exceeded u16 range")
+        let occupied_port_bases = self.workspace_port_bases()?;
+        let mut port = WORKSPACE_PORT_START;
+        loop {
+            if !workspace_port_block_conflicts_existing(port, port_block_size, &occupied_port_bases)
+                && workspace_port_block_available(port, port_block_size, &port_available)
+            {
+                return Ok(port);
+            }
+            let next = u32::from(port) + u32::from(port_block_size);
+            anyhow::ensure!(
+                next <= u32::from(u16::MAX),
+                "workspace port base exceeded u16 range"
+            );
+            port = next as u16;
+        }
+    }
+
+    fn workspace_port_bases(&self) -> Result<std::collections::HashSet<u16>> {
+        let mut stmt = self.conn.prepare("SELECT port_base FROM workspaces")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|port_base| {
+                u16::try_from(port_base)
+                    .map_err(|err| anyhow!("invalid workspace port_base {port_base}: {err}"))
+            })
+            .collect()
     }
 
     fn resolve_workspace_name(
@@ -6292,10 +6432,6 @@ mutation($threadId: ID!) {{
     ) -> Result<String> {
         let requested_name = requested_name.trim();
         if !requested_name.is_empty() {
-            anyhow::ensure!(
-                self.workspace_name_available(repository, requested_name)?,
-                "workspace {requested_name} already exists"
-            );
             return Ok(requested_name.to_owned());
         }
 
@@ -6341,6 +6477,38 @@ mutation($threadId: ID!) {{
         }
 
         unreachable!("workspace name generation should always return")
+    }
+
+    fn resolve_create_identity(
+        &self,
+        repository: &RepositoryRecord,
+        base_name: &str,
+        base_branch: &str,
+    ) -> Result<(String, String)> {
+        for version in 0.. {
+            let version = version + 1;
+            let name = if version == 1 {
+                base_name.to_owned()
+            } else {
+                versioned_workspace_name(base_name, version)
+            };
+            let branch = if version == 1 {
+                base_branch.to_owned()
+            } else {
+                versioned_branch_name(base_branch, version)
+            };
+
+            validate_workspace_name(&name)?;
+            validate_branch_name(&branch)?;
+
+            if self.workspace_name_available(repository, &name)?
+                && !local_branch_exists(&repository.root_path, &branch)?
+            {
+                return Ok((name, branch));
+            }
+        }
+
+        unreachable!("workspace identity generation should always return")
     }
 
     fn workspace_name_available(&self, repository: &RepositoryRecord, name: &str) -> Result<bool> {
@@ -7731,6 +7899,10 @@ fn extract_archductor_metadata_directive(
     (trim_metadata_blank_edges(&cleaned), directive)
 }
 
+pub fn strip_archductor_metadata_block(content: &str) -> String {
+    extract_archductor_metadata_directive(content).0
+}
+
 fn parse_archductor_metadata_directive(json_text: &str) -> Option<ArchductorMetadataDirective> {
     let value = serde_json::from_str::<Value>(json_text).ok()?;
     Some(ArchductorMetadataDirective {
@@ -7843,6 +8015,14 @@ fn validate_branch_name(branch: &str) -> Result<()> {
         "branch name contains unsupported characters"
     );
     Ok(())
+}
+
+fn versioned_workspace_name(base: &str, version: usize) -> String {
+    format!("{base}-v{version}")
+}
+
+fn versioned_branch_name(base: &str, version: usize) -> String {
+    format!("{base}-v{version}")
 }
 
 fn unique_message_branch_name(
@@ -8058,7 +8238,7 @@ fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -
 
 fn root_tracked_patch(root_path: &Path) -> Result<String> {
     let index_path =
-        std::env::temp_dir().join(format!("linux-archductor-root-index-{}", timestamp_nanos()));
+        std::env::temp_dir().join(format!("archductor-root-index-{}", timestamp_nanos()));
     git_with_index(root_path, &index_path, &["read-tree", "HEAD"])?;
     git_with_index(root_path, &index_path, &["add", "-A"])?;
     let current_patch = git_with_index_output(
@@ -8083,11 +8263,11 @@ fn create_worktree_checkpoint_commit(
     let now = timestamp();
     let ref_suffix = timestamp_nanos();
     let git_ref = format!(
-        "refs/linux-archductor/checkpoints/{}/{ref_kind}-{ref_suffix}",
+        "refs/archductor/checkpoints/{}/{ref_kind}-{ref_suffix}",
         workspace.id
     );
     let index_path = std::env::temp_dir().join(format!(
-        "linux-archductor-checkpoint-index-{}-{ref_suffix}",
+        "archductor-checkpoint-index-{}-{ref_suffix}",
         workspace.id
     ));
     let result = (|| -> Result<CreatedCheckpointRef> {
@@ -8106,10 +8286,8 @@ fn create_worktree_checkpoint_commit(
 
 fn diff_worktree_against_ref(workspace: &Workspace, base_ref: &str) -> Result<String> {
     let now = timestamp_nanos();
-    let index_path = std::env::temp_dir().join(format!(
-        "linux-archductor-turn-diff-index-{}-{now}",
-        workspace.id
-    ));
+    let index_path =
+        std::env::temp_dir().join(format!("archductor-turn-diff-index-{}-{now}", workspace.id));
     let result = (|| -> Result<String> {
         let tree = worktree_snapshot_tree(&workspace.path, &index_path)?;
         git_output_dynamic(
@@ -8443,9 +8621,9 @@ fn git_commit_tree(cwd: &Path, tree: &str, parent: &str, message: &str) -> Resul
         .arg(cwd)
         .args([
             "-c",
-            "user.name=Linux Archductor",
+            "user.name=Archductor",
             "-c",
-            "user.email=linux-archductor@example.test",
+            "user.email=archductor@example.test",
             "-c",
             "commit.gpgsign=false",
             "commit-tree",
@@ -8624,6 +8802,37 @@ fn process_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn workspace_port_block_available(
+    port_base: u16,
+    port_block_size: u16,
+    port_available: impl Fn(u16) -> bool,
+) -> bool {
+    (0..port_block_size).all(|offset| port_base.checked_add(offset).is_some_and(&port_available))
+}
+
+fn workspace_port_block_conflicts_existing(
+    port_base: u16,
+    port_block_size: u16,
+    occupied_port_bases: &std::collections::HashSet<u16>,
+) -> bool {
+    occupied_port_bases.iter().copied().any(|occupied| {
+        workspace_port_ranges_overlap(port_base, port_block_size, occupied, port_block_size)
+    })
+}
+
+fn workspace_port_ranges_overlap(
+    left_start: u16,
+    left_size: u16,
+    right_start: u16,
+    right_size: u16,
+) -> bool {
+    let left_start = u32::from(left_start);
+    let right_start = u32::from(right_start);
+    let left_end = left_start + u32::from(left_size).saturating_sub(1);
+    let right_end = right_start + u32::from(right_size).saturating_sub(1);
+    left_start <= right_end && right_start <= left_end
 }
 
 #[cfg(unix)]
@@ -9013,6 +9222,24 @@ mod tests {
     }
 
     #[test]
+    fn session_harness_metadata_sanitizes_model_delimiters() {
+        let metadata = SessionHarnessOptions {
+            model: Some("gpt-5.6-sol;approval=never\nnext".to_owned()),
+            ..SessionHarnessOptions::default()
+        }
+        .metadata()
+        .unwrap();
+
+        assert_eq!(metadata, "model=gpt-5.6-sol approval=never next");
+        let parsed = SessionHarnessOptions::from_metadata(Some(&metadata));
+        assert_eq!(
+            parsed.model.as_deref(),
+            Some("gpt-5.6-sol approval=never next")
+        );
+        assert!(parsed.approval_mode.is_none());
+    }
+
+    #[test]
     fn create_workspace_adds_git_worktree_context_dir_and_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -9043,7 +9270,7 @@ mod tests {
         assert_eq!(workspace.name, "berlin");
         assert_eq!(workspace.branch, "lc/berlin");
         assert_eq!(workspace.base_ref, "main");
-        assert_eq!(workspace.port_base, 3000);
+        assert_eq!(workspace.port_base, 42000);
         assert_eq!(workspace.status, "active");
         assert_eq!(workspace.path, workspace_parent.join("berlin"));
         assert!(workspace.path.join(".context").is_dir());
@@ -9053,6 +9280,49 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn create_workspace_versions_branch_and_workspace_when_requested_branch_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "lc/berlin", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(workspace.name, "berlin-v2");
+        assert_eq!(workspace.branch, "lc/berlin-v2");
+        assert_eq!(workspace.status, "active");
+        assert_eq!(workspace.path, workspace_parent.join("berlin-v2"));
+
+        let branch = git_output(&workspace.path, ["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "lc/berlin-v2");
     }
 
     #[test]
@@ -9165,9 +9435,9 @@ mod tests {
             .arg(&seed_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -9517,9 +9787,9 @@ exit 1
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -9731,7 +10001,7 @@ claude_code_executable_path = "/opt/bin/claude-custom"
     }
 
     #[test]
-    fn create_workspace_allocates_next_port_block() {
+    fn create_workspace_assigns_open_port_base() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -9765,8 +10035,87 @@ claude_code_executable_path = "/opt/bin/claude-custom"
             })
             .unwrap();
 
-        assert_eq!(first.port_base, 3000);
-        assert_eq!(second.port_base, 3010);
+        assert!(first.port_base >= WORKSPACE_PORT_START);
+        assert!(second.port_base >= WORKSPACE_PORT_START);
+        assert_ne!(first.port_base, second.port_base);
+    }
+
+    #[test]
+    fn workspace_port_base_starts_above_common_dev_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open(&db_path).unwrap();
+
+        let port = store.next_port_base_with_checker(10, |_| true).unwrap();
+
+        assert!(port > 8080);
+        assert!(![3000, 5173, 8080].contains(&port));
+    }
+
+    #[test]
+    fn workspace_port_base_skips_existing_workspace_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.next_port_base_with_checker(10, |_| true).unwrap(),
+            42010
+        );
+    }
+
+    #[test]
+    fn workspace_port_base_skips_existing_overlapping_port_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.next_port_base_with_checker(25, |_| true).unwrap(),
+            42025
+        );
     }
 
     #[test]
@@ -9827,63 +10176,17 @@ base_branch = "develop"
     }
 
     #[test]
-    fn create_workspace_uses_configured_port_block_size() {
+    fn workspace_port_base_scans_by_configured_block_size() {
         let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".archductor")).unwrap();
-        fs::write(
-            repo_path.join(".archductor/settings.toml"),
-            r#"
-[customization.workspace_defaults]
-port_block_size = 25
-"#,
-        )
-        .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["add", ".archductor/settings.toml"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["commit", "-m", "add archductor settings"])
-            .status()
-            .unwrap();
         let db_path = temp.path().join("state.db");
 
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
         let store = WorkspaceStore::open(&db_path).unwrap();
-        let first = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let second = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "tokyo".to_owned(),
-                branch: "lc/tokyo".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-
-        assert_eq!(first.port_base, 3000);
-        assert_eq!(second.port_base, 3025);
+        assert_eq!(
+            store
+                .next_port_base_with_checker(25, |port| port >= 42025)
+                .unwrap(),
+            42025
+        );
     }
 
     #[test]
@@ -10109,9 +10412,9 @@ notes.local
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10178,9 +10481,9 @@ setup = "printf 'setup-ran\n' > .context/setup-env"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10245,9 +10548,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10291,7 +10594,7 @@ CUSTOM_VALUE = "from-settings"
                 workspace.path.to_str().unwrap(),
                 repo_path.canonicalize().unwrap().to_str().unwrap(),
                 "main",
-                "3000",
+                "42000",
                 "1",
                 "from-settings",
             ]
@@ -10353,9 +10656,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10447,6 +10750,38 @@ CUSTOM_VALUE = "from-settings"
                 )],
             )
             .unwrap();
+        let provider_event = crate::provider_events::ProviderEventStore::new(&db_path)
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-1".to_owned()),
+                provider_item_id: Some("item-1".to_owned()),
+                provider_thread_id: Some(thread.id.to_string()),
+                provider_turn_id: None,
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::AssistantOutput,
+                provider_subtype: Some("message".to_owned()),
+                provider_sequence: Some(1),
+                occurred_at_ms: 1,
+                normalized_payload: serde_json::json!({"text": "done"}),
+                raw_json: serde_json::json!({"text": "done"}),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE provider_event_raw_payloads
+                 SET chat_thread_id = NULL, process_id = NULL
+                 WHERE identity_key = ?1",
+                [&provider_event.identity_key],
+            )
+            .unwrap();
 
         let deleted = store.delete("berlin", false, false).unwrap();
 
@@ -10471,8 +10806,22 @@ CUSTOM_VALUE = "from-settings"
             .conn
             .query_row("SELECT COUNT(*) FROM session_events", [], |row| row.get(0))
             .unwrap();
+        let orphan_provider_events: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM provider_events", [], |row| row.get(0))
+            .unwrap();
+        let orphan_provider_raw_payloads: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_event_raw_payloads",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(orphan_pty_chunks, 0);
         assert_eq!(orphan_session_events, 0);
+        assert_eq!(orphan_provider_events, 0);
+        assert_eq!(orphan_provider_raw_payloads, 0);
     }
 
     #[test]
@@ -10513,6 +10862,111 @@ CUSTOM_VALUE = "from-settings"
 
         assert!(store.delete("berlin", true, false).is_err());
         assert!(store.get_by_name("berlin").is_ok());
+    }
+
+    #[test]
+    fn delete_failed_workspace_keeps_metadata_when_worktree_cleanup_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let not_a_worktree = temp.path().join("not-a-worktree");
+        fs::create_dir(&not_a_worktree).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET path = ?1, status = 'failed' WHERE id = ?2",
+                params![not_a_worktree.to_string_lossy(), workspace.id],
+            )
+            .unwrap();
+
+        assert!(store.delete("berlin", true, false).is_err());
+        let remaining = store.get_by_name("berlin").unwrap();
+        assert_eq!(remaining.status, "failed");
+    }
+
+    #[test]
+    fn delete_failed_workspace_preserves_preexisting_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "lc/broken", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let repository_id: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM repositories WHERE name = 'demo'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let now = timestamp();
+        store
+            .conn
+            .execute(
+                "INSERT INTO workspaces (
+                    repository_id, name, path, branch, base_ref, port_base,
+                    status, archived_at, created_at, updated_at
+                 ) VALUES (?1, 'broken', ?2, 'lc/broken', 'main', 4200, 'failed', NULL, ?3, ?3)",
+                params![
+                    repository_id,
+                    temp.path()
+                        .join("workspaces/demo/broken")
+                        .to_string_lossy()
+                        .to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+
+        let deleted = store.delete("broken", true, false).unwrap();
+
+        assert_eq!(deleted.status, "failed");
+        assert!(store.get_by_name("broken").is_err());
+        let branches = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "--list", "lc/broken"])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&branches.stdout).trim().is_empty());
     }
 
     #[test]
@@ -10682,9 +11136,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10752,9 +11206,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10802,7 +11256,7 @@ CUSTOM_VALUE = "from-settings"
                 workspace.path.to_str().unwrap(),
                 repo_path.canonicalize().unwrap().to_str().unwrap(),
                 "main",
-                "3000",
+                "42000",
                 "1",
                 "from-settings",
             ]
@@ -10843,9 +11297,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10915,9 +11369,9 @@ run = "true"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -10981,9 +11435,9 @@ run = "printf 'started\n'"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11051,9 +11505,9 @@ run = "printf 'done\n'; exit 3"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11125,9 +11579,9 @@ lint = "printf 'lint failed\n'; exit 7"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11209,9 +11663,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11253,7 +11707,7 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(result.command, "pwd; printf '%s:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7");
         assert_eq!(result.cwd, workspace.path);
         assert_eq!(result.exit_code, Some(7));
-        assert!(result.stdout.contains("berlin:3000:from-settings"));
+        assert!(result.stdout.contains("berlin:42000:from-settings"));
         assert!(result.stdout.contains(result.cwd.to_str().unwrap()));
         assert_eq!(result.stderr, "warn\n");
         assert!(!result.started_at.is_empty());
@@ -11286,9 +11740,9 @@ working_directory = "apps/web"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12096,7 +12550,71 @@ working_directory = "apps/web"
     }
 
     #[test]
-    fn local_chat_history_messages_parse_codex_screen_snapshots() {
+    fn local_chat_history_messages_skip_provider_native_raw_output_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let session = store
+            .record_session_process(
+                "berlin",
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: Vec::new(),
+                    cwd: temp.path().join("workspaces/demo/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: Some("harness=codex-app-server".to_owned()),
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        store
+            .append_session_process_output(
+                session.id,
+                &format!(
+                    "{}{}agent reply\n",
+                    crate::runtime_session_store::format_provider_native_raw_output(
+                        "codex-app-server",
+                        "{\"id\":1,\"secret\":\"raw\"}",
+                    ),
+                    crate::runtime_session_store::format_provider_native_raw_output(
+                        "claude-stream-json",
+                        "{\"type\":\"result\"}",
+                    ),
+                ),
+            )
+            .unwrap();
+
+        let messages = store.local_chat_history_messages(session.id).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "agent");
+        assert_eq!(messages[0].content, "agent reply");
+    }
+
+    #[test]
+    fn local_chat_history_messages_keep_codex_screen_snapshots_as_raw_diagnostics() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -12145,10 +12663,12 @@ working_directory = "apps/web"
         let messages = store.local_chat_history_messages(session.id).unwrap();
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "run tests");
-        assert_eq!(messages[1].role, "agent");
-        assert_eq!(messages[1].content, "Running now.\nTests passed.");
+        assert!(messages.iter().all(|message| message.role == "agent"));
+        assert!(messages[0].content.contains("[codex screen]"));
+        assert!(messages[0].content.contains("│ run tests"));
+        assert!(messages[0].content.contains("│ Running now."));
+        assert!(messages[1].content.contains("[codex screen]"));
+        assert!(messages[1].content.contains("│ Tests passed."));
     }
 
     #[test]
@@ -12290,9 +12810,9 @@ accent = "#0ea5e9"
             &repo_path,
             [
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12370,9 +12890,9 @@ setup = "printf 'setup:%s:%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_POR
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12405,14 +12925,14 @@ setup = "printf 'setup:%s:%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_POR
             .unwrap();
 
         let setup = store.setup_workspace("berlin").unwrap();
-        wait_for_log(&setup.log_path, "setup:berlin:3000");
+        wait_for_log(&setup.log_path, "setup:berlin:42000");
 
         assert_eq!(setup.kind, ProcessKind::Setup);
         assert_eq!(setup.status, ProcessStatus::Running);
         assert!(store
             .read_latest_setup_log("berlin")
             .unwrap()
-            .contains("setup:berlin:3000"));
+            .contains("setup:berlin:42000"));
     }
 
     #[test]
@@ -12444,9 +12964,9 @@ working_directory = "apps/api"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12511,9 +13031,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12621,9 +13141,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12725,9 +13245,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12809,9 +13329,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12907,9 +13427,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -12994,9 +13514,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13083,9 +13603,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13169,9 +13689,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13242,9 +13762,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13325,9 +13845,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13436,9 +13956,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13534,7 +14054,7 @@ spotlight_testing = true
             launch.env_value("ARCHDUCTOR_WORKSPACE_NAME"),
             Some("berlin")
         );
-        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("3000"));
+        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));
         assert_eq!(
             launch.env_value("ARCHDUCTOR_ROOT_PATH"),
             repo_path.canonicalize().unwrap().to_str()
@@ -13567,9 +14087,9 @@ working_directory = "apps/worker"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -13648,6 +14168,7 @@ working_directory = "apps/worker"
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
+                    model: Some("gpt-5.6-sol".to_owned()),
                     approval_mode: Some("ask".to_owned()),
                     reasoning_mode: Some("high".to_owned()),
                     effort_mode: Some("medium".to_owned()),
@@ -13672,6 +14193,8 @@ working_directory = "apps/worker"
                 codex_trust_arg.as_str(),
                 "-C",
                 codex_cwd.as_str(),
+                "--model",
+                "gpt-5.6-sol",
                 "-c",
                 r#"model_reasoning_effort="high""#,
                 "-c",
@@ -13688,7 +14211,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;plan=true;fast=true;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
             )
         );
         assert!(launch.session_resume_id.is_none());
@@ -13729,6 +14252,7 @@ working_directory = "apps/worker"
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
+                    model: Some("claude-fable-5".to_owned()),
                     approval_mode: Some("never".to_owned()),
                     reasoning_mode: Some("low".to_owned()),
                     effort_mode: Some("high".to_owned()),
@@ -13749,6 +14273,8 @@ working_directory = "apps/worker"
             &vec![
                 "--permission-mode",
                 "plan",
+                "--model",
+                "claude-fable-5",
                 "--effort",
                 "high",
                 "--session-id",
@@ -13760,7 +14286,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=claude;plan=true;fast=true;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
+                "harness=claude;plan=true;fast=true;model=claude-fable-5;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
             )
         );
         assert!(launch.session_resume_id.is_some());
@@ -13806,7 +14332,7 @@ working_directory = "apps/worker"
             launch.args,
             vec![
                 "--resume".to_owned(),
-                "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned()
+                "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned(),
             ]
         );
         assert_eq!(
@@ -14207,7 +14733,7 @@ working_directory = "apps/worker"
             .append_chat_message(thread.id, "user", "run tests", "composer")
             .unwrap();
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "› run tests\n• Running now.\nRan cargo test\nok\n",
@@ -14555,9 +15081,9 @@ general = "Keep changes focused."
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14600,9 +15126,9 @@ general = "Keep changes focused."
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14651,9 +15177,9 @@ general = "Keep changes focused."
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -14742,9 +15268,9 @@ general = "Keep changes focused."
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -16392,9 +16918,9 @@ exit 1
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -16484,14 +17010,10 @@ exit 1
             })
             .unwrap();
 
+        git_dynamic(&workspace.path, &["config", "user.name", "Archductor"]).unwrap();
         git_dynamic(
             &workspace.path,
-            &["config", "user.name", "Linux Archductor"],
-        )
-        .unwrap();
-        git_dynamic(
-            &workspace.path,
-            &["config", "user.email", "linux-archductor@example.test"],
+            &["config", "user.email", "archductor@example.test"],
         )
         .unwrap();
         git_dynamic(&workspace.path, &["config", "commit.gpgsign", "false"]).unwrap();
@@ -16608,9 +17130,9 @@ pr_body_sections = ["Summary", "Tests", "Risk"]
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -16955,9 +17477,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -17059,7 +17581,7 @@ spotlight_testing = true
             .checkpoint_create("berlin", "before refactor", None)
             .unwrap();
         assert_eq!(cp.message, "before refactor");
-        assert!(cp.git_ref.starts_with("refs/linux-archductor/checkpoints/"));
+        assert!(cp.git_ref.starts_with("refs/archductor/checkpoints/"));
         assert!(cp.session_id.is_none());
 
         let list = store.checkpoint_list("berlin").unwrap();
@@ -17304,9 +17826,9 @@ spotlight_testing = true
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -17430,7 +17952,7 @@ spotlight_testing = true
             .append_chat_message(thread.id, "user", "run tests", "user_send")
             .unwrap();
         store
-            .append_chat_message(thread.id, "system", "/model gpt-5", "control_command")
+            .append_chat_message(thread.id, "system", "/model gpt-5.6-sol", "control_command")
             .unwrap();
         store
             .append_chat_message(thread.id, "agent", "Running now.", "agent_screen_parse")
@@ -17441,6 +17963,31 @@ spotlight_testing = true
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].source, "control_command");
         assert_eq!(messages[2].role, "agent");
+    }
+
+    #[test]
+    fn chat_thread_harness_metadata_updates_per_thread_model() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+
+        let updated = store
+            .update_chat_thread_harness_metadata(thread.id, Some("model=gpt-5.6-luna"))
+            .unwrap();
+
+        assert_eq!(
+            updated.harness_metadata.as_deref(),
+            Some("model=gpt-5.6-luna")
+        );
+        assert_eq!(
+            store
+                .get_chat_thread_record(thread.id)
+                .unwrap()
+                .harness_metadata
+                .as_deref(),
+            Some("model=gpt-5.6-luna")
+        );
     }
 
     #[test]
@@ -17482,7 +18029,7 @@ spotlight_testing = true
             .append_chat_message(
                 thread.id,
                 "agent",
-                "Repo Status\n\nThis is Linux Archductor.\n\nCurrent Git State",
+                "Repo Status\n\nThis is Archductor.\n\nCurrent Git State",
                 "agent_screen_parse",
             )
             .unwrap();
@@ -17490,7 +18037,7 @@ spotlight_testing = true
             .append_chat_message(
                 thread.id,
                 "agent",
-                "This is Linux Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia.",
+                "This is Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia.",
                 "agent_screen_parse",
             )
             .unwrap();
@@ -17507,7 +18054,7 @@ spotlight_testing = true
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].content,
-            "Repo Status\n\nThis is Linux Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia."
+            "Repo Status\n\nThis is Archductor.\n\nCurrent Git State\n\nYou’re in worktree valencia."
         );
     }
 
@@ -18059,6 +18606,87 @@ spotlight_testing = true
     }
 
     #[test]
+    fn later_agent_metadata_directives_are_hidden_without_applying_metadata() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "First response.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"workspace_name\":\"late rename\",\"branch_name\":\"lc/late-rename\",\"chat_title\":\"Late Rename\"}</archductor_metadata>\nContinuing.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert!(store.get_by_name("late-rename").is_err());
+        let updated_thread = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(updated_thread.title, "New Chat");
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages[2].content, "Continuing.");
+        assert!(!messages[2].content.contains("archductor_metadata"));
+    }
+
+    #[test]
+    fn agent_metadata_directive_renames_workspace_only_once_but_titles_each_new_chat() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let first = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(first.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                first.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing-webhook-fix\",\"branch_name\":\"lc/billing-webhook-fix\",\"chat_title\":\"Billing Webhook Fix\"}</archductor_metadata>\nFirst.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let renamed = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(renamed.id, workspace.id);
+        let second = store
+            .create_chat_thread("billing-webhook-fix", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(second.id, "user", "Add billing dashboard", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                second.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing-dashboard\",\"branch_name\":\"lc/billing-dashboard\",\"chat_title\":\"Billing Dashboard\"}</archductor_metadata>\nSecond.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert!(store.get_by_name("billing-dashboard").is_err());
+        let workspace = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(workspace.id, renamed.id);
+        assert_eq!(workspace.branch, "lc/billing-webhook-fix");
+        assert_eq!(
+            store.get_chat_thread_record(first.id).unwrap().title,
+            "Billing Webhook Fix"
+        );
+        assert_eq!(
+            store.get_chat_thread_record(second.id).unwrap().title,
+            "Billing Dashboard"
+        );
+    }
+
+    #[test]
     fn chat_thread_close_and_reopen_preserves_history_and_resume_id() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -18087,7 +18715,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn persist_codex_screen_delta_persists_structured_agent_messages_for_threads() {
+    fn legacy_codex_screen_delta_debug_import_persists_structured_agent_messages_for_threads() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "Bugfix A", None)
@@ -18113,14 +18741,14 @@ spotlight_testing = true
             .unwrap();
 
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n╰─",
             )
             .unwrap();
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n│ The failure is in parser.rs.\n╰─",
@@ -18139,7 +18767,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn persist_codex_screen_delta_persists_file_reads_as_events_only() {
+    fn legacy_codex_screen_delta_debug_import_persists_file_reads_as_events_only() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "Bugfix A", None)
@@ -18150,7 +18778,7 @@ spotlight_testing = true
             .append_chat_message(thread.id, "user", "Read the README", "user_send")
             .unwrap();
         store
-            .persist_codex_screen_delta(
+            .persist_legacy_codex_screen_delta_for_debug_import(
                 thread.id,
                 process.id,
                 "› Read the README\nRead README.md\n# Project\nDetails.\n",
@@ -18193,7 +18821,7 @@ spotlight_testing = true
 ";
 
         store
-            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .persist_legacy_codex_screen_delta_for_debug_import(thread.id, process.id, screen)
             .unwrap();
 
         let messages = store.list_chat_messages(thread.id).unwrap();
@@ -18235,10 +18863,10 @@ spotlight_testing = true
 
         let screen = include_str!("../tests/fixtures/codex_replay_duplicate_screen.txt");
         store
-            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .persist_legacy_codex_screen_delta_for_debug_import(thread.id, process.id, screen)
             .unwrap();
         store
-            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .persist_legacy_codex_screen_delta_for_debug_import(thread.id, process.id, screen)
             .unwrap();
 
         let messages = store.list_chat_messages(thread.id).unwrap();
@@ -18639,9 +19267,9 @@ spotlight_testing = true
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -18843,9 +19471,9 @@ spotlight_testing = true
             .arg(&path)
             .args([
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

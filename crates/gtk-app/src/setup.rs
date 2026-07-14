@@ -1,7 +1,7 @@
 use adw::ApplicationWindow;
+use archductor_core::doctor::{setup_blockers, SetupBlocker, SetupCheck, SetupReadiness};
 use gtk::prelude::*;
 use gtk::{Box as GBox, Label, LinkButton, Orientation};
-use linux_archductor_core::doctor::{setup_blockers, SetupBlocker, SetupCheck, SetupReadiness};
 
 use crate::buttons::text_button;
 
@@ -33,7 +33,7 @@ pub(crate) fn show_blocking_setup_if_needed(parent: &ApplicationWindow) {
     body.append(&title);
 
     let copy = Label::new(Some(
-        "Linux Archductor needs GitHub CLI plus a signed-in Codex or Claude CLI before chat features can run.",
+        "Archductor needs GitHub CLI plus a signed-in Codex or Claude CLI before chat features can run.",
     ));
     copy.add_css_class("setup-copy");
     copy.set_wrap(true);
@@ -275,10 +275,9 @@ mod tests {
             selected_provider_detail(&readiness),
             "claude will be selected for new chats."
         );
-        assert!(linux_archductor_core::doctor::setup_blockers_for_provider(
-            &readiness,
-            Some("claude")
-        )
-        .is_empty());
+        assert!(
+            archductor_core::doctor::setup_blockers_for_provider(&readiness, Some("claude"))
+                .is_empty()
+        );
     }
 }

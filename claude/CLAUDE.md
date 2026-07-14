@@ -4,11 +4,12 @@
 
 Before touching code or docs in this repository, read:
 
-1. `README.md`
+1. `docs/conductor-gui-mvp-handoff.md`
 2. `progress.md`
-3. `docs/manual-testing-checklist.md`
-4. `docs/archductor-docs-parity-map.md`
-5. `docs/deploy-and-local-test.md`
+3. `docs/mvp-scope.md`
+4. `docs/manual-testing-checklist.md`
+5. `docs/archductor-docs-parity-map.md`
+6. `README.md`
 
 Use official Conductor behavior as the parity baseline:
 
@@ -24,7 +25,7 @@ Use official Conductor behavior as the parity baseline:
 
 ## Product Baseline
 
-Linux Archductor is a local desktop control plane for parallel coding agents.
+Archductor is a local desktop control plane for parallel coding agents.
 The core loop should work in the app: add or clone a repository, create
 workspaces, run multiple chats/sessions, review work, create/merge PRs, archive,
 and repeat for the same repository.
@@ -70,9 +71,33 @@ Practical rule:
 - Implement, verify, and keep going.
 - Fix stale docs when you find them.
 - Do not call a feature done without current evidence from code, tests, CLI
-  smoke, or GUI/runtime verification.
+  smoke, and GTK smoke where applicable.
 - If auth, API keys, display server, network, local tools, or test data are
   missing, say exactly what was not verified.
+
+## Verification Contract
+
+Every behavior change must be verified at the layers it touches:
+
+- Written tests: run the narrowest automated tests that cover the edited core,
+  CLI, and/or GTK code. Use focused tests first and broader package tests when
+  the change crosses boundaries.
+- CLI smoke: run the relevant `archductor` command or CLI test path that proves
+  the behavior reaches the command boundary.
+- GTK smoke: run the relevant `archductor-gtk` test or runtime path that
+  proves the behavior reaches the app surface. For visible UI changes, use GTK
+  smoke tests or a real GTK launch path when the environment supports it.
+
+Keep CLI and GTK inline:
+
+- User-visible core behavior should not land in only one surface. Update CLI and
+  GTK together, or report the missing side as incomplete.
+- Shared parsing, projection, state, and provider behavior should live in core
+  when practical so CLI and GTK render the same semantics.
+- CLI and GTK should use the same names, statuses, filters, and lifecycle
+  assumptions for providers, sessions, workspaces, and runtime events.
+- Before final response, name the written tests, CLI smoke, and GTK smoke that
+  ran. If any layer was skipped, say why.
 
 ## Always-on Project Rules
 
@@ -99,34 +124,27 @@ Superpowers and communication:
 
 ## Current State
 
-The app has a usable but rough Archductor loop:
+Current state lives in `progress.md`; treat that file as the short status
+source. The practical summary:
 
+- The app has a usable GUI-first loop, but it is still a working prototype, not
+  a finished MVP.
 - Projects can add/clone repositories, edit shared/local settings, and create
   branch/prompt/GitHub/Linear workspaces.
-- Workspaces are real Git worktrees with `.context` files and stable port
-  ranges.
-- The workspace page can start Shell, Codex, Claude, and Cursor sessions,
-  terminal shells, setup/run scripts, review tabs, checks, todos, and lifecycle
-  actions.
-- The Checks tab can create/refresh PRs, read checks/comments, stage context for
-  agents, merge, and archive after merge when configured.
-
-Known rough edges:
-
-- Agent sessions run PTY-backed harnesses.
-- Codex chat now depends on:
-  - PTY-accurate enter behavior
-  - rendered screen parsing
-  - `chat_threads`
-  - `chat_messages`
-  - native resume ID capture from Codex rollout metadata
-- GTK chat is being migrated from process-first selection to thread-first
-  selection.
-- Terminal rendering is not a full terminal emulator.
-- Broad shortcuts, deep links, monorepo directory selection, linked directories,
-  richer GitHub review-thread sync, and unified local history are incomplete.
-- GitHub-backed flows require local `gh` auth.
-- Linear-backed flows require `LINEAR_API_KEY`.
+- Workspaces are real Git worktrees with `.context` files, timelines, linked
+  directories, stable port ranges, runtime controls, review surfaces, and
+  archive/restore/history paths.
+- The workspace page can start Shell, Codex, Claude, and Cursor session launch
+  paths from GTK. CLI session commands currently support Shell, Codex, and
+  Claude.
+- Agent/session work is PTY/provider-event backed. Prefer structured session
+  events, `chat_threads`, `chat_messages`, and native provider IDs over raw
+  terminal-log inference.
+- Terminal rendering is useful but not a full terminal emulator.
+- GitHub-backed flows require local `gh` auth. Linear-backed flows require
+  `LINEAR_API_KEY`.
+- Packaging is not release-ready until the manual Linux app checklist and
+  target package-channel validation pass.
 
 ## Repository Structure
 
@@ -148,9 +166,9 @@ Before changing architecture, know where things live:
   - fallback CLI
   - session helper flows used by app/runtime paths
 - `docs`
-  - parity target
-  - implementation plans/specs
-  - manual testing and deployment notes
+  - MVP target
+  - parity map
+  - manual testing, deployment, release notes, and UI sketches
 
 Default design direction:
 
@@ -168,6 +186,6 @@ Default design direction:
 - Do not revert user or other-agent changes unless explicitly asked.
 - Use `rg`/`rg --files` for search.
 - Keep changes scoped to the requested task.
-- Run the narrowest useful verification for the change.
+- Run written tests plus relevant CLI and GTK smoke for the change.
 - If a frontend/GTK change affects visible UI, run or build enough to prove it
   still works.

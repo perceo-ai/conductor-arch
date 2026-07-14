@@ -1,31 +1,42 @@
-use gtk::prelude::*;
-use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry, EventControllerKey,
-    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
-    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
-};
-use linux_archductor_core::agent_tools::{
+use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
-use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
-use linux_archductor_core::codex_tui::{
-    merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
-    parse_codex_inline_event, parse_codex_screen_messages,
+use archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
+use archductor_core::codex_tui::{
+    parse_codex_context_usage, parse_codex_file_change_block, parse_codex_inline_event,
     CodexFileChangeAction as CoreCodexFileChangeAction,
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
-    CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
+    CodexTranscriptEvent,
 };
-use linux_archductor_core::doctor::SetupReadiness;
+use archductor_core::doctor::SetupReadiness;
+use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_MODEL};
+use archductor_core::provider_events::{
+    ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
+};
 #[cfg(test)]
-use linux_archductor_core::session_state::AgentSessionState;
-use linux_archductor_core::settings::load_repository_settings;
-use linux_archductor_core::workspace::{
-    ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
-    SessionHarnessOptions, SessionKind, WorkspaceStore,
+use archductor_core::provider_projection::ProviderProjectionCategory;
+use archductor_core::provider_projection::{
+    provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
+    ProjectionRenderClass, ProviderProjectionItem, ProviderProjectionStatus,
+    ProviderProjectionStreamState,
+};
+#[cfg(test)]
+use archductor_core::session_state::AgentSessionState;
+use archductor_core::settings::load_repository_settings;
+use archductor_core::workflow_actions::gtk_live_controls_for_provider;
+use archductor_core::workspace::{
+    strip_archductor_metadata_block, ChatEventRecord, ChatMessageRecord, ChatThreadRecord,
+    ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, WorkspaceStore,
+};
+use gtk::prelude::*;
+use gtk::{
+    Adjustment, Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry,
+    EventControllerKey, GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer,
+    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::fs;
@@ -33,7 +44,8 @@ use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs as stdfs};
 use tracing::{debug, error, info, trace, warn};
@@ -46,7 +58,7 @@ use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
-use crate::state::AppState;
+use crate::state::{AppPage, AppState, AppStateSnapshot};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
 
@@ -61,6 +73,9 @@ const CONTEXT_DETAIL_HISTORY_LIMIT: usize = 6;
 #[cfg(test)]
 const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
+const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
+const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
+const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 33;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -71,10 +86,27 @@ pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 
+fn clone_refresh_chat_surface_controller(
+    controller: &RefreshChatSurfaceController,
+) -> Option<Rc<dyn Fn()>> {
+    controller.borrow().as_ref().cloned()
+}
+
+fn selected_harness_snapshot(selected_harness: &RefCell<SessionKind>) -> SessionKind {
+    *selected_harness.borrow()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ChatScrollSnapshot {
     value: f64,
     pinned_to_bottom: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatStatusBannerKind {
+    None,
+    Startup,
+    Working,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +136,8 @@ struct CodexInlineEvent {
 enum ChatTimelineItem {
     Message(ChatMessageRecord),
     Event(ChatEventRecord),
+    PendingUserInput(String),
+    ProviderProjection(ProviderProjectionItem),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +161,51 @@ enum LiveChatSource {
 
 fn live_chat_source() -> LiveChatSource {
     LiveChatSource::StructuredStore
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatRefreshWorkspaceDecision {
+    Refresh,
+    SkipStaleSurface,
+    ClearDeletedWorkspace,
+}
+
+fn chat_refresh_workspace_decision(
+    workspace_name: &str,
+    snapshot: &AppStateSnapshot,
+    workspace_exists: bool,
+) -> ChatRefreshWorkspaceDecision {
+    if snapshot.selected_workspace.as_deref() != Some(workspace_name)
+        || !matches!(snapshot.active_page, AppPage::Workspace | AppPage::Review)
+    {
+        return ChatRefreshWorkspaceDecision::SkipStaleSurface;
+    }
+    if !workspace_exists {
+        return ChatRefreshWorkspaceDecision::ClearDeletedWorkspace;
+    }
+    ChatRefreshWorkspaceDecision::Refresh
+}
+
+fn workspace_lookup_returned_no_rows(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::QueryReturnedNoRows)
+        )
+    })
+}
+
+fn clear_deleted_workspace_surface(
+    app_state: &AppState,
+    workspace_name: &str,
+    thread_row: &GBox,
+    messages: &GBox,
+    context_usage: &ContextUsageWidget,
+) {
+    app_state.remove_workspace_from_navigation(workspace_name, AppPage::Dashboard);
+    clear_box(thread_row);
+    clear_box(messages);
+    apply_context_usage_state(context_usage, None);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +248,8 @@ type ChatRenderRecordSignature = (i64, Option<i64>, ProcessStatus, Option<i32>, 
 type ChatRenderThreadSignature = (i64, String, String, String, String);
 type ChatRenderMessageSignature = (i64, String, Option<i64>, String, String);
 type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
+type ChatRenderProviderEventSignature = (String, i64, ProviderEventKind, ProviderEventPhase, usize);
+type ChatRenderPendingInputSignature = (usize, String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChatRenderSignature {
@@ -181,6 +262,8 @@ struct ChatRenderSignature {
     threads: Vec<ChatRenderThreadSignature>,
     messages: Vec<ChatRenderMessageSignature>,
     events: Vec<ChatRenderEventSignature>,
+    provider_events: Vec<ChatRenderProviderEventSignature>,
+    pending_inputs: Vec<ChatRenderPendingInputSignature>,
     transcript_display: String,
     render_state: &'static str,
     runtime_summary: Option<String>,
@@ -262,6 +345,8 @@ pub fn agent_session_panel(
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
     let selected_thread: Rc<RefCell<Option<i64>>> =
         Rc::new(RefCell::new(app_state.selected_chat_thread()));
+    let composer_drafts = Rc::new(RefCell::new(HashMap::<i64, String>::new()));
+    let restoring_composer_draft = Rc::new(Cell::new(false));
     let pending_commands = Rc::new(RefCell::new(HashMap::<i64, Vec<String>>::new()));
     let pending_archcar_inputs =
         Rc::new(RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new()));
@@ -323,6 +408,22 @@ pub fn agent_session_panel(
     input_view.set_right_margin(16);
     input_view.set_top_margin(14);
     input_view.set_bottom_margin(6);
+    let buffer = input_view.buffer();
+    let restore_composer_draft = Rc::new({
+        let buffer = buffer.clone();
+        let selected_thread = selected_thread.clone();
+        let composer_drafts = composer_drafts.clone();
+        let restoring_composer_draft = restoring_composer_draft.clone();
+        move || {
+            let text = composer_draft_for_thread(&composer_drafts, *selected_thread.borrow());
+            if text_buffer_text(&buffer) == text {
+                return;
+            }
+            restoring_composer_draft.set(true);
+            buffer.set_text(&text);
+            restoring_composer_draft.set(false);
+        }
+    });
 
     let input_scroll = ScrolledWindow::new();
     input_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -381,79 +482,201 @@ pub fn agent_session_panel(
             selected_model.borrow().as_deref(),
         ),
         {
+            let provider_model_choices_for_menu = provider_model_choices.clone();
             let database_path = database_path.to_path_buf();
             let current_workspace_name = current_workspace_name.clone();
             let selected_harness = selected_harness.clone();
             let reasoning_mode = reasoning_mode.clone();
             let refresh_chat_surface = refresh_chat_surface.clone();
-            let switch_chat_harness = switch_chat_harness.clone();
             let selected_model = selected_model.clone();
             let pending_commands = pending_commands.clone();
             let selected_thread = selected_thread.clone();
+            let thread_state = thread_state.clone();
+            let app_state = app_state.clone();
             let sync_live_controls = sync_live_controls.clone();
             let archcar_bridge = archcar_bridge.clone();
             let archcar_ready_cache = archcar_ready_cache.clone();
             let inflight_archcar_actions = inflight_archcar_actions.clone();
+            let toast_manager = toast_manager.clone();
+            let restore_composer_draft = restore_composer_draft.clone();
             Rc::new(move |index| {
-                let Some(choice) = provider_model_choices.get(index).cloned() else {
+                let Some(choice) = provider_model_choices_for_menu.get(index).cloned() else {
                     return;
                 };
                 let workspace_name = current_workspace_name.borrow().clone();
-                let kind = session_kind_from_provider(&choice.provider);
-                persist_selected_provider(&database_path, &workspace_name, &choice.provider);
-                select_harness_and_dispatch(
-                    selected_harness.as_ref(),
-                    reasoning_mode.as_ref(),
-                    kind,
-                    switch_chat_harness.borrow().as_ref(),
-                    refresh_chat_surface.borrow().as_ref(),
-                    None,
-                );
-                *selected_model.borrow_mut() = choice.model.clone();
-                if let Some(thread_id) = *selected_thread.borrow() {
-                    if kind == SessionKind::Codex {
-                        replace_pending_model_command(
-                            &pending_commands,
-                            thread_id,
-                            choice.model.as_deref(),
-                        );
-                        if let Ok(records) = WorkspaceStore::open(database_path.clone())
-                            .and_then(|store| store.list_thread_processes(thread_id))
-                        {
-                            if let Some(session_id) =
-                                any_running_archcar_codex_ready(&records, &archcar_ready_cache)
-                            {
-                                let pending_controls =
-                                    flush_pending_commands_for_send(&pending_commands, thread_id);
-                                for (index, control) in pending_controls.iter().enumerate() {
-                                    if !queue_archcar_control_send(
-                                        &archcar_bridge,
-                                        inflight_archcar_actions.as_ref(),
+                let current_kind = *selected_harness.borrow();
+                match model_selection_route(current_kind, &choice) {
+                    ModelSelectionRoute::SameProvider => {
+                        *selected_model.borrow_mut() = choice.model.clone();
+                        if let Some(thread_id) = *selected_thread.borrow() {
+                            let existing_metadata = thread_state
+                                .borrow()
+                                .iter()
+                                .find(|thread| thread.id == thread_id)
+                                .and_then(|thread| thread.harness_metadata.clone());
+                            let metadata = provider_model_harness_metadata(
+                                existing_metadata.as_deref(),
+                                choice.model.as_deref(),
+                            );
+                            match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+                                store.update_chat_thread_harness_metadata(
+                                    thread_id,
+                                    metadata.as_deref(),
+                                )
+                            }) {
+                                Ok(updated) => {
+                                    replace_thread_state_record(thread_state.as_ref(), updated)
+                                }
+                                Err(err) => {
+                                    toast_manager.error(format!("Save chat model failed: {err:#}"));
+                                    warn!(
+                                        workspace = %workspace_name,
                                         thread_id,
-                                        session_id,
-                                        control.clone(),
+                                        error = %err,
+                                        "failed to persist selected chat model"
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(thread_id) = *selected_thread.borrow() {
+                            if current_kind == SessionKind::Codex {
+                                if let Ok(records) = WorkspaceStore::open(database_path.clone())
+                                    .and_then(|store| store.list_thread_processes(thread_id))
+                                {
+                                    if let Some(session_id) = any_running_archcar_codex_ready(
+                                        &records,
+                                        &archcar_ready_cache,
                                     ) {
-                                        requeue_pending_controls(
-                                            &pending_commands,
-                                            thread_id,
-                                            &pending_controls,
-                                            index,
-                                        );
-                                        warn!(
+                                        queue_archcar_model_update(
+                                            &archcar_bridge,
+                                            inflight_archcar_actions.as_ref(),
                                             thread_id,
                                             session_id,
-                                            "archcar control send failed; requeued pending controls"
+                                            choice.model.clone(),
                                         );
-                                        break;
+                                        let pending_controls = flush_pending_commands_for_send(
+                                            &pending_commands,
+                                            thread_id,
+                                        );
+                                        for (index, control) in pending_controls.iter().enumerate()
+                                        {
+                                            if !queue_archcar_control_send(
+                                                &archcar_bridge,
+                                                inflight_archcar_actions.as_ref(),
+                                                thread_id,
+                                                session_id,
+                                                control.clone(),
+                                            ) {
+                                                requeue_pending_controls(
+                                                    &pending_commands,
+                                                    thread_id,
+                                                    &pending_controls,
+                                                    index,
+                                                );
+                                                warn!(
+                                                    thread_id,
+                                                    session_id,
+                                                    "archcar control send failed; requeued pending controls"
+                                                );
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        pending_commands.borrow_mut().remove(&thread_id);
+                    }
+                    ModelSelectionRoute::CrossProvider(kind) => {
+                        let source_provider = session_kind_provider(current_kind);
+                        let source_messages = match *selected_thread.borrow() {
+                            Some(thread_id) => {
+                                match model_switch_context_items(&database_path, thread_id) {
+                                    Ok(messages) => Some(messages),
+                                    Err(err) => {
+                                        toast_manager.error(format!(
+                                            "Read source chat history failed: {err:#}"
+                                        ));
+                                        warn!(
+                                            workspace = %workspace_name,
+                                            thread_id,
+                                            error = %err,
+                                            "failed to read source chat for provider switch"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
+                        let metadata =
+                            provider_model_harness_metadata(None, choice.model.as_deref());
+                        let title = default_chat_thread_title(kind, &thread_state.borrow());
+                        match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+                            let thread = store.create_chat_thread(
+                                &workspace_name,
+                                &choice.provider,
+                                &title,
+                                metadata.as_deref(),
+                            )?;
+                            if let Some(attachment) =
+                                source_messages.as_deref().and_then(|messages| {
+                                    model_switch_context_attachment(
+                                        source_provider,
+                                        &choice.provider,
+                                        messages,
+                                    )
+                                })
+                            {
+                                if let Err(err) = store.append_chat_message(
+                                    thread.id,
+                                    "system",
+                                    &attachment,
+                                    "model_switch_context",
+                                ) {
+                                    let _ = store.close_chat_thread(thread.id);
+                                    return Err(err);
+                                }
+                            }
+                            Ok(thread)
+                        }) {
+                            Ok(thread) => {
+                                persist_selected_provider(
+                                    &database_path,
+                                    &workspace_name,
+                                    &choice.provider,
+                                );
+                                *selected_harness.borrow_mut() = kind;
+                                if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+                                    *reasoning_mode.borrow_mut() = Some("high".to_owned());
+                                }
+                                *selected_model.borrow_mut() = choice.model.clone();
+                                thread_state.borrow_mut().insert(0, thread.clone());
+                                apply_thread_selection(
+                                    selected_thread.as_ref(),
+                                    Some(thread.id),
+                                    |thread_id| app_state.set_selected_chat_thread(thread_id),
+                                    || restore_composer_draft(),
+                                );
+                                if let Some(refresh_view) =
+                                    clone_refresh_chat_surface_controller(&refresh_chat_surface)
+                                {
+                                    refresh_view();
+                                }
+                            }
+                            Err(err) => {
+                                toast_manager
+                                    .error(format!("Create provider chat failed: {err:#}"));
+                                warn!(
+                                    workspace = %workspace_name,
+                                    provider = %choice.provider,
+                                    error = %err,
+                                    "failed to create provider chat for model selection"
+                                );
+                            }
+                        }
                     }
                 }
-                if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
+                if let Some(sync) = clone_refresh_chat_surface_controller(&sync_live_controls) {
                     sync();
                 }
             })
@@ -524,7 +747,6 @@ pub fn agent_session_panel(
     chat_overlay.set_measure_overlay(&composer_wrap, false);
 
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
-    let buffer = input_view.buffer();
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
         let placeholder = placeholder.clone();
@@ -597,7 +819,19 @@ pub fn agent_session_panel(
     };
     buffer.connect_changed({
         let update = update_composer_state.clone();
-        move |_| update()
+        let selected_thread = selected_thread.clone();
+        let composer_drafts = composer_drafts.clone();
+        let restoring_composer_draft = restoring_composer_draft.clone();
+        move |buffer| {
+            if !restoring_composer_draft.get() {
+                remember_composer_draft(
+                    &composer_drafts,
+                    *selected_thread.borrow(),
+                    &text_buffer_text(buffer),
+                );
+            }
+            update();
+        }
     });
     update_composer_state();
 
@@ -615,6 +849,10 @@ pub fn agent_session_panel(
         let selected_thread = selected_thread.clone();
         let last_render_signature = last_render_signature.clone();
         let selected_harness = selected_harness.clone();
+        let selected_model = selected_model.clone();
+        let reasoning_mode = reasoning_mode.clone();
+        let provider_model_btn = provider_model_btn.clone();
+        let provider_model_choices = provider_model_choices.clone();
         let active_sessions = active_sessions.clone();
         let last_output = last_output.clone();
         let app_state = app_state.clone();
@@ -630,13 +868,49 @@ pub fn agent_session_panel(
         let bridge_error_state = bridge_error_state.clone();
         let codex_ready = codex_ready.clone();
         let update_composer_for_view = update_composer_state.clone();
+        let queued_chat_inputs = queued_chat_inputs.clone();
         let external_chat_tabs = external_chat_tabs.clone();
         let context_usage = context_usage.clone();
         let toast_manager = toast_manager.clone();
+        let restore_composer_draft = restore_composer_draft.clone();
+        let sync_live_controls = sync_live_controls.clone();
         Rc::new(move || {
             let workspace = current_workspace_name.borrow().clone();
             debug!(workspace = %workspace, "chat refresh_view start");
             let chat_scroll = capture_chat_scroll(&scroll);
+            if chat_refresh_workspace_decision(&workspace, &app_state.snapshot(), true)
+                == ChatRefreshWorkspaceDecision::SkipStaleSurface
+            {
+                return;
+            }
+            match WorkspaceStore::open(database_path.clone())
+                .and_then(|store| store.get_workspace_record_by_name(&workspace).map(|_| ()))
+            {
+                Ok(()) => {}
+                Err(err) if workspace_lookup_returned_no_rows(&err) => {
+                    let can_recover_from_selected_thread =
+                        selected_thread.borrow().is_some_and(|thread_id| {
+                            WorkspaceStore::open(database_path.clone())
+                                .and_then(|store| {
+                                    let thread = store.get_chat_thread_record(thread_id)?;
+                                    store.get_workspace_record(thread.workspace_id).map(|_| ())
+                                })
+                                .is_ok()
+                        });
+                    if !can_recover_from_selected_thread {
+                        clear_deleted_workspace_surface(
+                            &app_state,
+                            &workspace,
+                            &thread_row,
+                            &messages,
+                            &context_usage,
+                        );
+                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                        return;
+                    }
+                }
+                Err(_) => {}
+            }
             let (workspace_name, loaded, loaded_threads) = match WorkspaceStore::open(
                 database_path.clone(),
             )
@@ -716,6 +990,47 @@ pub fn agent_session_panel(
                 "chat refresh_view loaded workspace state"
             );
 
+            let preferred_thread = *selected_thread.borrow();
+            let fallback_kind = *selected_harness.borrow();
+            let active_thread = {
+                let current = thread_state.borrow();
+                preferred_thread_for_selected_chat(&current, preferred_thread, fallback_kind)
+            };
+            apply_thread_selection(
+                selected_thread.as_ref(),
+                active_thread,
+                |thread_id| app_state.set_selected_chat_thread(thread_id),
+                || restore_composer_draft(),
+            );
+            let selected_thread_record = {
+                let selected_thread_id = *selected_thread.borrow();
+                let threads = thread_state.borrow();
+                selected_thread_id
+                    .and_then(|thread_id| threads.iter().find(|thread| thread.id == thread_id))
+                    .cloned()
+            };
+            if let Some(thread) = selected_thread_record {
+                let (kind, model) = selected_thread_harness_state(&thread);
+                *selected_harness.borrow_mut() = kind;
+                if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+                    *reasoning_mode.borrow_mut() = Some("high".to_owned());
+                }
+                *selected_model.borrow_mut() = model.clone();
+                let index = selected_provider_model_choice_index(
+                    provider_model_choices.as_ref(),
+                    kind,
+                    model.as_deref(),
+                );
+                if let Some(choice) = provider_model_choices.get(index) {
+                    provider_model_menu_set_child(&provider_model_btn, choice);
+                    provider_model_btn.set_tooltip_text(Some(&choice.button_label()));
+                }
+                if let Some(sync) = clone_refresh_chat_surface_controller(&sync_live_controls) {
+                    sync();
+                }
+                restore_composer_draft();
+            }
+            update_composer_for_view();
             let current_kind = *selected_harness.borrow();
             let selected_thread_id = *selected_thread.borrow();
             let mut archcar_changed = false;
@@ -803,18 +1118,6 @@ pub fn agent_session_panel(
                 );
                 update_composer_for_view();
             }
-
-            let preferred_thread = *selected_thread.borrow();
-            let active_thread = {
-                let current = thread_state.borrow();
-                preferred_thread_for_kind(&current, preferred_thread, current_kind)
-            };
-            apply_thread_selection(
-                selected_thread.as_ref(),
-                active_thread,
-                |thread_id| app_state.set_selected_chat_thread(thread_id),
-                || update_composer_for_view(),
-            );
             if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
                 (external_chat_tabs.on_threads_changed)(
                     thread_state.borrow().clone(),
@@ -845,15 +1148,19 @@ pub fn agent_session_panel(
                             let refresh_chat_surface = refresh_chat_surface_for_view.clone();
                             let app_state = app_state_for_thread_select.clone();
                             let update_composer_state = update_composer_for_view.clone();
+                            let restore_composer_draft = restore_composer_draft.clone();
                             move |thread_id| {
                                 apply_thread_selection(
                                     selected_thread.as_ref(),
                                     Some(thread_id),
                                     |selected| app_state.set_selected_chat_thread(selected),
-                                    || update_composer_state(),
+                                    || {
+                                        restore_composer_draft();
+                                        update_composer_state();
+                                    },
                                 );
                                 if let Some(refresh_view) =
-                                    refresh_chat_surface.borrow().as_ref().cloned()
+                                    clone_refresh_chat_surface_controller(&refresh_chat_surface)
                                 {
                                     refresh_view();
                                 }
@@ -903,6 +1210,8 @@ pub fn agent_session_panel(
                             None,
                             &current,
                             &thread_state.borrow(),
+                            &[],
+                            &[],
                             &[],
                             &[],
                             "structured",
@@ -996,35 +1305,45 @@ pub fn agent_session_panel(
                     });
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
-                            let (thread_messages, thread_events) = match WorkspaceStore::open(
-                                database_path.clone(),
-                            )
-                            .and_then(|store| {
-                                let messages = store.list_chat_messages(thread_id)?;
-                                let events = store.list_chat_events(thread_id)?;
-                                Ok((messages, events))
-                            }) {
-                                Ok(timeline) => timeline,
-                                Err(err) => {
-                                    error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
-                                    let message =
-                                        session_refresh_error_text("load chat timeline", &err);
-                                    toast_manager.error(message.clone());
-                                    let label = Label::new(Some(&message));
-                                    label.add_css_class("chat-agent-text");
-                                    label.set_selectable(true);
-                                    label.set_wrap(true);
-                                    label.set_xalign(0.0);
-                                    clear_box(&messages);
-                                    *last_render_signature.borrow_mut() = None;
-                                    apply_context_usage_state(&context_usage, None);
-                                    append_chat_refresh_row(&messages, &label);
-                                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                                    return;
-                                }
-                            };
+                            let (thread_messages, thread_events, provider_events) =
+                                match WorkspaceStore::open(database_path.clone()).and_then(
+                                    |store| {
+                                        let messages = store.list_chat_messages(thread_id)?;
+                                        let events = store.list_chat_events(thread_id)?;
+                                        let provider_events =
+                                            ProviderEventStore::new(database_path.clone())
+                                                .list_for_chat_thread(thread_id)?;
+                                        Ok((messages, events, provider_events))
+                                    },
+                                ) {
+                                    Ok(timeline) => timeline,
+                                    Err(err) => {
+                                        error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
+                                        let message =
+                                            session_refresh_error_text("load chat timeline", &err);
+                                        toast_manager.error(message.clone());
+                                        let label = Label::new(Some(&message));
+                                        label.add_css_class("chat-agent-text");
+                                        label.set_selectable(true);
+                                        label.set_wrap(true);
+                                        label.set_xalign(0.0);
+                                        clear_box(&messages);
+                                        *last_render_signature.borrow_mut() = None;
+                                        apply_context_usage_state(&context_usage, None);
+                                        append_chat_refresh_row(&messages, &label);
+                                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                        return;
+                                    }
+                                };
                             let transcript_display =
                                 transcript_display_for_workspace(&database_path, &workspace);
+                            let pending_user_inputs = pending_user_input_texts_for_thread(
+                                thread_id,
+                                pending_archcar_inputs.as_ref(),
+                                queued_chat_inputs.as_ref(),
+                                inflight_archcar_actions.as_ref(),
+                                &thread_messages,
+                            );
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(
                                     &thread_events,
@@ -1034,21 +1353,49 @@ pub fn agent_session_panel(
                                 workspace = %workspace,
                                 thread_id,
                                 thread_message_count = thread_messages.len(),
-                                thread_timeline_count = thread_messages.len() + thread_events.len(),
+                                thread_timeline_count = thread_messages.len() + thread_events.len() + provider_events.len(),
                                 render_legacy_inline_events,
                                 "chat refresh_view loaded persisted chat timeline"
                             );
-                            if !thread_messages.is_empty() || !thread_events.is_empty() {
+                            if !thread_messages.is_empty()
+                                || !thread_events.is_empty()
+                                || !provider_events.is_empty()
+                            {
+                                let provider_projection =
+                                    provider_projection_from_records(&provider_events);
+                                if let Some(new_workspace) =
+                                    apply_provider_projection_agent_metadata(
+                                        &database_path,
+                                        thread_id,
+                                        &provider_projection.items,
+                                    )
+                                {
+                                    if new_workspace != workspace {
+                                        app_state.rename_workspace_in_navigation(
+                                            &workspace,
+                                            &new_workspace,
+                                        );
+                                        *current_workspace_name.borrow_mut() =
+                                            new_workspace.clone();
+                                    }
+                                }
+                                let status_banner =
+                                    chat_status_banner_kind(&startup_state, working_elapsed, true);
                                 let signature = chat_render_signature(
                                     current_kind,
                                     Some(thread_id),
                                     active_record,
                                     startup_state.clone(),
-                                    working_elapsed_seconds_for_signature(working_elapsed),
+                                    working_elapsed_seconds_for_status_banner(
+                                        status_banner,
+                                        working_elapsed,
+                                    ),
                                     &current,
                                     &thread_state.borrow(),
                                     &thread_messages,
                                     &thread_events,
+                                    &provider_events,
+                                    &pending_user_inputs,
                                     &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
@@ -1064,19 +1411,17 @@ pub fn agent_session_panel(
                                     &context_usage,
                                     latest_context_usage_from_messages(&thread_messages),
                                 );
-                                if let Some(elapsed) = working_elapsed {
-                                    append_chat_refresh_row(
-                                        &messages,
-                                        &codex_working_indicator_widget(elapsed),
-                                    );
-                                } else if let Some(widget) =
-                                    codex_startup_state_widget(&startup_state)
-                                {
-                                    append_chat_refresh_row(&messages, &widget);
-                                }
-                                let timeline = merge_chat_timeline_for_render(
+                                append_chat_status_banner(
+                                    &messages,
+                                    status_banner,
+                                    &startup_state,
+                                    working_elapsed,
+                                );
+                                let timeline = chat_structured_items_for_render(
                                     thread_messages.clone(),
                                     thread_events,
+                                    provider_projection.items,
+                                    pending_user_inputs.clone(),
                                 );
                                 for item in timeline {
                                     match item {
@@ -1095,6 +1440,18 @@ pub fn agent_session_panel(
                                                 &chat_event_widget(&event),
                                             );
                                         }
+                                        ChatTimelineItem::PendingUserInput(input) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &chat_user_bubble(&input),
+                                            );
+                                        }
+                                        ChatTimelineItem::ProviderProjection(item) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &provider_projection_item_widget(&item),
+                                            );
+                                        }
                                     }
                                 }
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
@@ -1103,16 +1460,30 @@ pub fn agent_session_panel(
                         }
                     }
 
+                    let pending_user_inputs = pending_user_input_texts_for_thread(
+                        thread_id,
+                        pending_archcar_inputs.as_ref(),
+                        queued_chat_inputs.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        &[],
+                    );
+                    let status_banner = chat_status_banner_kind(
+                        &startup_state,
+                        working_elapsed,
+                        !pending_user_inputs.is_empty(),
+                    );
                     let signature = chat_render_signature(
                         current_kind,
                         Some(thread_id),
                         active_record,
                         startup_state.clone(),
-                        working_elapsed_seconds_for_signature(working_elapsed),
+                        working_elapsed_seconds_for_status_banner(status_banner, working_elapsed),
                         &current,
                         &thread_state.borrow(),
                         &[],
                         &[],
+                        &[],
+                        &pending_user_inputs,
                         "structured",
                         "empty",
                         runtime_summary.clone(),
@@ -1122,20 +1493,22 @@ pub fn agent_session_panel(
                     }
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
-                    if let Some(elapsed) = working_elapsed {
-                        append_chat_refresh_row(
-                            &messages,
-                            &codex_working_indicator_widget(elapsed),
-                        );
-                    } else if let Some(widget) = codex_startup_state_widget(&startup_state) {
-                        append_chat_refresh_row(&messages, &widget);
-                    }
+                    append_chat_status_banner(
+                        &messages,
+                        status_banner,
+                        &startup_state,
+                        working_elapsed,
+                    );
                     let empty = Label::new(Some("No messages yet."));
-                    empty.add_css_class("chat-agent-text");
-                    empty.set_selectable(true);
-                    empty.set_wrap(true);
-                    empty.set_xalign(0.0);
-                    append_chat_refresh_row(&messages, &empty);
+                    if pending_user_inputs.is_empty() {
+                        empty.add_css_class("chat-agent-text");
+                        empty.set_selectable(true);
+                        empty.set_wrap(true);
+                        empty.set_xalign(0.0);
+                        append_chat_refresh_row(&messages, &empty);
+                    } else {
+                        append_pending_user_input_rows(&messages, &pending_user_inputs);
+                    }
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
@@ -1147,6 +1520,8 @@ pub fn agent_session_panel(
                         None,
                         &current,
                         &thread_state.borrow(),
+                        &[],
+                        &[],
                         &[],
                         &[],
                         "structured",
@@ -1260,21 +1635,17 @@ pub fn agent_session_panel(
                         &workspace_for_send,
                         session_kind_provider(selected_kind),
                         &title,
-                        None,
+                        provider_model_harness_metadata(
+                            None,
+                            selected_model_for_send.borrow().as_deref(),
+                        )
+                        .as_deref(),
                     )
                 })
             },
         ) {
             Ok(thread_id) => {
                 app_state_for_send.set_selected_chat_thread(Some(thread_id));
-                if selected_kind == SessionKind::Codex && selected_model_for_send.borrow().is_some()
-                {
-                    replace_pending_model_command(
-                        &pending_commands_for_send,
-                        thread_id,
-                        selected_model_for_send.borrow().as_deref(),
-                    );
-                }
                 thread_id
             }
             Err(err) => {
@@ -1311,17 +1682,36 @@ pub fn agent_session_panel(
                 return false;
             }
         };
+        let thread_messages_for_send = match WorkspaceStore::open(db_for_send.clone())
+            .and_then(|store| store.list_chat_messages(thread_id))
+        {
+            Ok(messages) => messages,
+            Err(err) => {
+                let message = format!("[chat history] {err:#}");
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
+                error.add_css_class("chat-agent-text");
+                error.set_selectable(true);
+                error.set_wrap(true);
+                error.set_xalign(0.0);
+                append_revealed(&messages_for_send, &error);
+                return false;
+            }
+        };
         let should_request_agent_metadata = !staged_review
             && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
-            && WorkspaceStore::open(db_for_send.clone())
-                .and_then(|store| store.list_chat_messages(thread_id))
-                .map(|messages| messages.is_empty() && is_default_chat_thread_title(&thread.title))
-                .unwrap_or(false);
-        let send_input = if should_request_agent_metadata {
+            && !has_real_conversation_messages(&thread_messages_for_send)
+            && is_default_chat_thread_title(&thread.title);
+        let mut send_input = if should_request_agent_metadata {
             archductor_metadata_injected_prompt(&command, &workspace_for_send)
         } else {
             command.clone()
         };
+        if let Some(attachment) = pending_model_switch_context_attachment(&thread_messages_for_send)
+        {
+            send_input =
+                format!("[Attachment: prior chat context]\n{attachment}\n\n[New user message]\n{send_input}");
+        }
         let visible_input = (send_input != command).then_some(command.clone());
         debug!(
             workspace = %workspace_for_send,
@@ -1657,6 +2047,7 @@ pub fn agent_session_panel(
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
         let update_composer_for_switch = update_composer_state.clone();
+        let restore_composer_draft_for_switch = restore_composer_draft.clone();
         let toast_for_switch = toast_manager.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
@@ -1704,7 +2095,10 @@ pub fn agent_session_panel(
                 selected_thread_for_switch.as_ref(),
                 next_thread,
                 |thread_id| app_state_for_switch.set_selected_chat_thread(thread_id),
-                || update_composer_for_switch(),
+                || {
+                    restore_composer_draft_for_switch();
+                    update_composer_for_switch();
+                },
             );
             let next_process = next_thread.and_then(|thread_id| {
                 let thread_records = records
@@ -1731,7 +2125,8 @@ pub fn agent_session_panel(
             );
         });
         *switch_chat_harness.borrow_mut() = Some(switch_action.clone());
-        switch_action(*selected_harness.borrow());
+        let initial_kind = selected_harness_snapshot(selected_harness.as_ref());
+        switch_action(initial_kind);
     }
 
     if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
@@ -1739,14 +2134,19 @@ pub fn agent_session_panel(
         let refresh_chat_surface = refresh_chat_surface.clone();
         let app_state = app_state.clone();
         let update_composer_state = update_composer_state.clone();
+        let restore_composer_draft = restore_composer_draft.clone();
         *external_chat_tabs.selection_controller.borrow_mut() = Some(Rc::new(move |thread_id| {
             apply_thread_selection(
                 selected_thread.as_ref(),
                 thread_id,
                 |selected| app_state.set_selected_chat_thread(selected),
-                || update_composer_state(),
+                || {
+                    restore_composer_draft();
+                    update_composer_state();
+                },
             );
-            if let Some(refresh_view) = refresh_chat_surface.borrow().as_ref().cloned() {
+            if let Some(refresh_view) = clone_refresh_chat_surface_controller(&refresh_chat_surface)
+            {
                 refresh_view();
             }
         }));
@@ -1800,7 +2200,7 @@ pub fn agent_session_panel(
                 &active_sessions,
                 &last_output,
             );
-            if let Some(refresh) = refresh_chat_surface.borrow().as_ref().cloned() {
+            if let Some(refresh) = clone_refresh_chat_surface_controller(&refresh_chat_surface) {
                 refresh();
             }
         }
@@ -1813,7 +2213,7 @@ pub fn agent_session_panel(
         let record_state = record_state.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let working_threads = working_threads.clone();
-        let messages = messages.clone();
+        let refresh_view = refresh_view.clone();
         let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let interrupt_current_session = interrupt_current_session.clone();
@@ -1862,10 +2262,7 @@ pub fn agent_session_panel(
                         ArchcarInputKind::User,
                     );
                     buffer.set_text("");
-                    append_session_status_message(
-                        &messages,
-                        "[queued] Message held locally. Interrupt or wait for the current run, then press send to submit queued messages.",
-                    );
+                    refresh_view();
                     update_composer_state();
                 }
                 ComposerAction::Interrupt => {
@@ -1957,11 +2354,13 @@ pub fn agent_session_panel(
         let database_path = database_path.clone();
         let current_workspace_name = current_workspace_name.clone();
         let selected_harness = selected_harness.clone();
+        let selected_model = selected_model.clone();
         let thread_state = thread_state.clone();
         let selected_thread = selected_thread.clone();
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
+        let restore_composer_draft = restore_composer_draft.clone();
         let setup_readiness = setup_readiness.clone();
         let toast_manager = toast_manager.clone();
         move |_| {
@@ -1973,12 +2372,14 @@ pub fn agent_session_panel(
                 return;
             }
             let title = default_chat_thread_title(kind, &thread_state.borrow());
+            let metadata =
+                provider_model_harness_metadata(None, selected_model.borrow().as_deref());
             match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                 store.create_chat_thread(
                     &workspace_name,
                     session_kind_provider(kind),
                     &title,
-                    None,
+                    metadata.as_deref(),
                 )
             }) {
                 Ok(thread) => {
@@ -1987,7 +2388,10 @@ pub fn agent_session_panel(
                         selected_thread.as_ref(),
                         Some(thread.id),
                         |thread_id| app_state.set_selected_chat_thread(thread_id),
-                        || update_composer_state(),
+                        || {
+                            restore_composer_draft();
+                            update_composer_state();
+                        },
                     );
                     refresh_view();
                 }
@@ -1998,11 +2402,6 @@ pub fn agent_session_panel(
             }
         }
     });
-    input_view.buffer().connect_changed({
-        let update = update_composer_state.clone();
-        move |_| update()
-    });
-
     root
 }
 
@@ -2059,7 +2458,8 @@ fn chat_user_bubble(text: &str) -> GBox {
     row.set_hexpand(true);
     row.add_css_class("chat-user-row");
 
-    let bubble = Label::new(Some(text));
+    let bubble = Label::new(None);
+    bubble.set_markup(&chat_text_markup(text));
     bubble.add_css_class("chat-user-bubble");
     bubble.set_selectable(true);
     bubble.set_wrap(true);
@@ -2093,19 +2493,52 @@ fn capture_chat_scroll(scroll: &ScrolledWindow) -> ChatScrollSnapshot {
 
 fn restore_chat_scroll_after_refresh(scroll: &ScrolledWindow, snapshot: ChatScrollSnapshot) {
     let adjustment = scroll.vadjustment();
+    schedule_chat_scroll_restore_pass(
+        adjustment,
+        snapshot,
+        chat_scroll_restore_layout_passes(snapshot),
+    );
+}
+
+fn schedule_chat_scroll_restore_pass(
+    adjustment: Adjustment,
+    snapshot: ChatScrollSnapshot,
+    remaining_passes: u8,
+) {
+    if remaining_passes == 0 {
+        return;
+    }
     gtk::glib::idle_add_local_once(move || {
-        let value = restored_chat_scroll_value(
-            snapshot,
-            adjustment.lower(),
-            adjustment.upper(),
-            adjustment.page_size(),
-        );
-        adjustment.set_value(value);
+        apply_chat_scroll_restore(&adjustment, snapshot);
+        if remaining_passes > 1 {
+            // PER-190: One-shot layout settling pass for chat scroll restore;
+            // bounded retries end after the current refresh has stabilized.
+            gtk::glib::timeout_add_local_once(
+                Duration::from_millis(CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS),
+                move || {
+                    schedule_chat_scroll_restore_pass(adjustment, snapshot, remaining_passes - 1);
+                },
+            );
+        }
     });
 }
 
 fn chat_scroll_is_pinned_to_bottom(value: f64, lower: f64, upper: f64, page_size: f64) -> bool {
     chat_scroll_max_value(lower, upper, page_size) - value <= CHAT_SCROLL_BOTTOM_EPSILON
+}
+
+fn apply_chat_scroll_restore(adjustment: &Adjustment, snapshot: ChatScrollSnapshot) {
+    let value = restored_chat_scroll_value(
+        snapshot,
+        adjustment.lower(),
+        adjustment.upper(),
+        adjustment.page_size(),
+    );
+    adjustment.set_value(value);
+}
+
+fn chat_scroll_restore_layout_passes(_snapshot: ChatScrollSnapshot) -> u8 {
+    CHAT_SCROLL_RESTORE_LAYOUT_PASSES
 }
 
 fn restored_chat_scroll_value(
@@ -2132,6 +2565,7 @@ fn reveal_existing_chat_refresh_rows() -> bool {
 
 fn install_archcar_wake(root: &GBox, bridge: &AsyncArchcarBridge, refresh_view: Rc<dyn Fn()>) {
     let wake_id = NEXT_CHAT_WAKE_ID.fetch_add(1, Ordering::Relaxed);
+    let wake_pending = Arc::new(AtomicBool::new(false));
     CHAT_WAKE_REGISTRY.with(|registry| {
         registry.borrow_mut().insert(wake_id, refresh_view);
     });
@@ -2144,21 +2578,42 @@ fn install_archcar_wake(root: &GBox, bridge: &AsyncArchcarBridge, refresh_view: 
     let main_context = gtk::glib::MainContext::default();
     let root_ref = gtk::glib::SendWeakRef::from(root.downgrade());
     bridge.set_waker(move || {
+        if !mark_chat_refresh_wake_pending(wake_pending.as_ref()) {
+            return;
+        }
         let root_ref = root_ref.clone();
+        let wake_pending = Arc::clone(&wake_pending);
         main_context.invoke(move || {
-            if root_ref.upgrade().is_none() {
-                CHAT_WAKE_REGISTRY.with(|registry| {
-                    registry.borrow_mut().remove(&wake_id);
-                });
-                return;
-            }
-            let refresh =
-                CHAT_WAKE_REGISTRY.with(|registry| registry.borrow().get(&wake_id).cloned());
-            if let Some(refresh) = refresh {
-                refresh();
-            }
+            // PER-190: One-shot debounce for Archcar event bursts; the pending
+            // flag is cleared when the scheduled refresh runs or the surface is
+            // already gone.
+            gtk::glib::timeout_add_local_once(
+                Duration::from_millis(CHAT_REFRESH_WAKE_DELAY_MS),
+                move || {
+                    clear_chat_refresh_wake_pending(wake_pending.as_ref());
+                    if root_ref.upgrade().is_none() {
+                        CHAT_WAKE_REGISTRY.with(|registry| {
+                            registry.borrow_mut().remove(&wake_id);
+                        });
+                        return;
+                    }
+                    let refresh = CHAT_WAKE_REGISTRY
+                        .with(|registry| registry.borrow().get(&wake_id).cloned());
+                    if let Some(refresh) = refresh {
+                        refresh();
+                    }
+                },
+            );
         });
     });
+}
+
+fn mark_chat_refresh_wake_pending(pending: &AtomicBool) -> bool {
+    !pending.swap(true, Ordering::AcqRel)
+}
+
+fn clear_chat_refresh_wake_pending(pending: &AtomicBool) {
+    pending.store(false, Ordering::Release);
 }
 
 fn install_working_indicator_tick(
@@ -2197,14 +2652,7 @@ fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
 }
 
 fn session_transcript_label_widget(event: &SessionTranscriptEvent) -> Widget {
-    let label = Label::new(Some(&format!("{}\n{}", event.role.label(), event.body)));
-    label.add_css_class("chat-agent-text");
-    label.set_selectable(true);
-    label.set_wrap(true);
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_margin_bottom(18);
-    label.upcast()
+    chat_text_label(&format!("{}\n{}", event.role.label(), event.body)).upcast()
 }
 
 fn session_transcript_inline_events(event: &SessionTranscriptEvent) -> Vec<CodexInlineEvent> {
@@ -2226,6 +2674,9 @@ fn parse_session_transcript_inline_event(
     body: &str,
 ) -> Option<CodexInlineEvent> {
     if let Some(command) = header.trim().strip_prefix("Ran ") {
+        if let Some(event) = read_only_command_inline_event(command, body) {
+            return Some(event);
+        }
         return Some(CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
             title: command.trim().to_owned(),
@@ -2262,19 +2713,28 @@ fn read_file_inline_event(
     body: &str,
 ) -> Option<CodexInlineEvent> {
     let path = read_file_path_from_header(header)?;
-    let title = match role {
-        SessionTranscriptRole::Skill => skill_name_from_read_header(header)
-            .map(str::to_owned)
-            .unwrap_or_else(|| path.display().to_string()),
-        _ => format!("Read {}", path.display()),
+    let title = if let Some(skill_name) = skill_name_for_skill_md_read(
+        &path,
+        skill_name_from_read_header(header).map(str::to_owned),
+    ) {
+        format!("Read SKILL.md for {skill_name}")
+    } else {
+        format!("Read {}", read_path_display_name(&path))
     };
+    let is_skill_read =
+        role == SessionTranscriptRole::Skill || skill_name_for_skill_md_read(&path, None).is_some();
     Some(CodexInlineEvent {
-        kind: match role {
-            SessionTranscriptRole::Skill => CodexInlineEventKind::Skill,
-            _ => CodexInlineEventKind::Tool,
+        kind: if is_skill_read {
+            CodexInlineEventKind::Skill
+        } else {
+            CodexInlineEventKind::Tool
         },
         title,
-        subtitle: Some("File preview".to_owned()),
+        subtitle: Some(if is_skill_read {
+            "Skill".to_owned()
+        } else {
+            "File preview".to_owned()
+        }),
         body: Some(body.to_owned()),
         path: Some(path),
         status: CodexInlineEventStatus::Complete,
@@ -2311,6 +2771,174 @@ fn skill_name_from_read_header(header: &str) -> Option<&str> {
     (!skill.is_empty()).then_some(skill)
 }
 
+fn read_only_command_inline_event(command: &str, body: &str) -> Option<CodexInlineEvent> {
+    let path = read_only_command_path(command)?;
+    let title = if let Some(skill_name) = skill_name_for_skill_md_read(&path, None) {
+        format!("Read SKILL.md for {skill_name}")
+    } else {
+        format!("Read {}", read_path_display_name(&path))
+    };
+    let is_skill_read = skill_name_for_skill_md_read(&path, None).is_some();
+    Some(CodexInlineEvent {
+        kind: if is_skill_read {
+            CodexInlineEventKind::Skill
+        } else {
+            CodexInlineEventKind::Tool
+        },
+        title,
+        subtitle: Some(if is_skill_read {
+            "Skill".to_owned()
+        } else {
+            "File preview".to_owned()
+        }),
+        body: Some(body.to_owned()),
+        path: Some(path),
+        status: codex_event_status_from_line(body),
+    })
+}
+
+fn read_only_command_path(command: &str) -> Option<PathBuf> {
+    let trimmed = command.trim();
+    if let Some(inner) = shell_command_inner(trimmed) {
+        if let Some(path) = read_only_command_path(&inner) {
+            return Some(path);
+        }
+    }
+    let tokens = shell_command_tokens(trimmed);
+    let executable = tokens.first()?;
+    let executable = command_executable_name(executable);
+    if !matches!(
+        executable,
+        "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "batcat" | "less" | "more"
+    ) {
+        return None;
+    }
+    tokens
+        .iter()
+        .filter_map(|token| clean_read_command_path_token(token))
+        .find(|token| is_readable_path_token(token))
+        .map(PathBuf::from)
+}
+
+fn shell_command_inner(command: &str) -> Option<String> {
+    let tokens = shell_command_tokens(command);
+    let executable = tokens.first().map(|token| command_executable_name(token))?;
+    if !matches!(executable, "bash" | "sh" | "zsh" | "dash") {
+        return None;
+    }
+    tokens
+        .windows(2)
+        .find_map(|window| matches!(window[0].as_str(), "-c" | "-lc").then(|| window[1].clone()))
+        .filter(|inner| !inner.trim().is_empty())
+}
+
+fn command_executable_name(executable: &str) -> &str {
+    executable
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(executable)
+}
+
+fn shell_command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn clean_read_command_path_token(token: &str) -> Option<&str> {
+    let trimmed = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    });
+    if let Some(index) = trimmed.find("SKILL.md") {
+        return Some(&trimmed[..index + "SKILL.md".len()]);
+    }
+    Some(trimmed).filter(|value| {
+        !value.starts_with('-')
+            && !value.chars().all(|ch| ch.is_ascii_digit() || ch == ',')
+            && !matches!(*value, "|" | "&&" | "||" | "\\")
+    })
+}
+
+fn read_path_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| read_value_display_name(&path.display().to_string()))
+}
+
+fn read_value_display_name(value: &str) -> String {
+    let trimmed = value.trim().trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    });
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+fn skill_name_for_skill_md_read(path: &Path, explicit_name: Option<String>) -> Option<String> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+        return None;
+    }
+    explicit_name.or_else(|| {
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 fn merge_chat_timeline_for_render(
     messages: Vec<ChatMessageRecord>,
     events: Vec<ChatEventRecord>,
@@ -2331,10 +2959,95 @@ fn merge_chat_timeline_for_render(
 fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
     match item {
         ChatTimelineItem::Message(message) => {
-            (message.timeline_seq.unwrap_or(message.id), 0, message.id)
+            (message.timeline_seq.unwrap_or(i64::MAX - 2), 0, message.id)
         }
         ChatTimelineItem::Event(event) => (event.timeline_seq, 1, event.id),
+        ChatTimelineItem::PendingUserInput(_) => (i64::MAX - 1, 2, 0),
+        ChatTimelineItem::ProviderProjection(item) => (
+            i64::MAX - 3,
+            2,
+            i64::try_from(item.sequence).unwrap_or(i64::MAX),
+        ),
     }
+}
+
+fn chat_structured_items_for_render(
+    messages: Vec<ChatMessageRecord>,
+    events: Vec<ChatEventRecord>,
+    provider_projection_items: Vec<ProviderProjectionItem>,
+    pending_inputs: Vec<String>,
+) -> Vec<ChatTimelineItem> {
+    let (mut items, mut unsequenced_messages): (Vec<_>, Vec<_>) =
+        merge_chat_timeline_for_render(messages.clone(), events)
+            .into_iter()
+            .filter(|item| match item {
+                ChatTimelineItem::Message(message) => chat_message_is_renderable(message),
+                _ => true,
+            })
+            .partition(|item| {
+                !matches!(
+                    item,
+                    ChatTimelineItem::Message(message) if message.timeline_seq.is_none()
+                )
+            });
+    let provider_items =
+        provider_projection_items_for_timeline(provider_projection_items, &messages);
+    if provider_items
+        .iter()
+        .any(|item| item.render_class == ProjectionRenderClass::UserChat)
+    {
+        items = chat_timeline_items_anchored_to_provider_user_events(items, provider_items);
+    } else {
+        items.extend(
+            provider_items
+                .into_iter()
+                .map(ChatTimelineItem::ProviderProjection),
+        );
+    }
+    items.append(&mut unsequenced_messages);
+    items.extend(
+        pending_inputs
+            .into_iter()
+            .filter(|input| !input.trim().is_empty())
+            .map(ChatTimelineItem::PendingUserInput),
+    );
+    items
+}
+
+fn chat_timeline_items_anchored_to_provider_user_events(
+    mut persisted_items: Vec<ChatTimelineItem>,
+    provider_items: Vec<ProviderProjectionItem>,
+) -> Vec<ChatTimelineItem> {
+    let mut items = Vec::new();
+    for provider_item in provider_items {
+        if provider_item.render_class == ProjectionRenderClass::UserChat {
+            if let Some(index) =
+                matching_persisted_user_message_index(&persisted_items, provider_item.body.trim())
+            {
+                items.push(persisted_items.remove(index));
+            } else if !provider_item.body.trim().is_empty() {
+                items.push(ChatTimelineItem::ProviderProjection(provider_item));
+            }
+            continue;
+        }
+        items.push(ChatTimelineItem::ProviderProjection(provider_item));
+    }
+    items.extend(persisted_items);
+    items
+}
+
+fn matching_persisted_user_message_index(items: &[ChatTimelineItem], body: &str) -> Option<usize> {
+    items.iter().position(|item| {
+        matches!(
+            item,
+            ChatTimelineItem::Message(message)
+                if message.role == "user" && message.content.trim() == body
+        )
+    })
+}
+
+fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
+    message.role != "user" || !message.content.trim().is_empty()
 }
 
 fn chat_render_is_unchanged(
@@ -2358,6 +3071,8 @@ fn chat_render_signature(
     threads: &[ChatThreadRecord],
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
+    provider_events: &[ProviderEventRecord],
+    pending_inputs: &[String],
     transcript_display: &str,
     render_state: &'static str,
     runtime_summary: Option<String>,
@@ -2417,6 +3132,23 @@ fn chat_render_signature(
                 )
             })
             .collect(),
+        provider_events: provider_events
+            .iter()
+            .map(|event| {
+                (
+                    event.identity_key.clone(),
+                    event.received_sequence,
+                    event.kind,
+                    event.phase,
+                    event.normalized_payload.to_string().len() + event.raw_json.to_string().len(),
+                )
+            })
+            .collect(),
+        pending_inputs: pending_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| (index, input.clone()))
+            .collect(),
         transcript_display: transcript_display.to_owned(),
         render_state,
         runtime_summary,
@@ -2428,6 +3160,9 @@ fn chat_message_widget(
     render_raw_message_content: bool,
     render_legacy_inline_events: bool,
 ) -> Option<Widget> {
+    if !chat_message_is_renderable(message) {
+        return None;
+    }
     match message.role.as_str() {
         "user" => Some(chat_user_bubble(&message.content).upcast()),
         "system" => {
@@ -2449,14 +3184,7 @@ fn chat_message_widget(
             if content.trim().is_empty() {
                 return None;
             }
-            let label = Label::new(Some(&content));
-            label.add_css_class("chat-agent-text");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_margin_bottom(18);
-            Some(label.upcast())
+            Some(chat_text_label(&content).upcast())
         }
     }
 }
@@ -2527,27 +3255,739 @@ fn legacy_inline_events_for_message(
 fn chat_event_widget(event: &ChatEventRecord) -> Widget {
     stored_chat_event_inline_event(event)
         .map(|inline| inline_event_widget(&inline))
-        .unwrap_or_else(|| {
-            let label = Label::new(Some(&event.body));
-            label.add_css_class("chat-agent-text");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_margin_bottom(18);
-            label.upcast()
+        .unwrap_or_else(|| chat_text_label(&event.body).upcast())
+}
+
+fn provider_projection_items_for_render(
+    items: Vec<ProviderProjectionItem>,
+    messages: &[ChatMessageRecord],
+) -> Vec<ProviderProjectionItem> {
+    items
+        .into_iter()
+        .filter(provider_projection_item_is_relevant_chat_event)
+        .filter(|item| item.render_class != ProjectionRenderClass::HookCard)
+        .filter(provider_projection_item_has_renderable_content)
+        .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
+        .collect()
+}
+
+fn provider_projection_items_for_timeline(
+    items: Vec<ProviderProjectionItem>,
+    messages: &[ChatMessageRecord],
+) -> Vec<ProviderProjectionItem> {
+    items
+        .into_iter()
+        .filter(provider_projection_item_is_relevant_chat_event)
+        .filter(|item| item.render_class != ProjectionRenderClass::HookCard)
+        .filter(provider_projection_timeline_item_has_renderable_content)
+        .filter(|item| {
+            item.render_class == ProjectionRenderClass::UserChat
+                || !provider_projection_item_has_persisted_message(item, messages)
         })
+        .collect()
+}
+
+fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
+    match item.render_class {
+        ProjectionRenderClass::UserChat => false,
+        ProjectionRenderClass::AssistantChat => {
+            !provider_projection_assistant_body_for_render(item)
+                .trim()
+                .is_empty()
+        }
+        ProjectionRenderClass::ReasoningCard => !item.body.trim().is_empty(),
+        _ => true,
+    }
+}
+
+fn provider_projection_timeline_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
+    match item.render_class {
+        ProjectionRenderClass::UserChat => !item.body.trim().is_empty(),
+        _ => provider_projection_item_has_renderable_content(item),
+    }
+}
+
+fn provider_projection_item_has_persisted_message(
+    item: &ProviderProjectionItem,
+    messages: &[ChatMessageRecord],
+) -> bool {
+    item.render_class == ProjectionRenderClass::UserChat
+        && messages
+            .iter()
+            .any(|message| message.role == "user" && message.content.trim() == item.body.trim())
+}
+
+fn apply_provider_projection_agent_metadata(
+    database_path: &Path,
+    thread_id: i64,
+    items: &[ProviderProjectionItem],
+) -> Option<String> {
+    if !items.iter().any(|item| {
+        item.render_class == ProjectionRenderClass::AssistantChat
+            && item.body.contains("<archductor_metadata>")
+    }) {
+        return None;
+    }
+
+    let store = WorkspaceStore::open(database_path).ok()?;
+    for item in items.iter().filter(|item| {
+        item.render_class == ProjectionRenderClass::AssistantChat
+            && item.body.contains("<archductor_metadata>")
+    }) {
+        if let Err(err) = store.apply_agent_chat_metadata_directive(thread_id, &item.body) {
+            warn!(
+                thread_id,
+                error = %err,
+                "failed to apply provider projection metadata"
+            );
+        }
+    }
+    store
+        .get_chat_thread_record(thread_id)
+        .and_then(|thread| store.get_workspace_record(thread.workspace_id))
+        .map(|workspace| workspace.name)
+        .ok()
+}
+
+fn append_pending_user_input_rows(container: &GBox, pending_inputs: &[String]) {
+    for input in pending_inputs {
+        append_chat_refresh_row(container, &chat_user_bubble(input));
+    }
+}
+
+fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
+    if let Some(inline_event) = provider_projection_inline_event(item) {
+        return inline_event_widget(&inline_event);
+    }
+
+    match item.render_class {
+        ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
+        ProjectionRenderClass::AssistantChat => {
+            provider_projection_text_widget(&provider_projection_assistant_body_for_render(item))
+        }
+        ProjectionRenderClass::ReasoningCard => provider_projection_reasoning_widget(item),
+        _ => {
+            let container = GBox::new(Orientation::Vertical, 4);
+            container.set_hexpand(true);
+            if provider_projection_item_shows_status_chrome(item) {
+                let status = Label::new(Some(&provider_projection_status_line(item)));
+                status.add_css_class("card-meta");
+                status.add_css_class(provider_projection_status_css_class(item.status));
+                status.set_xalign(0.0);
+                status.set_wrap(true);
+                container.append(&status);
+            }
+            container.append(&provider_projection_text_widget(
+                &provider_projection_card_text(item),
+            ));
+            container.upcast()
+        }
+    }
+}
+
+fn provider_projection_assistant_body_for_render(item: &ProviderProjectionItem) -> String {
+    strip_archductor_metadata_block(&item.body)
+}
+
+fn provider_projection_reasoning_text(item: &ProviderProjectionItem) -> Option<String> {
+    let body = item.body.trim();
+    (!body.is_empty()).then(|| body.to_owned())
+}
+
+fn provider_projection_reasoning_widget(item: &ProviderProjectionItem) -> Widget {
+    let label = Label::new(None);
+    label.set_markup(&chat_text_markup(
+        &provider_projection_reasoning_text(item).unwrap_or_default(),
+    ));
+    label.add_css_class("chat-reasoning-text");
+    label.set_selectable(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.upcast()
+}
+
+fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -> bool {
+    matches!(
+        item.status,
+        ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
+    )
+}
+
+fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<CodexInlineEvent> {
+    let title = provider_projection_display_title(item);
+    let body = provider_projection_inline_event_body(item);
+    if item.render_class == ProjectionRenderClass::DiffCard {
+        if let Some(event) = provider_projection_file_change_inline_event(item, body.as_deref()) {
+            return Some(event);
+        }
+    }
+    if matches!(
+        item.render_class,
+        ProjectionRenderClass::CommandCard
+            | ProjectionRenderClass::ProcessCard
+            | ProjectionRenderClass::BackgroundCard
+    ) {
+        if let Some(mut event) =
+            read_only_command_inline_event(&title, body.as_deref().unwrap_or_default())
+        {
+            event.body = body;
+            event.status = codex_inline_status_from_provider_projection(item.status);
+            return Some(event);
+        }
+    }
+
+    let kind = match item.render_class {
+        ProjectionRenderClass::SkillCard => CodexInlineEventKind::Skill,
+        ProjectionRenderClass::CommandCard
+        | ProjectionRenderClass::ProcessCard
+        | ProjectionRenderClass::FileCard
+        | ProjectionRenderClass::DiffCard
+        | ProjectionRenderClass::ToolCard
+        | ProjectionRenderClass::PluginCard
+        | ProjectionRenderClass::SubagentCard
+        | ProjectionRenderClass::NestedTranscriptCard
+        | ProjectionRenderClass::BackgroundCard => CodexInlineEventKind::Tool,
+        _ => return None,
+    };
+    let title = provider_projection_inline_event_title(item);
+
+    Some(CodexInlineEvent {
+        kind,
+        title,
+        subtitle: Some(provider_projection_inline_event_subtitle(item).to_owned()),
+        body,
+        path: None,
+        status: codex_inline_status_from_provider_projection(item.status),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ProviderFileChangeSummary {
+    action: CoreCodexFileChangeAction,
+    path: String,
+    additions: Option<u32>,
+    deletions: Option<u32>,
+    diff: Option<String>,
+}
+
+fn provider_projection_file_change_inline_event(
+    item: &ProviderProjectionItem,
+    body: Option<&str>,
+) -> Option<CodexInlineEvent> {
+    let change = provider_file_change_from_raw_payload(item.raw_payload.as_deref())
+        .or_else(|| provider_file_change_from_body(body.unwrap_or_default()))?;
+    let display_name = read_value_display_name(&change.path);
+    let title = format!(
+        "{} {}",
+        codex_file_change_action_label(change.action),
+        display_name
+    );
+    let counts = codex_file_change_counts(change.additions, change.deletions);
+    let body = provider_file_change_body(&change);
+
+    Some(CodexInlineEvent {
+        kind: CodexInlineEventKind::Tool,
+        title,
+        subtitle: counts,
+        body: Some(body),
+        path: Some(PathBuf::from(change.path)),
+        status: codex_inline_status_from_provider_projection(item.status),
+    })
+}
+
+fn provider_file_change_body(change: &ProviderFileChangeSummary) -> String {
+    let mut header = format!(
+        "{} {}",
+        codex_file_change_action_label(change.action),
+        change.path
+    );
+    if let Some(counts) = codex_file_change_counts(change.additions, change.deletions) {
+        header.push_str(&format!(" ({counts})"));
+    }
+    if let Some(diff) = change
+        .diff
+        .as_deref()
+        .map(str::trim)
+        .filter(|diff| !diff.is_empty())
+    {
+        format!("{header}\n{diff}")
+    } else {
+        header
+    }
+}
+
+fn provider_file_change_from_raw_payload(
+    raw_payload: Option<&str>,
+) -> Option<ProviderFileChangeSummary> {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload?).ok()?;
+    let changes = payload.pointer("/params/item/changes")?.as_array()?;
+    let change = changes.first()?;
+    let path = change.get("path").and_then(serde_json::Value::as_str)?;
+    let action = provider_file_change_action(
+        change
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+    );
+    let diff = change
+        .get("diff")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .filter(|diff| !diff.trim().is_empty());
+    let (diff_additions, diff_deletions) = diff
+        .as_deref()
+        .map(provider_diff_counts)
+        .unwrap_or((None, None));
+
+    Some(ProviderFileChangeSummary {
+        action,
+        path: path.to_owned(),
+        additions: change
+            .get("additions")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .or(diff_additions),
+        deletions: change
+            .get("deletions")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .or(diff_deletions),
+        diff,
+    })
+}
+
+fn provider_file_change_from_body(body: &str) -> Option<ProviderFileChangeSummary> {
+    body.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (action, path) = provider_file_change_body_line(trimmed)?;
+        Some(ProviderFileChangeSummary {
+            action,
+            path: path.to_owned(),
+            additions: parse_file_change_count_from_text(trimmed, '+'),
+            deletions: parse_file_change_count_from_text(trimmed, '-'),
+            diff: None,
+        })
+    })
+}
+
+fn provider_file_change_body_line(line: &str) -> Option<(CoreCodexFileChangeAction, &str)> {
+    for (prefix, action) in [
+        ("added ", CoreCodexFileChangeAction::Added),
+        ("created ", CoreCodexFileChangeAction::Added),
+        ("edited ", CoreCodexFileChangeAction::Edited),
+        ("modified ", CoreCodexFileChangeAction::Edited),
+        ("changed ", CoreCodexFileChangeAction::Edited),
+        ("deleted ", CoreCodexFileChangeAction::Deleted),
+        ("removed ", CoreCodexFileChangeAction::Deleted),
+    ] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            return Some((action, path.split_whitespace().next()?));
+        }
+        let title_prefix = title_case_prefix(prefix);
+        if let Some(path) = line.strip_prefix(&title_prefix) {
+            return Some((action, path.split_whitespace().next()?));
+        }
+    }
+    None
+}
+
+fn title_case_prefix(prefix: &str) -> String {
+    let mut chars = prefix.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+}
+
+fn provider_file_change_action(kind: &str) -> CoreCodexFileChangeAction {
+    match kind.to_ascii_lowercase().as_str() {
+        "added" | "add" | "created" | "create" | "new" => CoreCodexFileChangeAction::Added,
+        "deleted" | "delete" | "removed" | "remove" => CoreCodexFileChangeAction::Deleted,
+        _ => CoreCodexFileChangeAction::Edited,
+    }
+}
+
+fn provider_diff_counts(diff: &str) -> (Option<u32>, Option<u32>) {
+    let mut additions = 0_u32;
+    let mut deletions = 0_u32;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            additions = additions.saturating_add(1);
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions = deletions.saturating_add(1);
+        }
+    }
+    (Some(additions), Some(deletions))
+}
+
+fn parse_file_change_count_from_text(text: &str, sign: char) -> Option<u32> {
+    text.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
+        .find_map(|token| {
+            let digits = token.strip_prefix(sign)?;
+            (!digits.is_empty())
+                .then(|| digits.parse::<u32>().ok())
+                .flatten()
+        })
+}
+
+fn provider_projection_inline_event_title(item: &ProviderProjectionItem) -> String {
+    let title = provider_projection_display_title(item);
+    let trimmed = title.trim();
+    match item.render_class {
+        ProjectionRenderClass::CommandCard | ProjectionRenderClass::ProcessCard => {
+            format!("Ran {trimmed}")
+        }
+        ProjectionRenderClass::FileCard | ProjectionRenderClass::DiffCard => {
+            format!("Read {}", read_value_display_name(trimmed))
+        }
+        ProjectionRenderClass::SkillCard => format!("Read {trimmed}"),
+        ProjectionRenderClass::PluginCard => format!("Used {trimmed}"),
+        ProjectionRenderClass::ToolCard => format!("Used {trimmed}"),
+        ProjectionRenderClass::SubagentCard => format!("Ran {trimmed}"),
+        ProjectionRenderClass::NestedTranscriptCard => format!("Opened {trimmed}"),
+        ProjectionRenderClass::BackgroundCard => format!("Ran {trimmed}"),
+        _ => title,
+    }
+}
+
+fn provider_projection_inline_event_subtitle(item: &ProviderProjectionItem) -> &'static str {
+    match item.render_class {
+        ProjectionRenderClass::CommandCard => "Command",
+        ProjectionRenderClass::ProcessCard => "Process",
+        ProjectionRenderClass::FileCard => "File",
+        ProjectionRenderClass::DiffCard => "Diff",
+        ProjectionRenderClass::ToolCard => "Tool",
+        ProjectionRenderClass::SkillCard => "Skill",
+        ProjectionRenderClass::PluginCard => "Plugin",
+        ProjectionRenderClass::SubagentCard => "Subagent",
+        ProjectionRenderClass::NestedTranscriptCard => "Nested transcript",
+        ProjectionRenderClass::BackgroundCard => "Background task",
+        _ => "Provider item",
+    }
+}
+
+fn provider_projection_inline_event_body(item: &ProviderProjectionItem) -> Option<String> {
+    let body = item.body.trim();
+    if !body.is_empty() {
+        return Some(provider_projection_plain_body(body));
+    }
+    item.raw_payload
+        .as_deref()
+        .and_then(provider_projection_payload_action_body)
+}
+
+fn provider_projection_plain_body(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|value| provider_projection_plain_payload_lines(&value, 0).join("\n"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| body.to_owned())
+}
+
+fn provider_projection_payload_action_body(raw_payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload).ok()?;
+    let mut lines = Vec::new();
+
+    if let Some(server) =
+        provider_projection_string_at_any(&payload, &["/params/item/server", "/params/server"])
+    {
+        lines.push(format!("server: {server}"));
+    }
+    if let Some(command) = provider_projection_string_at_any(
+        &payload,
+        &["/params/item/command", "/params/command", "/command"],
+    ) {
+        lines.push(format!("command: {command}"));
+    }
+    if let Some(arguments) = provider_projection_value_at_any(
+        &payload,
+        &[
+            "/params/item/arguments",
+            "/params/arguments",
+            "/arguments",
+            "/params/input",
+            "/input",
+        ],
+    ) {
+        let arguments = provider_projection_plain_payload_lines(arguments, 0);
+        if !arguments.is_empty() {
+            lines.push("arguments:".to_owned());
+            lines.extend(arguments.into_iter().map(|line| format!("  {line}")));
+        }
+    }
+
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn provider_projection_plain_payload_lines(value: &serde_json::Value, depth: usize) -> Vec<String> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, value)| match value {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) if depth < 2 => {
+                    let mut lines = vec![format!("{key}:")];
+                    lines.extend(
+                        provider_projection_plain_payload_lines(value, depth + 1)
+                            .into_iter()
+                            .map(|line| format!("  {line}")),
+                    );
+                    lines
+                }
+                _ => provider_projection_display_json_value(value)
+                    .map(|value| vec![format!("{key}: {value}")])
+                    .unwrap_or_default(),
+            })
+            .collect(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(provider_projection_display_json_value)
+            .map(|value| format!("- {value}"))
+            .collect(),
+        _ => provider_projection_display_json_value(value)
+            .map(|value| vec![value])
+            .unwrap_or_default(),
+    }
+}
+
+fn codex_inline_status_from_provider_projection(
+    status: ProviderProjectionStatus,
+) -> CodexInlineEventStatus {
+    match status {
+        ProviderProjectionStatus::Pending | ProviderProjectionStatus::Running => {
+            CodexInlineEventStatus::Loading
+        }
+        ProviderProjectionStatus::Complete => CodexInlineEventStatus::Complete,
+        ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled => {
+            CodexInlineEventStatus::Failed
+        }
+    }
+}
+
+fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
+    let mut text = provider_projection_display_title(item);
+    if !item.body.trim().is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&item.body);
+    }
+    if provider_projection_card_shows_raw_details(item) {
+        if let Some(raw_payload) = item.raw_payload.as_deref() {
+            if !raw_payload.trim().is_empty() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(raw_payload);
+            }
+        }
+    }
+    if text.trim().is_empty() && item.inspectable {
+        text.push_str("Provider details available for inspection.");
+    }
+    text
+}
+
+fn provider_projection_display_title(item: &ProviderProjectionItem) -> String {
+    if !provider_projection_title_is_generic_event_name(&item.title) {
+        return item.title.clone();
+    }
+    item.raw_payload
+        .as_deref()
+        .and_then(provider_projection_payload_action_title)
+        .unwrap_or_else(|| item.title.clone())
+}
+
+fn provider_projection_title_is_generic_event_name(title: &str) -> bool {
+    let title = title.trim();
+    title.contains('/')
+        && title
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.'))
+}
+
+fn provider_projection_payload_action_title(raw_payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload).ok()?;
+    provider_projection_payload_value_title(&payload)
+}
+
+fn provider_projection_payload_value_title(payload: &serde_json::Value) -> Option<String> {
+    let tool = provider_projection_string_at_any(
+        payload,
+        &[
+            "/params/item/tool",
+            "/params/tool",
+            "/params/tool_name",
+            "/tool_name",
+            "/params/item/action",
+            "/params/action",
+            "/params/hook/name",
+            "/hook/name",
+            "/params/hook_event_name",
+            "/hook_event_name",
+            "/params/name",
+        ],
+    );
+    if tool.as_deref().is_some_and(|tool| !tool.trim().is_empty()) {
+        return tool;
+    }
+
+    provider_projection_value_at_any(
+        payload,
+        &["/params/item/command", "/params/command", "/command"],
+    )
+    .and_then(provider_projection_display_json_value)
+}
+
+fn provider_projection_string_at_any(
+    value: &serde_json::Value,
+    pointers: &[&str],
+) -> Option<String> {
+    provider_projection_value_at_any(value, pointers)
+        .and_then(provider_projection_display_json_value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_projection_value_at_any<'a>(
+    value: &'a serde_json::Value,
+    pointers: &[&str],
+) -> Option<&'a serde_json::Value> {
+    pointers.iter().find_map(|pointer| value.pointer(pointer))
+}
+
+fn provider_projection_display_json_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(values) => {
+            let parts = values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn provider_projection_card_shows_raw_details(item: &ProviderProjectionItem) -> bool {
+    matches!(
+        item.render_class,
+        ProjectionRenderClass::PromptCard
+            | ProjectionRenderClass::WebCard
+            | ProjectionRenderClass::ImageCard
+            | ProjectionRenderClass::ErrorCard
+            | ProjectionRenderClass::FallbackCard
+    )
+}
+
+fn provider_projection_status_line(item: &ProviderProjectionItem) -> String {
+    provider_projection_status_label(item.status).to_owned()
+}
+
+fn provider_projection_status_label(status: ProviderProjectionStatus) -> &'static str {
+    match status {
+        ProviderProjectionStatus::Pending => "Pending",
+        ProviderProjectionStatus::Running => "Running",
+        ProviderProjectionStatus::Complete => "Complete",
+        ProviderProjectionStatus::Failed => "Failed",
+        ProviderProjectionStatus::Canceled => "Canceled",
+    }
+}
+
+fn provider_projection_stream_state_label(
+    stream_state: ProviderProjectionStreamState,
+) -> &'static str {
+    match stream_state {
+        ProviderProjectionStreamState::Snapshot => "Snapshot",
+        ProviderProjectionStreamState::Streaming => "Streaming",
+        ProviderProjectionStreamState::Complete => "Complete",
+    }
+}
+
+fn provider_projection_status_css_class(status: ProviderProjectionStatus) -> &'static str {
+    match status {
+        ProviderProjectionStatus::Pending => "status-pending",
+        ProviderProjectionStatus::Running => "status-running",
+        ProviderProjectionStatus::Complete => "status-success",
+        ProviderProjectionStatus::Failed => "status-error",
+        ProviderProjectionStatus::Canceled => "status-warning",
+    }
+}
+
+fn provider_projection_text_widget(text: &str) -> Widget {
+    let label = chat_text_label(text);
+    label.upcast()
+}
+
+fn chat_text_label(text: &str) -> Label {
+    let label = Label::new(None);
+    label.set_markup(&chat_text_markup(text));
+    label.add_css_class("chat-agent-text");
+    label.set_selectable(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label
+}
+
+fn chat_text_markup(text: &str) -> String {
+    let mut markup = String::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        if let Some(start) = rest.find('`') {
+            markup.push_str(&pango_escape_text(&rest[..start]));
+            let after_start = &rest[start..];
+            if let Some(stripped) = after_start.strip_prefix("```") {
+                if let Some(end) = stripped.find("```") {
+                    let code = &stripped[..end];
+                    markup.push_str(&chat_code_span_markup(code.trim_matches('\n')));
+                    rest = &stripped[end + 3..];
+                } else {
+                    markup.push_str(&pango_escape_text(after_start));
+                    break;
+                }
+            } else {
+                let stripped = &after_start[1..];
+                if let Some(end) = stripped.find('`') {
+                    let code = &stripped[..end];
+                    markup.push_str(&chat_code_span_markup(code));
+                    rest = &stripped[end + 1..];
+                } else {
+                    markup.push_str(&pango_escape_text(after_start));
+                    break;
+                }
+            }
+        } else {
+            markup.push_str(&pango_escape_text(rest));
+            break;
+        }
+    }
+
+    markup
+}
+
+fn chat_code_span_markup(code: &str) -> String {
+    format!(
+        "<span font_family=\"monospace\" foreground=\"#f2f5f8\">{}</span>",
+        pango_escape_text(code)
+    )
+}
+
+fn pango_escape_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn render_legacy_inline_events_for_thread(
     thread_events: &[ChatEventRecord],
     transcript_display: &str,
 ) -> bool {
-    match transcript_display.trim().to_ascii_lowercase().as_str() {
-        "raw" => false,
-        "legacy" => thread_events.is_empty(),
-        _ => thread_events.is_empty(),
-    }
+    let _ = (thread_events, transcript_display);
+    false
 }
 
 fn render_raw_message_content(transcript_display: &str) -> bool {
@@ -2637,16 +4077,12 @@ fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexT
                 .flatten()
                 .filter_map(|line| {
                     let kind = match line.get("kind")?.as_str()? {
-                        "context" => {
-                            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Context
-                        }
-                        "added" => linux_archductor_core::codex_tui::CodexFileChangeLineKind::Added,
-                        "deleted" => {
-                            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Deleted
-                        }
+                        "context" => archductor_core::codex_tui::CodexFileChangeLineKind::Context,
+                        "added" => archductor_core::codex_tui::CodexFileChangeLineKind::Added,
+                        "deleted" => archductor_core::codex_tui::CodexFileChangeLineKind::Deleted,
                         _ => return None,
                     };
-                    Some(linux_archductor_core::codex_tui::CodexFileChangeLine {
+                    Some(archductor_core::codex_tui::CodexFileChangeLine {
                         kind,
                         old_line: line
                             .get("old_line")
@@ -2661,7 +4097,7 @@ fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexT
                 })
                 .collect();
             Some(CodexTranscriptEvent::FileChange(
-                linux_archductor_core::codex_tui::CodexFileChange {
+                archductor_core::codex_tui::CodexFileChange {
                     action,
                     path: value.get("path")?.as_str()?.to_owned(),
                     additions: value
@@ -2680,9 +4116,7 @@ fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexT
     }
 }
 
-fn format_codex_file_change_event(
-    change: &linux_archductor_core::codex_tui::CodexFileChange,
-) -> String {
+fn format_codex_file_change_event(change: &archductor_core::codex_tui::CodexFileChange) -> String {
     let mut body = format!(
         "{} {}",
         codex_file_change_action_label(change.action),
@@ -2696,9 +4130,9 @@ fn format_codex_file_change_event(
     }
     for line in &change.lines {
         let prefix = match line.kind {
-            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Context => " ",
-            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Added => "+",
-            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Deleted => "-",
+            archductor_core::codex_tui::CodexFileChangeLineKind::Context => " ",
+            archductor_core::codex_tui::CodexFileChangeLineKind::Added => "+",
+            archductor_core::codex_tui::CodexFileChangeLineKind::Deleted => "-",
         };
         let line_number = line
             .new_line
@@ -2745,7 +4179,82 @@ fn inline_event_chip_label(event: &CodexInlineEvent, expanded: bool) -> String {
     format!("{marker} {}", inline_event_chip_name(event))
 }
 
+fn inline_event_chip_markup(event: &CodexInlineEvent, expanded: bool) -> String {
+    let marker = if expanded { "-" } else { "+" };
+    let name = inline_event_chip_name(event);
+    let (verb, rest) = inline_event_chip_name_parts(&name);
+    let accent = inline_event_type_color(event);
+    let marker = pango_escape_text(marker);
+    let verb = pango_escape_text(verb);
+    let rest = pango_escape_text(rest);
+
+    if rest.is_empty() {
+        format!("<span foreground=\"{accent}\" weight=\"700\">{marker} {verb}</span>")
+    } else {
+        format!(
+            "<span foreground=\"{accent}\" weight=\"700\">{marker} {verb}</span> <span foreground=\"#e7e7e7\">{rest}</span>"
+        )
+    }
+}
+
+fn inline_event_chip_name_parts(name: &str) -> (&str, &str) {
+    name.split_once(' ').unwrap_or((name, ""))
+}
+
+fn inline_event_type_css_class(event: &CodexInlineEvent) -> &'static str {
+    match event.subtitle.as_deref().unwrap_or_default() {
+        "Command" | "Command result" => "chat-inline-event-command",
+        "File" | "File preview" => "chat-inline-event-file",
+        "Diff" => "chat-inline-event-diff",
+        "Skill" => "chat-inline-event-skill",
+        "Plugin" => "chat-inline-event-plugin",
+        "Subagent" => "chat-inline-event-subagent",
+        "Nested transcript" => "chat-inline-event-nested",
+        "Background task" => "chat-inline-event-background",
+        _ => match event.kind {
+            CodexInlineEventKind::Skill => "chat-inline-event-skill",
+            CodexInlineEventKind::Tool => "chat-inline-event-tool",
+        },
+    }
+}
+
+fn inline_event_type_color(event: &CodexInlineEvent) -> &'static str {
+    match inline_event_type_css_class(event) {
+        "chat-inline-event-command" => "#93c5fd",
+        "chat-inline-event-file" => "#86efac",
+        "chat-inline-event-diff" => "#f0abfc",
+        "chat-inline-event-skill" => "#fcd34d",
+        "chat-inline-event-plugin" => "#c4b5fd",
+        "chat-inline-event-subagent" => "#67e8f9",
+        "chat-inline-event-nested" => "#d8b4fe",
+        "chat-inline-event-background" => "#cbd5e1",
+        _ => "#a7f3d0",
+    }
+}
+
+fn inline_event_chip_label_max_width_chars() -> i32 {
+    96
+}
+
+fn inline_event_chip_label_width_chars(label: &str) -> i32 {
+    let width = label.chars().count().max(1);
+    i32::try_from(width)
+        .unwrap_or(i32::MAX)
+        .min(inline_event_chip_label_max_width_chars())
+}
+
+fn configure_inline_event_chip_label(label: &Label, text: &str) {
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_width_chars(inline_event_chip_label_width_chars(text));
+    label.set_max_width_chars(inline_event_chip_label_max_width_chars());
+}
+
 fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
+    if inline_event_title_is_action_label(&event.title) {
+        return event.title.clone();
+    }
     event
         .path
         .as_ref()
@@ -2754,6 +4263,14 @@ fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| event.title.clone())
+}
+
+fn inline_event_title_is_action_label(title: &str) -> bool {
+    [
+        "Ran ", "Read ", "Used ", "Opened ", "Added ", "Edited ", "Deleted ",
+    ]
+    .iter()
+    .any(|prefix| title.starts_with(prefix))
 }
 
 fn raw_write_tool_inline_event(header: &str, body: &str) -> Option<CodexInlineEvent> {
@@ -2796,31 +4313,18 @@ fn raw_tool_event_path(header: &str) -> Option<PathBuf> {
 }
 
 fn inline_event_body_preview(event: &CodexInlineEvent, body: &str) -> InlineEventBodyPreview {
-    if inline_event_expands_body_by_default(event) {
-        let full = body.trim().to_owned();
-        return InlineEventBodyPreview {
-            preview: full.clone(),
-            full,
-            truncated: false,
-        };
+    let _ = event;
+    let full = body.trim().to_owned();
+    InlineEventBodyPreview {
+        preview: full.clone(),
+        full,
+        truncated: false,
     }
-    truncate_inline_event_body(body, 320)
 }
 
 fn inline_event_expands_body_by_default(event: &CodexInlineEvent) -> bool {
-    let title = event.title.to_ascii_lowercase();
-    let normalized_title = title.trim_start().trim_start_matches('•').trim_start();
-    let body = event
-        .body
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    ["write ", "edit ", "create ", "update "]
-        .iter()
-        .any(|marker| normalized_title.starts_with(marker))
-        || ["apply_patch", "write_stdin"]
-            .iter()
-            .any(|marker| title.contains(marker) || body.contains(marker))
+    let _ = event;
+    false
 }
 
 fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
@@ -3020,9 +4524,10 @@ fn extract_local_path(line: &str) -> Option<PathBuf> {
 }
 
 fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
-    let group = GBox::new(Orientation::Vertical, 8);
+    let group = GBox::new(Orientation::Vertical, 0);
     group.set_hexpand(true);
-    group.set_margin_bottom(18);
+    group.set_margin_top(0);
+    group.set_margin_bottom(0);
     for event in events {
         group.append(&inline_event_widget(event));
     }
@@ -3030,32 +4535,46 @@ fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
 }
 
 fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
-    let root = GBox::new(Orientation::Vertical, 8);
+    let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("chat-inline-event");
+    root.add_css_class(inline_event_type_css_class(event));
     if let Some(class) = inline_event_status_css_class(event.status) {
         root.add_css_class(class);
     }
     root.set_hexpand(true);
+    root.set_margin_top(0);
+    root.set_margin_bottom(0);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
-    let toggle = ToggleButton::with_label(&inline_event_chip_label(event, expand_by_default));
+    let toggle = ToggleButton::new();
     toggle.add_css_class("chat-inline-event-chip");
     toggle.set_halign(Align::Start);
+    toggle.set_margin_top(0);
+    toggle.set_margin_bottom(0);
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
+    let toggle_label = Label::new(None);
+    toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
+    configure_inline_event_chip_label(
+        &toggle_label,
+        &inline_event_chip_label(event, expand_by_default),
+    );
+    toggle.set_child(Some(&toggle_label));
     root.append(&toggle);
 
     let body_text = inline_event_body_text(event);
     let body_preview = inline_event_body_preview(event, &body_text);
-    let body = Label::new(Some(&body_preview.preview));
+    let body = Label::new(None);
+    body.set_markup(&chat_text_markup(&body_preview.preview));
     body.add_css_class("chat-inline-event-body");
     body.set_selectable(true);
     body.set_wrap(true);
     body.set_xalign(0.0);
-    body.set_margin_top(2);
+    body.set_margin_top(0);
     let body_revealer = Revealer::new();
-    body_revealer.set_transition_type(RevealerTransitionType::SlideDown);
-    body_revealer.set_transition_duration(180);
+    body_revealer.set_transition_type(RevealerTransitionType::None);
+    body_revealer.set_transition_duration(0);
     body_revealer.set_reveal_child(expand_by_default);
+    body_revealer.set_visible(expand_by_default);
     body_revealer.set_child(Some(&body));
     root.append(&body_revealer);
     toggle.set_active(expand_by_default);
@@ -3065,17 +4584,20 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
         let body_revealer = body_revealer.clone();
         let full = body_preview.full.clone();
         let preview = body_preview.preview.clone();
-        let collapsed_label = inline_event_chip_label(event, false);
-        let expanded_label = inline_event_chip_label(event, true);
+        let toggle_label = toggle_label.clone();
+        let collapsed_label = inline_event_chip_markup(event, false);
+        let expanded_label = inline_event_chip_markup(event, true);
         move |button| {
             if button.is_active() {
-                body.set_text(&full);
+                body.set_markup(&chat_text_markup(&full));
+                body_revealer.set_visible(true);
                 body_revealer.set_reveal_child(true);
-                button.set_label(&expanded_label);
+                toggle_label.set_markup(&expanded_label);
             } else {
-                body.set_text(&preview);
+                body.set_markup(&chat_text_markup(&preview));
                 body_revealer.set_reveal_child(false);
-                button.set_label(&collapsed_label);
+                body_revealer.set_visible(false);
+                toggle_label.set_markup(&collapsed_label);
             }
         }
     });
@@ -3665,6 +5187,57 @@ fn preferred_thread_for_kind(
         })
 }
 
+fn preferred_thread_for_selected_chat(
+    threads: &[ChatThreadRecord],
+    preferred: Option<i64>,
+    fallback_kind: SessionKind,
+) -> Option<i64> {
+    preferred
+        .filter(|id| {
+            threads
+                .iter()
+                .any(|thread| thread.id == *id && thread.status == "active")
+        })
+        .or_else(|| preferred_thread_for_kind(threads, None, fallback_kind))
+}
+
+fn selected_thread_harness_state(thread: &ChatThreadRecord) -> (SessionKind, Option<String>) {
+    (
+        session_kind_from_provider(&thread.provider),
+        chat_thread_model(thread),
+    )
+}
+
+fn text_buffer_text(buffer: &TextBuffer) -> String {
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), true)
+        .to_string()
+}
+
+fn remember_composer_draft(
+    drafts: &RefCell<HashMap<i64, String>>,
+    thread_id: Option<i64>,
+    text: &str,
+) {
+    let Some(thread_id) = thread_id else {
+        return;
+    };
+    if text.trim().is_empty() {
+        drafts.borrow_mut().remove(&thread_id);
+    } else {
+        drafts.borrow_mut().insert(thread_id, text.to_owned());
+    }
+}
+
+fn composer_draft_for_thread(
+    drafts: &RefCell<HashMap<i64, String>>,
+    thread_id: Option<i64>,
+) -> String {
+    thread_id
+        .and_then(|thread_id| drafts.borrow().get(&thread_id).cloned())
+        .unwrap_or_default()
+}
+
 fn default_chat_thread_title(kind: SessionKind, threads: &[ChatThreadRecord]) -> String {
     let provider = session_kind_provider(kind);
     let next = threads
@@ -3724,13 +5297,19 @@ struct ProviderModelChoice {
     model: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelSelectionRoute {
+    SameProvider,
+    CrossProvider(SessionKind),
+}
+
 impl ProviderModelChoice {
     fn provider_label(&self) -> &'static str {
         provider_display_name(&self.provider)
     }
 
     fn model_label(&self) -> &str {
-        self.model.as_deref().unwrap_or("Default")
+        self.model.as_deref().unwrap_or(CODEX_DEFAULT_MODEL)
     }
 
     fn button_label(&self) -> String {
@@ -3740,6 +5319,155 @@ impl ProviderModelChoice {
     fn icon_name(&self) -> &'static str {
         provider_icon_name(&self.provider)
     }
+}
+
+fn model_selection_route(
+    current_kind: SessionKind,
+    choice: &ProviderModelChoice,
+) -> ModelSelectionRoute {
+    let current_provider = session_kind_provider(current_kind);
+    if choice.provider == current_provider {
+        ModelSelectionRoute::SameProvider
+    } else {
+        ModelSelectionRoute::CrossProvider(session_kind_from_provider(&choice.provider))
+    }
+}
+
+fn provider_model_harness_metadata(
+    existing_metadata: Option<&str>,
+    model: Option<&str>,
+) -> Option<String> {
+    let mut options = SessionHarnessOptions::from_metadata(existing_metadata);
+    options.model = model.map(str::to_owned);
+    options.metadata()
+}
+
+fn chat_thread_model(thread: &ChatThreadRecord) -> Option<String> {
+    SessionHarnessOptions::from_metadata(thread.harness_metadata.as_deref()).model
+}
+
+fn replace_thread_state_record(
+    thread_state: &RefCell<Vec<ChatThreadRecord>>,
+    updated: ChatThreadRecord,
+) {
+    let mut threads = thread_state.borrow_mut();
+    if let Some(existing) = threads.iter_mut().find(|thread| thread.id == updated.id) {
+        *existing = updated;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelSwitchContextMessage {
+    role: String,
+    content: String,
+}
+
+const MODEL_SWITCH_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+
+fn model_switch_context_items(
+    database_path: &Path,
+    thread_id: i64,
+) -> anyhow::Result<Vec<ModelSwitchContextMessage>> {
+    let store = WorkspaceStore::open(database_path)?;
+    let messages = store.list_chat_messages(thread_id)?;
+    let mut context = messages
+        .iter()
+        .filter_map(|message| model_switch_context_message(&message.role, &message.content))
+        .collect::<Vec<_>>();
+    let provider_records =
+        ProviderEventStore::new(database_path).list_for_chat_thread(thread_id)?;
+    let projection = provider_projection_from_records(&provider_records);
+    for item in provider_projection_items_for_render(projection.items, &messages) {
+        let role = match item.render_class {
+            ProjectionRenderClass::UserChat => "user",
+            ProjectionRenderClass::AssistantChat => "agent",
+            _ => continue,
+        };
+        if let Some(message) = model_switch_context_message(role, &item.body) {
+            context.push(message);
+        }
+    }
+    Ok(context)
+}
+
+fn model_switch_context_message(role: &str, content: &str) -> Option<ModelSwitchContextMessage> {
+    let role = match role {
+        "user" => "user",
+        "agent" | "assistant" => "agent",
+        _ => return None,
+    };
+    let content = content.trim();
+    (!content.is_empty()).then(|| ModelSwitchContextMessage {
+        role: role.to_owned(),
+        content: content.to_owned(),
+    })
+}
+
+fn model_switch_context_attachment(
+    source_provider: &str,
+    target_provider: &str,
+    messages: &[ModelSwitchContextMessage],
+) -> Option<String> {
+    let mut history = messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.trim()))
+        .filter(|(_, content)| !content.is_empty())
+        .collect::<Vec<_>>();
+    if history.is_empty() {
+        return None;
+    }
+    let mut budget = MODEL_SWITCH_CONTEXT_MAX_BYTES;
+    let mut truncated = false;
+    let mut retained = Vec::new();
+    while let Some((role, body)) = history.pop() {
+        let cost = role.len() + body.len() + 16;
+        if cost > budget {
+            truncated = true;
+            break;
+        }
+        budget -= cost;
+        retained.push((role, body));
+    }
+    retained.reverse();
+
+    let mut attachment = format!(
+        "Attached prior chat context from {} to {}.\n\
+Do not answer this attachment. Use it only for continuity and wait for the next real user message.\n\n\
+# Attached Transcript\n\n",
+        provider_display_name(source_provider),
+        provider_display_name(target_provider)
+    );
+    if truncated || !history.is_empty() {
+        attachment.push_str("[Older transcript omitted]\n\n");
+    }
+    for (role, body) in retained {
+        attachment.push_str(match role {
+            "user" => "## User\n",
+            "agent" => "## Agent\n",
+            _ => continue,
+        });
+        attachment.push_str(body);
+        attachment.push_str("\n\n");
+    }
+    Some(attachment.trim_end().to_owned())
+}
+
+fn pending_model_switch_context_attachment(messages: &[ChatMessageRecord]) -> Option<&str> {
+    let (attachment_index, attachment) = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.source == "model_switch_context")?;
+    let has_later_real_message = messages[attachment_index + 1..]
+        .iter()
+        .any(|message| matches!(message.role.as_str(), "user" | "agent" | "assistant"));
+    (!has_later_real_message).then_some(attachment.content.as_str())
+}
+
+fn has_real_conversation_messages(messages: &[ChatMessageRecord]) -> bool {
+    messages
+        .iter()
+        .any(|message| matches!(message.role.as_str(), "user" | "agent" | "assistant"))
 }
 
 fn provider_model_choices(
@@ -3758,17 +5486,14 @@ fn provider_model_choices(
 
 fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoice> {
     match launchable_provider_name(provider) {
-        Some("codex") => [None, Some("gpt-5"), Some("gpt-5-mini")]
-            .into_iter()
+        Some(provider @ ("codex" | "claude")) => model_choices_for_provider(provider)
+            .iter()
+            .copied()
             .map(|model| ProviderModelChoice {
-                provider: "codex".to_owned(),
-                model: model.map(str::to_owned),
+                provider: provider.to_owned(),
+                model: Some(model.to_owned()),
             })
             .collect(),
-        Some("claude") => vec![ProviderModelChoice {
-            provider: "claude".to_owned(),
-            model: None,
-        }],
         _ => Vec::new(),
     }
 }
@@ -3783,7 +5508,12 @@ fn selected_provider_model_choice_index(
         .iter()
         .position(|choice| {
             choice.provider == provider
-                && choice.model.as_deref().unwrap_or("") == model.unwrap_or("")
+                && model.is_some_and(|model| choice.model.as_deref() == Some(model))
+        })
+        .or_else(|| {
+            choices
+                .iter()
+                .position(|choice| choice.provider == provider)
         })
         .unwrap_or(0)
 }
@@ -3937,28 +5667,6 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
     }
 }
 
-fn codex_model_command(model: Option<&str>) -> Option<String> {
-    match model.map(str::trim).filter(|model| !model.is_empty()) {
-        Some(model) => Some(format!("/model {model}")),
-        None => Some("/model default".to_owned()),
-    }
-}
-
-fn replace_pending_model_command(
-    pending: &RefCell<HashMap<i64, Vec<String>>>,
-    thread_id: i64,
-    model: Option<&str>,
-) {
-    pending
-        .borrow_mut()
-        .entry(thread_id)
-        .or_default()
-        .retain(|existing| !existing.starts_with("/model "));
-    if let Some(command) = codex_model_command(model) {
-        queue_thread_command(pending, thread_id, command);
-    }
-}
-
 fn codex_reasoning_command(level: &str) -> Option<String> {
     match level.trim().to_ascii_lowercase().as_str() {
         "low" | "medium" | "high" => Some(format!("/thinking {}", level.trim())),
@@ -4017,6 +5725,68 @@ fn queue_archcar_input(
             visible_input,
             kind,
         });
+}
+
+fn queued_archcar_input_visible_text(input: &QueuedArchcarInput) -> String {
+    input
+        .visible_input
+        .as_deref()
+        .unwrap_or(&input.input)
+        .trim()
+        .to_owned()
+}
+
+fn pending_user_input_texts_for_thread(
+    thread_id: i64,
+    pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    queued_chat_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    persisted_messages: &[ChatMessageRecord],
+) -> Vec<String> {
+    let persisted = persisted_messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.trim().to_owned())
+        .collect::<HashSet<_>>();
+    let mut inputs = Vec::new();
+
+    for input in queued_chat_inputs
+        .borrow()
+        .get(&thread_id)
+        .into_iter()
+        .flat_map(|inputs| inputs.iter())
+    {
+        inputs.push(queued_archcar_input_visible_text(input));
+    }
+    for input in pending_archcar_inputs
+        .borrow()
+        .get(&thread_id)
+        .into_iter()
+        .flat_map(|inputs| inputs.iter())
+    {
+        inputs.push(queued_archcar_input_visible_text(input));
+    }
+    for action in inflight_actions.borrow().values() {
+        if let PendingArchcarAction::UserSend {
+            thread_id: action_thread_id,
+            input,
+            visible_input,
+            ..
+        } = action
+        {
+            if *action_thread_id == thread_id {
+                inputs.push(visible_input.as_deref().unwrap_or(input).trim().to_owned());
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    inputs
+        .into_iter()
+        .filter(|input| !input.is_empty())
+        .filter(|input| !persisted.contains(input))
+        .filter(|input| seen.insert(input.clone()))
+        .collect()
 }
 
 fn queued_chat_inputs_count(
@@ -4086,15 +5856,13 @@ fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
 }
 
 fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
-    match provider {
-        "codex" => vec![
-            "provider".to_owned(),
-            "model".to_owned(),
-            "thinking".to_owned(),
-        ],
-        "claude" => vec!["provider".to_owned()],
-        "shell" => vec!["provider".to_owned()],
-        _ => vec!["provider".to_owned()],
+    let controls = gtk_live_controls_for_provider(provider)
+        .map(|control| control.control.to_owned())
+        .collect::<Vec<_>>();
+    if controls.is_empty() {
+        vec!["provider".to_owned()]
+    } else {
+        controls
     }
 }
 
@@ -4454,7 +6222,7 @@ fn provider_model_menu_button(
         .cloned()
         .unwrap_or_else(|| ProviderModelChoice {
             provider: "codex".to_owned(),
-            model: None,
+            model: Some(CODEX_DEFAULT_MODEL.to_owned()),
         });
     let button = Button::new();
     button.add_css_class("chat-mode-menu");
@@ -4789,9 +6557,8 @@ fn format_selected_session_surface(
         .map(|code| code.to_string())
         .unwrap_or_else(|| "-".to_owned());
     let ended = record.ended_at.as_deref().unwrap_or("-");
-    let events = parse_session_transcript_events(transcript);
-    let event_summary = session_transcript_event_summary(&events);
-    let transcript = render_session_transcript_events(transcript);
+    let event_summary = raw_session_transcript_summary(transcript);
+    let transcript = raw_session_transcript_display(transcript);
 
     format!(
         "Session #{} - {}\nStatus: {}\nState: {}\nAttachment: {}\nEvents: {}\nPID: {}\nStarted: {}\nEnded: {}\nExit: {}\nHarness: {}\nCommand: {}\n\nTranscript\n{}\n",
@@ -4845,6 +6612,15 @@ fn session_transcript_event_summary(events: &[SessionTranscriptEvent]) -> String
         "{} total, {user} user, {review} review, {system} system, {agent} agent, {tool} tool, {skill} skill, {harness} harness",
         events.len()
     )
+}
+
+fn raw_session_transcript_summary(transcript: &str) -> String {
+    let display = raw_session_transcript_display(transcript);
+    if display == "[no transcript output yet]\n" {
+        "raw transcript, 0 bytes".to_owned()
+    } else {
+        format!("raw transcript, {} bytes", display.len())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4912,11 +6688,17 @@ fn render_session_transcript_events(transcript: &str) -> String {
 }
 
 fn live_session_append_text(text: &str) -> String {
-    let rendered = render_session_transcript_events(text);
-    if rendered == "[no transcript output yet]\n" {
-        String::new()
+    raw_session_transcript_display(text)
+}
+
+fn raw_session_transcript_display(transcript: &str) -> String {
+    let cleaned = terminal_display_text(&trim_session_scrollback(transcript)).to_string();
+    if cleaned.trim().is_empty() {
+        "[no transcript output yet]\n".to_owned()
+    } else if cleaned.ends_with('\n') {
+        cleaned
     } else {
-        rendered
+        format!("{cleaned}\n")
     }
 }
 
@@ -4924,8 +6706,6 @@ fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEve
     let cleaned = terminal_display_text(&trim_session_scrollback(transcript)).to_string();
     let lines = cleaned.lines().collect::<Vec<_>>();
     let mut events = Vec::new();
-    let mut codex_agent_messages = Vec::<ScreenMessage>::new();
-    let mut codex_agent_event_indices = Vec::<usize>::new();
     let mut index = 0usize;
 
     while index < lines.len() {
@@ -4942,17 +6722,7 @@ fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEve
         }
 
         if line == "[codex screen]" {
-            let (screen, next) = collect_codex_block(&lines, index + 1, "[/codex screen]");
-            let parsed = parse_codex_screen_messages(&screen)
-                .into_iter()
-                .filter(|message| message.role == ScreenMessageRole::Agent)
-                .collect::<Vec<_>>();
-            sync_codex_agent_events(
-                &mut events,
-                &mut codex_agent_messages,
-                &mut codex_agent_event_indices,
-                &parsed,
-            );
+            let (_, next) = collect_codex_block(&lines, index + 1, "[/codex screen]");
             index = next;
             continue;
         }
@@ -5014,35 +6784,6 @@ fn push_session_event(
     let body = body.trim().to_owned();
     if !body.is_empty() {
         events.push(SessionTranscriptEvent { role, body });
-    }
-}
-
-fn sync_codex_agent_events(
-    events: &mut Vec<SessionTranscriptEvent>,
-    codex_agent_messages: &mut Vec<ScreenMessage>,
-    codex_agent_event_indices: &mut Vec<usize>,
-    incoming: &[ScreenMessage],
-) {
-    let previous = codex_agent_messages.clone();
-    merge_screen_messages(codex_agent_messages, incoming);
-    let shared = previous.len().min(codex_agent_messages.len());
-
-    for index in 0..shared {
-        if previous[index].content != codex_agent_messages[index].content {
-            if let Some(event_index) = codex_agent_event_indices.get(index).copied() {
-                if let Some(event) = events.get_mut(event_index) {
-                    event.body = codex_agent_messages[index].content.clone();
-                }
-            }
-        }
-    }
-
-    for message in codex_agent_messages.iter().skip(previous.len()) {
-        events.push(SessionTranscriptEvent {
-            role: SessionTranscriptRole::Agent,
-            body: message.content.clone(),
-        });
-        codex_agent_event_indices.push(events.len() - 1);
     }
 }
 
@@ -5139,6 +6880,14 @@ fn collect_file_change_event(lines: &[&str], start: usize) -> (String, usize) {
 fn is_file_change_detail_line(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with("@@")
+        || trimmed.starts_with("diff --git")
+        || trimmed.starts_with("index ")
+        || trimmed.starts_with("new file mode ")
+        || trimmed.starts_with("deleted file mode ")
+        || trimmed.starts_with("rename from ")
+        || trimmed.starts_with("rename to ")
+        || trimmed.starts_with("similarity index ")
+        || trimmed.starts_with("dissimilarity index ")
         || trimmed.starts_with("+++")
         || trimmed.starts_with("---")
         || trimmed.starts_with('+')
@@ -5480,6 +7229,63 @@ fn working_elapsed_seconds_for_signature(elapsed: Option<Duration>) -> Option<u6
     elapsed.map(|elapsed| elapsed.as_secs())
 }
 
+fn working_elapsed_seconds_for_status_banner(
+    banner: ChatStatusBannerKind,
+    elapsed: Option<Duration>,
+) -> Option<u64> {
+    if banner == ChatStatusBannerKind::Working {
+        working_elapsed_seconds_for_signature(elapsed)
+    } else {
+        None
+    }
+}
+
+fn chat_status_banner_kind(
+    startup_state: &CodexStartupState,
+    working_elapsed: Option<Duration>,
+    has_chat_rows: bool,
+) -> ChatStatusBannerKind {
+    if has_chat_rows {
+        return ChatStatusBannerKind::None;
+    }
+    if working_elapsed.is_some() {
+        return ChatStatusBannerKind::Working;
+    }
+    if codex_startup_state_has_banner(startup_state) {
+        ChatStatusBannerKind::Startup
+    } else {
+        ChatStatusBannerKind::None
+    }
+}
+
+fn codex_startup_state_has_banner(state: &CodexStartupState) -> bool {
+    matches!(
+        state,
+        CodexStartupState::Loading { .. } | CodexStartupState::Error { .. }
+    )
+}
+
+fn append_chat_status_banner(
+    messages: &GBox,
+    banner: ChatStatusBannerKind,
+    startup_state: &CodexStartupState,
+    working_elapsed: Option<Duration>,
+) {
+    match banner {
+        ChatStatusBannerKind::None => {}
+        ChatStatusBannerKind::Startup => {
+            if let Some(widget) = codex_startup_state_widget(startup_state) {
+                append_chat_refresh_row(messages, &widget);
+            }
+        }
+        ChatStatusBannerKind::Working => {
+            if let Some(elapsed) = working_elapsed {
+                append_chat_refresh_row(messages, &codex_working_indicator_widget(elapsed));
+            }
+        }
+    }
+}
+
 fn format_working_elapsed(elapsed: Duration) -> String {
     let total_seconds = elapsed.as_secs();
     let seconds = total_seconds % 60;
@@ -5609,11 +7415,10 @@ fn is_raw_file_change_event_line(line: &str) -> bool {
         .strip_prefix('•')
         .map(str::trim_start)
         .unwrap_or_else(|| line.trim());
-    ["Added ", "Edited ", "Deleted "].iter().any(|prefix| {
-        trimmed
-            .strip_prefix(prefix)
-            .is_some_and(raw_tool_target_looks_path_like)
-    })
+    matches!(
+        parse_codex_inline_event(trimmed),
+        Some(CoreCodexInlineEvent::FileChange(_))
+    )
 }
 
 fn raw_tool_target_looks_path_like(rest: &str) -> bool {
@@ -5663,7 +7468,7 @@ fn seed_running_sessions(
     }
 }
 
-fn provider_status_text(status: &linux_archductor_core::mcp::McpStatus) -> String {
+fn provider_status_text(status: &archductor_core::mcp::McpStatus) -> String {
     let codex_servers = status.codex_user.len() + status.codex_project.len();
     let claude_servers = status.claude_user.len() + status.claude_project.len();
     let cursor_servers = status.cursor_user.len() + status.cursor_project.len();
@@ -5717,6 +7522,7 @@ fn collect_session_harness_options(
     SessionHarnessOptions {
         plan_mode: plan_mode.is_active(),
         fast_mode: fast_mode.is_active(),
+        model: None,
         approval_mode: combo_active_value_or_none(approval_mode, Some("default")),
         reasoning_mode: combo_active_value_or_none(reasoning_mode, Some("default")),
         effort_mode: combo_active_value_or_none(effort_mode, Some("default")),
@@ -5912,6 +7718,11 @@ enum PendingArchcarAction {
         session_id: i64,
         command: String,
     },
+    ModelUpdate {
+        thread_id: i64,
+        session_id: i64,
+        model: Option<String>,
+    },
     UserSend {
         thread_id: i64,
         session_id: i64,
@@ -6095,6 +7906,29 @@ fn queue_archcar_control_send(
                 thread_id,
                 session_id,
                 command,
+            },
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn queue_archcar_model_update(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+    session_id: i64,
+    model: Option<String>,
+) -> bool {
+    let token = bridge.set_session_model(session_id, model.clone());
+    if let Some(token) = token {
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::ModelUpdate {
+                thread_id,
+                session_id,
+                model,
             },
         );
         true
@@ -6443,6 +8277,64 @@ fn handle_archcar_response(
                 );
             }
         },
+        PendingArchcarAction::ModelUpdate {
+            thread_id,
+            session_id,
+            model,
+        } => match response.result {
+            Ok(ArchcarResponse::Ack) => {
+                debug!(
+                    thread_id,
+                    session_id,
+                    ?model,
+                    "archcar model update accepted"
+                );
+            }
+            Ok(other) => {
+                warn!(
+                    thread_id,
+                    session_id,
+                    ?model,
+                    ?other,
+                    "unexpected archcar model update response"
+                );
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar model update response: {other:?}");
+                toast_manager.error(message.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error { thread_id, message },
+                );
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
+                request_archcar_ensure(
+                    &bridge,
+                    inflight_actions,
+                    workspace.to_owned(),
+                    Some(thread_id),
+                );
+            }
+            Err(err) => {
+                warn!(thread_id, session_id, ?model, error = %err, "archcar model update failed");
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message: err,
+                    },
+                );
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
+                request_archcar_ensure(
+                    &bridge,
+                    inflight_actions,
+                    workspace.to_owned(),
+                    Some(thread_id),
+                );
+            }
+        },
         PendingArchcarAction::UserSend {
             thread_id,
             session_id,
@@ -6675,8 +8567,10 @@ Do not answer this message. Use it only for continuity and wait for the next rea
 mod tests {
     use super::*;
     use crate::archcar_async::AsyncArchcarRequestKind;
-    use linux_archductor_core::doctor::SetupCheck;
-    use linux_archductor_core::workspace::ProcessKind;
+    use crate::state::{AppPage, WorkspaceTab};
+    use archductor_core::doctor::SetupCheck;
+    use archductor_core::paths::AppPaths;
+    use archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -6714,6 +8608,57 @@ mod tests {
         record
     }
 
+    fn provider_event_record(
+        kind: ProviderEventKind,
+        phase: ProviderEventPhase,
+    ) -> ProviderEventRecord {
+        ProviderEventRecord {
+            id: 1,
+            identity_key: "codex:thread-7:tool-1:completed".to_owned(),
+            provider: "codex".to_owned(),
+            provider_event_id: Some("evt-1".to_owned()),
+            provider_item_id: Some("tool-1".to_owned()),
+            provider_thread_id: Some("thread-7".to_owned()),
+            provider_turn_id: None,
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: Some(1),
+            chat_thread_id: Some(7),
+            process_id: Some(9),
+            phase,
+            kind,
+            provider_subtype: Some("tool_result".to_owned()),
+            provider_sequence: Some(1),
+            received_sequence: 3,
+            occurred_at_ms: 42,
+            normalized_payload: serde_json::json!({
+                "title": "Bash",
+                "body": "cargo test passed"
+            }),
+            raw_json: serde_json::json!({
+                "type": "tool_result",
+                "tool": "Bash"
+            }),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
+            created_at: "1".to_owned(),
+            updated_at: "1".to_owned(),
+        }
+    }
+
+    fn chat_message_record(id: i64, role: &str, content: &str, source: &str) -> ChatMessageRecord {
+        ChatMessageRecord {
+            id,
+            thread_id: 7,
+            role: role.to_owned(),
+            content: content.to_owned(),
+            source: source.to_owned(),
+            timeline_seq: Some(id),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
     #[test]
     fn harness_selection_updates_state_before_switch_callback() {
         let selected_harness = RefCell::new(SessionKind::Codex);
@@ -6736,6 +8681,110 @@ mod tests {
         assert_eq!(*selected_harness.borrow(), SessionKind::Claude);
         assert_eq!(reasoning_mode.borrow().as_deref(), Some("high"));
         assert_eq!(*observed.borrow(), Some(SessionKind::Claude));
+    }
+
+    #[test]
+    fn selected_harness_snapshot_drops_borrow_before_reentrant_switch() {
+        let selected_harness = RefCell::new(SessionKind::Codex);
+        let initial_kind = selected_harness_snapshot(&selected_harness);
+
+        let switch = |kind| {
+            *selected_harness.borrow_mut() = kind;
+        };
+        switch(initial_kind);
+
+        assert_eq!(*selected_harness.borrow(), SessionKind::Codex);
+    }
+
+    #[test]
+    fn same_provider_model_selection_does_not_switch_chat_harness() {
+        let current = ProviderModelChoice {
+            provider: "codex".to_owned(),
+            model: Some("gpt-5.6-luna".to_owned()),
+        };
+
+        assert_eq!(
+            model_selection_route(SessionKind::Codex, &current),
+            ModelSelectionRoute::SameProvider
+        );
+    }
+
+    #[test]
+    fn cross_provider_model_selection_opens_provider_chat() {
+        let current = ProviderModelChoice {
+            provider: "claude".to_owned(),
+            model: Some("claude-fable-5".to_owned()),
+        };
+
+        assert_eq!(
+            model_selection_route(SessionKind::Codex, &current),
+            ModelSelectionRoute::CrossProvider(SessionKind::Claude)
+        );
+    }
+
+    #[test]
+    fn model_switch_attachment_keeps_only_user_and_agent_messages() {
+        let messages = vec![
+            ModelSwitchContextMessage {
+                role: "user".to_owned(),
+                content: "Fix auth".to_owned(),
+            },
+            ModelSwitchContextMessage {
+                role: "agent".to_owned(),
+                content: "I found the callback bug.".to_owned(),
+            },
+        ];
+
+        let attachment = model_switch_context_attachment("codex", "claude", &messages).unwrap();
+
+        assert!(attachment.contains("Attached prior chat context"));
+        assert!(attachment.contains("from Codex to Claude"));
+        assert!(attachment.contains("## User"));
+        assert!(attachment.contains("Fix auth"));
+        assert!(attachment.contains("## Agent"));
+        assert!(attachment.contains("I found the callback bug."));
+        assert!(!attachment.contains("/model gpt-5.6-sol"));
+        assert!(!attachment.contains("control_command"));
+    }
+
+    #[test]
+    fn model_switch_attachment_is_bounded_to_recent_messages() {
+        let messages = vec![
+            ModelSwitchContextMessage {
+                role: "user".to_owned(),
+                content: "old".repeat(MODEL_SWITCH_CONTEXT_MAX_BYTES),
+            },
+            ModelSwitchContextMessage {
+                role: "agent".to_owned(),
+                content: "recent answer".to_owned(),
+            },
+        ];
+
+        let attachment = model_switch_context_attachment("codex", "claude", &messages).unwrap();
+
+        assert!(attachment.contains("[Older transcript omitted]"));
+        assert!(attachment.contains("recent answer"));
+        assert!(!attachment.contains(&"old".repeat(512)));
+    }
+
+    #[test]
+    fn model_switch_attachment_is_pending_only_until_first_real_message() {
+        let pending = vec![ChatMessageRecord {
+            source: "model_switch_context".to_owned(),
+            role: "system".to_owned(),
+            content: "Attached context".to_owned(),
+            ..chat_message_record(1, "system", "Attached context", "model_switch_context")
+        }];
+        assert_eq!(
+            pending_model_switch_context_attachment(&pending),
+            Some("Attached context")
+        );
+
+        let consumed = vec![
+            chat_message_record(1, "system", "Attached context", "model_switch_context"),
+            chat_message_record(2, "assistant", "Continue", "provider_event"),
+        ];
+        assert_eq!(pending_model_switch_context_attachment(&consumed), None);
     }
 
     #[test]
@@ -6762,15 +8811,15 @@ mod tests {
             vec![
                 ProviderModelChoice {
                     provider: "codex".to_owned(),
-                    model: None,
+                    model: Some("gpt-5.6-sol".to_owned()),
                 },
                 ProviderModelChoice {
                     provider: "codex".to_owned(),
-                    model: Some("gpt-5".to_owned()),
+                    model: Some("gpt-5.6-terra".to_owned()),
                 },
                 ProviderModelChoice {
                     provider: "codex".to_owned(),
-                    model: Some("gpt-5-mini".to_owned()),
+                    model: Some("gpt-5.6-luna".to_owned()),
                 },
             ]
         );
@@ -6793,26 +8842,35 @@ mod tests {
                 .map(|choice| (choice.provider.as_str(), choice.model.as_deref()))
                 .collect::<Vec<_>>(),
             vec![
-                ("codex", None),
-                ("codex", Some("gpt-5")),
-                ("codex", Some("gpt-5-mini")),
-                ("claude", None),
+                ("codex", Some("gpt-5.6-sol")),
+                ("codex", Some("gpt-5.6-terra")),
+                ("codex", Some("gpt-5.6-luna")),
+                ("claude", Some("claude-fable-5")),
+                ("claude", Some("claude-opus-4-8")),
+                ("claude", Some("claude-sonnet-5")),
+                ("claude", Some("claude-haiku-4-5-20251001")),
             ]
         );
     }
 
     #[test]
-    fn default_model_choice_queues_codex_model_reset() {
-        let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
-        queue_thread_command(&pending, 7, "/thinking high".to_owned());
+    fn provider_model_choices_do_not_include_synthetic_or_stale_models() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::ready("ready"),
+        };
 
-        replace_pending_model_command(&pending, 7, None);
+        let choices = provider_model_choices(&readiness, SessionKind::Codex);
+        let models = choices
+            .iter()
+            .filter_map(|choice| choice.model.as_deref())
+            .collect::<Vec<_>>();
 
-        assert_eq!(
-            pending.borrow().get(&7).cloned().unwrap_or_default(),
-            vec!["/thinking high".to_owned(), "/model default".to_owned()]
-        );
+        assert!(choices.iter().all(|choice| choice.model.is_some()));
+        assert!(!models.contains(&"gpt-5"));
+        assert!(!models.contains(&"gpt-5-mini"));
     }
 
     #[test]
@@ -6968,14 +9026,14 @@ fix it
     #[test]
     fn pending_control_commands_flush_before_user_message() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 7, "/model gpt-5.6-sol".to_owned());
         queue_thread_command(&pending, 7, "/thinking high".to_owned());
 
         let flushed = flush_pending_commands_for_send(&pending, 7);
 
         assert_eq!(
             flushed,
-            vec!["/model gpt-5".to_owned(), "/thinking high".to_owned()]
+            vec!["/model gpt-5.6-sol".to_owned(), "/thinking high".to_owned()]
         );
         assert!(flush_pending_commands_for_send(&pending, 7).is_empty());
     }
@@ -7204,7 +9262,7 @@ fix it
     }
 
     #[test]
-    fn codex_inline_event_chip_label_uses_plus_minus_and_compact_name() {
+    fn codex_inline_event_chip_label_uses_plus_minus_and_action_name() {
         let file_event = CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
             title: "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md".to_owned(),
@@ -7217,7 +9275,7 @@ fix it
         };
         let command_event = CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
-            title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+            title: "cargo test -p archductor-core codex_tui".to_owned(),
             subtitle: Some("Command result".to_owned()),
             body: None,
             path: None,
@@ -7226,15 +9284,87 @@ fix it
 
         assert_eq!(
             inline_event_chip_label(&file_event, false),
-            "+ 2026-07-03-manual-skill-tool-calls.md"
+            "+ Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&file_event, true),
-            "- 2026-07-03-manual-skill-tool-calls.md"
+            "- Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&command_event, false),
-            "+ cargo test -p linux-archductor-core codex_tui"
+            "+ cargo test -p archductor-core codex_tui"
+        );
+    }
+
+    #[test]
+    fn inline_event_chip_markup_colors_action_without_coloring_name() {
+        let command_event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Ran cargo test".to_owned(),
+            subtitle: Some("Command".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+        let skill_event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Skill,
+            title: "Read superpowers:test-driven-development".to_owned(),
+            subtitle: Some("Skill".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        let command_markup = inline_event_chip_markup(&command_event, false);
+        let skill_markup = inline_event_chip_markup(&skill_event, false);
+
+        assert_eq!(
+            inline_event_type_css_class(&command_event),
+            "chat-inline-event-command"
+        );
+        assert_eq!(
+            inline_event_type_css_class(&skill_event),
+            "chat-inline-event-skill"
+        );
+        assert!(command_markup.contains("foreground=\"#93c5fd\""));
+        assert!(command_markup.contains("+ Ran"));
+        assert!(command_markup.contains("foreground=\"#e7e7e7\">cargo test"));
+        assert!(skill_markup.contains("foreground=\"#fcd34d\""));
+        assert!(skill_markup.contains("+ Read"));
+        assert!(skill_markup.contains("foreground=\"#e7e7e7\">superpowers:test-driven-development"));
+    }
+
+    #[test]
+    fn inline_event_chip_label_layout_caps_long_commands() {
+        let long_command = format!("Ran pnpm {}", "x".repeat(240));
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: long_command,
+            subtitle: Some("Command".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        assert_eq!(inline_event_chip_label_max_width_chars(), 96);
+        assert_eq!(
+            inline_event_chip_label_width_chars(&inline_event_chip_label(&event, false)),
+            96
+        );
+        assert_eq!(
+            inline_event_type_css_class(&event),
+            "chat-inline-event-command"
+        );
+        assert!(inline_event_chip_markup(&event, false).contains("foreground=\"#e7e7e7\">pnpm"));
+    }
+
+    #[test]
+    fn inline_event_chip_label_short_names_do_not_request_one_char_width() {
+        let label = "+ Used MCP Loaded";
+
+        assert_eq!(
+            inline_event_chip_label_width_chars(label),
+            label.chars().count() as i32
         );
     }
 
@@ -7274,11 +9404,127 @@ fix it
         .unwrap();
 
         assert_eq!(tool.kind, CodexInlineEventKind::Tool);
+        assert_eq!(tool.title, "Read result.txt");
         assert_eq!(tool.path.as_deref(), Some(tool_path.as_path()));
+        assert_eq!(inline_event_chip_label(&tool, false), "+ Read result.txt");
         assert!(inline_event_body_text(&tool).contains("tool file contents"));
         assert_eq!(skill.kind, CodexInlineEventKind::Skill);
+        assert_eq!(skill.title, "Read SKILL.md for graphify");
         assert_eq!(skill.path.as_deref(), Some(skill_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&skill, false),
+            "+ Read SKILL.md for graphify"
+        );
         assert!(inline_event_body_text(&skill).contains("name: graphify"));
+    }
+
+    #[test]
+    fn read_only_shell_commands_render_as_file_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("session_surface.rs");
+        fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!("Ran sed -n '1,220p' {}", source_path.display()),
+            "fn main() {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Tool);
+        assert_eq!(read.title, "Read session_surface.rs");
+        assert_eq!(read.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn read_only_bash_lc_commands_render_as_file_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("session_surface.rs");
+        fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!(
+                "Ran /bin/bash -lc \"sed -n '1,220p' {}\"",
+                source_path.display()
+            ),
+            "fn main() {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Tool);
+        assert_eq!(read.title, "Read session_surface.rs");
+        assert_eq!(read.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn read_only_shell_commands_render_skill_md_as_skill_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("graphify");
+        fs::create_dir(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        fs::write(&skill_path, "---\nname: graphify\n---").unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!("Ran cat '{}'", skill_path.display()),
+            "---\nname: graphify\n---",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Skill);
+        assert_eq!(read.title, "Read SKILL.md for graphify");
+        assert_eq!(read.subtitle.as_deref(), Some("Skill"));
+        assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read SKILL.md for graphify"
+        );
+    }
+
+    #[test]
+    fn read_only_bash_lc_commands_render_skill_md_as_skill_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("verification-before-completion");
+        fs::create_dir(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        fs::write(
+            &skill_path,
+            "---\nname: verification-before-completion\n---",
+        )
+        .unwrap();
+
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!(
+                "Ran /bin/bash -lc \"sed -n '1,260p' {}\"",
+                skill_path.display()
+            ),
+            "---\nname: verification-before-completion\n---",
+        )
+        .unwrap();
+
+        assert_eq!(read.kind, CodexInlineEventKind::Skill);
+        assert_eq!(
+            read.title,
+            "Read SKILL.md for verification-before-completion"
+        );
+        assert_eq!(read.subtitle.as_deref(), Some("Skill"));
+        assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
+        assert_eq!(
+            inline_event_chip_label(&read, false),
+            "+ Read SKILL.md for verification-before-completion"
+        );
     }
 
     #[test]
@@ -7310,7 +9556,7 @@ fix it
         assert_eq!(preview.preview, full);
         assert_eq!(preview.full, full);
         assert!(!preview.truncated);
-        assert!(inline_event_expands_body_by_default(&event));
+        assert!(!inline_event_expands_body_by_default(&event));
     }
 
     #[test]
@@ -7511,6 +9757,31 @@ fix it
     }
 
     #[test]
+    fn chat_scroll_restore_retries_across_late_layout_passes() {
+        let snapshot = ChatScrollSnapshot {
+            value: 640.0,
+            pinned_to_bottom: false,
+        };
+
+        assert_eq!(
+            chat_scroll_restore_layout_passes(snapshot),
+            CHAT_SCROLL_RESTORE_LAYOUT_PASSES
+        );
+    }
+
+    #[test]
+    fn chat_status_banner_does_not_insert_working_row_above_existing_timeline() {
+        assert_eq!(
+            chat_status_banner_kind(
+                &CodexStartupState::Ready,
+                Some(Duration::from_secs(12)),
+                true
+            ),
+            ChatStatusBannerKind::None
+        );
+    }
+
+    #[test]
     fn queue_thread_command_dedupes_adjacent_duplicates() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
         queue_thread_command(&pending, 3, "/thinking high".to_owned());
@@ -7524,16 +9795,19 @@ fix it
     #[test]
     fn queue_thread_command_replaces_prior_model_and_thinking_commands() {
         let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
-        queue_thread_command(&pending, 5, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 5, "/model gpt-5.6-sol".to_owned());
         queue_thread_command(&pending, 5, "/thinking medium".to_owned());
-        queue_thread_command(&pending, 5, "/model gpt-5-mini".to_owned());
+        queue_thread_command(&pending, 5, "/model gpt-5.6-luna".to_owned());
         queue_thread_command(&pending, 5, "/thinking high".to_owned());
 
         let flushed = flush_pending_commands_for_send(&pending, 5);
 
         assert_eq!(
             flushed,
-            vec!["/model gpt-5-mini".to_owned(), "/thinking high".to_owned()]
+            vec![
+                "/model gpt-5.6-luna".to_owned(),
+                "/thinking high".to_owned()
+            ]
         );
     }
 
@@ -7544,6 +9818,79 @@ fix it
         queue_archcar_input(&pending, 5, "   ".to_owned(), None, ArchcarInputKind::User);
 
         assert!(pending.borrow().is_empty());
+    }
+
+    #[test]
+    fn pending_user_input_texts_include_local_starting_and_inflight_sends() {
+        let local_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let starting_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::from([(
+            11,
+            PendingArchcarAction::UserSend {
+                thread_id: 7,
+                session_id: 9,
+                input: "[metadata]\nreal inflight".to_owned(),
+                visible_input: Some("real inflight".to_owned()),
+                kind: ArchcarInputKind::User,
+                checkpoint_id: None,
+            },
+        )]));
+        queue_archcar_input(
+            &local_queue,
+            7,
+            "queued while busy".to_owned(),
+            None,
+            ArchcarInputKind::User,
+        );
+        queue_archcar_input(
+            &starting_queue,
+            7,
+            "[metadata]\nqueued while starting".to_owned(),
+            Some("queued while starting".to_owned()),
+            ArchcarInputKind::User,
+        );
+
+        let pending =
+            pending_user_input_texts_for_thread(7, &starting_queue, &local_queue, &inflight, &[]);
+
+        assert_eq!(
+            pending,
+            vec![
+                "queued while busy".to_owned(),
+                "queued while starting".to_owned(),
+                "real inflight".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_user_input_texts_skip_persisted_messages() {
+        let local_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let starting_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::<u64, PendingArchcarAction>::new());
+        queue_archcar_input(
+            &local_queue,
+            7,
+            "already persisted".to_owned(),
+            None,
+            ArchcarInputKind::User,
+        );
+        let persisted = vec![chat_message_record(
+            1,
+            "user",
+            "already persisted",
+            "user_send",
+        )];
+
+        let pending = pending_user_input_texts_for_thread(
+            7,
+            &starting_queue,
+            &local_queue,
+            &inflight,
+            &persisted,
+        );
+
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -7742,24 +10089,27 @@ fix it
     }
 
     #[test]
-    fn live_session_append_renders_user_and_review_events_without_markers() {
+    fn live_session_append_keeps_user_and_review_markers_raw() {
         let user = live_session_append_text("[user input memphis#9]\ncargo test\n[/user input]\n");
         let review =
             live_session_append_text("[staged review prompt]\nFix CI\n[/staged review prompt]\n");
 
-        assert_eq!(user, "You\ncargo test\n\n");
-        assert_eq!(review, "Review Prompt\nFix CI\n\n");
+        assert_eq!(user, "[user input memphis#9]\ncargo test\n[/user input]\n");
+        assert_eq!(
+            review,
+            "[staged review prompt]\nFix CI\n[/staged review prompt]\n"
+        );
     }
 
     #[test]
-    fn live_session_append_renders_plain_output_as_agent_event() {
+    fn live_session_append_keeps_plain_output_raw() {
         let text = live_session_append_text("hello\x1b[31m agent\x1b[0m\n");
 
-        assert_eq!(text, "Agent\nhello agent\n\n");
+        assert_eq!(text, "hello agent\n");
     }
 
     #[test]
-    fn selected_session_surface_renders_labeled_transcript_events() {
+    fn selected_session_surface_renders_raw_transcript_without_semantic_labels() {
         let record = session_record(
             11,
             "cursor /tmp/workspace",
@@ -7780,17 +10130,16 @@ Fix the failing checks
 
         let surface = format_selected_session_surface(&record, transcript, "waiting", true);
 
-        assert!(surface.contains("System\n[session started] #11 kind=Cursor pid=1234"));
-        assert!(surface.contains("Harness\n[archductor bootstrap for codex]"));
-        assert!(surface.contains("Tool\n[tool bash]"));
-        assert!(surface.contains("Skill\n[skill tests]"));
-        assert!(surface.contains("You\nopen the project"));
-        assert!(surface.contains("Review Prompt\nFix the failing checks"));
-        assert!(surface.contains("Agent\nBuild succeeded"));
-        assert!(surface.contains(
-            "Events: 7 total, 1 user, 1 review, 1 system, 1 agent, 1 tool, 1 skill, 1 harness"
-        ));
-        assert!(!surface.contains("[user input memphis#11]"));
+        assert!(surface.contains("[session started] #11 kind=Cursor pid=1234"));
+        assert!(surface.contains("[archductor bootstrap for codex]"));
+        assert!(surface.contains("[tool bash]"));
+        assert!(surface.contains("[skill tests]"));
+        assert!(surface.contains("[user input memphis#11]"));
+        assert!(surface.contains("[staged review prompt]"));
+        assert!(surface.contains("Build succeeded"));
+        assert!(surface.contains("Events: raw transcript, "));
+        assert!(!surface.contains("Tool\n[tool bash]"));
+        assert!(!surface.contains("Agent\nBuild succeeded"));
     }
 
     #[test]
@@ -7838,7 +10187,7 @@ agent response
     }
 
     #[test]
-    fn transcript_events_parse_codex_screen_blocks_without_raw_duplication() {
+    fn transcript_events_skip_codex_raw_and_screen_diagnostic_blocks() {
         let transcript = "\
 [user input memphis#4]
 run tests
@@ -7867,11 +10216,29 @@ noise
 
         let events = parse_session_transcript_events(transcript);
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].role, SessionTranscriptRole::User);
         assert_eq!(events[0].body, "run tests");
-        assert_eq!(events[1].role, SessionTranscriptRole::Agent);
-        assert_eq!(events[1].body, "Running now.\nTests passed.");
+    }
+
+    #[test]
+    fn transcript_events_ignore_codex_screen_blocks_for_normal_session_semantics() {
+        let transcript = "\
+[user input memphis#4]
+run tests
+[/user input]
+[codex screen]
+╭─ Codex ─╮
+│ Parsed from screen.
+╰────
+[/codex screen]
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].role, SessionTranscriptRole::User);
+        assert_eq!(events[0].body, "run tests");
     }
 
     #[test]
@@ -7965,7 +10332,7 @@ Read SKILL.md (graphify), SKILL.md (skill-creator)
 ---
 name: graphify
 ---
-Ran cargo test -p linux-archductor-core codex_tui
+Ran cargo test -p archductor-core codex_tui
 running 23 tests
 test result: ok. 23 passed
 • Edited crates/core/src/codex_tui.rs (+12 -3)
@@ -7986,7 +10353,7 @@ I summarized the result.
         assert_eq!(events[1].role, SessionTranscriptRole::Tool);
         assert_eq!(
             events[1].body,
-            "Ran cargo test -p linux-archductor-core codex_tui\nrunning 23 tests\ntest result: ok. 23 passed"
+            "Ran cargo test -p archductor-core codex_tui\nrunning 23 tests\ntest result: ok. 23 passed"
         );
         assert_eq!(events[2].role, SessionTranscriptRole::Tool);
         assert_eq!(
@@ -8017,7 +10384,7 @@ I summarized the result.
         let edit_events = session_transcript_inline_events(&edit);
 
         assert_eq!(skill_events[0].kind, CodexInlineEventKind::Skill);
-        assert_eq!(skill_events[0].title, "graphify");
+        assert_eq!(skill_events[0].title, "Read SKILL.md for graphify");
         assert!(skill_events[0]
             .body
             .as_deref()
@@ -8039,6 +10406,37 @@ I summarized the result.
         assert_eq!(change.lines.len(), 3);
         assert_eq!(change.lines[1].new_line, Some(379));
         assert_eq!(change.lines[1].content, "added");
+    }
+
+    #[test]
+    fn transcript_changed_path_blocks_render_as_edit_events_with_diff_body() {
+        let transcript = "\
+changed /home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md
+diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
+@@ -1 +1 @@
+-old note
++new note
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].role, SessionTranscriptRole::Tool);
+        let inline_events = session_transcript_inline_events(&events[0]);
+        assert_eq!(inline_events.len(), 1);
+        assert_eq!(
+            inline_events[0].title,
+            "Edited /home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md"
+        );
+        assert_eq!(
+            inline_event_chip_name(&inline_events[0]),
+            inline_events[0].title
+        );
+        assert_eq!(inline_events[0].subtitle.as_deref(), None);
+        let body = inline_events[0].body.as_deref().unwrap();
+        assert!(body.contains("@@ -1 +1 @@"));
+        assert!(body.contains("-old note"));
+        assert!(body.contains("+new note"));
     }
 
     #[test]
@@ -8085,6 +10483,905 @@ I summarized the result.
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
         assert!(matches!(timeline[1], ChatTimelineItem::Event(_)));
         assert!(matches!(timeline[2], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn chat_render_skips_blank_persisted_user_bubbles() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "   ".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), Vec::new(), Vec::new());
+
+        assert!(timeline.is_empty());
+    }
+
+    #[test]
+    fn chat_render_places_pending_user_input_after_provider_events() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "agent".to_owned(),
+            content: "previous answer".to_owned(),
+            source: "agent_reply".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "running tests".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            vec![provider_item],
+            vec!["new user message".to_owned()],
+        );
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert!(matches!(timeline[2], ChatTimelineItem::PendingUserInput(_)));
+    }
+
+    #[test]
+    fn chat_render_places_unsequenced_user_messages_after_provider_events() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "new user message".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "running tests".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), vec![provider_item], Vec::new());
+
+        assert!(matches!(
+            timeline[0],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert!(matches!(timeline[1], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn chat_render_keeps_provider_events_after_persisted_history() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "agent".to_owned(),
+            content: "older persisted answer".to_owned(),
+            source: "agent_reply".to_owned(),
+            timeline_seq: Some(500),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "running tests".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), vec![provider_item], Vec::new());
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+    }
+
+    #[test]
+    fn chat_render_anchors_persisted_user_messages_to_provider_user_events() {
+        let messages = vec![
+            ChatMessageRecord {
+                id: 30,
+                thread_id: 7,
+                role: "user".to_owned(),
+                content: "first prompt".to_owned(),
+                source: "user_send".to_owned(),
+                timeline_seq: Some(1),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            ChatMessageRecord {
+                id: 31,
+                thread_id: 7,
+                role: "user".to_owned(),
+                content: "second prompt".to_owned(),
+                source: "user_send".to_owned(),
+                timeline_seq: Some(2),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+        ];
+        let provider_items = vec![
+            ProviderProjectionItem {
+                id: "codex:thread-7:input-1".to_owned(),
+                sequence: 1,
+                category: ProviderProjectionCategory::UserMessage,
+                render_class: ProjectionRenderClass::UserChat,
+                title: "User".to_owned(),
+                body: "first prompt".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:tool-1".to_owned(),
+                sequence: 2,
+                category: ProviderProjectionCategory::NativeTool,
+                render_class: ProjectionRenderClass::ToolCard,
+                title: "Bash".to_owned(),
+                body: "first output".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:input-2".to_owned(),
+                sequence: 3,
+                category: ProviderProjectionCategory::UserMessage,
+                render_class: ProjectionRenderClass::UserChat,
+                title: "User".to_owned(),
+                body: "second prompt".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:tool-2".to_owned(),
+                sequence: 4,
+                category: ProviderProjectionCategory::NativeTool,
+                render_class: ProjectionRenderClass::ToolCard,
+                title: "Bash".to_owned(),
+                body: "second output".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+        ];
+
+        let timeline =
+            chat_structured_items_for_render(messages, Vec::new(), provider_items, Vec::new());
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert!(matches!(timeline[2], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[3],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+    }
+
+    #[test]
+    fn canonical_provider_tool_events_project_as_tool_cards_not_assistant_chat() {
+        let record = provider_event_record(ProviderEventKind::Tool, ProviderEventPhase::Completed);
+        let projection = provider_projection_from_records(&[record]);
+
+        assert_eq!(projection.items.len(), 1);
+        assert_eq!(
+            projection.items[0].render_class,
+            ProjectionRenderClass::ToolCard
+        );
+        assert_ne!(
+            projection.items[0].render_class,
+            ProjectionRenderClass::AssistantChat
+        );
+        assert_eq!(projection.items[0].title, "Bash");
+        assert_eq!(projection.items[0].body, "cargo test passed");
+    }
+
+    #[test]
+    fn provider_projection_uses_provider_item_identity_across_phase_updates() {
+        let mut streaming = provider_event_record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        streaming.identity_key = "codex:thread-7:msg-1:delta".to_owned();
+        streaming.provider_item_id = Some("msg-1".to_owned());
+        streaming.normalized_payload = serde_json::json!({
+            "title": "Assistant",
+            "body": "partial"
+        });
+        let mut completed = streaming.clone();
+        completed.identity_key = "codex:thread-7:msg-1:completed".to_owned();
+        completed.phase = ProviderEventPhase::Completed;
+        completed.received_sequence = 4;
+        completed.normalized_payload = serde_json::json!({
+            "title": "Assistant",
+            "body": "complete"
+        });
+
+        let projection = provider_projection_from_records(&[streaming, completed]);
+
+        assert_eq!(projection.items.len(), 1);
+        assert_eq!(projection.items[0].id, "codex:thread-7:msg-1");
+        assert_eq!(projection.items[0].body, "complete");
+        assert_eq!(
+            projection.items[0].status,
+            ProviderProjectionStatus::Complete
+        );
+    }
+
+    #[test]
+    fn provider_projection_maps_subtype_specific_render_classes() {
+        let cases = [
+            (
+                ProviderEventKind::FileSystem,
+                "file_write",
+                ProviderProjectionCategory::FileWrite,
+                ProjectionRenderClass::FileCard,
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                "plugin",
+                ProviderProjectionCategory::Plugin,
+                ProjectionRenderClass::PluginCard,
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                "hook",
+                ProviderProjectionCategory::Hook,
+                ProjectionRenderClass::HookCard,
+            ),
+            (
+                ProviderEventKind::WebBrowserMedia,
+                "image",
+                ProviderProjectionCategory::Image,
+                ProjectionRenderClass::ImageCard,
+            ),
+            (
+                ProviderEventKind::LimitFailure,
+                "rate_limit",
+                ProviderProjectionCategory::RateLimit,
+                ProjectionRenderClass::WarningCard,
+            ),
+        ];
+
+        for (kind, subtype, category, render_class) in cases {
+            let mut record = provider_event_record(kind, ProviderEventPhase::Completed);
+            record.provider_subtype = Some(subtype.to_owned());
+            let projection = provider_projection_from_records(&[record]);
+
+            assert_eq!(projection.items[0].category, category);
+            assert_eq!(projection.items[0].render_class, render_class);
+        }
+    }
+
+    #[test]
+    fn provider_projection_action_card_text_hides_raw_payload() {
+        let mut record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Failed,
+        );
+        record.raw_json = serde_json::json!({
+            "type": "command",
+            "secret": "raw-secret"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let status = provider_projection_status_line(&projection.items[0]);
+        let text = provider_projection_card_text(&projection.items[0]);
+
+        assert!(status.contains("Failed"));
+        assert!(!status.contains("Complete"));
+        assert!(!status.contains("Streaming"));
+        assert_eq!(
+            provider_projection_status_css_class(projection.items[0].status),
+            "status-error"
+        );
+        assert!(!text.contains("raw-secret"));
+        assert!(!text.contains("\"type\": \"command\""));
+        assert!(!text.contains("[redacted]"));
+    }
+
+    #[test]
+    fn provider_projection_action_cards_do_not_render_running_streaming_chrome() {
+        let mut record =
+            provider_event_record(ProviderEventKind::Tool, ProviderEventPhase::Progress);
+        record.normalized_payload = serde_json::json!({
+            "title": "Read",
+            "body": "crates/core/src/lib.rs"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let item = &projection.items[0];
+
+        assert!(!provider_projection_item_shows_status_chrome(item));
+        let text = provider_projection_card_text(item);
+        assert!(text.starts_with("Read\ncrates/core/src/lib.rs"));
+        assert!(!text.contains("\"type\": \"tool_result\""));
+        assert!(!text.contains("Running"));
+        assert!(!text.contains("Streaming"));
+    }
+
+    #[test]
+    fn provider_projection_action_items_render_as_inline_event_chips_without_json() {
+        let mut record = provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Started);
+        record.provider_subtype = Some("item/mcpToolCall/started".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "get_wiki_page",
+            "body": ""
+        });
+        record.raw_json = serde_json::json!({
+            "method": "item/mcpToolCall/started",
+            "params": {
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "cubic",
+                    "tool": "get_wiki_page",
+                    "arguments": {
+                        "page": "Project Context"
+                    }
+                }
+            }
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Used get_wiki_page");
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Used get_wiki_page"
+        );
+        let body = inline_event_body_text(&inline);
+        assert!(body.contains("Project Context"));
+        assert!(!body.contains("\"method\""));
+        assert!(!body.contains("\"params\""));
+    }
+
+    #[test]
+    fn provider_projection_completed_structured_tool_output_is_plain_text() {
+        let mut record =
+            provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Completed);
+        record.provider_subtype = Some("item/mcpToolCall/completed".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "get_wiki_page",
+            "body": "{\n  \"ok\": true,\n  \"page\": \"Project Context\"\n}"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(
+            inline_event_body_text(&inline),
+            "ok: true\npage: Project Context"
+        );
+    }
+
+    #[test]
+    fn provider_projection_action_cards_hide_raw_details_when_body_is_incomplete() {
+        let mut record = provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Started);
+        record.provider_subtype = Some("item/mcpToolCall/started".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "get_wiki_page",
+            "body": ""
+        });
+        record.raw_json = serde_json::json!({
+            "method": "item/mcpToolCall/started",
+            "params": {
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "cubic",
+                    "tool": "get_wiki_page",
+                    "arguments": {
+                        "page": "Project Context"
+                    }
+                }
+            }
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let text = provider_projection_card_text(&projection.items[0]);
+
+        assert!(text.contains("get_wiki_page"));
+        assert!(!text.contains("\"page\": \"Project Context\""));
+        assert!(!text.contains("\"server\": \"cubic\""));
+    }
+
+    #[test]
+    fn provider_projection_keeps_failure_status_chrome() {
+        let record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Failed,
+        );
+        let projection = provider_projection_from_records(&[record]);
+
+        assert!(provider_projection_item_shows_status_chrome(
+            &projection.items[0]
+        ));
+    }
+
+    #[test]
+    fn hook_events_are_hidden_from_normal_chat_projection() {
+        let mut record = provider_event_record(
+            ProviderEventKind::SkillPluginHook,
+            ProviderEventPhase::Progress,
+        );
+        record.provider_subtype = Some("hook_event".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "PreToolUse",
+            "body": "Bash: cargo test"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn provider_projection_inline_titles_use_action_verbs() {
+        let cases = [
+            (
+                ProviderEventKind::CommandProcess,
+                None,
+                serde_json::json!({"title": "cargo test", "body": "ok"}),
+                "+ Ran cargo test",
+            ),
+            (
+                ProviderEventKind::FileSystem,
+                Some("read"),
+                serde_json::json!({"title": "README.md", "body": "# Archductor"}),
+                "+ Read README.md",
+            ),
+            (
+                ProviderEventKind::FileSystem,
+                Some("read"),
+                serde_json::json!({"title": "/tmp/archductor/session_surface.rs", "body": "fn main() {}"}),
+                "+ Read session_surface.rs",
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                None,
+                serde_json::json!({"title": "skill-creator", "body": "loaded"}),
+                "+ Read skill-creator",
+            ),
+        ];
+
+        for (kind, subtype, payload, label) in cases {
+            let mut record = provider_event_record(kind, ProviderEventPhase::Completed);
+            record.provider_subtype = subtype.map(str::to_owned);
+            record.normalized_payload = payload;
+            let projection = provider_projection_from_records(&[record]);
+            let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+            assert_eq!(inline_event_chip_label(&inline, false), label);
+            assert!(!inline_event_expands_body_by_default(&inline));
+        }
+    }
+
+    #[test]
+    fn provider_projection_read_only_commands_render_as_reads() {
+        let mut record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "sed -n '1,220p' crates/gtk-app/src/session_surface.rs",
+            "body": "fn agent_session_panel() {}"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Read session_surface.rs");
+        assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn provider_projection_bash_lc_read_only_commands_render_as_reads() {
+        let mut record = provider_event_record(
+            ProviderEventKind::CommandProcess,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "/bin/bash -lc \"sed -n '1,220p' crates/gtk-app/src/session_surface.rs\"",
+            "body": "fn agent_session_panel() {}"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Read session_surface.rs");
+        assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn provider_projection_file_change_items_render_as_edits_with_counts() {
+        let mut record = provider_event_record(
+            ProviderEventKind::DiffFileChange,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "File changes",
+            "body": "modified src/main.rs"
+        });
+        record.raw_json = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "changes": [
+                        {
+                            "path": "src/main.rs",
+                            "kind": "modified",
+                            "diff": "@@ -1 +1 @@\n-old\n+new\n"
+                        }
+                    ]
+                }
+            }
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Edited main.rs");
+        assert_eq!(inline.subtitle.as_deref(), Some("+1 -1"));
+        assert_eq!(inline_event_chip_label(&inline, false), "+ Edited main.rs");
+        assert!(inline_event_body_text(&inline).contains("-old"));
+        assert!(inline_event_body_text(&inline).contains("+new"));
+    }
+
+    #[test]
+    fn subagent_projection_items_render_as_collapsible_inline_output() {
+        let mut record = provider_event_record(
+            ProviderEventKind::SubagentCollaboration,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "Review agent",
+            "body": "Found 2 issues"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Ran Review agent");
+        assert_eq!(inline.subtitle.as_deref(), Some("Subagent"));
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Ran Review agent"
+        );
+        assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
+    }
+
+    #[test]
+    fn chat_text_labels_do_not_reserve_extra_bottom_gap() {
+        let source = include_str!("session_surface.rs");
+        let forbidden = ["set_margin_bottom", "(18)"].join("");
+
+        assert!(!source.contains(&forbidden));
+    }
+
+    #[test]
+    fn chat_text_markup_formats_inline_code_and_escapes_content() {
+        let markup = chat_text_markup("Use `cargo test` before <merge>.");
+
+        assert!(markup.contains("Use "));
+        assert!(markup.contains("font_family=\"monospace\""));
+        assert!(markup.contains("cargo test"));
+        assert!(markup.contains("&lt;merge&gt;"));
+        assert!(!markup.contains("<merge>"));
+    }
+
+    #[test]
+    fn inline_event_body_preview_keeps_live_tool_output_full() {
+        let full = format!("get_wiki_page\n{}", "x".repeat(500));
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "get_wiki_page".to_owned(),
+            subtitle: Some("Tool call".to_owned()),
+            body: Some(full.clone()),
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        let preview = inline_event_body_preview(&event, &full);
+
+        assert_eq!(preview.preview, full);
+        assert_eq!(preview.full, full);
+        assert!(!preview.truncated);
+    }
+
+    #[test]
+    fn chat_wake_coalesces_event_bursts() {
+        let pending = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(mark_chat_refresh_wake_pending(&pending));
+        assert!(!mark_chat_refresh_wake_pending(&pending));
+        clear_chat_refresh_wake_pending(&pending);
+        assert!(mark_chat_refresh_wake_pending(&pending));
+    }
+
+    #[test]
+    fn provider_projection_fallback_card_text_shows_redacted_raw_payload() {
+        let item = ProviderProjectionItem {
+            id: "fallback-1".to_owned(),
+            sequence: 1,
+            category: ProviderProjectionCategory::Unknown,
+            render_class: ProjectionRenderClass::FallbackCard,
+            title: "Unknown provider event".to_owned(),
+            body: String::new(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: Some(
+                "{\n  \"type\": \"future_event\",\n  \"api_key\": \"[redacted]\"\n}".to_owned(),
+            ),
+            inspectable: true,
+        };
+
+        let text = provider_projection_card_text(&item);
+
+        assert!(text.contains("Unknown provider event"));
+        assert!(text.contains("\"type\": \"future_event\""));
+        assert!(text.contains("[redacted]"));
+    }
+
+    #[test]
+    fn normal_chat_provider_projection_hides_raw_and_status_events() {
+        let mut response = provider_event_record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        response.provider_item_id = Some("msg-1".to_owned());
+        response.normalized_payload = serde_json::json!({
+            "title": "Assistant",
+            "body": "I can fix that."
+        });
+        let mut thought = provider_event_record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+        );
+        thought.provider_item_id = Some("thought-1".to_owned());
+        thought.normalized_payload = serde_json::json!({
+            "title": "Thought",
+            "body": "Need to inspect the event mapper."
+        });
+        let mut tool =
+            provider_event_record(ProviderEventKind::Tool, ProviderEventPhase::Completed);
+        tool.provider_item_id = Some("tool-1".to_owned());
+        tool.normalized_payload = serde_json::json!({
+            "title": "Bash",
+            "body": "cargo test passed"
+        });
+        let mut status = provider_event_record(
+            ProviderEventKind::ThreadSession,
+            ProviderEventPhase::Started,
+        );
+        status.provider_item_id = Some("status-1".to_owned());
+        status.normalized_payload = serde_json::json!({
+            "title": "thread/started",
+            "body": ""
+        });
+        let mut raw =
+            provider_event_record(ProviderEventKind::Unknown, ProviderEventPhase::Unknown);
+        raw.provider_item_id = Some("raw-1".to_owned());
+        raw.normalized_payload = serde_json::json!({
+            "title": "Unknown provider event"
+        });
+        raw.raw_json = serde_json::json!({
+            "id": 7,
+            "result": { "ok": true }
+        });
+
+        let projection = provider_projection_from_records(&[response, thought, tool, status, raw]);
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.render_class)
+                .collect::<Vec<_>>(),
+            vec![
+                ProjectionRenderClass::AssistantChat,
+                ProjectionRenderClass::ReasoningCard,
+                ProjectionRenderClass::ToolCard,
+            ]
+        );
+        assert!(items.iter().any(|item| item.body == "I can fix that."));
+        assert!(items
+            .iter()
+            .any(|item| item.body == "Need to inspect the event mapper."));
+        let rendered_text = items
+            .iter()
+            .map(provider_projection_card_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered_text.contains("Unknown provider event"));
+        assert!(!rendered_text.contains("\"result\""));
+        assert!(!rendered_text.contains("thread/started"));
+    }
+
+    #[test]
+    fn provider_user_chat_rows_are_skipped_because_persisted_messages_own_user_bubbles() {
+        let mut user_event =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
+        user_event.normalized_payload = serde_json::json!({
+            "title": "User",
+            "body": "run tests"
+        });
+        let projection = provider_projection_from_records(&[user_event]);
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "run tests".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: Some(1),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+
+        let items_without_message =
+            provider_projection_items_for_render(projection.items.clone(), &[]);
+        let items = provider_projection_items_for_render(projection.items, &messages);
+
+        assert!(items_without_message.is_empty());
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn provider_empty_user_chat_rows_are_skipped() {
+        let mut user_event =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
+        user_event.provider_item_id = Some("user-empty".to_owned());
+        user_event.normalized_payload = serde_json::json!({
+            "title": "User",
+            "body": "   "
+        });
+        let projection = provider_projection_from_records(&[user_event]);
+
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn provider_reasoning_renders_only_exposed_reasoning_text() {
+        let mut reasoning = provider_event_record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+        );
+        reasoning.provider_item_id = Some("thought-1".to_owned());
+        reasoning.normalized_payload = serde_json::json!({
+            "title": "Reasoning",
+            "body": "Need to inspect the event mapper."
+        });
+        let projection = provider_projection_from_records(&[reasoning]);
+        let item = &projection.items[0];
+
+        assert_eq!(item.render_class, ProjectionRenderClass::ReasoningCard);
+        assert_eq!(
+            provider_projection_reasoning_text(item).as_deref(),
+            Some("Need to inspect the event mapper.")
+        );
+        assert!(!provider_projection_reasoning_text(item)
+            .unwrap()
+            .contains("Reasoning"));
+    }
+
+    #[test]
+    fn provider_assistant_body_hides_archductor_metadata() {
+        let item = ProviderProjectionItem {
+            id: "assistant".to_owned(),
+            sequence: 1,
+            category: ProviderProjectionCategory::AssistantMessage,
+            render_class: ProjectionRenderClass::AssistantChat,
+            title: "Assistant".to_owned(),
+            body: "<archductor_metadata>{\"workspace_name\":\"harness-file-changes\",\"branch_name\":\"lc/harness-file-changes\",\"chat_title\":\"Harness File Changes\"}</archductor_metadata>\nContinuing."
+                .to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        assert_eq!(
+            provider_projection_assistant_body_for_render(&item),
+            "Continuing."
+        );
+    }
+
+    #[test]
+    fn provider_empty_reasoning_rows_are_skipped() {
+        let mut reasoning = provider_event_record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+        );
+        reasoning.provider_item_id = Some("thought-empty".to_owned());
+        reasoning.normalized_payload = serde_json::json!({
+            "title": "Reasoning",
+            "body": ""
+        });
+        let projection = provider_projection_from_records(&[reasoning]);
+
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -8165,7 +11462,7 @@ I summarized the result.
     }
 
     #[test]
-    fn legacy_inline_event_parsing_only_runs_without_persisted_events() {
+    fn legacy_inline_event_parsing_is_disabled_for_normal_chat_rendering() {
         let message = ChatMessageRecord {
             id: 10,
             thread_id: 7,
@@ -8201,7 +11498,7 @@ I summarized the result.
         let persisted_timeline_events = legacy_inline_events_for_message(&message, legacy_disabled);
         let raw_events = legacy_inline_events_for_message(&message, raw_enabled);
 
-        assert_eq!(legacy_events.len(), 1);
+        assert!(legacy_events.is_empty());
         assert!(persisted_timeline_events.is_empty());
         assert!(raw_events.is_empty());
     }
@@ -8529,6 +11826,36 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
+    fn chat_refresh_skips_stale_workspace_surface_after_selection_changes() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("tokyo".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        assert_eq!(
+            chat_refresh_workspace_decision("berlin", &state.snapshot(), true),
+            ChatRefreshWorkspaceDecision::SkipStaleSurface
+        );
+    }
+
+    #[test]
+    fn chat_refresh_clears_deleted_selected_workspace_instead_of_showing_session_error() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        assert_eq!(
+            chat_refresh_workspace_decision("berlin", &state.snapshot(), false),
+            ChatRefreshWorkspaceDecision::ClearDeletedWorkspace
+        );
+    }
+
+    #[test]
     fn gtk_refresh_timers_are_documented_or_removed() {
         let recurring_sources = [
             ("main.rs", include_str!("main.rs")),
@@ -8639,6 +11966,84 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*selected_thread.borrow(), Some(7));
         assert_eq!(*app_state.borrow(), None);
         assert_eq!(*composer_updates.borrow(), 0);
+    }
+
+    #[test]
+    fn cloned_refresh_controller_drops_borrow_before_callback_runs() {
+        let controller: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
+        let observed = Rc::new(Cell::new(false));
+        *controller.borrow_mut() = Some(Rc::new({
+            let controller = controller.clone();
+            let observed = observed.clone();
+            move || {
+                let _same_controller = clone_refresh_chat_surface_controller(&controller);
+                observed.set(true);
+            }
+        }));
+
+        let Some(refresh) = clone_refresh_chat_surface_controller(&controller) else {
+            panic!("expected refresh controller");
+        };
+        refresh();
+
+        assert!(observed.get());
+    }
+
+    #[test]
+    fn selected_chat_thread_wins_over_current_provider_when_refreshing() {
+        let threads = vec![
+            ChatThreadRecord {
+                id: 7,
+                workspace_id: 1,
+                provider: "codex".to_owned(),
+                title: "Codex".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+            ChatThreadRecord {
+                id: 8,
+                workspace_id: 1,
+                provider: "claude".to_owned(),
+                title: "Claude".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: Some("model=claude-sonnet-4-20250514".to_owned()),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+        ];
+
+        assert_eq!(
+            preferred_thread_for_selected_chat(&threads, Some(8), SessionKind::Codex),
+            Some(8)
+        );
+        assert_eq!(
+            selected_thread_harness_state(&threads[1]),
+            (
+                SessionKind::Claude,
+                Some("claude-sonnet-4-20250514".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn composer_drafts_are_stored_per_thread() {
+        let drafts = RefCell::new(HashMap::<i64, String>::new());
+
+        remember_composer_draft(&drafts, Some(7), "codex draft");
+        remember_composer_draft(&drafts, Some(8), "claude draft");
+
+        assert_eq!(composer_draft_for_thread(&drafts, Some(7)), "codex draft");
+        assert_eq!(composer_draft_for_thread(&drafts, Some(8)), "claude draft");
+
+        remember_composer_draft(&drafts, Some(7), "   ");
+        assert_eq!(composer_draft_for_thread(&drafts, Some(7)), "");
+        assert_eq!(composer_draft_for_thread(&drafts, Some(8)), "claude draft");
     }
 
     #[test]

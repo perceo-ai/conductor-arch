@@ -23,7 +23,10 @@ mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, ColorScheme, StyleManager};
+use adw::{Application, ApplicationWindow};
+use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use command_palette::{
     filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
     ShortcutAction,
@@ -32,11 +35,6 @@ use gtk::{
     Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overflow, Overlay, ScrolledWindow,
     Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_archductor_core::archcar::server::{
-    reconcile_managed_sessions_on_startup, ArchcarServer,
-};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
@@ -49,7 +47,8 @@ use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
-const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
+const APP_ID: &str = "io.github.pranavkannepalli.archductor";
+const APP_SIDEBAR_DEFAULT_WIDTH_PX: f64 = 320.0;
 static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +253,7 @@ where
                     .ok_or_else(|| "--page requires a value".to_owned())?;
                 target.page = parse_app_page_with_debug_mode(value, debug_mode)?;
             }
-            value if value.starts_with("linux-archductor://") => {
+            value if value.starts_with("archductor://") => {
                 target = parse_deep_link_with_debug_mode(value, debug_mode)?;
             }
             _ => {}
@@ -270,8 +269,8 @@ fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
 
 fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<LaunchTarget, String> {
     let rest = value
-        .strip_prefix("linux-archductor://")
-        .ok_or_else(|| "deep link must start with linux-archductor://".to_owned())?;
+        .strip_prefix("archductor://")
+        .ok_or_else(|| "deep link must start with archductor://".to_owned())?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let mut target = LaunchTarget::default();
     let parts = path
@@ -287,7 +286,9 @@ fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<Laun
         ["dashboard"] => target.page = AppPage::Dashboard,
         ["projects"] | ["repositories"] => target.page = AppPage::Projects,
         ["history"] => target.page = AppPage::History,
-        ["pty-inspector"] | ["pty", "inspector"] if debug_mode => {
+        ["session-logs"] | ["session", "logs"] | ["pty-inspector"] | ["pty", "inspector"]
+            if debug_mode =>
+        {
             target.page = AppPage::PtyInspector;
         }
         ["workspace"] | ["workspaces"] => target.page = AppPage::Workspace,
@@ -325,7 +326,9 @@ fn parse_app_page_with_debug_mode(value: &str, debug_mode: bool) -> Result<AppPa
         "settings" | "config" => Ok(AppPage::Settings),
         "history" | "archive" => Ok(AppPage::History),
         "workspace" | "workspaces" => Ok(AppPage::Workspace),
-        "ptyinspector" | "pty" if debug_mode => Ok(AppPage::PtyInspector),
+        "sessionlogs" | "sessionlog" | "ptyinspector" | "pty" if debug_mode => {
+            Ok(AppPage::PtyInspector)
+        }
         other => Err(format!("unknown page: {other}")),
     }
 }
@@ -335,7 +338,7 @@ fn debug_mode_enabled() -> bool {
 }
 
 fn debug_mode_enabled_from_env(value: Option<&str>) -> bool {
-    linux_archductor_core::env_flags::explicit_truthy(value)
+    archductor_core::env_flags::explicit_truthy(value)
 }
 
 fn parse_workspace_tab(value: &str) -> Result<WorkspaceTab, String> {
@@ -398,27 +401,21 @@ fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings
 }
 
 fn apply_view_preferences(
-    window: &ApplicationWindow,
+    target: &impl IsA<gtk::Widget>,
     preferences: &ViewPreferences,
     colors_css: &CssProvider,
     color_scope_class: &str,
 ) {
-    let style_manager = StyleManager::default();
-    match preferences.theme {
-        Some(ViewTheme::Light) => style_manager.set_color_scheme(ColorScheme::ForceLight),
-        Some(ViewTheme::Dark) => style_manager.set_color_scheme(ColorScheme::ForceDark),
-        Some(ViewTheme::System) | None => style_manager.set_color_scheme(ColorScheme::Default),
-    }
     colors_css.load_from_data(&view_colors_css(color_scope_class, &preferences.colors));
     for class_name in VIEW_PREFERENCE_CLASSES {
-        window.remove_css_class(class_name);
+        target.remove_css_class(class_name);
     }
-    window.remove_css_class(color_scope_class);
+    target.remove_css_class(color_scope_class);
     for class_name in preferences.css_classes() {
-        window.add_css_class(class_name);
+        target.add_css_class(class_name);
     }
     if !preferences.colors.is_empty() {
-        window.add_css_class(color_scope_class);
+        target.add_css_class(color_scope_class);
     }
 }
 
@@ -613,7 +610,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let refresh_hub = RefreshHub::default();
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Linux Archductor")
+        .title("Archductor")
         .default_width(1280)
         .default_height(800)
         .build();
@@ -646,20 +643,16 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         &view_colors_css,
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    apply_view_preferences(
-        &window,
-        &initial_view_preferences,
-        &view_colors_css,
-        &color_scope_class,
-    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: styles applied"
+        "gtk startup: styles loaded"
     );
 
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(120.0);
     split.set_max_sidebar_width(360.0);
+    split.set_sidebar_width_unit(adw::LengthUnit::Px);
+    split.set_sidebar_width_fraction(APP_SIDEBAR_DEFAULT_WIDTH_PX);
     split.set_pin_sidebar(false);
     split.set_collapsed(false);
     let collapse_sidebar: Rc<dyn Fn()> = {
@@ -694,6 +687,16 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             toast_overlay.clone(),
             collapse_sidebar.clone(),
         );
+    let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
+    workspace_preference_scope.set_hexpand(true);
+    workspace_preference_scope.set_vexpand(true);
+    workspace_preference_scope.append(&workspace_detail);
+    apply_view_preferences(
+        &workspace_preference_scope,
+        &initial_view_preferences,
+        &view_colors_css,
+        &color_scope_class,
+    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: workspace center built"
@@ -702,6 +705,26 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
+    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
+    let navigate_created_workspace: Rc<dyn Fn(String)> = {
+        let app_state = app_state.clone();
+        let main_stack_handle = main_stack_handle.clone();
+        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
+        Rc::new(move |workspace_name| {
+            app_state.navigate_to_workspace_with_default_tab(
+                Some(workspace_name),
+                Some(WorkspaceTab::Chats),
+            );
+            if let Some(refresh_view_preferences) =
+                refresh_view_preferences_handle.borrow().as_ref()
+            {
+                refresh_view_preferences();
+            }
+            if let Some(stack) = main_stack_handle.borrow().as_ref() {
+                stack.set_visible_child_name("workspace");
+            }
+        })
+    };
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
@@ -713,6 +736,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 refresh_hub.refresh(RefreshScope::Sidebar);
             }
         },
+        navigate_created_workspace,
         toast_manager.clone(),
     );
     tracing::info!(
@@ -748,7 +772,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     main_stack.add_named(&projects_page, Some("projects"));
     main_stack.add_named(&settings_page, Some("settings"));
     main_stack.add_named(&history_page, Some("history"));
-    main_stack.add_named(&workspace_detail, Some("workspace"));
+    main_stack.add_named(&workspace_preference_scope, Some("workspace"));
     if debug_mode {
         main_stack.add_named(
             &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
@@ -766,7 +790,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
 
     let refresh_view_preferences: Rc<dyn Fn()> = {
         let state_for_view = app_state.clone();
-        let window_for_view = window.clone();
+        let workspace_preference_scope = workspace_preference_scope.clone();
         let colors_css_for_view = view_colors_css.clone();
         let color_scope_class = color_scope_class.clone();
         let db_path_for_view = app_state.workspace_database_path();
@@ -776,7 +800,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let preferences =
                 resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
             apply_view_preferences(
-                &window_for_view,
+                &workspace_preference_scope,
                 &preferences,
                 &colors_css_for_view,
                 &color_scope_class,
@@ -785,6 +809,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
     };
+    *refresh_view_preferences_handle.borrow_mut() = Some(refresh_view_preferences.clone());
 
     let (sidebar, refresh_sidebar) = sidebar::build_app_sidebar(
         &app_state,
@@ -872,6 +897,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 .unwrap_or_default();
             let commands = palette_commands(
                 state_for_palette.snapshot().selected_workspace.is_some(),
+                debug_mode,
                 &keybindings,
                 &custom_commands,
             );
@@ -1453,9 +1479,9 @@ pub(crate) fn detail_row(label: &str, value: &str) -> GBox {
 pub(crate) fn cli_binary() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("linux-archductor")))
+        .and_then(|path| path.parent().map(|parent| parent.join("archductor")))
         .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("linux-archductor"))
+        .unwrap_or_else(|| PathBuf::from("archductor"))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -1544,8 +1570,8 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_archductor_core::repository::{AddRepository, RepositoryStore};
-    use linux_archductor_core::workspace::{CreateWorkspace, ProcessStatus};
+    use archductor_core::repository::{AddRepository, RepositoryStore};
+    use archductor_core::workspace::{CreateWorkspace, ProcessStatus};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1594,14 +1620,9 @@ mod tests {
 
     #[test]
     fn launch_target_parses_workspace_and_tab_args() {
-        let target = parse_launch_target([
-            "linux-archductor-gtk",
-            "--workspace",
-            "berlin",
-            "--tab",
-            "checks",
-        ])
-        .unwrap();
+        let target =
+            parse_launch_target(["archductor-gtk", "--workspace", "berlin", "--tab", "checks"])
+                .unwrap();
 
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
@@ -1610,11 +1631,9 @@ mod tests {
 
     #[test]
     fn launch_target_parses_workspace_deep_link() {
-        let target = parse_launch_target([
-            "linux-archductor-gtk",
-            "linux-archductor://workspace/berlin?tab=review",
-        ])
-        .unwrap();
+        let target =
+            parse_launch_target(["archductor-gtk", "archductor://workspace/berlin?tab=review"])
+                .unwrap();
 
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Review);
@@ -1623,8 +1642,7 @@ mod tests {
 
     #[test]
     fn launch_target_parses_page_deep_links_and_tab_aliases() {
-        let history =
-            parse_launch_target(["linux-archductor-gtk", "linux-archductor://history"]).unwrap();
+        let history = parse_launch_target(["archductor-gtk", "archductor://history"]).unwrap();
         let terminal = parse_workspace_tab("big-terminal").unwrap();
 
         assert_eq!(history.page, AppPage::History);
@@ -1644,22 +1662,27 @@ mod tests {
     }
 
     #[test]
-    fn pty_inspector_route_is_gated_by_debug_mode() {
+    fn session_logs_route_is_gated_by_debug_mode() {
         let err = parse_launch_target_with_debug_mode(
-            ["linux-archductor-gtk", "--page", "pty-inspector"],
+            ["archductor-gtk", "--page", "session-logs"],
             false,
         )
         .unwrap_err();
-        assert_eq!(err, "unknown page: ptyinspector");
+        assert_eq!(err, "unknown page: sessionlogs");
 
-        let target = parse_launch_target_with_debug_mode(
-            ["linux-archductor-gtk", "--page", "pty-inspector"],
-            true,
-        )
-        .unwrap();
+        let target =
+            parse_launch_target_with_debug_mode(["archductor-gtk", "--page", "session-logs"], true)
+                .unwrap();
 
         assert_eq!(target.page, AppPage::PtyInspector);
         assert_eq!(target.workspace, None);
+
+        let legacy_target = parse_launch_target_with_debug_mode(
+            ["archductor-gtk", "--page", "pty-inspector"],
+            true,
+        )
+        .unwrap();
+        assert_eq!(legacy_target.page, AppPage::PtyInspector);
     }
 
     #[test]
@@ -1770,9 +1793,9 @@ mod tests {
             &path,
             [
                 "-c",
-                "user.name=Linux Archductor",
+                "user.name=Archductor",
                 "-c",
-                "user.email=linux-archductor@example.test",
+                "user.email=archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

@@ -238,6 +238,7 @@ impl KeyShortcut {
 
 pub(crate) fn palette_commands(
     has_workspace: bool,
+    debug_mode: bool,
     keybindings: &Keybindings,
     custom_commands: &[String],
 ) -> Vec<PaletteCommand> {
@@ -253,6 +254,12 @@ pub(crate) fn palette_commands(
         cmd("Refresh", PaletteTarget::Refresh),
         cmd("Toggle Sidebar", PaletteTarget::ToggleSidebar),
     ];
+    if debug_mode {
+        commands.push(cmd(
+            "Session Logs",
+            PaletteTarget::Page(AppPage::PtyInspector),
+        ));
+    }
 
     if has_workspace {
         commands.extend([
@@ -370,7 +377,7 @@ fn palette_command_search_terms(command: &PaletteCommand) -> Vec<String> {
         PaletteTarget::Page(AppPage::Projects) => Vec::new(),
         PaletteTarget::Page(AppPage::History) => vec!["archive".to_owned(), "past".to_owned()],
         PaletteTarget::Page(AppPage::PtyInspector) => {
-            vec!["debug".to_owned(), "pty".to_owned(), "sessions".to_owned()]
+            vec!["debug".to_owned(), "sessions".to_owned(), "pty".to_owned()]
         }
         PaletteTarget::Page(AppPage::Workspace) => vec!["worktree".to_owned(), "branch".to_owned()],
         PaletteTarget::Page(AppPage::Settings) => vec!["config".to_owned()],
@@ -425,7 +432,7 @@ mod tests {
     #[test]
     fn palette_commands_include_global_navigation_and_shortcuts() {
         let keybindings = Keybindings::default();
-        let commands = palette_commands(false, &keybindings, &[]);
+        let commands = palette_commands(false, false, &keybindings, &[]);
 
         assert!(commands.iter().any(|command| command.label == "Dashboard"
             && command.target == PaletteTarget::Page(AppPage::Dashboard)));
@@ -445,7 +452,7 @@ mod tests {
     #[test]
     fn palette_commands_include_workspace_tabs_when_workspace_selected() {
         let keybindings = Keybindings::default();
-        let commands = palette_commands(true, &keybindings, &[]);
+        let commands = palette_commands(true, false, &keybindings, &[]);
 
         assert!(commands
             .iter()
@@ -458,7 +465,7 @@ mod tests {
     #[test]
     fn palette_filter_matches_label_shortcut_and_aliases() {
         let keybindings = Keybindings::default();
-        let commands = palette_commands(true, &keybindings, &[]);
+        let commands = palette_commands(true, true, &keybindings, &[]);
 
         let terminal = filter_palette_commands(&commands, "term");
         assert_eq!(terminal[0].label, "Chat / Terminal");
@@ -478,12 +485,29 @@ mod tests {
             chat[0].target,
             PaletteTarget::WorkspaceTab(WorkspaceTab::Chats)
         );
+
+        let logs = filter_palette_commands(&commands, "session logs");
+        assert!(logs.iter().any(|command| {
+            command.label == "Session Logs"
+                && command.target == PaletteTarget::Page(AppPage::PtyInspector)
+        }));
+    }
+
+    #[test]
+    fn palette_hides_session_logs_outside_debug_mode() {
+        let keybindings = Keybindings::default();
+        let commands = palette_commands(true, false, &keybindings, &[]);
+
+        assert!(commands
+            .iter()
+            .all(|command| command.label != "Session Logs"));
+        assert!(filter_palette_commands(&commands, "session logs").is_empty());
     }
 
     #[test]
     fn palette_filter_hides_workspace_commands_without_workspace() {
         let keybindings = Keybindings::default();
-        let commands = palette_commands(false, &keybindings, &[]);
+        let commands = palette_commands(false, false, &keybindings, &[]);
 
         assert!(filter_palette_commands(&commands, "terminal").is_empty());
         assert!(filter_palette_commands(&commands, "project").is_empty());
@@ -578,7 +602,7 @@ mod tests {
             "test".to_owned(),
             "Open Docs=xdg-open https://example.com".to_owned(),
         ];
-        let commands = palette_commands(true, &keybindings, &custom);
+        let commands = palette_commands(true, false, &keybindings, &custom);
         assert!(commands.iter().any(|c| c.label == "Run Tests"
             && c.target == PaletteTarget::RunCommand("pnpm test".to_owned())));
         assert!(commands.iter().any(|c| c.label == "Open Docs"
@@ -589,14 +613,14 @@ mod tests {
     fn palette_commands_custom_commands_hidden_without_workspace() {
         let keybindings = Keybindings::default();
         let custom = vec!["test".to_owned()];
-        let commands = palette_commands(false, &keybindings, &custom);
+        let commands = palette_commands(false, false, &keybindings, &custom);
         assert!(!commands.iter().any(|c| c.label == "Run Tests"));
     }
 
     #[test]
     fn tab_shortcuts_shown_in_palette() {
         let bindings = Keybindings::from_config(Some("changes=ctrl+1"));
-        let commands = palette_commands(true, &bindings, &[]);
+        let commands = palette_commands(true, false, &bindings, &[]);
         let changes = commands
             .iter()
             .find(|c| c.target == PaletteTarget::WorkspaceTab(WorkspaceTab::Changes))

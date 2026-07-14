@@ -1,8 +1,8 @@
+use archductor_core::paths::AppPaths;
+use archductor_core::workspace::WorkspaceStatusLine;
+use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
 use gtk::{Box as GBox, Button, Label, Orientation, PolicyType, ScrolledWindow};
-use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::workspace::WorkspaceStatusLine;
-use linux_archductor_core::workspace::WorkspaceStore;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -265,7 +265,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
                 .as_ref()
                 .and_then(|state| state.attention_label()),
         ),
-        None => format!("{} · port {}", line.repository_name, ws.port_base),
+        None => line.repository_name.clone(),
     };
     let meta_label = Label::new(Some(&meta));
     meta_label.add_css_class("card-meta");

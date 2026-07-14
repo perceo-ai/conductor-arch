@@ -72,10 +72,64 @@ name = "archcar"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "linux-archductor-core",
+ "archductor-core",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "archductor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "archductor-core",
+ "assert_cmd",
+ "clap",
+ "predicates",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "archductor-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "globset",
+ "portable-pty",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "uuid",
+ "vt100",
+ "walkdir",
+]
+
+[[package]]
+name = "archductor-gtk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "archductor-core",
+ "futures-channel",
+ "glib",
+ "gtk4",
+ "libadwaita",
+ "notify",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -875,59 +929,6 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
-]
-
-[[package]]
-name = "linux-archductor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "linux-archductor-core",
- "predicates",
- "tempfile",
-]
-
-[[package]]
-name = "linux-archductor-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "globset",
- "portable-pty",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "uuid",
- "vt100",
- "walkdir",
-]
-
-[[package]]
-name = "linux-archductor-gtk"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures-channel",
- "glib",
- "gtk4",
- "libadwaita",
- "linux-archductor-core",
- "notify",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

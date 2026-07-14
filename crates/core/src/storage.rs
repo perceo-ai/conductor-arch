@@ -25,6 +25,7 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           port_base INTEGER NOT NULL,
           status TEXT NOT NULL,
           archived_at TEXT,
+          agent_metadata_applied_at TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -176,6 +177,63 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           UNIQUE(process_id, sequence)
         );
 
+        CREATE TABLE IF NOT EXISTS provider_events (
+          id INTEGER PRIMARY KEY,
+          identity_key TEXT NOT NULL UNIQUE,
+          provider TEXT NOT NULL,
+          provider_event_id TEXT,
+          provider_item_id TEXT,
+          provider_thread_id TEXT,
+          provider_turn_id TEXT,
+          parent_provider_item_id TEXT,
+          parent_provider_thread_id TEXT,
+          workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+          chat_thread_id INTEGER REFERENCES chat_threads(id) ON DELETE CASCADE,
+          process_id INTEGER REFERENCES processes(id) ON DELETE CASCADE,
+          phase TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          provider_subtype TEXT,
+          provider_sequence INTEGER,
+          received_sequence INTEGER NOT NULL,
+          occurred_at_ms INTEGER NOT NULL,
+          normalized_payload_json TEXT NOT NULL,
+          raw_json TEXT NOT NULL,
+          schema_version INTEGER NOT NULL,
+          adapter_version TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_provider_events_thread
+          ON provider_events(provider, provider_thread_id, received_sequence, id);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_events_chat_thread
+          ON provider_events(chat_thread_id, received_sequence, id);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_events_process
+          ON provider_events(process_id, received_sequence, id);
+
+        CREATE TABLE IF NOT EXISTS provider_event_raw_payloads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          identity_key TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          chat_thread_id INTEGER,
+          process_id INTEGER,
+          phase TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          provider_sequence INTEGER,
+          raw_sequence INTEGER NOT NULL,
+          occurred_at_ms INTEGER NOT NULL,
+          raw_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_provider_event_raw_payloads_identity
+          ON provider_event_raw_payloads(identity_key, raw_sequence, id);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_event_raw_payloads_chat_thread
+          ON provider_event_raw_payloads(chat_thread_id, raw_sequence, id);
+
         CREATE TABLE IF NOT EXISTS workspace_timeline (
           id INTEGER PRIMARY KEY,
           workspace_id INTEGER NOT NULL,
@@ -216,6 +274,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "chat_messages",
         "timeline_seq",
         "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "agent_metadata_applied_at",
+        "ALTER TABLE workspaces ADD COLUMN agent_metadata_applied_at TEXT",
     )?;
     Ok(())
 }

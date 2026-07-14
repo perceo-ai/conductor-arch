@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=Linux Archductor
+Name=Archductor
 GenericName=Coding Agent Workspace Manager
-Comment=Linux-native parallel coding-agent workflow built around Git worktrees
-Exec=linux-archductor-gtk
-Icon=linux-archductor
+Comment=Archductor parallel coding-agent workflow built around Git worktrees
+Exec=archductor-gtk
+Icon=archductor
 Type=Application
 Categories=Development;IDE;
 Keywords=git;worktree;agent;codex;claude;

@@ -1,15 +1,15 @@
-use linux_archductor_core::codex_tui::{
+use archductor_core::codex_tui::{
     CodexParseBenchmark, CodexParsedItem, CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
-use linux_archductor_core::session_event::{
+use archductor_core::session_event::{
     codex_parsed_item_to_session_event, parse_codex_screen_event_delta, SessionCommandOutputStatus,
     SessionEvent, SessionEventPayload, SessionEventSource, SessionEventStatus, SessionInputKind,
     SessionMetadataValue, SessionPromptOption, SessionPromptStyle,
 };
-use linux_archductor_core::session_pipeline::{
+use archductor_core::session_pipeline::{
     process_codex_pty_pipeline, PtyChunkInput, SessionPipelineInput,
 };
-use linux_archductor_core::session_state::{AgentSessionState, SessionStateMachine};
+use archductor_core::session_state::{AgentSessionState, SessionStateMachine};
 
 #[test]
 fn event_model_serializes_all_required_event_families_with_raw_text() {
@@ -181,7 +181,7 @@ Ran cargo test
 running
 • after tool
 ";
-    let delta = linux_archductor_core::codex_tui::parse_codex_screen_delta(
+    let delta = archductor_core::codex_tui::parse_codex_screen_delta(
         screen,
         &CodexParseBenchmark {
             last_user_message: Some("latest question".to_owned()),

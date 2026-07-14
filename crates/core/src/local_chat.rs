@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::codex_tui::{merge_screen_messages, parse_codex_screen_messages, ScreenMessage};
 use crate::session_event::{SessionEvent, SessionEventPayload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +42,6 @@ pub struct LocalChatHistoryMessage {
 pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage> {
     let lines = transcript.lines().collect::<Vec<_>>();
     let mut messages = Vec::new();
-    let mut codex_messages = Vec::<ScreenMessage>::new();
     let mut index = 0usize;
 
     while index < lines.len() {
@@ -53,17 +51,18 @@ pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHist
             continue;
         }
 
-        if line == "[codex screen]" {
-            let (screen, next) = collect_codex_screen_block(&lines, index + 1);
-            let parsed = parse_codex_screen_messages(&screen);
-            merge_screen_messages(&mut codex_messages, &parsed);
-            index = next;
+        if line == "[codex raw]" {
+            index = skip_bracketed_block(&lines, index + 1, "[/codex raw]");
             continue;
         }
 
-        if line == "[codex raw]" {
-            let (_, next) = collect_codex_raw_block(&lines, index + 1);
-            index = next;
+        if line == "[codex-app-server jsonl]" {
+            index = skip_bracketed_block(&lines, index + 1, "[/codex-app-server jsonl]");
+            continue;
+        }
+
+        if line == "[claude-stream-json]" {
+            index = skip_bracketed_block(&lines, index + 1, "[/claude-stream-json]");
             continue;
         }
 
@@ -92,9 +91,6 @@ pub(crate) fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHist
         index = next;
     }
 
-    for message in codex_messages {
-        push_local_chat_message(&mut messages, message.role.as_str(), message.content);
-    }
     messages
 }
 
@@ -217,30 +213,14 @@ fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, us
     (content.join("\n"), index)
 }
 
-fn collect_codex_screen_block(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
+fn skip_bracketed_block(lines: &[&str], mut index: usize, end_marker: &str) -> usize {
     while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/codex screen]" {
-            return (content.join("\n"), index + 1);
+        if lines[index].trim_end() == end_marker {
+            return index + 1;
         }
-        content.push(lines[index]);
         index += 1;
     }
-    (content.join("\n"), index)
-}
-
-fn collect_codex_raw_block(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/codex raw]" {
-            return (content.join("\n"), index + 1);
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
+    index
 }
 
 fn is_local_chat_marker(line: &str) -> bool {
@@ -249,8 +229,10 @@ fn is_local_chat_marker(line: &str) -> bool {
         || line == "[staged review prompt]"
         || line == "[codex raw]"
         || line == "[/codex raw]"
-        || line == "[codex screen]"
-        || line == "[/codex screen]"
+        || line == "[codex-app-server jsonl]"
+        || line == "[/codex-app-server jsonl]"
+        || line == "[claude-stream-json]"
+        || line == "[/claude-stream-json]"
         || is_local_system_marker(line)
 }
 
@@ -266,4 +248,26 @@ fn is_local_system_marker(line: &str) -> bool {
         || line.starts_with("[tool ")
         || line.starts_with("[skill ")
         || line.starts_with("[archductor bootstrap")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_skips_provider_native_raw_output_blocks() {
+        let messages = parse_local_chat_transcript(
+            "[codex-app-server jsonl]\n{\"id\":1,\"secret\":\"raw\"}\n[/codex-app-server jsonl]\n\
+[claude-stream-json]\n{\"type\":\"result\"}\n[/claude-stream-json]\n\
+agent reply\n",
+        );
+
+        assert_eq!(
+            messages,
+            vec![LocalChatHistoryMessage {
+                role: "agent".to_owned(),
+                content: "agent reply".to_owned(),
+            }]
+        );
+    }
 }

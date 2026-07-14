@@ -17,22 +17,22 @@ help:
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION'
 
 dev:
-	@pkill -f '^target/debug/linux-archductor-gtk$$' 2>/dev/null || true
+	@pkill -f '^target/debug/archductor-gtk$$' 2>/dev/null || true
 	@pkill -f '^target/debug/archcar$$' 2>/dev/null || true
 	@cargo build --workspace
 	@trap 'kill 0' INT TERM EXIT; \
 	cargo run --bin archcar & \
-	cargo watch -x "run --bin linux-archductor-gtk" & \
+	cargo watch -x "run --bin archductor-gtk" & \
 	wait
 
 archcar:
 	cargo run --bin archcar
 
 gtk:
-	cargo run --bin linux-archductor-gtk
+	cargo run --bin archductor-gtk
 
 cli:
-	cargo run --bin linux-archductor --
+	cargo run --bin archductor --
 
 run: gtk
 

@@ -1,6 +1,6 @@
 # Archductor Docs Parity Map
 
-Use this map when updating the Linux Archductor MVP docs or implementing the GUI.
+Use this map when updating the Archductor MVP docs or implementing the GUI.
 The product target is Archductor parity first. Better-than-Archductor features
 should be explicit product decisions after parity is understood.
 
