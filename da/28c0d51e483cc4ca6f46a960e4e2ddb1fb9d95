@@ -1,0 +1,46 @@
+crates/gtk-app/src/session_surface.rs
+  s_2eaee49d59303c::t_466e0656aca324 819-820,830-832,844-846,870-871,9498-9500
+  s_2eaee49d59303c::t_1694b7a1339c09 2607-2614,2619-2620,2622,2627-2646
+  s_2eaee49d59303c::t_096eb3d0758fe7 732-736,753
+  s_2eaee49d59303c::t_372b25ffcfab8e 5986,5989-6007,6038-6052
+  s_2eaee49d59303c::t_42881c43ce8149 9482,9492-9497,9501-9527,9529-9531,10905,10943,10947,10950,12221-12229
+  s_2eaee49d59303c::t_afd48eb4c29e0d 10951-10952
+  s_2eaee49d59303c::t_1fe0384d9064c6 773,804-814,816-817,821,823-824,826-828,835,837-838,841-842,867,869
+  s_2eaee49d59303c::t_2074dcf618a7cb 8326-8328,8421-8436,8727
+  s_2eaee49d59303c::t_d166ee60ccda17 3154
+  s_2eaee49d59303c::t_0398c27782617d 10949
+  s_2eaee49d59303c::t_f8b2375f1fd989 771-772,798-803,815,818,822,825,829,833-834,836,839-840,843,847-866,868,872-873
+  s_2eaee49d59303c::t_e86ccfeb7d40b5 6053,6077-6090
+  s_2eaee49d59303c::t_e3d72b36875b25 1627-1631
+  s_2eaee49d59303c::t_368cdeebc311fd 6054
+crates/core/src/archcar/protocol.rs
+  s_2eaee49d59303c::t_cfbb1385d015d5 510-522
+  s_2eaee49d59303c::t_f92d674131dbcf 249-256
+  s_2eaee49d59303c::t_9d01487e32bad7 312-317
+  s_2eaee49d59303c::t_aa2bb2ec4234e4 509
+crates/core/src/archcar/session.rs
+  s_2eaee49d59303c::t_2623593b97ad7e 1627-1631,2009-2028
+  s_2eaee49d59303c::t_7a7bbf3fd12225 2638-2650
+  s_2eaee49d59303c::t_5501808bb9f30b 2029-2030
+  s_2eaee49d59303c::t_c4d2d6791266d5 2637
+crates/gtk-app/src/theme.rs
+  s_2eaee49d59303c::t_a7d5c4d21e7933 2198-2235
+  s_2eaee49d59303c::t_ba7a3977a6b7e9 2888,2890-2894,2898,2902-2904
+  s_2eaee49d59303c::t_302a12d8f18863 2905
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "da28c0d51e483cc4ca6f46a960e4e2ddb1fb9d95",
+  "prompts": {},
+  "sessions": {
+    "s_2eaee49d59303c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f93-19d2-7930-9984-77958e3a29db",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
