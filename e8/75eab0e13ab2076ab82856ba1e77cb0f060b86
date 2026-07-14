@@ -1,0 +1,102 @@
+docs/conductor-gui-mvp-handoff.md
+  s_843928463a43be::t_2086aae54849d9 8,72-73
+docs/mvp-scope.md
+  s_843928463a43be::t_2086aae54849d9 3-4,60-62
+crates/core/src/archcar/client.rs
+  s_843928463a43be::t_dcb31cef447853 15,20,26,36,55,75,93,104,114,125,128,139-140,145,151,214,223,229,233,238
+crates/cli/src/main.rs
+  s_843928463a43be::t_8b5d9c706c3015 2365-2398
+  s_843928463a43be::t_26e08a9a61d354 1751-1758,1833-1836,1846-1848,1861,1864,1869-1873,1875-1887,1890-1891,1912,2251-2257,2259-2260
+  s_843928463a43be::t_9859bc4246180d 1888,2258
+  s_843928463a43be::t_0cef4e8c6edd71 1849-1857,1892-1898,1900-1910,2262-2268
+crates/core/src/import.rs
+  s_843928463a43be::t_986745543559ed 41,310
+crates/core/src/archcar/transport.rs
+  s_843928463a43be::t_0752d061955609 45-71
+  s_843928463a43be::t_dcb31cef447853 1-44
+crates/core/src/workspace.rs
+  s_843928463a43be::t_c5ef88335fb250 4943
+  s_843928463a43be::t_2c0835949db222 9153,9208-9222
+  s_843928463a43be::t_bb4631275d2379 2483,6824,7237,7240,9104,9297-9298
+  s_843928463a43be::t_daec882d60c8fb 9223-9225
+.github/workflows/ci.yml
+  s_843928463a43be::t_1d6a6b4706ddd6 230
+  s_843928463a43be::t_454c43a55c7a48 221-229,231-266,273-314,317-336,341-347,349-353,362-364
+  s_843928463a43be::t_163673fec43e3c 315-316,337-339
+  s_843928463a43be::t_eae733cb765852 340,348
+  s_843928463a43be::t_8b5d9c706c3015 267-272
+crates/core/src/paths.rs
+  s_843928463a43be::t_dcb31cef447853 16,18-31,33,35,37,50-55
+crates/core/src/repository.rs
+  s_843928463a43be::t_986745543559ed 274
+progress.md
+  s_843928463a43be::t_2086aae54849d9 3,59-64,112-118
+crates/core/src/platform.rs
+  s_843928463a43be::t_172363aa041827 55-57
+  s_843928463a43be::t_dcb31cef447853 1-54,58-97,103-104
+  s_843928463a43be::t_8b5d9c706c3015 98-102
+docs/release-readiness.md
+  s_843928463a43be::t_7816c6c394fd6a 47,49,85,123-124
+crates/core/src/archcar/session.rs
+  s_843928463a43be::t_2c0835949db222 2251,2255,2262-2263
+.codex/AGENTS.md
+  s_843928463a43be::t_dd8297edfbc69e 132-135,193,211-212
+crates/core/src/archcar/mod.rs
+  s_843928463a43be::t_dcb31cef447853 6
+README.md
+  s_843928463a43be::t_2bc550e3c1f8b6 12-13,162-172,507-513,587-588
+  s_843928463a43be::t_6a0574f192de74 589
+crates/gtk-app/src/main.rs
+  s_843928463a43be::t_986745543559ed 1492
+  s_843928463a43be::t_99faf5340f4f26 208
+  s_843928463a43be::t_845b85b3c31f9b 1525-1526,1581-1582
+  s_843928463a43be::t_fb994a9e854fff 1527,1529-1542,1545-1553,1555-1578
+  s_843928463a43be::t_ce200ad8f163cf 1508-1510,1513,1515-1516,1522
+crates/core/src/lib.rs
+  s_843928463a43be::t_dcb31cef447853 16
+crates/core/src/pty.rs
+  s_843928463a43be::t_dcb31cef447853 23
+crates/gtk-app/src/workspace_command_center.rs
+  s_843928463a43be::t_0cef4e8c6edd71 1132
+  s_843928463a43be::t_ce200ad8f163cf 2829-2834
+docs/manual-testing-checklist.md
+  s_843928463a43be::t_7816c6c394fd6a 358-377
+crates/core/src/archcar/server.rs
+  s_843928463a43be::t_1dfa2f67ce5645 1128
+  s_843928463a43be::t_dcb31cef447853 19,29,62,68-70,94,168,176
+  s_843928463a43be::t_3ad161920ef073 1124,1947,2168,2181,2198,2219-2220
+crates/core/src/settings.rs
+  s_843928463a43be::t_351dbbe7321250 2120-2125,2144-2147
+  s_843928463a43be::t_1f8ddeb9c9702b 2108-2112,2114,2116-2118,2126,2133-2134,2138-2139
+crates/core/src/doctor.rs
+  s_843928463a43be::t_2edbc60c81853b 188-189,191-192,194,209-211,219-226,473-489
+  s_843928463a43be::t_1f8ddeb9c9702b 190
+  s_843928463a43be::t_845b85b3c31f9b 403-406,408-421
+  s_843928463a43be::t_508f9c003c2b73 390,394-396,402,407,422
+  s_843928463a43be::t_421158f2f7c543 423-424,490
+docs/archductor-docs-parity-map.md
+  s_843928463a43be::t_2086aae54849d9 89-93
+.github/workflows/publish.yml
+  s_843928463a43be::t_3fe0deed2c1ed9 180-191,193-282
+  s_843928463a43be::t_1d6a6b4706ddd6 192
+crates/core/src/mcp.rs
+  s_843928463a43be::t_986745543559ed 29,114
+packaging/README.md
+  s_843928463a43be::t_7816c6c394fd6a 7-8,11-13,122-132,142-144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "e875eab0e13ab2076ab82856ba1e77cb0f060b86",
+  "prompts": {},
+  "sessions": {
+    "s_843928463a43be": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f61f5-f061-75d3-9316-7a8ae96d2ce9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
