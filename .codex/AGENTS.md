@@ -143,6 +143,9 @@ Use these terms exactly:
 - `Working tree`: the files on disk for that workspace.
 - `Running environment`: terminals, agents, scripts, tests, servers, and other
   live processes inside that workspace.
+- `Turn`: the actions a coding agent takes after one user message and before
+  the next user message in that same chat thread. A single tool call or file
+  write is not a turn.
 
 Relationship model:
 

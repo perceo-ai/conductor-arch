@@ -466,6 +466,9 @@ impl ProviderEventStore {
         let tx = conn.transaction()?;
         let received_sequence = next_received_sequence(&tx)?;
         let raw_sequence = next_raw_sequence(&tx)?;
+        let timeline_seq = existing_timeline_sequence(&tx, &identity_key)?
+            .map(Ok)
+            .unwrap_or_else(|| next_timeline_sequence(&tx))?;
         let normalized_payload = merge_existing_streaming_payload(&tx, &identity_key, draft)?;
         let normalized_payload_json = serde_json::to_string(&normalized_payload)?;
         tx.execute(
@@ -474,11 +477,11 @@ impl ProviderEventStore {
                 provider_thread_id, provider_turn_id, parent_provider_item_id,
                 parent_provider_thread_id, workspace_id, chat_thread_id, process_id,
                 phase, kind, provider_subtype, provider_sequence, received_sequence,
-                occurred_at_ms, normalized_payload_json, raw_json, schema_version,
+                timeline_seq, occurred_at_ms, normalized_payload_json, raw_json, schema_version,
                 adapter_version, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23
              )
              ON CONFLICT(identity_key) DO UPDATE SET
                 provider_event_id = excluded.provider_event_id,
@@ -494,6 +497,7 @@ impl ProviderEventStore {
                 kind = excluded.kind,
                 provider_subtype = excluded.provider_subtype,
                 provider_sequence = excluded.provider_sequence,
+                timeline_seq = COALESCE(provider_events.timeline_seq, excluded.timeline_seq),
                 occurred_at_ms = excluded.occurred_at_ms,
                 normalized_payload_json = excluded.normalized_payload_json,
                 raw_json = excluded.raw_json,
@@ -517,6 +521,7 @@ impl ProviderEventStore {
                 draft.provider_subtype,
                 draft.provider_sequence,
                 received_sequence,
+                timeline_seq,
                 draft.occurred_at_ms as i64,
                 normalized_payload_json,
                 raw_json,
@@ -816,6 +821,22 @@ fn open_migrated_connection(path: &Path) -> Result<Connection> {
           ON provider_event_raw_payloads(chat_thread_id, raw_sequence, id);",
     )?;
     Ok(conn)
+}
+
+fn existing_timeline_sequence(conn: &Connection, identity_key: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT timeline_seq FROM provider_events WHERE identity_key = ?1",
+            [identity_key],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+fn next_timeline_sequence(conn: &Connection) -> Result<i64> {
+    conn.execute("INSERT INTO chat_timeline_seq DEFAULT VALUES", [])?;
+    Ok(conn.last_insert_rowid())
 }
 
 fn next_received_sequence(conn: &Connection) -> Result<i64> {

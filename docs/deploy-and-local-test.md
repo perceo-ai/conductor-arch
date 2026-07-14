@@ -195,7 +195,7 @@ default_visible_tab = "changes"
 
 [customization.view]
 theme = "system"
-accent_color = "green"
+accent_color = "blue"
 density = "compact"
 keybindings = "vim"
 terminal_font = "JetBrains Mono 13"

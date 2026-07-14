@@ -14,7 +14,7 @@ const APP_CSS: &str = r#"
 @define-color lc-text #e4e4e4;
 @define-color lc-text-strong #f8fafc;
 @define-color lc-text-muted #8a8a8a;
-@define-color lc-success #84e0a0;
+@define-color lc-success #d0d0d0;
 @define-color lc-danger #ff8a8a;
 
 window {
@@ -568,7 +568,7 @@ checkbutton {
     font-weight: 700;
 }
 .card-meta.ws-pr-status-ready {
-    color: #84e0a0;
+    color: #cfcfcf;
 }
 .card-meta.ws-pr-status-pending {
     color: #a8a8a8;
@@ -1578,6 +1578,11 @@ separator {
     background-color: #181818;
     border-bottom: 1px solid #232323;
 }
+.ws-changes-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e6e6e6;
+}
 .ws-pr-number {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 13px;
@@ -1597,8 +1602,8 @@ separator {
     color: #a8a8a8;
 }
 .ws-pr-status-ready {
-    background-color: #163522;
-    color: #84e0a0;
+    background-color: #262626;
+    color: #cfcfcf;
 }
 .ws-pr-status-pending {
     background-color: #262626;
@@ -1632,8 +1637,8 @@ separator {
     border-bottom-color: #2d2d2d;
 }
 .ws-pr-compact-panel.ws-pr-status-ready {
-    background-color: #14251a;
-    border-bottom-color: #214b2d;
+    background-color: #181818;
+    border-bottom-color: #2d2d2d;
 }
 .ws-pr-compact-panel.ws-pr-status-failed {
     background-color: #2a1718;
@@ -1660,9 +1665,9 @@ separator {
     border-color: #3a3a3a;
 }
 .ws-pr-action-button.ws-pr-status-ready {
-    background-color: #1f6b39;
-    color: #f1fff4;
-    border-color: #2c874b;
+    background-color: #303030;
+    color: #f5f5f5;
+    border-color: #4a4a4a;
 }
 .ws-pr-action-button.ws-pr-status-failed {
     background-color: #8d2e34;
@@ -1712,7 +1717,7 @@ separator {
     font-size: 12px;
 }
 .ws-file-summary-counts {
-    color: #9ad6a3;
+    color: #bfc7d5;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
     font-size: 12px;
     font-weight: 700;
@@ -2703,7 +2708,7 @@ textview:focus,
 .diff-added,
 .status-running,
 .workspace-status-running {
-    color: #22c55e;
+    color: #aaaaaa;
 }
 
 .diff-removed,
@@ -2735,7 +2740,7 @@ mod tests {
         assert!(css.contains("#333333"));
         assert!(css.contains("#5a5a5a"));
         assert!(css.contains("#8a8a8a"));
-        assert!(css.contains("#22c55e"));
+        assert!(css.contains("#aaaaaa"));
         assert!(css.contains("Mona Sans"));
         assert!(css.contains("Commit Mono"));
         assert!(css.contains(".workspace-modal-section"));

@@ -3086,22 +3086,33 @@ impl WorkspaceStore {
                     kind,
                     provider_subtype,
                     normalized_payload_json,
-                    raw_json
+                    raw_json,
+                    COALESCE(timeline_seq, received_sequence) AS event_timeline_seq,
+                    (
+                        SELECT m.id
+                        FROM chat_messages m
+                        WHERE m.thread_id = provider_events.chat_thread_id
+                          AND m.role = 'user'
+                          AND COALESCE(m.timeline_seq, m.id) <= COALESCE(provider_events.timeline_seq, provider_events.received_sequence)
+                        ORDER BY COALESCE(m.timeline_seq, m.id) DESC, m.id DESC
+                        LIMIT 1
+                    ) AS user_message_id
              FROM provider_events
              WHERE workspace_id = ?1
-               AND provider_turn_id IS NOT NULL
                AND phase = 'completed'
                AND kind IN ('diff_file_change', 'file_system')
-             ORDER BY received_sequence DESC, id DESC",
+             ORDER BY event_timeline_seq DESC, received_sequence DESC, id DESC",
         )?;
         let rows = stmt.query_map([workspace.id], |row| {
-            let provider_turn_id: String = row.get(0)?;
+            let provider_turn_id: Option<String> = row.get(0)?;
             let chat_thread_id: Option<i64> = row.get(1)?;
             let occurred_at_ms: i64 = row.get(2)?;
             let kind: String = row.get(3)?;
             let provider_subtype: Option<String> = row.get(4)?;
             let normalized_payload_json: String = row.get(5)?;
             let raw_json: String = row.get(6)?;
+            let timeline_seq: i64 = row.get(7)?;
+            let user_message_id: Option<i64> = row.get(8)?;
             Ok((
                 provider_turn_id,
                 chat_thread_id,
@@ -3110,6 +3121,8 @@ impl WorkspaceStore {
                 provider_subtype,
                 serde_json::from_str::<Value>(&normalized_payload_json).unwrap_or(Value::Null),
                 serde_json::from_str::<Value>(&raw_json).unwrap_or(Value::Null),
+                timeline_seq,
+                user_message_id,
             ))
         })?;
 
@@ -3124,6 +3137,8 @@ impl WorkspaceStore {
                 provider_subtype,
                 normalized_payload,
                 raw_json,
+                timeline_seq,
+                user_message_id,
             ) = row?;
             let summaries = provider_file_change_summaries(
                 &kind,
@@ -3135,17 +3150,26 @@ impl WorkspaceStore {
                 continue;
             }
 
-            let index = if let Some(index) = turn_index.get(&provider_turn_id).copied() {
+            let turn_key = match (chat_thread_id, user_message_id) {
+                (Some(thread_id), Some(message_id)) => {
+                    format!("thread:{thread_id}:user:{message_id}")
+                }
+                _ => provider_turn_id
+                    .clone()
+                    .unwrap_or_else(|| format!("event:{timeline_seq}")),
+            };
+
+            let index = if let Some(index) = turn_index.get(&turn_key).copied() {
                 index
             } else {
                 if turns.len() >= limit {
                     continue;
                 }
                 let index = turns.len();
-                turn_index.insert(provider_turn_id.clone(), index);
+                turn_index.insert(turn_key.clone(), index);
                 turns.push(TurnFileChangeSummary {
                     label: format!("Turn {}", index + 1),
-                    provider_turn_id: provider_turn_id.clone(),
+                    provider_turn_id: turn_key,
                     occurred_at_ms,
                     chat_thread_id,
                     files: Vec::new(),
@@ -13045,7 +13069,7 @@ typecheck = "cargo check --workspace"
 
 [customization.view]
 theme = "dark"
-accent_color = "green"
+accent_color = "blue"
 density = "compact"
 keybindings = "vim"
 terminal_font = "JetBrains Mono 13"
@@ -13099,7 +13123,7 @@ accent = "#0ea5e9"
 
         assert_eq!(defaults.default_visible_tab.as_deref(), Some("checks"));
         assert_eq!(defaults.theme.as_deref(), Some("dark"));
-        assert_eq!(defaults.accent_color.as_deref(), Some("green"));
+        assert_eq!(defaults.accent_color.as_deref(), Some("blue"));
         assert_eq!(defaults.colors.get("accent"), Some(&"#0ea5e9".to_owned()));
         assert_eq!(defaults.density.as_deref(), Some("compact"));
         assert_eq!(defaults.keybindings.as_deref(), Some("vim"));
@@ -19693,6 +19717,107 @@ spotlight_testing = true
         assert!(!turns
             .iter()
             .any(|turn| turn.provider_turn_id == "unrelated checkpoint"));
+    }
+
+    #[test]
+    fn turn_file_change_summaries_group_writes_between_user_messages() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .append_chat_message(thread.id, "user", "first request", "user_send")
+            .unwrap();
+        for (event_id, path) in [("event-a", "src/a.rs"), ("event-b", "src/b.rs")] {
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(event_id.to_owned()),
+                    provider_item_id: Some(event_id.to_owned()),
+                    provider_thread_id: Some("thread-1".to_owned()),
+                    provider_turn_id: Some(event_id.to_owned()),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread.id),
+                    process_id: Some(process.id),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: None,
+                    occurred_at_ms: 10,
+                    normalized_payload: serde_json::json!({"title": "File changes"}),
+                    raw_json: serde_json::json!({
+                        "params": {
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [{"path": path, "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+        store
+            .append_chat_message(thread.id, "user", "second request", "user_send")
+            .unwrap();
+        provider_store
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-c".to_owned()),
+                provider_item_id: Some("event-c".to_owned()),
+                provider_thread_id: Some("thread-1".to_owned()),
+                provider_turn_id: Some("event-c".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                provider_subtype: Some("item/fileChange/completed".to_owned()),
+                provider_sequence: None,
+                occurred_at_ms: 20,
+                normalized_payload: serde_json::json!({"title": "File changes"}),
+                raw_json: serde_json::json!({
+                    "params": {
+                        "item": {
+                            "type": "fileChange",
+                            "changes": [{"path": "src/c.rs", "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                        }
+                    }
+                }),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+
+        let turns = store.turn_file_change_summaries("berlin", 25).unwrap();
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/c.rs"]
+        );
+        assert_eq!(
+            turns[1]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/b.rs"]
+        );
     }
 
     #[test]

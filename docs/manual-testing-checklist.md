@@ -304,7 +304,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Set `customization.workspace_defaults.default_visible_tab = "checks"` and
   confirm opening/selecting that workspace lands on Checks when no explicit tab
   is passed.
-- [ ] Set `customization.view.theme = "light"`, `accent_color = "green"`, and
+- [ ] Set `customization.view.theme = "light"`, `accent_color = "blue"`, and
   `density = "compact"` and confirm selecting the workspace changes the GTK
   stylesheet.
 - [ ] Set `customization.view.keybindings = "vim"` and confirm Ctrl+P opens the

@@ -31,6 +31,9 @@ Use these terms exactly:
 - `Working tree`: files on disk for that workspace.
 - `Running environment`: terminals, agents, scripts, tests, servers, and other
   processes inside the workspace.
+- `Turn`: the actions a coding agent takes after one user message and before
+  the next user message in the same chat thread. One tool call or file write is
+  not a turn.
 
 Relationships:
 
@@ -39,6 +42,7 @@ Relationships:
 - `1 workspace maps to 1 branch`
 - `1 branch has 1 working tree`
 - `1 workspace can run many processes`
+- `1 turn can contain many tool calls and file writes`
 
 ## V1 Must-Haves
 

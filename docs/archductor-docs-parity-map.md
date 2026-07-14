@@ -17,6 +17,9 @@ instructions:
 - `Working tree`: the files on disk for that workspace.
 - `Running environment`: terminals, agents, setup/run scripts, servers, tests,
   and watchers inside the workspace.
+- `Turn`: the actions a coding agent takes after one user message and before
+  the next user message in the same chat thread. One tool call or file write is
+  not a turn.
 
 Relationship model:
 
@@ -26,6 +29,7 @@ Relationship model:
 - `1 branch has 1 working tree`
 - `1 working tree belongs to 1 workspace`
 - `1 workspace can run many processes in its running environment`
+- `1 turn can contain many tool calls and file writes`
 
 ## Core Product Loop
 

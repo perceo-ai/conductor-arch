@@ -486,7 +486,7 @@ pub fn default_repository_settings_toml() -> Result<String> {
             },
             view: ViewSettings {
                 theme: Some("system".to_owned()),
-                accent_color: Some("green".to_owned()),
+                accent_color: Some("blue".to_owned()),
                 colors: default_view_colors(),
                 density: Some("compact".to_owned()),
                 diff_preference: Some("unified".to_owned()),
@@ -565,9 +565,9 @@ fn default_view_colors() -> BTreeMap<String, String> {
         ("text", "#e4e4e4"),
         ("text_strong", "#f8fafc"),
         ("text_muted", "#8a8a8a"),
-        ("accent", "#22c55e"),
-        ("accent_fg", "#052e16"),
-        ("success", "#84e0a0"),
+        ("accent", "#5b9dff"),
+        ("accent_fg", "#071a33"),
+        ("success", "#d0d0d0"),
         ("warning", "#f59e0b"),
         ("danger", "#ff8a8a"),
     ]
@@ -694,7 +694,7 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
         );
         anyhow::ensure!(
             is_valid_hex_color(value),
-            "customization.view.colors.{key} must be a hex color like #22c55e"
+            "customization.view.colors.{key} must be a hex color like #5b9dff"
         );
     }
     Ok(())
@@ -2794,7 +2794,7 @@ default_visible_tab = "changes"
 
 [customization.view]
 theme = "system"
-accent_color = "green"
+accent_color = "blue"
 density = "compact"
 sidebar_layout = "grouped"
 diff_preference = "unified"
@@ -2808,8 +2808,8 @@ command_palette_presets = ["ci", "review"]
 settings_import_export = "toml"
 
 [customization.view.colors]
-accent = "#22c55e"
-accent_fg = "#052e16"
+accent = "#5b9dff"
+accent_fg = "#071a33"
 background = "#191919"
 text = "#e4e4e4"
 "##,

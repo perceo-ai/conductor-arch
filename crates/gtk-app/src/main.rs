@@ -472,7 +472,7 @@ const VIEW_COLOR_TOKENS: &[(&str, &str, &str)] = &[
     ("text_muted", "lc-text-muted", "#8a8a8a"),
     ("accent", "lc-accent", "#8a8a8a"),
     ("accent_fg", "lc-accent-fg", "#f5f5f5"),
-    ("success", "lc-success", "#84e0a0"),
+    ("success", "lc-success", "#d0d0d0"),
     ("warning", "lc-warning", "#f59e0b"),
     ("danger", "lc-danger", "#ff8a8a"),
 ];
@@ -545,14 +545,14 @@ window.lc-custom-colors,
 .lc-custom-colors .project-tab-active,
 .lc-custom-colors .card-activity,
 .lc-custom-colors .workspace-title {
-    color: @lc-accent;
-    border-color: @lc-accent;
+    color: @lc-text;
+    border-color: @lc-border;
 }
 
 .lc-custom-colors .suggested-action,
 .lc-custom-colors .suggested-action:hover {
-    background-color: @lc-accent;
-    color: @lc-accent-fg;
+    background-color: @lc-hover;
+    color: @lc-text;
 }
 
 .lc-custom-colors .diff-added,

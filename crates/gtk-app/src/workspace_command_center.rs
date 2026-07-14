@@ -4,7 +4,7 @@ use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
 use archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
+    ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
     WorkspaceTimelineEvent,
 };
@@ -3948,59 +3948,24 @@ fn apply_diff_tags(buffer: &gtk::TextBuffer) {
 }
 
 fn workspace_changes_panel(
-    db_path: &Path,
+    _db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
+    _refresh_hub: RefreshHub,
+    _toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let header_row = GBox::new(Orientation::Horizontal, 8);
     header_row.add_css_class("ws-changes-header");
     let title = Label::new(Some("Changes"));
-    title.add_css_class("section-title");
+    title.add_css_class("ws-changes-title");
     title.set_xalign(0.0);
     title.set_hexpand(true);
-    let scope_label = Label::new(Some("Uncommitted changes"));
-    scope_label.add_css_class("detail-label");
-    let menu_btn = text_button("⋯");
+    let menu_btn = text_button("Uncommitted");
     menu_btn.add_css_class("ws-changes-menu-btn");
     header_row.append(&title);
-    header_row.append(&scope_label);
     header_row.append(&menu_btn);
     panel.append(&header_row);
-
-    let status = Label::new(Some(&format!(
-        "Branch: {}",
-        workspace_branch_state_text(store, name)
-    )));
-    status.add_css_class("card-meta");
-    status.set_xalign(0.0);
-    status.set_wrap(true);
-    panel.append(&status);
-
-    let feedback = Label::new(Some("Stage files, edit the commit message, then commit."));
-    feedback.add_css_class("card-meta");
-    feedback.set_xalign(0.0);
-    feedback.set_wrap(true);
-
-    panel.append(&workspace_base_ref_controls(
-        db_path,
-        store,
-        name,
-        refresh_hub.clone(),
-        toast_overlay.clone(),
-        &feedback,
-    ));
-
-    panel.append(&workspace_git_file_actions_panel(
-        db_path,
-        store,
-        name,
-        refresh_hub,
-        toast_overlay.clone(),
-        &feedback,
-    ));
 
     let body_stack = Stack::new();
     body_stack.set_vexpand(true);
@@ -4008,19 +3973,14 @@ fn workspace_changes_panel(
 
     let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
     body_stack.add_named(
-        &workspace_file_summary_scope_view(
-            "Uncommitted changes",
-            "Current working tree changes.",
-            &uncommitted_summaries,
-            true,
-        ),
+        &workspace_file_summary_scope_view(&uncommitted_summaries, true),
         Some("uncommitted"),
     );
 
     let mut scope_items = vec![(
         "Uncommitted changes".to_owned(),
         "uncommitted".to_owned(),
-        "Uncommitted changes".to_owned(),
+        "Uncommitted".to_owned(),
     )];
 
     match store.turn_file_change_summaries(name, WORKSPACE_TURN_CHANGE_LIMIT) {
@@ -4028,12 +3988,8 @@ fn workspace_changes_panel(
             for (index, turn) in turns.iter().enumerate() {
                 let key = format!("turn_{index}");
                 let label = turn_scope_label(index);
-                let subtitle = format!(
-                    "File writes recorded from chat turn {}.",
-                    short_turn_id(&turn.provider_turn_id)
-                );
                 body_stack.add_named(
-                    &workspace_file_summary_scope_view(&label, &subtitle, &turn.files, false),
+                    &workspace_file_summary_scope_view(&turn.files, false),
                     Some(&key),
                 );
                 scope_items.push((label.clone(), key, label));
@@ -4041,8 +3997,7 @@ fn workspace_changes_panel(
             if turns.is_empty() {
                 body_stack.add_named(
                     &workspace_empty_changes_scope_view(
-                        "Turn changes",
-                        "No file writes recorded from chat turns yet.",
+                        "No file changes recorded for recent agent turns.",
                     ),
                     Some("turns_empty"),
                 );
@@ -4055,10 +4010,9 @@ fn workspace_changes_panel(
         }
         Err(err) => {
             body_stack.add_named(
-                &workspace_empty_changes_scope_view(
-                    "Turn changes",
-                    &format!("Could not read chat turn file writes: {err:#}"),
-                ),
+                &workspace_empty_changes_scope_view(&format!(
+                    "Could not read recent agent-turn file changes: {err:#}"
+                )),
                 Some("turns_error"),
             );
             scope_items.push((
@@ -4081,11 +4035,11 @@ fn workspace_changes_panel(
     for (label, target, scope_text) in scope_items {
         let item = menu_text_button(&label);
         let body_stack_for_item = body_stack.clone();
-        let scope_label_for_item = scope_label.clone();
+        let menu_btn_for_item = menu_btn.clone();
         let popover_for_item = popover.clone();
         item.connect_clicked(move |_| {
             body_stack_for_item.set_visible_child_name(&target);
-            scope_label_for_item.set_text(&scope_text);
+            menu_btn_for_item.set_label(&scope_text);
             popover_for_item.popdown();
         });
         menu.append(&item);
@@ -4095,14 +4049,10 @@ fn workspace_changes_panel(
         popover.popup();
     });
 
-    panel.append(&feedback);
-
     panel
 }
 
 fn workspace_file_summary_scope_view(
-    title: &str,
-    subtitle: &str,
     summaries: &[DiffFileSummary],
     show_state: bool,
 ) -> ScrolledWindow {
@@ -4111,19 +4061,8 @@ fn workspace_file_summary_scope_view(
     panel.set_vexpand(true);
     panel.set_hexpand(true);
 
-    let title_label = Label::new(Some(title));
-    title_label.add_css_class("section-title");
-    title_label.set_xalign(0.0);
-    panel.append(&title_label);
-
-    let subtitle_label = Label::new(Some(subtitle));
-    subtitle_label.add_css_class("card-meta");
-    subtitle_label.set_xalign(0.0);
-    subtitle_label.set_wrap(true);
-    panel.append(&subtitle_label);
-
     if summaries.is_empty() {
-        let empty = Label::new(Some("No files changed in this scope."));
+        let empty = Label::new(Some("No files changed."));
         empty.add_css_class("card-meta");
         empty.set_xalign(0.0);
         panel.append(&empty);
@@ -4140,8 +4079,21 @@ fn workspace_file_summary_scope_view(
     scroll
 }
 
-fn workspace_empty_changes_scope_view(title: &str, message: &str) -> ScrolledWindow {
-    workspace_file_summary_scope_view(title, message, &[], false)
+fn workspace_empty_changes_scope_view(message: &str) -> ScrolledWindow {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.add_css_class("ws-file-summary-panel");
+    panel.set_vexpand(true);
+    panel.set_hexpand(true);
+    let empty = Label::new(Some(message));
+    empty.add_css_class("card-meta");
+    empty.set_xalign(0.0);
+    empty.set_wrap(true);
+    panel.append(&empty);
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&panel));
+    scroll
 }
 
 fn workspace_file_summary_row(summary: &DiffFileSummary, show_state: bool) -> GBox {
@@ -4183,728 +4135,6 @@ fn turn_scope_label(index: usize) -> String {
     }
 }
 
-fn short_turn_id(provider_turn_id: &str) -> String {
-    const LIMIT: usize = 18;
-    if provider_turn_id.chars().count() <= LIMIT {
-        return provider_turn_id.to_owned();
-    }
-    provider_turn_id.chars().take(LIMIT).collect::<String>() + "..."
-}
-
-fn workspace_base_ref_controls(
-    db_path: &Path,
-    store: &WorkspaceStore,
-    name: &str,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 6);
-    row.add_css_class("ws-base-ref-row");
-    let label = Label::new(Some("Base"));
-    label.add_css_class("detail-label");
-    let entry = Entry::new();
-    entry.set_hexpand(true);
-    entry.set_placeholder_text(Some("main"));
-    if let Ok(base_ref) = store.workspace_base_ref(name) {
-        entry.set_text(&base_ref);
-    }
-    let save_btn = text_button("Set Base");
-    let db_path_for_save = db_path.to_path_buf();
-    let workspace_for_save = name.to_owned();
-    let entry_for_save = entry.clone();
-    let feedback_for_save = feedback.clone();
-    save_btn.connect_clicked(move |_| {
-        let base_ref = entry_for_save.text();
-        let result = WorkspaceStore::open(&db_path_for_save)
-            .and_then(|store| store.set_workspace_base_ref(&workspace_for_save, &base_ref));
-        match result {
-            Ok(workspace) => {
-                apply_action_feedback(
-                    &feedback_for_save,
-                    &toast_overlay,
-                    &format!("Base branch set to {}.", workspace.base_ref),
-                    true,
-                );
-                refresh_hub.refresh(RefreshScope::Workspace);
-            }
-            Err(err) => apply_action_feedback(
-                &feedback_for_save,
-                &toast_overlay,
-                &format!("Could not set base branch: {err:#}"),
-                true,
-            ),
-        }
-    });
-    row.append(&label);
-    row.append(&entry);
-    row.append(&save_btn);
-    row
-}
-
-fn workspace_git_file_actions_panel(
-    db_path: &Path,
-    store: &WorkspaceStore,
-    name: &str,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) -> GBox {
-    let panel = GBox::new(Orientation::Vertical, 6);
-    panel.add_css_class("ws-git-actions-panel");
-
-    let mut has_stageable = false;
-    let mut has_staged = false;
-    match store.diff_file_summaries(name) {
-        Ok(summaries) if summaries.is_empty() => {
-            let empty = Label::new(Some("No file changes."));
-            empty.add_css_class("card-meta");
-            empty.set_xalign(0.0);
-            panel.append(&empty);
-        }
-        Ok(summaries) => {
-            has_stageable = summaries
-                .iter()
-                .any(|summary| summary.unstaged || summary.untracked || !summary.staged);
-            has_staged = summaries.iter().any(|summary| summary.staged);
-            let list = GBox::new(Orientation::Vertical, 4);
-            for summary in summaries {
-                let file_block = GBox::new(Orientation::Vertical, 3);
-                let path = summary.path.clone();
-                let staged = summary.staged;
-                let unstaged = summary.unstaged || summary.untracked;
-                list.append(&file_block);
-                file_block.append(&workspace_git_file_action_row(
-                    db_path,
-                    name,
-                    summary,
-                    refresh_hub.clone(),
-                    toast_overlay.clone(),
-                    feedback,
-                ));
-                file_block.append(&workspace_git_hunk_actions_panel(
-                    db_path,
-                    name,
-                    &path,
-                    unstaged,
-                    staged,
-                    refresh_hub.clone(),
-                    toast_overlay.clone(),
-                    feedback,
-                ));
-            }
-            panel.append(&list);
-        }
-        Err(err) => {
-            let error = Label::new(Some(&format!("Could not read file changes: {err:#}")));
-            error.add_css_class("card-meta");
-            error.set_xalign(0.0);
-            error.set_wrap(true);
-            panel.append(&error);
-        }
-    }
-
-    panel.append(&workspace_git_batch_actions_row(
-        db_path,
-        name,
-        has_stageable,
-        has_staged,
-        refresh_hub.clone(),
-        toast_overlay.clone(),
-        feedback,
-    ));
-
-    let commit_row = GBox::new(Orientation::Horizontal, 6);
-    let message = Entry::new();
-    message.set_hexpand(true);
-    message.set_placeholder_text(Some("Commit message"));
-    if let Ok(draft) = store.commit_message_draft(name) {
-        message.set_text(&draft);
-    }
-    let generate_btn = text_button("Generate");
-    generate_btn.set_sensitive(has_staged);
-    let db_path_for_generate = db_path.to_path_buf();
-    let workspace_for_generate = name.to_owned();
-    let feedback_for_generate = feedback.clone();
-    let toast_for_generate = toast_overlay.clone();
-    let message_for_generate = message.clone();
-    generate_btn.connect_clicked(move |_| {
-        let result = WorkspaceStore::open(&db_path_for_generate).and_then(|store| {
-            store.generated_commit_message_from_staged_diff(&workspace_for_generate)
-        });
-        match result {
-            Ok(generated) => {
-                message_for_generate.set_text(&generated);
-                apply_action_feedback(
-                    &feedback_for_generate,
-                    &toast_for_generate,
-                    "Generated commit message from staged diff.",
-                    true,
-                );
-            }
-            Err(err) => apply_action_feedback(
-                &feedback_for_generate,
-                &toast_for_generate,
-                &git_action_error("Could not generate commit message", &err),
-                true,
-            ),
-        }
-    });
-    let commit_btn = text_button("Commit");
-    commit_btn.set_sensitive(has_staged);
-    let db_path_for_commit = db_path.to_path_buf();
-    let workspace_for_commit = name.to_owned();
-    let refresh_for_commit = refresh_hub;
-    let toast_for_commit = toast_overlay;
-    let feedback_for_commit = feedback.clone();
-    let message_for_commit = message.clone();
-    commit_btn.connect_clicked(move |_| {
-        let result = WorkspaceStore::open(&db_path_for_commit).and_then(|store| {
-            store.commit_workspace_changes(&workspace_for_commit, &message_for_commit.text())
-        });
-        match result {
-            Ok(output) => {
-                let first_line = output.lines().next().unwrap_or("Committed staged changes.");
-                apply_action_feedback(&feedback_for_commit, &toast_for_commit, first_line, true);
-                refresh_for_commit.refresh(RefreshScope::Workspace);
-            }
-            Err(err) => apply_action_feedback(
-                &feedback_for_commit,
-                &toast_for_commit,
-                &format!("Could not commit: {err:#}"),
-                true,
-            ),
-        }
-    });
-    commit_row.append(&message);
-    commit_row.append(&generate_btn);
-    commit_row.append(&commit_btn);
-    panel.append(&commit_row);
-
-    panel
-}
-
-fn workspace_git_batch_actions_row(
-    db_path: &Path,
-    name: &str,
-    has_stageable: bool,
-    has_staged: bool,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 6);
-    row.add_css_class("ws-git-file-action-row");
-    let label = Label::new(Some("All files"));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    row.append(&label);
-
-    let stage_all_btn = text_button("Stage All");
-    stage_all_btn.set_sensitive(has_stageable);
-    connect_git_workspace_action(
-        &stage_all_btn,
-        db_path,
-        name,
-        "Staged all files.",
-        refresh_hub.clone(),
-        toast_overlay.clone(),
-        feedback,
-        |store, workspace_name| store.stage_all_workspace_files(workspace_name),
-    );
-    row.append(&stage_all_btn);
-
-    let unstage_all_btn = text_button("Unstage All");
-    unstage_all_btn.set_sensitive(has_staged);
-    connect_git_workspace_action(
-        &unstage_all_btn,
-        db_path,
-        name,
-        "Unstaged all files.",
-        refresh_hub,
-        toast_overlay,
-        feedback,
-        |store, workspace_name| store.unstage_all_workspace_files(workspace_name),
-    );
-    row.append(&unstage_all_btn);
-
-    row
-}
-
-fn workspace_git_hunk_actions_panel(
-    db_path: &Path,
-    name: &str,
-    path: &str,
-    show_unstaged: bool,
-    show_staged: bool,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) -> GBox {
-    let panel = GBox::new(Orientation::Vertical, 2);
-    if show_unstaged {
-        append_hunk_rows(
-            &panel,
-            db_path,
-            name,
-            path,
-            false,
-            refresh_hub.clone(),
-            toast_overlay.clone(),
-            feedback,
-        );
-    }
-    if show_staged {
-        append_hunk_rows(
-            &panel,
-            db_path,
-            name,
-            path,
-            true,
-            refresh_hub,
-            toast_overlay,
-            feedback,
-        );
-    }
-    panel
-}
-
-fn append_hunk_rows(
-    panel: &GBox,
-    db_path: &Path,
-    name: &str,
-    path: &str,
-    staged: bool,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) {
-    let hunks = WorkspaceStore::open(db_path)
-        .and_then(|store| store.diff_hunks(name, path, staged))
-        .unwrap_or_else(|err| {
-            vec![DiffHunkSummary {
-                index: 0,
-                header: "Could not read hunks".to_owned(),
-                additions: 0,
-                deletions: 0,
-                staged,
-                unsupported_reason: Some(format!("{err:#}")),
-            }]
-        });
-    let total_hunks = hunks.len();
-    for hunk in hunks.into_iter().take(8) {
-        panel.append(&workspace_git_hunk_action_row(
-            db_path,
-            name,
-            path,
-            hunk,
-            refresh_hub.clone(),
-            toast_overlay.clone(),
-            feedback,
-        ));
-    }
-    if total_hunks > 8 {
-        panel.append(&detail_row(
-            "Hunks",
-            &format!(
-                "{} additional hunks omitted here. Use file-level actions for the full file.",
-                total_hunks - 8
-            ),
-        ));
-    }
-}
-
-fn workspace_git_hunk_action_row(
-    db_path: &Path,
-    name: &str,
-    path: &str,
-    hunk: DiffHunkSummary,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 6);
-    row.add_css_class("ws-git-file-action-row");
-    let label = Label::new(Some(&hunk_action_label(&hunk)));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    row.append(&label);
-
-    if let Some(reason) = hunk.unsupported_reason {
-        let unsupported = Label::new(Some(&format!("{reason}; use file-level fallback.")));
-        unsupported.add_css_class("card-meta");
-        unsupported.set_xalign(0.0);
-        unsupported.set_wrap(true);
-        row.append(&unsupported);
-        return row;
-    }
-
-    let action_label = if hunk.staged {
-        "Unstage Hunk"
-    } else {
-        "Stage Hunk"
-    };
-    let button = text_button(action_label);
-    let hunk_index = hunk.index;
-    connect_git_hunk_action(
-        &button,
-        db_path,
-        name,
-        path,
-        hunk_index,
-        hunk.staged,
-        refresh_hub,
-        toast_overlay,
-        feedback,
-    );
-    row.append(&button);
-    row
-}
-
-fn hunk_action_label(hunk: &DiffHunkSummary) -> String {
-    let state = if hunk.staged { "staged" } else { "unstaged" };
-    format!(
-        "  Hunk {} [{state}] +{} -{} {}",
-        hunk.index + 1,
-        hunk.additions,
-        hunk.deletions,
-        hunk.header
-    )
-}
-
-fn workspace_git_file_action_row(
-    db_path: &Path,
-    name: &str,
-    summary: DiffFileSummary,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 6);
-    row.add_css_class("ws-git-file-action-row");
-    let path = summary.path.clone();
-    let counts = match (summary.additions, summary.deletions) {
-        (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
-        _ => "binary".to_owned(),
-    };
-    let label = Label::new(Some(&format!(
-        "{} {} {}",
-        summary.path,
-        diff_state_label(&summary),
-        counts
-    )));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    row.append(&label);
-
-    let open_btn = text_button("Open");
-    let db_path_for_open = db_path.to_path_buf();
-    let workspace_for_open = name.to_owned();
-    let path_for_open = path.clone();
-    let feedback_for_open = feedback.clone();
-    let toast_for_open = toast_overlay.clone();
-    open_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open(&db_path_for_open)
-            .and_then(|store| store.workspace_path(&workspace_for_open))
-            .map(|workspace_path| workspace_path.join(&path_for_open))
-        {
-            Ok(file_path) if file_path.exists() => {
-                match std::process::Command::new("xdg-open")
-                    .arg(&file_path)
-                    .spawn()
-                {
-                    Ok(_) => apply_action_feedback(
-                        &feedback_for_open,
-                        &toast_for_open,
-                        &format!("Opened {}.", file_path.display()),
-                        true,
-                    ),
-                    Err(err) => apply_action_feedback(
-                        &feedback_for_open,
-                        &toast_for_open,
-                        &format!("Could not open {}: {err}", file_path.display()),
-                        true,
-                    ),
-                }
-            }
-            Ok(file_path) => apply_action_feedback(
-                &feedback_for_open,
-                &toast_for_open,
-                &format!("File does not exist: {}", file_path.display()),
-                true,
-            ),
-            Err(err) => apply_action_feedback(
-                &feedback_for_open,
-                &toast_for_open,
-                &format!("Could not resolve file path: {err:#}"),
-                true,
-            ),
-        }
-    });
-    row.append(&open_btn);
-
-    let copy_diff_btn = text_button("Copy Diff");
-    let db_path_for_copy = db_path.to_path_buf();
-    let workspace_for_copy = name.to_owned();
-    let path_for_copy = path.clone();
-    let feedback_for_copy = feedback.clone();
-    let toast_for_copy = toast_overlay.clone();
-    copy_diff_btn.connect_clicked(move |_| {
-        let result = WorkspaceStore::open(&db_path_for_copy).map(|store| {
-            workspace_diff_text_for_clipboard(&store, &workspace_for_copy, Some(&path_for_copy))
-        });
-        match result {
-            Ok(diff_text) => {
-                if let Some(display) = gtk::gdk::Display::default() {
-                    display.clipboard().set_text(&diff_text);
-                    apply_action_feedback(
-                        &feedback_for_copy,
-                        &toast_for_copy,
-                        &format!("Copied diff for {}.", path_for_copy),
-                        true,
-                    );
-                } else {
-                    apply_action_feedback(
-                        &feedback_for_copy,
-                        &toast_for_copy,
-                        "Could not access clipboard.",
-                        true,
-                    );
-                }
-            }
-            Err(err) => apply_action_feedback(
-                &feedback_for_copy,
-                &toast_for_copy,
-                &format!("Could not copy diff for {}: {err:#}", path_for_copy),
-                true,
-            ),
-        }
-    });
-    row.append(&copy_diff_btn);
-
-    let stage_btn = text_button("Stage");
-    stage_btn.set_sensitive(!summary.staged || summary.unstaged || summary.untracked);
-    connect_git_file_action(
-        &stage_btn,
-        db_path,
-        name,
-        &path,
-        "Staged",
-        refresh_hub.clone(),
-        toast_overlay.clone(),
-        feedback,
-        None,
-        |store, workspace_name, file_path| store.stage_workspace_file(workspace_name, file_path),
-    );
-    row.append(&stage_btn);
-
-    let unstage_btn = text_button("Unstage");
-    unstage_btn.set_sensitive(summary.staged);
-    connect_git_file_action(
-        &unstage_btn,
-        db_path,
-        name,
-        &path,
-        "Unstaged",
-        refresh_hub.clone(),
-        toast_overlay.clone(),
-        feedback,
-        None,
-        |store, workspace_name, file_path| store.unstage_workspace_file(workspace_name, file_path),
-    );
-    row.append(&unstage_btn);
-
-    let revert_btn = destructive_button("Revert");
-    revert_btn.set_sensitive(!summary.untracked);
-    connect_git_file_action(
-        &revert_btn,
-        db_path,
-        name,
-        &path,
-        "Reverted",
-        refresh_hub,
-        toast_overlay,
-        feedback,
-        Some("Confirm Revert"),
-        |store, workspace_name, file_path| store.revert_workspace_file(workspace_name, file_path),
-    );
-    row.append(&revert_btn);
-
-    row
-}
-
-fn connect_git_hunk_action(
-    button: &Button,
-    db_path: &Path,
-    workspace_name: &str,
-    file_path: &str,
-    hunk_index: usize,
-    staged: bool,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-) {
-    let db_path = db_path.to_path_buf();
-    let workspace_name = workspace_name.to_owned();
-    let file_path = file_path.to_owned();
-    let feedback = feedback.clone();
-    let button_for_click = button.clone();
-    button.connect_clicked(move |_| {
-        button_for_click.set_sensitive(false);
-        let action_text = if staged {
-            "Unstaging hunk..."
-        } else {
-            "Staging hunk..."
-        };
-        apply_action_feedback(&feedback, &toast_overlay, action_text, false);
-        let result = WorkspaceStore::open(&db_path).and_then(|store| {
-            if staged {
-                store.unstage_workspace_hunk(&workspace_name, &file_path, hunk_index)
-            } else {
-                store.stage_workspace_hunk(&workspace_name, &file_path, hunk_index)
-            }
-        });
-        match result {
-            Ok(()) => {
-                let done = if staged {
-                    format!("Unstaged hunk {} in {}.", hunk_index + 1, file_path)
-                } else {
-                    format!("Staged hunk {} in {}.", hunk_index + 1, file_path)
-                };
-                apply_action_feedback(&feedback, &toast_overlay, &done, true);
-                refresh_hub.refresh(RefreshScope::Workspace);
-            }
-            Err(err) => {
-                button_for_click.set_sensitive(true);
-                apply_action_feedback(
-                    &feedback,
-                    &toast_overlay,
-                    &format!(
-                        "{}\nFallback: use Stage/Unstage on the full file.",
-                        git_action_error("Could not update hunk", &err)
-                    ),
-                    true,
-                );
-            }
-        }
-    });
-}
-
-fn connect_git_workspace_action<F>(
-    button: &Button,
-    db_path: &Path,
-    workspace_name: &str,
-    success_message: &'static str,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-    action: F,
-) where
-    F: Fn(&WorkspaceStore, &str) -> anyhow::Result<()> + 'static,
-{
-    let db_path = db_path.to_path_buf();
-    let workspace_name = workspace_name.to_owned();
-    let feedback = feedback.clone();
-    let button_for_click = button.clone();
-    button.connect_clicked(move |_| {
-        button_for_click.set_sensitive(false);
-        apply_action_feedback(&feedback, &toast_overlay, "Updating files...", false);
-        let result =
-            WorkspaceStore::open(&db_path).and_then(|store| action(&store, &workspace_name));
-        match result {
-            Ok(()) => {
-                apply_action_feedback(&feedback, &toast_overlay, success_message, true);
-                refresh_hub.refresh(RefreshScope::Workspace);
-            }
-            Err(err) => {
-                button_for_click.set_sensitive(true);
-                apply_action_feedback(
-                    &feedback,
-                    &toast_overlay,
-                    &git_action_error("Could not update files", &err),
-                    true,
-                );
-            }
-        }
-    });
-}
-
-fn connect_git_file_action<F>(
-    button: &Button,
-    db_path: &Path,
-    workspace_name: &str,
-    file_path: &str,
-    action_label: &'static str,
-    refresh_hub: RefreshHub,
-    toast_overlay: ToastOverlay,
-    feedback: &Label,
-    confirm_label: Option<&'static str>,
-    action: F,
-) where
-    F: Fn(&WorkspaceStore, &str, &str) -> anyhow::Result<()> + 'static,
-{
-    let db_path = db_path.to_path_buf();
-    let workspace_name = workspace_name.to_owned();
-    let file_path = file_path.to_owned();
-    let feedback = feedback.clone();
-    let confirmed = Rc::new(RefCell::new(confirm_label.is_none()));
-    let button_for_click = button.clone();
-    button.connect_clicked(move |_| {
-        if let Some(confirm_label) = confirm_label {
-            if !*confirmed.borrow() {
-                *confirmed.borrow_mut() = true;
-                button_for_click.set_label(confirm_label);
-                apply_action_feedback(
-                    &feedback,
-                    &toast_overlay,
-                    &format!(
-                        "Click {confirm_label} to discard staged and working tree changes in {file_path}."
-                    ),
-                    true,
-                );
-                return;
-            }
-        }
-        button_for_click.set_sensitive(false);
-        apply_action_feedback(
-            &feedback,
-            &toast_overlay,
-            &format!("Updating {file_path}..."),
-            false,
-        );
-        let result = WorkspaceStore::open(&db_path)
-            .and_then(|store| action(&store, &workspace_name, &file_path));
-        match result {
-            Ok(()) => {
-                apply_action_feedback(
-                    &feedback,
-                    &toast_overlay,
-                    &format!("{action_label} {file_path}."),
-                    true,
-                );
-                refresh_hub.refresh(RefreshScope::Workspace);
-            }
-            Err(err) => {
-                button_for_click.set_sensitive(true);
-                apply_action_feedback(
-                    &feedback,
-                    &toast_overlay,
-                    &git_action_error(&format!("Could not update {file_path}"), &err),
-                    true,
-                );
-            }
-        }
-    });
-}
-
-fn git_action_error(prefix: &str, err: &anyhow::Error) -> String {
-    format!(
-        "{prefix}: {err:#}\nHint: Refresh changes, inspect git status, and retry after resolving path conflicts."
-    )
-}
-
 fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
     match store.checks_summary(name) {
         Ok(summary) => summary
@@ -4923,14 +4153,6 @@ fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
 
 fn workspace_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
     workspace_diff_sections(store, name, path, Some(DIFF_RENDER_LIMIT_BYTES))
-}
-
-fn workspace_diff_text_for_clipboard(
-    store: &WorkspaceStore,
-    name: &str,
-    path: Option<&str>,
-) -> String {
-    workspace_diff_sections(store, name, path, None)
 }
 
 fn workspace_diff_sections(
@@ -8113,29 +7335,6 @@ mod tests {
         let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
 
         assert_eq!(rendered, "Staged changes\nNo changes.\n");
-    }
-
-    #[test]
-    fn git_action_error_includes_recovery_hint() {
-        let rendered = git_action_error("Could not update README.md", &anyhow::anyhow!("bad path"));
-
-        assert!(rendered.contains("bad path"));
-        assert!(rendered.contains("Hint: Refresh changes"));
-    }
-
-    #[test]
-    fn hunk_action_label_includes_state_and_counts() {
-        let label = hunk_action_label(&archductor_core::workspace::DiffHunkSummary {
-            index: 1,
-            header: "@@ -10,2 +10,3 @@".to_owned(),
-            additions: 3,
-            deletions: 1,
-            staged: false,
-            unsupported_reason: None,
-        });
-
-        assert!(label.contains("Hunk 2 [unstaged] +3 -1"));
-        assert!(label.contains("@@ -10,2 +10,3 @@"));
     }
 
     #[test]

@@ -28,6 +28,8 @@ many terminals.
 - Persist provider events, parsed session events, chat threads/messages,
   process records, and diagnostic logs.
 - Keep multiple sessions in one workspace separate from multiple workspaces.
+- Treat a chat turn as the agent work between one user message and the next;
+  one tool call or file write is only part of a turn.
 - Reconcile stale processes on restart.
 
 ### Review And PR Flow

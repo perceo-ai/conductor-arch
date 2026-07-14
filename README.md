@@ -24,6 +24,7 @@ should use these terms consistently:
 | `Branch` | The Git branch checked out inside a workspace. This is usually the review and PR unit. | `1 branch has 1 working tree` |
 | `Working tree` | The files on disk for one workspace. Archductor creates these separate checkouts with Git worktrees. | `1 working tree belongs to 1 workspace` |
 | `Running environment` | The app, server, watchers, tests, terminals, and agent processes running inside a workspace. | `1 workspace can run many processes` |
+| `Turn` | The actions a coding agent takes after one user message and before the next user message in the same chat thread. One tool call or file write is not a turn. | `1 turn can contain many tool calls and file writes` |
 
 Practical rule:
 
@@ -269,7 +270,7 @@ default_visible_tab = "changes"
 
 [customization.view]
 theme = "system"
-accent_color = "green"
+accent_color = "blue"
 density = "compact"
 keybindings = "vim"
 diff_preference = "unified"
