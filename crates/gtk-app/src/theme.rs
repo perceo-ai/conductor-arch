@@ -1690,6 +1690,33 @@ separator {
     background-color: #242424;
     color: #e4e4e4;
 }
+.ws-file-summary-panel {
+    padding: 10px 12px 14px;
+    background-color: #151515;
+}
+.ws-file-summary-row {
+    min-height: 32px;
+    padding: 5px 8px;
+    border-radius: 6px;
+}
+.ws-file-summary-row:hover {
+    background-color: #1f1f1f;
+}
+.ws-file-summary-path {
+    color: #dddddd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 13px;
+}
+.ws-file-summary-state {
+    color: #9a9a9a;
+    font-size: 12px;
+}
+.ws-file-summary-counts {
+    color: #9ad6a3;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 12px;
+    font-weight: 700;
+}
 
 /* ── File list ── */
 .ws-file-list {

@@ -5,8 +5,8 @@ use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
 use archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
-    WorkspaceStore, WorkspaceTimelineEvent,
+    PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
+    WorkspaceTimelineEvent,
 };
 use gtk::prelude::*;
 use gtk::{
@@ -29,8 +29,7 @@ const WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH: i32 = 1280;
 const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
-const WORKSPACE_TURN_DIFF_LIMIT: usize = 25;
-const WORKSPACE_TURN_DIFF_MAX_KIB: usize = 64;
+const WORKSPACE_TURN_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
@@ -3962,7 +3961,7 @@ fn workspace_changes_panel(
     title.add_css_class("section-title");
     title.set_xalign(0.0);
     title.set_hexpand(true);
-    let scope_label = Label::new(Some("Total changes"));
+    let scope_label = Label::new(Some("Uncommitted changes"));
     scope_label.add_css_class("detail-label");
     let menu_btn = text_button("⋯");
     menu_btn.add_css_class("ws-changes-menu-btn");
@@ -4007,25 +4006,70 @@ fn workspace_changes_panel(
     body_stack.set_vexpand(true);
     body_stack.set_hexpand(true);
 
-    let total_view = workspace_changes_text_view(store, name);
-    body_stack.add_named(&total_view, Some("total"));
+    let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
+    body_stack.add_named(
+        &workspace_file_summary_scope_view(
+            "Uncommitted changes",
+            "Current working tree changes.",
+            &uncommitted_summaries,
+            true,
+        ),
+        Some("uncommitted"),
+    );
 
-    let split_view = workspace_split_changes_text_view(store, name);
-    body_stack.add_named(&split_view, Some("split"));
+    let mut scope_items = vec![(
+        "Uncommitted changes".to_owned(),
+        "uncommitted".to_owned(),
+        "Uncommitted changes".to_owned(),
+    )];
 
-    let untracked_view = workspace_untracked_changes_view(db_path, name);
-    body_stack.add_named(&untracked_view, Some("untracked"));
+    match store.turn_file_change_summaries(name, WORKSPACE_TURN_CHANGE_LIMIT) {
+        Ok(turns) => {
+            for (index, turn) in turns.iter().enumerate() {
+                let key = format!("turn_{index}");
+                let label = turn_scope_label(index);
+                let subtitle = format!(
+                    "File writes recorded from chat turn {}.",
+                    short_turn_id(&turn.provider_turn_id)
+                );
+                body_stack.add_named(
+                    &workspace_file_summary_scope_view(&label, &subtitle, &turn.files, false),
+                    Some(&key),
+                );
+                scope_items.push((label.clone(), key, label));
+            }
+            if turns.is_empty() {
+                body_stack.add_named(
+                    &workspace_empty_changes_scope_view(
+                        "Turn changes",
+                        "No file writes recorded from chat turns yet.",
+                    ),
+                    Some("turns_empty"),
+                );
+                scope_items.push((
+                    "Latest turn".to_owned(),
+                    "turns_empty".to_owned(),
+                    "Latest turn".to_owned(),
+                ));
+            }
+        }
+        Err(err) => {
+            body_stack.add_named(
+                &workspace_empty_changes_scope_view(
+                    "Turn changes",
+                    &format!("Could not read chat turn file writes: {err:#}"),
+                ),
+                Some("turns_error"),
+            );
+            scope_items.push((
+                "Latest turn".to_owned(),
+                "turns_error".to_owned(),
+                "Latest turn".to_owned(),
+            ));
+        }
+    }
 
-    let last_turn_view = workspace_turn_changes_view(db_path, name);
-    body_stack.add_named(&last_turn_view, Some("last_turn"));
-
-    let checks_view = workspace_checks_text_view(store, name);
-    body_stack.add_named(&checks_view, Some("checks"));
-
-    let commits_view = workspace_commit_browser_view(db_path, name);
-    body_stack.add_named(&commits_view, Some("commits"));
-
-    body_stack.set_visible_child_name("total");
+    body_stack.set_visible_child_name("uncommitted");
     panel.append(&body_stack);
 
     let popover = gtk::Popover::new();
@@ -4034,21 +4078,14 @@ fn workspace_changes_panel(
     let menu = GBox::new(Orientation::Vertical, 4);
     menu.add_css_class("chat-menu-list");
 
-    for (label, target, scope_text) in [
-        ("Total changes", "total", "Total changes"),
-        ("Split diff", "split", "Split diff"),
-        ("Untracked changes", "untracked", "Untracked changes"),
-        ("Turn changes", "last_turn", "Turn changes"),
-        ("By commit", "commits", "Changes by commit"),
-        ("Checks", "checks", "Checks"),
-    ] {
-        let item = menu_text_button(label);
+    for (label, target, scope_text) in scope_items {
+        let item = menu_text_button(&label);
         let body_stack_for_item = body_stack.clone();
         let scope_label_for_item = scope_label.clone();
         let popover_for_item = popover.clone();
         item.connect_clicked(move |_| {
-            body_stack_for_item.set_visible_child_name(target);
-            scope_label_for_item.set_text(scope_text);
+            body_stack_for_item.set_visible_child_name(&target);
+            scope_label_for_item.set_text(&scope_text);
             popover_for_item.popdown();
         });
         menu.append(&item);
@@ -4061,6 +4098,97 @@ fn workspace_changes_panel(
     panel.append(&feedback);
 
     panel
+}
+
+fn workspace_file_summary_scope_view(
+    title: &str,
+    subtitle: &str,
+    summaries: &[DiffFileSummary],
+    show_state: bool,
+) -> ScrolledWindow {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.add_css_class("ws-file-summary-panel");
+    panel.set_vexpand(true);
+    panel.set_hexpand(true);
+
+    let title_label = Label::new(Some(title));
+    title_label.add_css_class("section-title");
+    title_label.set_xalign(0.0);
+    panel.append(&title_label);
+
+    let subtitle_label = Label::new(Some(subtitle));
+    subtitle_label.add_css_class("card-meta");
+    subtitle_label.set_xalign(0.0);
+    subtitle_label.set_wrap(true);
+    panel.append(&subtitle_label);
+
+    if summaries.is_empty() {
+        let empty = Label::new(Some("No files changed in this scope."));
+        empty.add_css_class("card-meta");
+        empty.set_xalign(0.0);
+        panel.append(&empty);
+    } else {
+        for summary in summaries {
+            panel.append(&workspace_file_summary_row(summary, show_state));
+        }
+    }
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&panel));
+    scroll
+}
+
+fn workspace_empty_changes_scope_view(title: &str, message: &str) -> ScrolledWindow {
+    workspace_file_summary_scope_view(title, message, &[], false)
+}
+
+fn workspace_file_summary_row(summary: &DiffFileSummary, show_state: bool) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("ws-file-summary-row");
+
+    let path = Label::new(Some(&summary.path));
+    path.add_css_class("ws-file-summary-path");
+    path.set_xalign(0.0);
+    path.set_hexpand(true);
+    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    row.append(&path);
+
+    if show_state {
+        let state = Label::new(Some(diff_state_label(summary)));
+        state.add_css_class("ws-file-summary-state");
+        row.append(&state);
+    }
+
+    let counts = Label::new(Some(&diff_counts_text(summary)));
+    counts.add_css_class("ws-file-summary-counts");
+    row.append(&counts);
+
+    row
+}
+
+fn diff_counts_text(summary: &DiffFileSummary) -> String {
+    match (summary.additions, summary.deletions) {
+        (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
+        _ => "binary".to_owned(),
+    }
+}
+
+fn turn_scope_label(index: usize) -> String {
+    match index {
+        0 => "Latest turn".to_owned(),
+        1 => "1 turn before".to_owned(),
+        value => format!("{value} turns before"),
+    }
+}
+
+fn short_turn_id(provider_turn_id: &str) -> String {
+    const LIMIT: usize = 18;
+    if provider_turn_id.chars().count() <= LIMIT {
+        return provider_turn_id.to_owned();
+    }
+    provider_turn_id.chars().take(LIMIT).collect::<String>() + "..."
 }
 
 fn workspace_base_ref_controls(
@@ -4777,37 +4905,6 @@ fn git_action_error(prefix: &str, err: &anyhow::Error) -> String {
     )
 }
 
-fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
-    let mut out = String::new();
-    out.push_str("Recent commits\n");
-    out.push_str(
-        &store
-            .git_log_oneline(name, 12)
-            .unwrap_or_else(|err| format!("Could not read log: {err:#}\n")),
-    );
-    out.push_str("\n\nStatus\n");
-    out.push_str(
-        &store
-            .git_status_short(name)
-            .unwrap_or_else(|err| format!("Could not read status: {err:#}\n")),
-    );
-    out.push_str("\n\n");
-    match store.diff_file_summaries(name) {
-        Ok(summaries) => out.push_str(&format_diff_file_summary(&summaries)),
-        Err(err) => out.push_str(&format!(
-            "Files changed\nCould not read diff summary: {err:#}\n"
-        )),
-    }
-    out.push_str("\n\nDiff\n");
-    out.push_str(&workspace_diff_sections(
-        store,
-        name,
-        None,
-        Some(DIFF_RENDER_LIMIT_BYTES),
-    ));
-    out
-}
-
 fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
     match store.checks_summary(name) {
         Ok(summary) => summary
@@ -4918,79 +5015,6 @@ fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) 
         .unwrap_or_else(|err| format!("Could not open workspace database: {err:#}\n"))
 }
 
-fn workspace_split_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
-    let diff = match path {
-        Some(path) => store
-            .unified_diff_against_base(name, Some(Path::new(path)))
-            .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
-        None => store
-            .unified_diff_against_base(name, None)
-            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
-    };
-    format_split_diff_text(&diff, Some(DIFF_RENDER_LIMIT_BYTES))
-}
-
-fn format_split_diff_text(diff: &str, limit: Option<usize>) -> String {
-    if diff.trim().is_empty() {
-        return "Split diff\nNo changes.\n".to_owned();
-    }
-    if limit.is_some_and(|limit| diff.len() > limit) {
-        return "Split diff\nDiff is too large for split view. Use Unified or Copy Diff for full context.\n".to_owned();
-    }
-
-    let mut out = String::from("Split diff\nleft: old/base | right: new/workspace\n\n");
-    let mut pending_deleted = std::collections::VecDeque::<String>::new();
-    for line in diff.lines() {
-        if line.starts_with('-') && !line.starts_with("---") {
-            pending_deleted.push_back(line[1..].to_owned());
-        } else if line.starts_with('+') && !line.starts_with("+++") {
-            let right = line[1..].to_owned();
-            let left = pending_deleted.pop_front().unwrap_or_default();
-            push_split_diff_row(&mut out, &left, &right);
-        } else {
-            while let Some(left) = pending_deleted.pop_front() {
-                push_split_diff_row(&mut out, &left, "");
-            }
-            if line.starts_with("diff ")
-                || line.starts_with("index ")
-                || line.starts_with("--- ")
-                || line.starts_with("+++ ")
-                || line.starts_with("@@")
-            {
-                out.push_str(line);
-                out.push('\n');
-            } else if let Some(context) = line.strip_prefix(' ') {
-                push_split_diff_row(&mut out, context, context);
-            } else {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        if let Some(limit) = limit {
-            if out.len() > limit {
-                return truncate_owned_with_marker(
-                    out,
-                    limit,
-                    "\n[Split diff truncated after rendered output limit. Use Unified or Copy Diff for full context.]\n",
-                );
-            }
-        }
-    }
-    while let Some(left) = pending_deleted.pop_front() {
-        push_split_diff_row(&mut out, &left, "");
-        if let Some(limit) = limit {
-            if out.len() > limit {
-                return truncate_owned_with_marker(
-                    out,
-                    limit,
-                    "\n[Split diff truncated after rendered output limit. Use Unified or Copy Diff for full context.]\n",
-                );
-            }
-        }
-    }
-    out
-}
-
 fn truncate_owned_with_marker(mut value: String, limit: usize, marker: &str) -> String {
     if value.len() + marker.len() <= limit {
         value.push_str(marker);
@@ -5003,278 +5027,6 @@ fn truncate_owned_with_marker(mut value: String, limit: usize, marker: &str) -> 
     value.truncate(end);
     value.push_str(marker);
     value
-}
-
-fn push_split_diff_row(out: &mut String, left: &str, right: &str) {
-    out.push_str(&format!(
-        "{:<72} | {}\n",
-        split_diff_cell(left),
-        split_diff_cell(right)
-    ));
-}
-
-fn split_diff_cell(value: &str) -> String {
-    const CELL_LIMIT: usize = 96;
-    let (visible, truncated) = truncate_text_at_char_boundary(value, CELL_LIMIT);
-    if truncated {
-        format!("{visible}...")
-    } else {
-        visible.to_owned()
-    }
-}
-
-fn workspace_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
-    let view = TextView::new();
-    view.set_editable(false);
-    view.set_monospace(true);
-    view.set_vexpand(true);
-    view.add_css_class("ws-diff-view");
-    view.set_left_margin(6);
-    view.set_right_margin(6);
-    view.set_top_margin(4);
-    view.buffer().set_text(&workspace_changes_text(store, name));
-    apply_diff_tags(&view.buffer());
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_child(Some(&view));
-    scroll
-}
-
-fn workspace_split_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
-    let view = TextView::new();
-    view.set_editable(false);
-    view.set_monospace(true);
-    view.set_vexpand(true);
-    view.add_css_class("ws-diff-view");
-    view.set_left_margin(6);
-    view.set_right_margin(6);
-    view.set_top_margin(4);
-    view.buffer()
-        .set_text(&workspace_split_diff_text(store, name, None));
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_child(Some(&view));
-    scroll
-}
-
-fn workspace_untracked_changes_view(db_path: &Path, name: &str) -> ScrolledWindow {
-    let view = TextView::new();
-    view.set_editable(false);
-    view.set_monospace(true);
-    view.set_vexpand(true);
-    view.add_css_class("ws-diff-view");
-    view.set_left_margin(6);
-    view.set_right_margin(6);
-    view.set_top_margin(4);
-    view.buffer()
-        .set_text(&workspace_untracked_changes_text(db_path, name));
-    apply_diff_tags(&view.buffer());
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_child(Some(&view));
-    scroll
-}
-
-fn workspace_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindow {
-    let view = TextView::new();
-    view.set_editable(false);
-    view.set_monospace(true);
-    view.set_vexpand(true);
-    view.add_css_class("ws-diff-view");
-    view.set_left_margin(6);
-    view.set_right_margin(6);
-    view.set_top_margin(4);
-    view.buffer()
-        .set_text(&workspace_turn_changes_text(db_path, name));
-    apply_diff_tags(&view.buffer());
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_child(Some(&view));
-    scroll
-}
-
-fn workspace_checks_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
-    let view = TextView::new();
-    view.set_editable(false);
-    view.set_monospace(true);
-    view.set_vexpand(true);
-    view.add_css_class("ws-diff-view");
-    view.set_left_margin(6);
-    view.set_right_margin(6);
-    view.set_top_margin(4);
-    view.buffer()
-        .set_text(&workspace_checks_and_todos_text(store, name));
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_child(Some(&view));
-    scroll
-}
-
-fn workspace_commit_browser_view(db_path: &Path, name: &str) -> GBox {
-    let panel = GBox::new(Orientation::Vertical, 8);
-    panel.set_vexpand(true);
-    let commit_status = Label::new(Some("Select a commit to view its diff."));
-    commit_status.add_css_class("card-meta");
-    commit_status.set_xalign(0.0);
-    commit_status.set_wrap(true);
-    panel.append(&commit_status);
-
-    let split = Paned::new(Orientation::Horizontal);
-    split.set_wide_handle(true);
-    split.set_resize_start_child(true);
-    split.set_shrink_end_child(false);
-    let commits = recent_commit_summaries(db_path, name, 8);
-    let list = GBox::new(Orientation::Vertical, 4);
-    let diff_view = TextView::new();
-    diff_view.set_editable(false);
-    diff_view.set_monospace(true);
-    diff_view.set_vexpand(true);
-    diff_view.add_css_class("ws-diff-view");
-    diff_view.set_left_margin(6);
-    diff_view.set_right_margin(6);
-    diff_view.set_top_margin(4);
-    diff_view
-        .buffer()
-        .set_text("Select a commit on the left to inspect its diff.");
-    apply_diff_tags(&diff_view.buffer());
-    let diff_scroll = ScrolledWindow::new();
-    diff_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    diff_scroll.set_child(Some(&diff_view));
-
-    if commits.is_empty() {
-        list.append(&detail_row("Commits", "No commits found."));
-    } else {
-        for commit in commits {
-            let row = make_action_row();
-            let btn = flat_button(&commit.label);
-            btn.set_hexpand(true);
-            btn.set_halign(Align::Fill);
-            let db_for_commit = db_path.to_path_buf();
-            let workspace_for_commit = name.to_owned();
-            let diff_buffer = diff_view.buffer();
-            let status_for_commit = commit_status.clone();
-            let commit_hash = commit.hash.clone();
-            let commit_summary = commit.summary.clone();
-            btn.connect_clicked(move |_| {
-                let text = WorkspaceStore::open(db_for_commit.clone())
-                    .and_then(|store| store.git_show_commit(&workspace_for_commit, &commit_hash))
-                    .unwrap_or_else(|err| format!("Could not read commit {commit_hash}: {err:#}"));
-                diff_buffer.set_text(&text);
-                apply_diff_tags(&diff_buffer);
-                status_for_commit.set_text(&format!("{commit_hash} {commit_summary}"));
-            });
-            row.append(&btn);
-            list.append(&row);
-        }
-    }
-
-    let list_scroll = ScrolledWindow::new();
-    list_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    list_scroll.set_min_content_width(180);
-    list_scroll.set_child(Some(&list));
-    split.set_start_child(Some(&list_scroll));
-    split.set_end_child(Some(&diff_scroll));
-
-    panel.append(&split);
-    panel
-}
-
-#[derive(Clone)]
-struct CommitSummary {
-    hash: String,
-    summary: String,
-    label: String,
-}
-
-fn recent_commit_summaries(db_path: &Path, name: &str, limit: usize) -> Vec<CommitSummary> {
-    let Ok(store) = WorkspaceStore::open(db_path) else {
-        return Vec::new();
-    };
-    let Ok(log) = store.git_log_oneline(name, limit) else {
-        return Vec::new();
-    };
-    log.lines()
-        .filter_map(|line| {
-            let (hash, summary) = line.split_once(' ')?;
-            Some(CommitSummary {
-                hash: hash.to_owned(),
-                summary: summary.to_owned(),
-                label: format!("{hash} {summary}"),
-            })
-        })
-        .collect()
-}
-
-fn workspace_untracked_changes_text(db_path: &Path, name: &str) -> String {
-    match WorkspaceStore::open(db_path).and_then(|store| store.untracked_files(name)) {
-        Ok(files) if files.is_empty() => "Untracked changes\nNo untracked files.\n".to_owned(),
-        Ok(files) => {
-            let mut out = "Untracked changes\n".to_owned();
-            for path in files {
-                out.push_str(&format!("{path}\n"));
-            }
-            out
-        }
-        Err(err) => format!("Untracked changes\nCould not read files: {err:#}\n"),
-    }
-}
-
-fn workspace_turn_changes_text(db_path: &Path, name: &str) -> String {
-    let result = WorkspaceStore::open(db_path)
-        .and_then(|store| store.turn_checkpoint_diffs(name, WORKSPACE_TURN_DIFF_LIMIT));
-    match result {
-        Ok(turns) if turns.is_empty() => {
-            "Turn changes\nNo turn checkpoints yet. Send chat prompts to create them.\n".to_owned()
-        }
-        Ok(turns) => format_workspace_turn_changes(&turns),
-        Err(err) => format!("Turn changes\nCould not read turn diffs: {err:#}\n"),
-    }
-}
-
-fn format_workspace_turn_changes(turns: &[TurnCheckpointDiff]) -> String {
-    let mut out = format!(
-        "Turn changes\nShowing up to {} recent turns. Each diff is capped at {} KiB.\n",
-        WORKSPACE_TURN_DIFF_LIMIT, WORKSPACE_TURN_DIFF_MAX_KIB
-    );
-    for turn in turns {
-        out.push('\n');
-        out.push_str(&format!(
-            "Checkpoint #{} {}\n{}\n",
-            turn.checkpoint.id, turn.checkpoint.created_at, turn.checkpoint.message
-        ));
-        if let Some(end) = &turn.end_checkpoint {
-            out.push_str(&format!(
-                "Range: checkpoint #{} -> checkpoint #{}\n",
-                turn.checkpoint.id, end.id
-            ));
-        } else {
-            out.push_str(&format!(
-                "Range: checkpoint #{} -> current worktree\n",
-                turn.checkpoint.id
-            ));
-        }
-        if turn.diff.trim().is_empty() {
-            out.push_str("No changes for this turn.\n");
-        } else {
-            out.push_str(&turn.diff);
-            if !turn.diff.ends_with('\n') {
-                out.push('\n');
-            }
-            if turn.truncated {
-                out.push_str("[Turn diff reached hard display limit]\n");
-            }
-        }
-    }
-    out
-}
-
-fn workspace_checks_and_todos_text(store: &WorkspaceStore, name: &str) -> String {
-    let mut out = workspace_checks_text(store, name);
-    out.push_str("\n\nWorkspace Context Estimate\n");
-    out.push_str(&workspace_context_estimate_text(store, name));
-    out.push_str("\n\nTodos\n");
-    out.push_str(&workspace_todos_text(store, name));
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -8137,17 +7889,6 @@ fn apply_action_feedback(
 mod tests {
     use super::*;
 
-    fn test_checkpoint(id: i64, message: &str) -> archductor_core::workspace::Checkpoint {
-        archductor_core::workspace::Checkpoint {
-            id,
-            workspace_id: 1,
-            session_id: None,
-            git_ref: format!("refs/test/{id}"),
-            message: message.to_owned(),
-            created_at: "2026-07-12T00:00:00Z".to_owned(),
-        }
-    }
-
     fn test_workspace() -> Workspace {
         Workspace {
             id: 1,
@@ -8321,27 +8062,6 @@ mod tests {
         let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
 
         assert_eq!(rendered, "Staged changes\nNo changes.\n");
-    }
-
-    #[test]
-    fn split_diff_pairs_added_and_deleted_lines() {
-        let rendered = format_split_diff_text(
-            "diff --git a/a.txt b/a.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n+added\n",
-            Some(1024),
-        );
-
-        assert!(rendered.contains("old"));
-        assert!(rendered.contains("new"));
-        assert!(rendered.contains("same"));
-        assert!(rendered.contains("added"));
-    }
-
-    #[test]
-    fn split_diff_falls_back_for_large_diffs() {
-        let rendered =
-            format_split_diff_text(&format!("diff --git a/a b/a\n{}", "x".repeat(64)), Some(32));
-
-        assert!(rendered.contains("too large for split view"));
     }
 
     #[test]
@@ -8535,30 +8255,33 @@ mod tests {
     }
 
     #[test]
-    fn workspace_turn_changes_formats_multiple_bounded_turns() {
-        let turns = vec![
-            TurnCheckpointDiff {
-                checkpoint: test_checkpoint(2, "Turn start: thread #7 user"),
-                end_checkpoint: None,
-                diff: "diff --git a/README.md b/README.md\n+latest\n".to_owned(),
-                truncated: false,
-            },
-            TurnCheckpointDiff {
-                checkpoint: test_checkpoint(1, "Turn start: thread #7 user"),
-                end_checkpoint: Some(test_checkpoint(2, "Turn start: thread #7 user")),
-                diff: String::new(),
-                truncated: true,
-            },
-        ];
+    fn turn_scope_labels_match_recent_chat_write_filters() {
+        assert_eq!(turn_scope_label(0), "Latest turn");
+        assert_eq!(turn_scope_label(1), "1 turn before");
+        assert_eq!(turn_scope_label(24), "24 turns before");
+    }
 
-        let text = format_workspace_turn_changes(&turns);
+    #[test]
+    fn diff_counts_text_formats_text_and_binary_changes() {
+        let text = DiffFileSummary {
+            path: "README.md".to_owned(),
+            additions: Some(12),
+            deletions: Some(3),
+            staged: false,
+            unstaged: true,
+            untracked: false,
+        };
+        let binary = DiffFileSummary {
+            path: "assets/logo.png".to_owned(),
+            additions: None,
+            deletions: None,
+            staged: false,
+            unstaged: false,
+            untracked: true,
+        };
 
-        assert!(text.contains("Showing up to 25 recent turns"));
-        assert!(text.contains("Each diff is capped at 64 KiB"));
-        assert!(text.contains("Range: checkpoint #2 -> current worktree"));
-        assert!(text.contains("Range: checkpoint #1 -> checkpoint #2"));
-        assert!(text.contains("+latest"));
-        assert!(text.contains("No changes for this turn."));
+        assert_eq!(diff_counts_text(&text), "+12 -3");
+        assert_eq!(diff_counts_text(&binary), "binary");
     }
 
     #[test]

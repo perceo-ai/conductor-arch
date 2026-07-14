@@ -899,6 +899,15 @@ pub struct DiffFileSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFileChangeSummary {
+    pub provider_turn_id: String,
+    pub label: String,
+    pub occurred_at_ms: u64,
+    pub chat_thread_id: Option<i64>,
+    pub files: Vec<DiffFileSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffHunkSummary {
     pub index: usize,
     pub header: String,
@@ -3056,6 +3065,106 @@ impl WorkspaceStore {
         }
         summaries.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(summaries)
+    }
+
+    pub fn turn_file_change_summaries(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<TurnFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let limit = limit.min(TURN_CHECKPOINT_DIFF_LIMIT);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT provider_turn_id,
+                    chat_thread_id,
+                    occurred_at_ms,
+                    kind,
+                    provider_subtype,
+                    normalized_payload_json,
+                    raw_json
+             FROM provider_events
+             WHERE workspace_id = ?1
+               AND provider_turn_id IS NOT NULL
+               AND phase = 'completed'
+               AND kind IN ('diff_file_change', 'file_system')
+             ORDER BY received_sequence DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([workspace.id], |row| {
+            let provider_turn_id: String = row.get(0)?;
+            let chat_thread_id: Option<i64> = row.get(1)?;
+            let occurred_at_ms: i64 = row.get(2)?;
+            let kind: String = row.get(3)?;
+            let provider_subtype: Option<String> = row.get(4)?;
+            let normalized_payload_json: String = row.get(5)?;
+            let raw_json: String = row.get(6)?;
+            Ok((
+                provider_turn_id,
+                chat_thread_id,
+                occurred_at_ms.max(0) as u64,
+                kind,
+                provider_subtype,
+                serde_json::from_str::<Value>(&normalized_payload_json).unwrap_or(Value::Null),
+                serde_json::from_str::<Value>(&raw_json).unwrap_or(Value::Null),
+            ))
+        })?;
+
+        let mut turns = Vec::<TurnFileChangeSummary>::new();
+        let mut turn_index = BTreeMap::<String, usize>::new();
+        for row in rows {
+            let (
+                provider_turn_id,
+                chat_thread_id,
+                occurred_at_ms,
+                kind,
+                provider_subtype,
+                normalized_payload,
+                raw_json,
+            ) = row?;
+            let summaries = provider_file_change_summaries(
+                &kind,
+                provider_subtype.as_deref(),
+                &normalized_payload,
+                &raw_json,
+            );
+            if summaries.is_empty() {
+                continue;
+            }
+
+            let index = if let Some(index) = turn_index.get(&provider_turn_id).copied() {
+                index
+            } else {
+                if turns.len() >= limit {
+                    continue;
+                }
+                let index = turns.len();
+                turn_index.insert(provider_turn_id.clone(), index);
+                turns.push(TurnFileChangeSummary {
+                    label: format!("Turn {}", index + 1),
+                    provider_turn_id: provider_turn_id.clone(),
+                    occurred_at_ms,
+                    chat_thread_id,
+                    files: Vec::new(),
+                });
+                index
+            };
+
+            let turn = &mut turns[index];
+            turn.occurred_at_ms = turn.occurred_at_ms.max(occurred_at_ms);
+            if turn.chat_thread_id.is_none() {
+                turn.chat_thread_id = chat_thread_id;
+            }
+            turn.files.extend(summaries);
+        }
+
+        for turn in &mut turns {
+            turn.files = merge_diff_summaries(std::mem::take(&mut turn.files));
+            turn.files.sort_by(|left, right| left.path.cmp(&right.path));
+        }
+        Ok(turns)
     }
 
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
@@ -7559,6 +7668,127 @@ fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
             })
         })
         .collect()
+}
+
+fn provider_file_change_summaries(
+    kind: &str,
+    provider_subtype: Option<&str>,
+    normalized_payload: &Value,
+    raw_json: &Value,
+) -> Vec<DiffFileSummary> {
+    let mut summaries = provider_raw_file_change_summaries(raw_json);
+    if summaries.is_empty() {
+        summaries = provider_normalized_file_change_summaries(normalized_payload);
+    }
+    if summaries.is_empty() && provider_event_is_file_write(kind, provider_subtype) {
+        if let Some(path) =
+            provider_event_path(normalized_payload).or_else(|| provider_event_path(raw_json))
+        {
+            summaries.push(DiffFileSummary {
+                path,
+                additions: None,
+                deletions: None,
+                staged: false,
+                unstaged: false,
+                untracked: false,
+            });
+        }
+    }
+    summaries
+}
+
+fn provider_event_is_file_write(kind: &str, provider_subtype: Option<&str>) -> bool {
+    if kind == "diff_file_change" {
+        return true;
+    }
+    let subtype = provider_subtype.unwrap_or_default().to_ascii_lowercase();
+    kind == "file_system"
+        && ["write", "create", "patch", "edit"]
+            .iter()
+            .any(|needle| subtype.contains(needle))
+}
+
+fn provider_raw_file_change_summaries(raw_json: &Value) -> Vec<DiffFileSummary> {
+    raw_json
+        .pointer("/params/item/changes")
+        .or_else(|| raw_json.pointer("/item/changes"))
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .filter_map(|change| {
+                    let path = change.get("path").and_then(Value::as_str)?;
+                    let (additions, deletions) = change
+                        .get("diff")
+                        .and_then(Value::as_str)
+                        .map(count_patch_lines)
+                        .map(|(additions, deletions)| (Some(additions), Some(deletions)))
+                        .unwrap_or((None, None));
+                    Some(DiffFileSummary {
+                        path: path.to_owned(),
+                        additions,
+                        deletions,
+                        staged: false,
+                        unstaged: false,
+                        untracked: false,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn provider_normalized_file_change_summaries(normalized_payload: &Value) -> Vec<DiffFileSummary> {
+    normalized_payload
+        .get("body")
+        .and_then(Value::as_str)
+        .map(|body| {
+            body.lines()
+                .filter_map(|line| {
+                    let path = line.split_whitespace().last()?.trim();
+                    (!path.is_empty()).then(|| DiffFileSummary {
+                        path: path.to_owned(),
+                        additions: None,
+                        deletions: None,
+                        staged: false,
+                        unstaged: false,
+                        untracked: false,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn provider_event_path(value: &Value) -> Option<String> {
+    for pointer in [
+        "/path",
+        "/title",
+        "/params/item/path",
+        "/params/path",
+        "/item/path",
+    ] {
+        let Some(path) = value.pointer(pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        if path.contains('/') || path.contains('.') {
+            return Some(path.to_owned());
+        }
+    }
+    None
+}
+
+fn count_patch_lines(diff: &str) -> (usize, usize) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            additions += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
 }
 
 fn diff_hunk_summaries(diff: &str, staged: bool) -> Vec<DiffHunkSummary> {
@@ -19310,6 +19540,78 @@ spotlight_testing = true
         assert!(changed
             .iter()
             .any(|path| path.contains("rename-me.txt") && path.contains("renamed.txt")));
+    }
+
+    #[test]
+    fn turn_file_change_summaries_come_from_provider_write_events_not_checkpoints() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .checkpoint_create("berlin", "unrelated checkpoint", None)
+            .unwrap();
+
+        for turn in 1..=27 {
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(format!("event-{turn}")),
+                    provider_item_id: Some(format!("file-{turn}")),
+                    provider_thread_id: Some("thread-1".to_owned()),
+                    provider_turn_id: Some(format!("turn-{turn}")),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread.id),
+                    process_id: Some(process.id),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: Some(turn),
+                    occurred_at_ms: turn as u64,
+                    normalized_payload: serde_json::json!({
+                        "title": "File changes",
+                        "body": format!("modified src/file-{turn}.rs")
+                    }),
+                    raw_json: serde_json::json!({
+                        "method": "item/completed",
+                        "params": {
+                            "turnId": format!("turn-{turn}"),
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [
+                                    {
+                                        "path": format!("src/file-{turn}.rs"),
+                                        "kind": "modified",
+                                        "diff": "@@ -1 +1 @@\n-old\n+new\n"
+                                    }
+                                ]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+
+        let turns = store.turn_file_change_summaries("berlin", 99).unwrap();
+
+        assert_eq!(turns.len(), 25);
+        assert_eq!(turns[0].provider_turn_id, "turn-27");
+        assert_eq!(turns[0].files[0].path, "src/file-27.rs");
+        assert_eq!(turns[0].files[0].additions, Some(1));
+        assert_eq!(turns[0].files[0].deletions, Some(1));
+        assert_eq!(turns[24].provider_turn_id, "turn-3");
+        assert!(!turns
+            .iter()
+            .any(|turn| turn.provider_turn_id == "unrelated checkpoint"));
     }
 
     #[test]
