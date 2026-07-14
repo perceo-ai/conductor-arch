@@ -5267,6 +5267,7 @@ enum WorkspacePrTopActionKind {
     CreatePr,
     CommitAndPush,
     Push,
+    MergeSourceBranch,
     MergePr,
     FixBlocked,
     ViewPr,
@@ -5307,6 +5308,20 @@ fn workspace_pr_primary_action(
             tooltip: "Ask the current chat to commit and push local changes",
             css_class: "ws-pr-status-muted",
             kind: WorkspacePrTopActionKind::CommitAndPush,
+        });
+    }
+
+    let source_branch_ahead = snapshot
+        .summary
+        .as_ref()
+        .map(|summary| summary.source_branch_ahead)
+        .unwrap_or_default();
+    if source_branch_ahead > 0 {
+        return Some(WorkspacePrTopAction {
+            label: "Merge",
+            tooltip: "Ask the current chat to merge the source branch into this workspace",
+            css_class: "ws-pr-status-pending",
+            kind: WorkspacePrTopActionKind::MergeSourceBranch,
         });
     }
 
@@ -5395,6 +5410,21 @@ fn connect_commit_and_push_prompt_button(
 ) {
     button.connect_clicked(move |_| {
         let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
+        state.queue_pending_chat_prompt(prompt);
+        state.set_active_workspace_tab(WorkspaceTab::Chats);
+        refresh_hub.refresh(RefreshScope::Workspace);
+    });
+}
+
+fn connect_merge_source_branch_prompt_button(
+    button: &Button,
+    db_path: PathBuf,
+    workspace_name: String,
+    state: AppState,
+    refresh_hub: RefreshHub,
+) {
+    button.connect_clicked(move |_| {
+        let prompt = workspace_merge_source_branch_chat_prompt(&db_path, &workspace_name);
         state.queue_pending_chat_prompt(prompt);
         state.set_active_workspace_tab(WorkspaceTab::Chats);
         refresh_hub.refresh(RefreshScope::Workspace);
@@ -5507,6 +5537,13 @@ fn workspace_pr_status_panel(
             state.clone(),
             refresh_hub.clone(),
         ),
+        WorkspacePrTopActionKind::MergeSourceBranch => connect_merge_source_branch_prompt_button(
+            &primary_btn,
+            db_path.to_path_buf(),
+            workspace_name.to_owned(),
+            state.clone(),
+            refresh_hub.clone(),
+        ),
         WorkspacePrTopActionKind::Push => {
             connect_push_branch_button(
                 &primary_btn,
@@ -5551,6 +5588,7 @@ fn workspace_pr_status_title(
     match action.kind {
         WorkspacePrTopActionKind::CommitAndPush => return "Commit and push branch",
         WorkspacePrTopActionKind::Push => return "Push branch",
+        WorkspacePrTopActionKind::MergeSourceBranch => return "Merge source branch",
         WorkspacePrTopActionKind::CreatePr => return "No pull request yet",
         WorkspacePrTopActionKind::FixBlocked if action.css_class == "ws-pr-status-failed" => {
             return "Blocked";
@@ -5709,6 +5747,18 @@ fn workspace_commit_and_push_chat_prompt(_db_path: &Path, name: &str) -> String 
         "Commit and push workspace {name}.\n\n\
          Review staged, unstaged, and untracked changes. Make the smallest coherent commit for \
          the current work, push the workspace branch, and report the commit plus push result."
+    )
+}
+
+fn workspace_merge_source_branch_chat_prompt(db_path: &Path, name: &str) -> String {
+    let source = WorkspaceStore::open(db_path)
+        .and_then(|store| store.workspace_base_ref(name))
+        .unwrap_or_else(|_| "the source branch".to_owned());
+    format!(
+        "Merge {source} into workspace {name} before creating a pull request.\n\n\
+         Fetch the latest source branch if needed, merge it into the workspace branch, resolve \
+         conflicts carefully, run the relevant verification, then report the merge result and any \
+         remaining blockers."
     )
 }
 
@@ -7934,6 +7984,7 @@ mod tests {
             open_todos: 0,
             total_todos: 0,
             branch_push_state,
+            source_branch_ahead: 0,
             open_review_comments: 0,
             conflicting_workspaces,
         }
@@ -8436,6 +8487,35 @@ mod tests {
             "ws-pr-status-missing"
         );
 
+        let mut source_ahead_summary = test_checks_summary(
+            0,
+            Some(archductor_core::workspace::BranchPushState {
+                ahead: 2,
+                behind: 0,
+                has_upstream: true,
+            }),
+            Vec::new(),
+        );
+        source_ahead_summary.source_branch_ahead = 1;
+        let source_ahead = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(source_ahead_summary),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&source_ahead),
+            Some("Merge")
+        );
+        let source_ahead_action = workspace_pr_primary_action(&source_ahead).unwrap();
+        assert_eq!(
+            source_ahead_action.kind,
+            WorkspacePrTopActionKind::MergeSourceBranch
+        );
+        assert_eq!(
+            workspace_pr_status_title(&source_ahead, source_ahead_action),
+            "Merge source branch"
+        );
+
         let clean_without_upstream = WorkspacePrStatusSnapshot {
             pr: None,
             status: None,
@@ -8577,6 +8657,7 @@ mod tests {
                 open_todos: 0,
                 total_todos: 0,
                 branch_push_state: None,
+                source_branch_ahead: 0,
                 open_review_comments: 0,
                 conflicting_workspaces: Vec::new(),
             },
@@ -8867,6 +8948,7 @@ mod tests {
                 open_todos: 0,
                 total_todos: 0,
                 branch_push_state: None,
+                source_branch_ahead: 0,
                 open_review_comments: 0,
                 conflicting_workspaces: Vec::new(),
             },
@@ -8914,6 +8996,7 @@ mod tests {
                 open_todos: 0,
                 total_todos: 0,
                 branch_push_state: None,
+                source_branch_ahead: 0,
                 open_review_comments: 0,
                 conflicting_workspaces: Vec::new(),
             },
@@ -9002,6 +9085,7 @@ mod tests {
                 open_todos: 0,
                 total_todos: 0,
                 branch_push_state: None,
+                source_branch_ahead: 0,
                 open_review_comments: 0,
                 conflicting_workspaces: Vec::new(),
             },

@@ -1497,6 +1497,12 @@ fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
         ),
         None => {}
     }
+    if summary.source_branch_ahead > 0 {
+        println!(
+            "Source:    {} commit(s) ahead; merge before creating PR",
+            summary.source_branch_ahead
+        );
+    }
     println!("Changed:   {} file(s)", summary.changed_files);
     println!(
         "Run:       {}",

@@ -1021,6 +1021,7 @@ pub struct ChecksSummary {
     pub open_todos: usize,
     pub total_todos: usize,
     pub branch_push_state: Option<BranchPushState>,
+    pub source_branch_ahead: usize,
     pub open_review_comments: usize,
     pub conflicting_workspaces: Vec<(String, Vec<String>)>,
 }
@@ -1403,7 +1404,7 @@ impl WorkspaceStore {
                 None
             };
             let (diff_additions, diff_deletions) = if workspace.status == "active" {
-                workspace_diff_stats_against_base(&workspace).unwrap_or_default()
+                workspace_diff_stats_against_head(&workspace).unwrap_or_default()
             } else {
                 (0, 0)
             };
@@ -3169,7 +3170,7 @@ impl WorkspaceStore {
 
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
         let workspace = self.get_by_name(name)?;
-        workspace_diff_stats_against_base(&workspace)
+        workspace_diff_stats_against_head(&workspace)
     }
 
     pub fn workspace_base_ref(&self, name: &str) -> Result<String> {
@@ -4638,6 +4639,11 @@ mutation($threadId: ID!) {{
         } else {
             None
         };
+        let source_branch_ahead = if path_exists {
+            workspace_source_branch_ahead(&workspace)
+        } else {
+            0
+        };
         let comments = self.list_review_comments(name)?;
         let open_review_comments = comments.iter().filter(|c| c.status == "open").count();
         let conflicting_workspaces = if path_exists {
@@ -4656,6 +4662,7 @@ mutation($threadId: ID!) {{
             open_todos,
             total_todos: todos.len(),
             branch_push_state,
+            source_branch_ahead,
             open_review_comments,
             conflicting_workspaces,
         })
@@ -7890,16 +7897,8 @@ fn hunk_unsupported_reason(diff: &str) -> Option<String> {
     None
 }
 
-fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, usize)> {
-    let base_ref = workspace_base_ref(workspace);
-    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])
-        .or_else(|err| {
-            if base_ref == "main" {
-                Err(err)
-            } else {
-                git_output(&workspace.path, ["diff", "--numstat", "main", "--"])
-            }
-        })?;
+fn workspace_diff_stats_against_head(workspace: &Workspace) -> Result<(usize, usize)> {
+    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", "HEAD", "--"])?;
     let mut additions = 0;
     let mut deletions = 0;
     for summary in parse_diff_numstat(&diff) {
@@ -7920,6 +7919,29 @@ fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, us
     }
 
     Ok((additions, deletions))
+}
+
+fn workspace_source_branch_ahead(workspace: &Workspace) -> usize {
+    let base_ref = workspace_base_ref(workspace);
+    if git_ref_exists(&workspace.path, base_ref) {
+        let range = format!("HEAD..{base_ref}");
+        return count_git_rev_list(&workspace.path, &range);
+    }
+    if base_ref != "main" && git_ref_exists(&workspace.path, "main") {
+        return count_git_rev_list(&workspace.path, "HEAD..main");
+    }
+    0
+}
+
+fn git_ref_exists(cwd: &Path, ref_name: &str) -> bool {
+    let commit_ref = format!("{ref_name}^{{commit}}");
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--verify", &commit_ref])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn workspace_base_ref(workspace: &Workspace) -> &str {
@@ -15274,7 +15296,7 @@ general = "Keep changes focused."
     }
 
     #[test]
-    fn diff_stats_against_base_include_committed_and_untracked_changes() {
+    fn diff_stats_against_base_counts_worktree_changes_against_branch_head() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -15324,14 +15346,73 @@ general = "Keep changes focused."
             .unwrap();
         fs::write(workspace.path.join("notes.txt"), "new\nnotes\n").unwrap();
 
-        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (3, 1));
+        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (2, 0));
         let line = store
             .list_status()
             .unwrap()
             .into_iter()
             .find(|line| line.workspace.name == "berlin")
             .unwrap();
-        assert_eq!((line.diff_additions, line.diff_deletions), (3, 1));
+        assert_eq!((line.diff_additions, line.diff_deletions), (2, 0));
+    }
+
+    #[test]
+    fn checks_summary_reports_source_branch_ahead_without_counting_it_as_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let baseline_changed_files = store.checks_summary("berlin").unwrap().changed_files;
+
+        fs::write(repo_path.join("CHANGELOG.md"), "main moved\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "CHANGELOG.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "main moved",
+            ])
+            .status()
+            .unwrap();
+
+        let summary = store.checks_summary("berlin").unwrap();
+
+        assert_eq!(summary.changed_files, baseline_changed_files);
+        assert_eq!(summary.source_branch_ahead, 1);
+        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (0, 0));
     }
 
     #[test]
