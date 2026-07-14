@@ -1731,16 +1731,16 @@ separator {
     min-height: 0;
 }
 .ws-dir-row {
-    padding: 2px 9px;
+    padding: 0;
 }
 .ws-folder-icon {
     color: #c39b50;
-    min-width: 14px;
-    min-height: 14px;
+    min-width: 13px;
+    min-height: 13px;
 }
 .ws-folder-toggle {
-    min-width: 16px;
-    min-height: 16px;
+    min-width: 12px;
+    min-height: 13px;
     padding: 0;
     border: none;
     background: transparent;
@@ -1754,12 +1754,12 @@ separator {
     color: #b0b0b0;
 }
 .ws-file-row {
-    padding: 2px 9px;
+    padding: 0;
 }
 .ws-file-icon {
     color: #8091a7;
-    min-width: 14px;
-    min-height: 14px;
+    min-width: 13px;
+    min-height: 13px;
 }
 .ws-file-name {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;

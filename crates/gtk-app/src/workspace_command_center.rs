@@ -1571,9 +1571,9 @@ fn append_file_tree_rows(
     if let Some(children) = dir_children.get(parent_key) {
         for child in children {
             let dir_path = tree_join_path(parent_key, child);
-            let row_box = GBox::new(Orientation::Horizontal, 6);
+            let row_box = GBox::new(Orientation::Horizontal, file_tree_row_spacing());
             row_box.add_css_class("ws-dir-row");
-            row_box.set_margin_start((depth as i32) * 12);
+            row_box.set_margin_start(file_tree_indent_margin_start(depth));
             let toggle = Label::new(Some("▸"));
             toggle.add_css_class("ws-folder-toggle");
             let icon = Image::from_icon_name(file_tree_icon_name(true, &dir_path));
@@ -1635,9 +1635,9 @@ fn append_file_tree_rows(
     if let Some(files) = file_children.get(parent_key) {
         for file in files {
             let file_path = tree_join_path(parent_key, file);
-            let row_box = GBox::new(Orientation::Horizontal, 6);
+            let row_box = GBox::new(Orientation::Horizontal, file_tree_row_spacing());
             row_box.add_css_class("ws-file-row");
-            row_box.set_margin_start((depth as i32) * 12);
+            row_box.set_margin_start(file_tree_indent_margin_start(depth));
 
             let icon = Image::from_icon_name(file_tree_icon_name(false, &file_path));
             icon.add_css_class("ws-file-icon");
@@ -1680,6 +1680,14 @@ fn file_tree_icon_name(is_dir: bool, path: &str) -> &'static str {
         }
         _ => "text-x-generic-symbolic",
     }
+}
+
+fn file_tree_indent_margin_start(depth: usize) -> i32 {
+    (depth as i32) * 8
+}
+
+fn file_tree_row_spacing() -> i32 {
+    2
 }
 
 fn ws_run_console(
@@ -7388,6 +7396,14 @@ mod tests {
             file_tree_icon_name(false, "Cargo.toml"),
             "text-x-script-symbolic"
         );
+    }
+
+    #[test]
+    fn browse_file_tree_uses_tight_filesystem_indentation() {
+        assert_eq!(file_tree_indent_margin_start(0), 0);
+        assert_eq!(file_tree_indent_margin_start(1), 8);
+        assert_eq!(file_tree_indent_margin_start(3), 24);
+        assert_eq!(file_tree_row_spacing(), 2);
     }
 
     #[test]
