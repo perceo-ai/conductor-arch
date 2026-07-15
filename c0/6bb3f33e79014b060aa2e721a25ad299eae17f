@@ -1,0 +1,34 @@
+crates/gtk-app/src/theme.rs
+  s_a63aff6741133a::t_08de21e5b4ac76 3011-3021
+  s_a63aff6741133a::t_ea260ebc91f154 20-88
+  s_334155ca48da57::t_4d49ea1b91bba4 3022
+crates/gtk-app/src/toast.rs
+  s_a63aff6741133a::t_ea260ebc91f154 2-3,13-24,26-32,77,103-129
+  s_a63aff6741133a::t_08de21e5b4ac76 157,164-178,183-185
+  s_a63aff6741133a::t_cde3e765cfd818 25
+  s_a63aff6741133a::t_1761a1a8c386c1 179-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c06bb3f33e79014b060aa2e721a25ad299eae17f",
+  "prompts": {},
+  "sessions": {
+    "s_334155ca48da57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649a-658f-7b33-8c99-86fbdc632ce0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_a63aff6741133a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f64b7-91b6-7e93-99e3-9a843823df95",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
