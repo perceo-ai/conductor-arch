@@ -245,16 +245,22 @@ pub(crate) fn build_settings_page(
     let delete_branch_check = CheckButton::with_label("Delete branch when archiving");
     let auto_upstream_check = CheckButton::with_label("Auto setup upstream remote");
 
-    let general_intro = settings_group(
-        "Repository defaults",
-        "High-level behavior for this repository. Scripts, checks, and Git defaults live in their own sections.",
+    let project_behavior_group = settings_group(
+        "Project behavior",
+        "High-level behavior for the selected project and its workspaces.",
     );
-    general_panel.append(&general_intro.0);
-    general_intro.1.append(&settings_toggle_row(
+    general_panel.append(&project_behavior_group.0);
+    project_behavior_group.1.append(&settings_toggle_row(
         &spotlight_check,
         "Turns on spotlight state tracking for workspace sync flows.",
     ));
-    general_intro.1.append(&settings_toggle_row(
+
+    let privacy_group = settings_group(
+        "Privacy",
+        "App-wide privacy defaults used across Archductor projects.",
+    );
+    general_panel.append(&privacy_group.0);
+    privacy_group.1.append(&settings_toggle_row(
         &privacy_check,
         "Uses privacy-safe behavior for repository and agent operations.",
     ));
@@ -700,6 +706,13 @@ pub(crate) fn build_settings_page(
     let env_buffer_load = env_view.1.clone();
     let customization_buffer_load = customization_view.1.clone();
     let prompt_editors_load = prompt_views.clone();
+    let project_behavior_group_load = project_behavior_group.0.clone();
+    let privacy_group_load = privacy_group.0.clone();
+    let environment_group_load = environment_group.0.clone();
+    let provider_paths_load = provider_paths.0.clone();
+    let provider_platforms_load = provider_platforms.0.clone();
+    let inspector_load = inspector.clone();
+    let save_settings_btn_load = save_settings_btn.clone();
     let shared_settings_path_load = paths.shared_settings_path();
     let toast_load = toast_manager.clone();
     let load_selected_settings = {
@@ -718,6 +731,23 @@ pub(crate) fn build_settings_page(
             *loading_settings_for_load.borrow_mut() = true;
             field_edits_load.borrow_mut().clear();
             let repo_name = selected_repository_name(&settings_repo_select_load);
+            let visible_general_groups = general_group_ids_for_scope(scope);
+            project_behavior_group_load
+                .set_visible(visible_general_groups.contains(&"project_behavior"));
+            privacy_group_load.set_visible(visible_general_groups.contains(&"privacy"));
+            environment_group_load.set_visible(visible_general_groups.contains(&"environment"));
+            provider_paths_load.set_visible(visible_general_groups.contains(&"agents"));
+            provider_platforms_load
+                .set_visible(visible_general_groups.contains(&"provider_platforms"));
+            let content_enabled = settings_content_enabled(scope, !repo_name.is_empty());
+            inspector_load.set_sensitive(content_enabled);
+            save_settings_btn_load.set_sensitive(content_enabled);
+            if !content_enabled {
+                *loaded_settings_target_load.borrow_mut() = None;
+                settings_result_load.set_text("Select a project to edit Local overrides.");
+                *loading_settings_for_load.borrow_mut() = false;
+                return;
+            }
             let loaded: anyhow::Result<(
                 SettingsSaveTarget,
                 RepositorySettings,
@@ -726,9 +756,6 @@ pub(crate) fn build_settings_page(
             )> = match scope {
                 SettingsUiScope::Shared => load_app_shared_settings(&shared_settings_path_load)
                     .map(|settings| (SettingsSaveTarget::Shared, settings.clone(), settings, None)),
-                SettingsUiScope::Local if repo_name.is_empty() => {
-                    Err(anyhow::anyhow!("Select a project."))
-                }
                 SettingsUiScope::Local => repository_root(&db_path_load_settings, &repo_name)
                     .and_then(|repo_path| {
                         let raw = load_repository_settings_for_layer(
@@ -935,6 +962,8 @@ pub(crate) fn build_settings_page(
                 }
                 Err(err) => {
                     *loaded_settings_target_load.borrow_mut() = None;
+                    inspector_load.set_sensitive(false);
+                    save_settings_btn_load.set_sensitive(false);
                     surface_label_error(
                         &settings_result_load,
                         &toast_load,
@@ -1596,6 +1625,39 @@ fn settings_sections_for_scope(scope: SettingsUiScope) -> Vec<SettingsSection> {
         .collect()
 }
 
+fn general_group_ids_for_scope(scope: SettingsUiScope) -> Vec<&'static str> {
+    match scope {
+        SettingsUiScope::Shared => vec!["privacy", "agents", "provider_platforms"],
+        SettingsUiScope::Local => vec!["project_behavior", "environment"],
+    }
+}
+
+fn general_field_ids_for_scope(scope: SettingsUiScope) -> Vec<&'static str> {
+    general_group_ids_for_scope(scope)
+        .into_iter()
+        .flat_map(|group| match group {
+            "privacy" => &["enterprise_privacy"][..],
+            "agents" => &[
+                "claude_executable",
+                "codex_executable",
+                "default_agent",
+                "default_model",
+                "claude_provider",
+                "codex_provider",
+            ],
+            "provider_platforms" => &["bedrock_region", "vertex_project"],
+            "project_behavior" => &["spotlight_testing"],
+            "environment" => &["environment_variables"],
+            _ => &[],
+        })
+        .copied()
+        .collect()
+}
+
+fn settings_content_enabled(scope: SettingsUiScope, has_project: bool) -> bool {
+    scope == SettingsUiScope::Shared || has_project
+}
+
 fn settings_rail_button(section: SettingsSection) -> Button {
     let button = text_button(section.title);
     button.add_css_class("settings-rail-button");
@@ -1967,6 +2029,55 @@ mod tests {
             ids,
             vec!["general", "prompts", "scripts", "git", "advanced"]
         );
+    }
+
+    #[test]
+    fn shared_scope_general_groups_are_cross_project_defaults_only() {
+        assert_eq!(
+            general_group_ids_for_scope(SettingsUiScope::Shared),
+            vec!["privacy", "agents", "provider_platforms"]
+        );
+    }
+
+    #[test]
+    fn local_scope_general_groups_are_project_dependent_only() {
+        assert_eq!(
+            general_group_ids_for_scope(SettingsUiScope::Local),
+            vec!["project_behavior", "environment"]
+        );
+    }
+
+    #[test]
+    fn shared_scope_general_fields_exclude_project_values() {
+        assert_eq!(
+            general_field_ids_for_scope(SettingsUiScope::Shared),
+            vec![
+                "enterprise_privacy",
+                "claude_executable",
+                "codex_executable",
+                "default_agent",
+                "default_model",
+                "claude_provider",
+                "codex_provider",
+                "bedrock_region",
+                "vertex_project",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_scope_general_fields_exclude_app_wide_defaults() {
+        assert_eq!(
+            general_field_ids_for_scope(SettingsUiScope::Local),
+            vec!["spotlight_testing", "environment_variables"]
+        );
+    }
+
+    #[test]
+    fn local_settings_content_requires_a_selected_project() {
+        assert!(settings_content_enabled(SettingsUiScope::Shared, false));
+        assert!(!settings_content_enabled(SettingsUiScope::Local, false));
+        assert!(settings_content_enabled(SettingsUiScope::Local, true));
     }
 
     #[test]
