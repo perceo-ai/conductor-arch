@@ -3,6 +3,7 @@ use archductor_core::agent_tools::launchable_provider_key;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
+use archductor_core::settings::PromptKind;
 use archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
@@ -2599,7 +2600,7 @@ fn show_prompt_preview(prompt: &str, launch_cmd: &str) {
     title.set_xalign(0.0);
     body.append(&title);
     let hint = Label::new(Some(
-        "This prompt will be injected when the session starts.",
+        "These instructions are included with the first message in a new chat.",
     ));
     hint.add_css_class("card-meta");
     hint.set_xalign(0.0);
@@ -4780,9 +4781,14 @@ fn connect_fix_blocked_prompt_button(
     let feedback_for_fix = feedback.clone();
     let toast_for_fix = toast_overlay.clone();
     button.connect_clicked(move |_| {
-        let prompt = WorkspaceStore::open_app(db_path.clone())
-            .and_then(|store| store.pull_request_checks_agent_prompt(&workspace_name))
-            .unwrap_or_else(|_| workspace_conflict_resolution_prompt(&db_path, &workspace_name));
+        let failed_checks = WorkspaceStore::open_app(db_path.clone())
+            .and_then(|store| store.pull_request_checks(&workspace_name))
+            .ok();
+        let prompt = workspace_conflict_resolution_prompt(
+            &db_path,
+            &workspace_name,
+            failed_checks.as_deref(),
+        );
         state.queue_pending_chat_prompt(prompt);
         state.set_active_workspace_tab(WorkspaceTab::Chats);
         apply_action_feedback(
@@ -5014,26 +5020,28 @@ fn pull_request_is_ready(
 }
 
 fn workspace_setup_prompt(db_path: &Path, name: &str) -> String {
-    workspace_script_prompt(db_path, name, "setup", "Setup")
+    workspace_script_prompt(db_path, name, "setup", "Setup", PromptKind::SetupScript)
 }
 
 fn workspace_run_prompt(db_path: &Path, name: &str) -> String {
-    workspace_script_prompt(db_path, name, "run", "Run")
+    workspace_script_prompt(db_path, name, "run", "Run", PromptKind::RunScript)
 }
 
 fn workspace_continue_prompt(db_path: &Path, name: &str) -> String {
-    WorkspaceStore::open_app(db_path)
-        .and_then(|store| store.workspace_repo_settings(name))
+    let configured = WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.resolved_prompt(name, PromptKind::ContinueWork))
         .ok()
-        .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr))
-        .filter(|prompt| !prompt.trim().is_empty())
-        .map(|prompt| format!("Continue after the merged PR for workspace {name}.\n\n{prompt}"))
-        .unwrap_or_else(|| {
-            format!(
-                "Continue after the merged PR for workspace {name}.\n\
-                 Check remaining todos, decide the next branch or follow-up PR, and keep going."
-            )
-        })
+        .flatten();
+    workspace_continue_prompt_from_parts(name, configured.as_deref())
+}
+
+fn workspace_continue_prompt_from_parts(name: &str, configured: Option<&str>) -> String {
+    let mut prompt = format!(
+        "Continue after the merged PR for workspace {name}.\n\
+         Check remaining todos, decide the next branch or follow-up PR, and keep going."
+    );
+    append_configured_prompt(&mut prompt, configured);
+    prompt
 }
 
 fn workspace_create_pr_chat_prompt(db_path: &Path, name: &str) -> String {
@@ -5041,9 +5049,9 @@ fn workspace_create_pr_chat_prompt(db_path: &Path, name: &str) -> String {
     let mut context_brief = None;
     if let Ok(store) = WorkspaceStore::open_app(db_path) {
         repo_prompt = store
-            .workspace_repo_settings(name)
+            .resolved_prompt(name, PromptKind::CreatePr)
             .ok()
-            .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr));
+            .flatten();
         context_brief = store.read_context_brief(name).ok().flatten();
     }
     workspace_create_pr_chat_prompt_from_parts(
@@ -5080,35 +5088,68 @@ fn workspace_create_pr_chat_prompt_from_parts(
     prompt
 }
 
-fn workspace_commit_and_push_chat_prompt(_db_path: &Path, name: &str) -> String {
-    format!(
+fn workspace_commit_and_push_chat_prompt(db_path: &Path, name: &str) -> String {
+    let mut prompt = format!(
         "Commit and push workspace {name}.\n\n\
          Review staged, unstaged, and untracked changes. Make the smallest coherent commit for \
          the current work, push the workspace branch, and report the commit plus push result."
-    )
+    );
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, PromptKind::CommitGeneration).as_deref(),
+    );
+    prompt
 }
 
 fn workspace_merge_source_branch_chat_prompt(db_path: &Path, name: &str) -> String {
     let source = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_base_ref(name))
         .unwrap_or_else(|_| "the source branch".to_owned());
-    format!(
+    let mut prompt = format!(
         "Merge {source} into workspace {name} before creating a pull request.\n\n\
          Fetch the latest source branch if needed, merge it into the workspace branch, resolve \
          conflicts carefully, run the relevant verification, then report the merge result and any \
          remaining blockers."
-    )
+    );
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, PromptKind::ResolveMergeConflicts).as_deref(),
+    );
+    prompt
 }
 
-fn workspace_conflict_resolution_prompt(_db_path: &Path, name: &str) -> String {
-    format!(
+fn workspace_conflict_resolution_prompt(
+    db_path: &Path,
+    name: &str,
+    failed_checks: Option<&str>,
+) -> String {
+    let mut prompt = format!(
         "Resolve the blockers for workspace {name} before PR/merge.\n\n\
          Inspect workspace conflicts, failing checks, and branch state. Make the smallest safe \
          fix, rerun the relevant verification, and report what changed."
-    )
+    );
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, PromptKind::ResolveMergeConflicts).as_deref(),
+    );
+    if let Some(failed_checks) = failed_checks {
+        prompt.push_str("\n\nFailed checks:\n");
+        prompt.push_str(failed_checks);
+        append_configured_prompt(
+            &mut prompt,
+            resolved_workspace_prompt(db_path, name, PromptKind::FixErrors).as_deref(),
+        );
+    }
+    prompt
 }
 
-fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: &str) -> String {
+fn workspace_script_prompt(
+    db_path: &Path,
+    name: &str,
+    script_key: &str,
+    label: &str,
+    prompt_kind: PromptKind,
+) -> String {
     let current = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_repo_settings(name))
         .ok()
@@ -5117,7 +5158,7 @@ fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: 
             "run" => settings.scripts.run,
             _ => None,
         });
-    match current {
+    let mut prompt = match current {
         Some(script) if !script.trim().is_empty() => format!(
             "Create or update .archductor/settings.toml for workspace {name}.\n\
              Set scripts.{script_key} to this multiline shell block of successive commands:\n\n{script}\n"
@@ -5127,6 +5168,28 @@ fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: 
              Define scripts.{script_key} as a multiline shell block so the {label} tab can run successive commands in order.\n\
              Keep the commands short, reliable, and checked into the repo."
         ),
+    };
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, prompt_kind).as_deref(),
+    );
+    prompt
+}
+
+fn resolved_workspace_prompt(db_path: &Path, name: &str, kind: PromptKind) -> Option<String> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.resolved_prompt(name, kind))
+        .ok()
+        .flatten()
+}
+
+fn append_configured_prompt(prompt: &mut String, configured: Option<&str>) {
+    if let Some(configured) = configured
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        prompt.push_str("\n\nRepository instructions:\n");
+        prompt.push_str(configured);
     }
 }
 
@@ -7142,7 +7205,7 @@ fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("No local check runs recorded"))?;
     let output = store.read_latest_check_log(name)?;
     let output = bounded_check_prompt_output(&output);
-    Ok(format!(
+    let mut prompt = format!(
         "Address the latest local check output for workspace {name}. If it failed, make the smallest safe fix and rerun the relevant check.\n\nProcess #{}: {}\nStatus: {}\nExit: {}\nStarted: {}\n\nOutput:\n```text\n{}\n```",
         record.id,
         record.command,
@@ -7150,7 +7213,14 @@ fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Resu
         exit_code_label(record.exit_code),
         record.started_at,
         output
-    ))
+    );
+    append_configured_prompt(
+        &mut prompt,
+        store
+            .resolved_prompt(name, PromptKind::TestFixing)?
+            .as_deref(),
+    );
+    Ok(prompt)
 }
 
 fn bounded_check_prompt_output(output: &str) -> String {
@@ -7849,6 +7919,14 @@ mod tests {
         assert!(prompt.contains("summary and testing/verification section"));
         assert!(prompt.contains("Use the repo PR template."));
         assert!(prompt.contains("Changed chat tabs."));
+    }
+
+    #[test]
+    fn continue_prompt_uses_continue_work_not_create_pr() {
+        let prompt = workspace_continue_prompt_from_parts("berlin", Some("Continue carefully."));
+
+        assert!(prompt.contains("Continue carefully."));
+        assert!(!prompt.contains("Write a concise PR."));
     }
 
     #[test]

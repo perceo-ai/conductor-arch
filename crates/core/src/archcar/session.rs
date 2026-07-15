@@ -33,11 +33,32 @@ use crate::provider_events::{
 use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
+use crate::settings::PromptKind;
 use crate::workspace::{
     ChatThreadRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
     WorkspaceStore,
 };
 use serde_json::json;
+
+pub fn compose_first_turn_input(general: Option<&str>, visible: &str, first_turn: bool) -> String {
+    if first_turn {
+        if let Some(general) = general.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+            return format!("{general}\n\n{visible}");
+        }
+    }
+    visible.to_owned()
+}
+
+fn resolved_general_prompt(db_path: &std::path::Path, workspace: &str) -> Result<Option<String>> {
+    WorkspaceStore::open_app(db_path)?.resolved_prompt(workspace, PromptKind::General)
+}
+
+fn durable_thread_is_first_user_turn(db_path: &std::path::Path, thread_id: i64) -> Result<bool> {
+    Ok(!WorkspaceStore::open(db_path)?
+        .list_chat_messages(thread_id)?
+        .iter()
+        .any(|message| message.role == "user"))
+}
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -1520,7 +1541,18 @@ fn run_codex_app_server_session_loop(
     event_tx: Sender<ArchcarEvent>,
 ) {
     let started = snapshot.lock().unwrap().clone();
-    let runtime_store = RuntimeSessionStore::new(db_path);
+    let general_prompt = match resolved_general_prompt(&db_path, &started.workspace) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: format!("Could not resolve general prompt: {err:#}"),
+            });
+            None
+        }
+    };
+    let runtime_store = RuntimeSessionStore::new(db_path.clone());
     let _ = event_tx.send(ArchcarEvent::SessionStarted {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -1737,6 +1769,12 @@ fn run_codex_app_server_session_loop(
                     kind,
                     delivery,
                 } => {
+                    let first_turn = kind != ArchcarInputKind::ControlCommand
+                        && durable_thread_is_first_user_turn(&db_path, started.thread_id)
+                            .unwrap_or(false);
+                    let provider_input =
+                        compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
+                    let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
                     let Some(thread_id) = provider_thread_id.as_deref() else {
                         let _ = event_tx.send(ArchcarEvent::SessionError {
                             session_id: Some(started.session_id),
@@ -1766,14 +1804,15 @@ fn run_codex_app_server_session_loop(
                                 &CodexAppServerTurnSteerParams {
                                     thread_id: thread_id.to_owned(),
                                     input: vec![CodexAppServerUserInput::Text {
-                                        text: input.clone(),
+                                        text: provider_input.clone(),
                                     }],
                                     expected_turn_id: Some(expected_turn_id),
                                 },
                             )
                         }
                         CodexInputRoute::Start => {
-                            let params = codex_turn_start_params(&connection, thread_id, &input);
+                            let params =
+                                codex_turn_start_params(&connection, thread_id, &provider_input);
                             write_turn_start_request_with_id(
                                 &mut connection.stdin,
                                 request_id,
@@ -1795,15 +1834,15 @@ fn run_codex_app_server_session_loop(
                             request_id,
                             PendingCodexInputRequest {
                                 kind: request_kind,
-                                input: input.clone(),
+                                input: provider_input.clone(),
                             },
                         );
                         user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
                             &started,
-                            &input,
-                            visible_input.as_deref(),
+                            &provider_input,
+                            Some(&persisted_input),
                             &kind,
                             user_input_sequence,
                         );
@@ -1896,7 +1935,18 @@ fn run_claude_stream_session_loop(
     event_tx: Sender<ArchcarEvent>,
 ) {
     let started = snapshot.lock().unwrap().clone();
-    let runtime_store = RuntimeSessionStore::new(db_path);
+    let general_prompt = match resolved_general_prompt(&db_path, &started.workspace) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: format!("Could not resolve general prompt: {err:#}"),
+            });
+            None
+        }
+    };
+    let runtime_store = RuntimeSessionStore::new(db_path.clone());
     let _ = event_tx.send(ArchcarEvent::SessionStarted {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -1939,7 +1989,9 @@ fn run_claude_stream_session_loop(
                         Some(started.session_id),
                         "claude-stream-json",
                     ));
-                    let _ = runtime_store.append_provider_event(&draft);
+                    if should_persist_provider_native_event(draft.kind) {
+                        let _ = runtime_store.append_provider_event(&draft);
+                    }
                     let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                         thread_id: started.thread_id,
                     });
@@ -1970,11 +2022,17 @@ fn run_claude_stream_session_loop(
                     kind,
                     delivery: _,
                 } => {
+                    let first_turn = kind != ArchcarInputKind::ControlCommand
+                        && durable_thread_is_first_user_turn(&db_path, started.thread_id)
+                            .unwrap_or(false);
+                    let provider_input =
+                        compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
+                    let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
                     let payload = json!({
                         "type": "user",
                         "message": {
                             "role": "user",
-                            "content": [{"type": "text", "text": input.clone()}],
+                            "content": [{"type": "text", "text": provider_input.clone()}],
                         },
                     });
                     if let Err(err) = write_provider_json_line(&mut connection.stdin, &payload) {
@@ -1991,8 +2049,8 @@ fn run_claude_stream_session_loop(
                         persist_runtime_user_input(
                             &runtime_store,
                             &started,
-                            &input,
-                            visible_input.as_deref(),
+                            &provider_input,
+                            Some(&persisted_input),
                             &kind,
                             user_input_sequence,
                         );
@@ -2154,6 +2212,9 @@ fn persist_codex_app_server_message(
     started: &SessionSnapshot,
 ) {
     let event = codex_app_server_provider_event_for_session(message, started);
+    if !should_persist_provider_native_event(event.kind) {
+        return;
+    }
     if let Err(err) = runtime_store.append_provider_event(&event) {
         warn!(
             session_id = started.session_id,
@@ -2162,6 +2223,10 @@ fn persist_codex_app_server_message(
             "failed to persist codex app-server provider event"
         );
     }
+}
+
+fn should_persist_provider_native_event(kind: ProviderEventKind) -> bool {
+    kind != ProviderEventKind::UserInput
 }
 
 fn codex_app_server_provider_event_for_session(
@@ -2446,6 +2511,28 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn general_prompt_is_hidden_prefix_only_on_first_turn() {
+        assert_eq!(
+            compose_first_turn_input(Some("Keep changes focused."), "Fix auth", true),
+            "Keep changes focused.\n\nFix auth"
+        );
+        assert_eq!(
+            compose_first_turn_input(Some("Keep changes focused."), "Run tests", false),
+            "Run tests"
+        );
+    }
+
+    #[test]
+    fn provider_echoes_do_not_persist_as_visible_user_messages() {
+        assert!(!should_persist_provider_native_event(
+            ProviderEventKind::UserInput
+        ));
+        assert!(should_persist_provider_native_event(
+            ProviderEventKind::AssistantOutput
+        ));
     }
 
     #[test]

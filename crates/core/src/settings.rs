@@ -59,6 +59,69 @@ pub struct PromptSettings {
     pub run_script: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    NewWorkspace,
+    General,
+    ContinueWork,
+    SummarizeSession,
+    Handoff,
+    CodeReview,
+    CreatePr,
+    FixErrors,
+    ResolveMergeConflicts,
+    RenameBranch,
+    CommitGeneration,
+    TestFixing,
+    RefactorStyle,
+    SetupScript,
+    RunScript,
+}
+
+impl PromptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewWorkspace => "new_workspace",
+            Self::General => "general",
+            Self::ContinueWork => "continue_work",
+            Self::SummarizeSession => "summarize_session",
+            Self::Handoff => "handoff",
+            Self::CodeReview => "code_review",
+            Self::CreatePr => "create_pr",
+            Self::FixErrors => "fix_errors",
+            Self::ResolveMergeConflicts => "resolve_merge_conflicts",
+            Self::RenameBranch => "rename_branch",
+            Self::CommitGeneration => "commit_generation",
+            Self::TestFixing => "test_fixing",
+            Self::RefactorStyle => "refactor_style",
+            Self::SetupScript => "setup_script",
+            Self::RunScript => "run_script",
+        }
+    }
+}
+
+impl PromptSettings {
+    pub fn get(&self, kind: PromptKind) -> Option<&str> {
+        match kind {
+            PromptKind::NewWorkspace => self.new_workspace.as_deref(),
+            PromptKind::General => self.general.as_deref(),
+            PromptKind::ContinueWork => self.continue_work.as_deref(),
+            PromptKind::SummarizeSession => self.summarize_session.as_deref(),
+            PromptKind::Handoff => self.handoff.as_deref(),
+            PromptKind::CodeReview => self.code_review.as_deref(),
+            PromptKind::CreatePr => self.create_pr.as_deref(),
+            PromptKind::FixErrors => self.fix_errors.as_deref(),
+            PromptKind::ResolveMergeConflicts => self.resolve_merge_conflicts.as_deref(),
+            PromptKind::RenameBranch => self.rename_branch.as_deref(),
+            PromptKind::CommitGeneration => self.commit_generation.as_deref(),
+            PromptKind::TestFixing => self.test_fixing.as_deref(),
+            PromptKind::RefactorStyle => self.refactor_style.as_deref(),
+            PromptKind::SetupScript => self.setup_script.as_deref(),
+            PromptKind::RunScript => self.run_script.as_deref(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptPackSettings {
     pub active: Option<String>,
@@ -2224,6 +2287,24 @@ fn normalize_workspace_tab(value: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn prompt_kind_returns_matching_value() {
+        let prompts = PromptSettings {
+            continue_work: Some("Inspect current changes.".to_owned()),
+            create_pr: Some("Write a concise PR.".to_owned()),
+            ..PromptSettings::default()
+        };
+
+        assert_eq!(
+            prompts.get(PromptKind::ContinueWork),
+            Some("Inspect current changes.")
+        );
+        assert_eq!(
+            prompts.get(PromptKind::CreatePr),
+            Some("Write a concise PR.")
+        );
+    }
 
     #[test]
     fn effective_settings_merge_shared_repository_and_local_in_order() {

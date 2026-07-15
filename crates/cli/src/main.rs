@@ -555,7 +555,11 @@ fn main() -> Result<()> {
                     .with_context(|| format!("read {}", input.display()))?;
                 let settings = repository_settings_from_toml(&contents)?;
                 save_app_shared_settings(&paths.shared_settings_path(), &settings)?;
-                println!("Imported Shared settings from {}", input.display());
+                let refreshed = refresh_all_repository_prompt_snapshots(&paths)?;
+                println!(
+                    "Imported Shared settings from {} and refreshed {refreshed} prompt snapshot(s)",
+                    input.display()
+                );
             }
         },
         Command::Import { command } => match command {
@@ -677,7 +681,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Repo { command } => {
-            let store = RepositoryStore::open(paths.database_path)?;
+            let store = RepositoryStore::open(&paths.database_path)?;
             match command {
                 RepoCommand::Add {
                     path,
@@ -751,8 +755,13 @@ fn main() -> Result<()> {
                             let settings = repository_settings_from_toml(&contents)?;
                             let layer = repo_settings_layer(local);
                             save_repository_settings(&repo.root_path, layer, &settings)?;
+                            let refreshed = WorkspaceStore::open_app_with_logs(
+                                &paths.database_path,
+                                &paths.logs_dir,
+                            )?
+                            .refresh_repository_prompt_snapshots(repo.id)?;
                             println!(
-                                "Imported {} settings for {} from {}",
+                                "Imported {} settings for {} from {} and refreshed {refreshed} prompt snapshot(s)",
                                 repo_settings_layer_label(layer),
                                 repo.name,
                                 input.display()
@@ -1432,6 +1441,14 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn refresh_all_repository_prompt_snapshots(paths: &AppPaths) -> Result<usize> {
+    let repositories = RepositoryStore::open(&paths.database_path)?.list()?;
+    let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
+    repositories.into_iter().try_fold(0, |total, repository| {
+        Ok(total + store.refresh_repository_prompt_snapshots(repository.id)?)
+    })
 }
 
 fn print_archcar_response(response: ArchcarResponse) {

@@ -26,7 +26,7 @@ use crate::session_pipeline::{
 use crate::session_state::AgentSessionState;
 use crate::settings::{
     ensure_repository_config, gitignore_pattern_key, load_effective_repository_settings,
-    load_repository_settings, save_local_default_agent_provider, RepositorySettings,
+    load_repository_settings, save_local_default_agent_provider, PromptKind, RepositorySettings,
 };
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
@@ -3780,7 +3780,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_checks_agent_prompt(&self, name: &str) -> Result<String> {
         let checks = self.pull_request_check_runs(name)?;
-        Ok(format_pull_request_checks_agent_prompt(name, &checks))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::TestFixing,
+            format_pull_request_checks_agent_prompt(name, &checks),
+        )
     }
 
     pub fn pull_request_review_state(&self, name: &str) -> Result<String> {
@@ -3791,7 +3795,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_review_agent_prompt(&self, name: &str) -> Result<String> {
         let review_state = self.pull_request_review_state(name)?;
-        Ok(format_pull_request_review_agent_prompt(name, &review_state))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_pull_request_review_agent_prompt(name, &review_state),
+        )
     }
 
     pub fn pull_request_readiness(&self, name: &str) -> Result<PullRequestReadiness> {
@@ -3830,7 +3838,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_readiness_agent_prompt(&self, name: &str) -> Result<String> {
         let readiness = self.pull_request_readiness(name)?;
-        Ok(format_pull_request_readiness_agent_prompt(name, &readiness))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_pull_request_readiness_agent_prompt(name, &readiness),
+        )
     }
 
     fn pull_request_review_threads_by_id(
@@ -4207,7 +4219,24 @@ mutation($threadId: ID!) {{
             .into_iter()
             .filter(|comment| comment.status == "open")
             .collect::<Vec<_>>();
-        Ok(format_review_comments_agent_prompt(name, &comments))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_review_comments_agent_prompt(name, &comments),
+        )
+    }
+
+    fn append_resolved_prompt(
+        &self,
+        workspace: &str,
+        kind: PromptKind,
+        mut prompt: String,
+    ) -> Result<String> {
+        if let Some(instructions) = self.resolved_prompt(workspace, kind)? {
+            prompt.push_str("\n\nRepository instructions:\n");
+            prompt.push_str(&instructions);
+        }
+        Ok(prompt)
     }
 
     pub fn resolve_review_comment(&self, id: i64) -> Result<ReviewComment> {
@@ -5537,6 +5566,33 @@ mutation($threadId: ID!) {{
         let workspace = self.get_by_name(workspace_name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         self.repository_settings(&repository.root_path)
+    }
+
+    pub fn resolved_prompt(&self, workspace: &str, kind: PromptKind) -> Result<Option<String>> {
+        Ok(self
+            .workspace_repo_settings(workspace)?
+            .prompts
+            .as_ref()
+            .and_then(|prompts| prompts.get(kind))
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(ToOwned::to_owned))
+    }
+
+    pub fn refresh_repository_prompt_snapshots(&self, repository_id: i64) -> Result<usize> {
+        let repository = self.load_repository_by_id(repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
+             FROM workspaces WHERE repository_id = ?1 ORDER BY id",
+        )?;
+        let workspaces = stmt
+            .query_map([repository_id], row_to_workspace)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for workspace in &workspaces {
+            write_managed_prompt_snapshot(&workspace.path, &settings)?;
+        }
+        Ok(workspaces.len())
     }
 
     pub fn workspace_changes_scope(&self, workspace_name: &str) -> Result<Option<String>> {
@@ -8454,6 +8510,12 @@ fn initialize_context_files(
         .context("write .context/agent-notes.md")?;
     fs::write(context_dir.join("todos.md"), todos).context("write .context/todos.md")?;
 
+    write_managed_prompt_snapshot(workspace_path, settings)?;
+
+    Ok(())
+}
+
+fn managed_prompt_snapshot(settings: &crate::settings::RepositorySettings) -> Option<String> {
     let mut prompts_lines = Vec::new();
     if let Some(general) = settings.prompts.as_ref().and_then(|p| p.general.as_deref()) {
         prompts_lines.push(format!("## General\n\n{general}\n"));
@@ -8473,11 +8535,25 @@ fn initialize_context_files(
         prompts_lines.push(format!("## Create PR\n\n{create_pr}\n"));
     }
     if !prompts_lines.is_empty() {
-        let content = format!("# Prompts\n\n{}", prompts_lines.join("\n"));
-        fs::write(context_dir.join("PROMPTS.md"), content).context("write .context/PROMPTS.md")?;
+        return Some(format!("# Prompts\n\n{}", prompts_lines.join("\n")));
     }
 
-    Ok(())
+    None
+}
+
+fn write_managed_prompt_snapshot(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let path = workspace_path.join(".context/PROMPTS.md");
+    match managed_prompt_snapshot(settings) {
+        Some(content) => fs::write(&path, content).context("write .context/PROMPTS.md"),
+        None => match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).context("remove .context/PROMPTS.md"),
+        },
+    }
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -9663,6 +9739,75 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn refresh_repository_prompt_snapshots_updates_only_managed_prompt_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let repository = RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let first = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let second = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "paris".to_owned(),
+                branch: "lc/paris".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let original_brief = fs::read_to_string(first.path.join(".context/brief.md")).unwrap();
+        let original_notes =
+            fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap();
+        let original_todos = fs::read_to_string(first.path.join(".context/todos.md")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.local.toml"),
+            "[prompts]\ngeneral = \"Updated general\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .refresh_repository_prompt_snapshots(repository.id)
+                .unwrap(),
+            2
+        );
+        for workspace in [&first, &second] {
+            assert!(
+                fs::read_to_string(workspace.path.join(".context/PROMPTS.md"))
+                    .unwrap()
+                    .contains("Updated general")
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/brief.md")).unwrap(),
+            original_brief
+        );
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap(),
+            original_notes
+        );
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/todos.md")).unwrap(),
+            original_todos
+        );
     }
 
     #[test]

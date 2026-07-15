@@ -8,6 +8,7 @@ use archductor_core::settings::{
     AgentProfileSettings, FilePatternSource, GitSettings, PromptSettings, ProviderSettings,
     RepositorySettings, ScriptSettings, SettingsLayer,
 };
+use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
@@ -970,12 +971,17 @@ pub(crate) fn build_settings_page(
         *pending_autosave_target_recover.borrow_mut() = None;
         *recover_confirmation_for_click.borrow_mut() = None;
         match repository_root(&db_path_recover_settings, &repo_name).and_then(|repo_path| {
-            save_repository_settings(&repo_path, layer, &settings).map(|()| repo_path)
+            save_repository_settings(&repo_path, layer, &settings)?;
+            let refreshed = refresh_repository_prompt_snapshots(
+                &db_path_recover_settings,
+                &repo_name,
+            )?;
+            Ok((repo_path, refreshed))
         }) {
-            Ok(repo_path) => {
+            Ok((repo_path, refreshed)) => {
                 load_selected_settings_for_recover();
                 settings_result_recover.set_text(&format!(
-                    "Recovered {:?} settings for {}. Previous file was backed up when present.",
+                    "Recovered {:?} settings for {} and refreshed {refreshed} prompt snapshot(s). Previous file was backed up when present.",
                     layer,
                     repo_path.display()
                 ));
@@ -1343,10 +1349,15 @@ pub(crate) fn build_settings_page(
             },
             customization,
         };
-        match save_repository_settings(&repo_path, layer, &settings) {
-            Ok(()) => {
+        match save_repository_settings(&repo_path, layer, &settings)
+            .and_then(|()| refresh_repository_prompt_snapshots(&db_path_save_settings, &repo_name))
+        {
+            Ok(refreshed) => {
                 bool_edits_for_save.borrow_mut().clear();
-                settings_result.set_text(&format!("Saved settings for {}", repo_path.display()))
+                settings_result.set_text(&format!(
+                    "Saved settings for {} and refreshed {refreshed} prompt snapshot(s)",
+                    repo_path.display()
+                ))
             }
             Err(err) => surface_label_error(
                 &settings_result,
@@ -1518,6 +1529,11 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.id.to_string() == name || repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
+}
+
+fn refresh_repository_prompt_snapshots(db_path: &PathBuf, name: &str) -> anyhow::Result<usize> {
+    let repository = RepositoryStore::open(db_path)?.get_by_name(name)?;
+    WorkspaceStore::open_app(db_path)?.refresh_repository_prompt_snapshots(repository.id)
 }
 
 fn selected_repository_name(select: &ComboBoxText) -> String {
