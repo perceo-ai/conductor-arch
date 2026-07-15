@@ -115,10 +115,12 @@ of effective settings.
 The header copy will explain the customer-facing distinction between reusable
 defaults and project overrides.
 
-Shared and Local will use a single segmented control with one active selection.
-Scope help appears below the control and changes with the selected scope. Save,
-load, and error messages move to a dedicated status area rather than occupying
-the tab row.
+Shared and Local will use the app's existing workspace chat-tab visual pattern,
+including its tab shell, active state, spacing, hover treatment, and typography.
+This pass must reuse or extract the current chat-tab styling rather than invent
+a separate segmented-control appearance. Scope help appears below the tabs and
+changes with the selected scope. Save, load, and error messages move to a
+dedicated status area rather than occupying the tab row.
 
 The project selector and project-only actions are visible only for Local. Shared
 loads even when no projects exist. Local shows a useful empty state when no
@@ -182,10 +184,10 @@ brief, notes, or todo files.
 The Dashboard header explains that the page summarizes current workspace state
 across projects.
 
-Project filtering uses the same clear tab treatment as other page-level tabs.
-If the project count exceeds the practical tab width, the existing first-five
-limit is replaced with a selector or overflow treatment that keeps every
-project reachable.
+Project filtering uses the standard workspace chat-tab treatment. If the
+project count exceeds the practical tab width, the existing first-five limit is
+replaced with a selector or overflow treatment that keeps every project
+reachable.
 
 Workspace buckets use state-oriented names:
 
@@ -223,7 +225,8 @@ Selecting a chat loads its transcript asynchronously as before. Source labels
 use `Archductor`, `Legacy`, and `Imported Conductor` instead of platform-specific
 labels that do not explain provenance.
 
-Both tabs use the shared segmented-tab styling and a flatter split-pane layout.
+Both tabs use the standard workspace chat-tab treatment and a flatter
+split-pane layout.
 
 ## Error Handling
 
