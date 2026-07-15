@@ -5591,10 +5591,10 @@ mutation($threadId: ID!) {{
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut refreshed = 0;
         for workspace in &workspaces {
-            if !managed_prompt_context_is_real(&workspace.path)? {
+            let Some(context) = ManagedPromptContext::open(&workspace.path)? else {
                 continue;
-            }
-            write_managed_prompt_snapshot(&workspace.path, &settings)?;
+            };
+            write_managed_prompt_snapshot_in_context(&context, &settings)?;
             refreshed += 1;
         }
         Ok(refreshed)
@@ -8550,24 +8550,208 @@ fn write_managed_prompt_snapshot(
     workspace_path: &Path,
     settings: &crate::settings::RepositorySettings,
 ) -> Result<()> {
-    anyhow::ensure!(
-        managed_prompt_context_is_real(workspace_path)?,
-        "{} must exist",
-        workspace_path.join(".context").display()
-    );
-    let path = workspace_path.join(".context/PROMPTS.md");
-    managed_prompt_target_is_real(&path)?;
+    let context = ManagedPromptContext::open(workspace_path)?
+        .with_context(|| format!("{} must exist", workspace_path.join(".context").display()))?;
+    write_managed_prompt_snapshot_in_context(&context, settings)
+}
+
+fn write_managed_prompt_snapshot_in_context(
+    context: &ManagedPromptContext,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
     match managed_prompt_snapshot(settings) {
-        Some(content) => atomic_write_managed_prompt(&path, content.as_bytes())
+        Some(content) => context
+            .replace(content.as_bytes())
             .context("write .context/PROMPTS.md"),
-        None => match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err).context("remove .context/PROMPTS.md"),
-        },
+        None => context.remove().context("remove .context/PROMPTS.md"),
     }
 }
 
+#[cfg(unix)]
+struct ManagedPromptContext {
+    directory: rustix::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl ManagedPromptContext {
+    fn open(workspace_path: &Path) -> Result<Option<Self>> {
+        use rustix::fs::{Mode, OFlags};
+
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let workspace = match rustix::fs::open(workspace_path, directory_flags, Mode::empty()) {
+            Ok(workspace) => workspace,
+            Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("{} must be a real directory", workspace_path.display())
+                })
+            }
+        };
+        let context_path = workspace_path.join(".context");
+        let directory =
+            match rustix::fs::openat(&workspace, ".context", directory_flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("{} must be a real directory", context_path.display())
+                    })
+                }
+            };
+        Ok(Some(Self { directory }))
+    }
+
+    fn target_mode(&self) -> Result<Option<rustix::fs::Mode>> {
+        use rustix::fs::{AtFlags, FileType, Mode};
+
+        let stat =
+            match rustix::fs::statat(&self.directory, "PROMPTS.md", AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+                Err(err) => return Err(err).context("inspect .context/PROMPTS.md"),
+            };
+        anyhow::ensure!(
+            FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
+            ".context/PROMPTS.md must be a real file"
+        );
+        Ok(Some(Mode::from_raw_mode(stat.st_mode)))
+    }
+
+    fn replace(&self, contents: &[u8]) -> Result<()> {
+        use rustix::fs::{Mode, OFlags};
+
+        let original_mode = self.target_mode()?;
+        let tmp_name = format!(".PROMPTS.md.{}.tmp", Uuid::new_v4());
+        let write_result = (|| -> Result<()> {
+            let file = rustix::fs::openat(
+                &self.directory,
+                tmp_name.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o666),
+            )
+            .context("create managed prompt temporary file")?;
+            let mut file = fs::File::from(file);
+            file.write_all(contents)
+                .context("write managed prompt temporary file")?;
+            let replacement_mode = self.target_mode()?.or(original_mode);
+            if let Some(mode) = replacement_mode {
+                rustix::fs::fchmod(&file, mode)
+                    .context("preserve .context/PROMPTS.md permissions")?;
+            }
+            file.sync_all()
+                .context("sync managed prompt temporary file")?;
+            rustix::fs::renameat(
+                &self.directory,
+                tmp_name.as_str(),
+                &self.directory,
+                "PROMPTS.md",
+            )
+            .context("replace .context/PROMPTS.md")?;
+            rustix::fs::fsync(&self.directory).context("sync .context directory")?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = rustix::fs::unlinkat(
+                &self.directory,
+                tmp_name.as_str(),
+                rustix::fs::AtFlags::empty(),
+            );
+        }
+        write_result
+    }
+
+    fn remove(&self) -> Result<()> {
+        if self.target_mode()?.is_none() {
+            return Ok(());
+        }
+        match rustix::fs::unlinkat(&self.directory, "PROMPTS.md", rustix::fs::AtFlags::empty()) {
+            Ok(()) => {
+                rustix::fs::fsync(&self.directory).context("sync .context directory")?;
+                Ok(())
+            }
+            Err(err) if err == rustix::io::Errno::NOENT => Ok(()),
+            Err(err) => Err(err).context("unlink .context/PROMPTS.md"),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ManagedPromptContext {
+    directory: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl ManagedPromptContext {
+    fn open(workspace_path: &Path) -> Result<Option<Self>> {
+        if !managed_prompt_context_is_real(workspace_path)? {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            directory: workspace_path.join(".context"),
+        }))
+    }
+
+    fn target_permissions(&self) -> Result<Option<fs::Permissions>> {
+        let path = self.directory.join("PROMPTS.md");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_file(),
+                    "{} must be a real file",
+                    path.display()
+                );
+                Ok(Some(metadata.permissions()))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
+        }
+    }
+
+    fn replace(&self, contents: &[u8]) -> Result<()> {
+        let path = self.directory.join("PROMPTS.md");
+        let permissions = self.target_permissions()?;
+        let tmp_path = self
+            .directory
+            .join(format!(".PROMPTS.md.{}.tmp", Uuid::new_v4()));
+        let write_result = (|| -> Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .with_context(|| format!("create {}", tmp_path.display()))?;
+            file.write_all(contents)
+                .with_context(|| format!("write {}", tmp_path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", tmp_path.display()))?;
+            if let Some(permissions) = permissions {
+                fs::set_permissions(&tmp_path, permissions)
+                    .with_context(|| format!("set permissions {}", tmp_path.display()))?;
+            }
+            self.target_permissions()?;
+            fs::rename(&tmp_path, &path).with_context(|| format!("replace {}", path.display()))?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        write_result
+    }
+
+    fn remove(&self) -> Result<()> {
+        if self.target_permissions()?.is_none() {
+            return Ok(());
+        }
+        let path = self.directory.join("PROMPTS.md");
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+}
+
+#[cfg(not(unix))]
 fn managed_prompt_context_is_real(workspace_path: &Path) -> Result<bool> {
     let context_dir = workspace_path.join(".context");
     let metadata = match fs::symlink_metadata(&context_dir) {
@@ -8582,60 +8766,6 @@ fn managed_prompt_context_is_real(workspace_path: &Path) -> Result<bool> {
         context_dir.display()
     );
     Ok(true)
-}
-
-fn managed_prompt_target_is_real(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                !metadata.file_type().is_symlink() && metadata.file_type().is_file(),
-                "{} must be a real file",
-                path.display()
-            );
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
-    }
-}
-
-fn atomic_write_managed_prompt(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("resolve parent for {}", path.display()))?;
-    let tmp_path = parent.join(format!(".PROMPTS.md.{}.tmp", Uuid::new_v4()));
-    let write_result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .with_context(|| format!("create {}", tmp_path.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", tmp_path.display()))?;
-        managed_prompt_target_is_real(path)?;
-        fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
-        sync_directory_if_supported(parent)?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-    write_result
-}
-
-#[cfg(unix)]
-fn sync_directory_if_supported(path: &Path) -> Result<()> {
-    fs::File::open(path)
-        .with_context(|| format!("open {}", path.display()))?
-        .sync_all()
-        .with_context(|| format!("sync {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_directory_if_supported(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -9967,6 +10097,84 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(format!("{err:#}").contains("must be a real file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_context_handle_contains_parent_swap_writes() {
+        let (temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        let original_context = workspace.path.join(".context-original");
+        fs::rename(workspace.path.join(".context"), &original_context).unwrap();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        context.replace(b"updated prompts\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        assert_eq!(
+            fs::read_to_string(original_context.join("PROMPTS.md")).unwrap(),
+            "updated prompts\n"
+        );
+        assert!(fs::read_dir(&original_context).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".PROMPTS.md.")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_context_handle_contains_parent_swap_deletion() {
+        let (temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        let original_context = workspace.path.join(".context-original");
+        fs::rename(workspace.path.join(".context"), &original_context).unwrap();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not delete\n").unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        context.remove().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not delete\n"
+        );
+        assert!(!original_context.join("PROMPTS.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_replacement_preserves_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let prompts = workspace.path.join(".context/PROMPTS.md");
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        for mode in [0o600, 0o400] {
+            fs::set_permissions(&prompts, fs::Permissions::from_mode(mode)).unwrap();
+
+            context.replace(b"updated prompts\n").unwrap();
+
+            assert_eq!(
+                fs::metadata(&prompts).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
     }
 
     #[test]
