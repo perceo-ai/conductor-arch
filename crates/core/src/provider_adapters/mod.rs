@@ -25,5 +25,8 @@ mod tests {
                 );
             }
         }
+
+        assert!(!include_str!("codex_app_server.rs").contains("claude_stream"));
+        assert!(!include_str!("claude_stream.rs").contains("codex_app_server"));
     }
 }

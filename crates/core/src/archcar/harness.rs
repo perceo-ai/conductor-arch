@@ -1,5 +1,8 @@
 use anyhow::Result;
 
+use crate::archcar::harness_contract::{
+    ManagedHarness, MANAGED_HARNESS_CONTRACT_VERSION, REQUIRED_HARNESS_FEATURES,
+};
 use crate::workspace::{SessionHarnessOptions, SessionKind, WorkspaceStore};
 
 pub trait HarnessController: Send + Sync {
@@ -19,6 +22,31 @@ pub fn controller_for_kind(kind: SessionKind) -> Box<dyn HarnessController> {
         SessionKind::Claude => Box::new(ClaudeHarnessController),
         SessionKind::Shell => Box::new(ShellHarnessController),
     }
+}
+
+pub fn managed_harness_for_kind(kind: SessionKind) -> Option<Box<dyn ManagedHarness>> {
+    match kind {
+        SessionKind::Codex => Some(Box::new(CodexHarnessController)),
+        SessionKind::Claude => Some(Box::new(ClaudeHarnessController)),
+        SessionKind::Shell => None,
+    }
+}
+
+pub fn validate_managed_harness(harness: &dyn ManagedHarness) -> Result<()> {
+    let descriptor = harness.descriptor();
+    anyhow::ensure!(
+        descriptor.contract_version == MANAGED_HARNESS_CONTRACT_VERSION,
+        "{} uses managed harness contract {} instead of {}",
+        descriptor.provider_key,
+        descriptor.contract_version,
+        MANAGED_HARNESS_CONTRACT_VERSION,
+    );
+    anyhow::ensure!(
+        descriptor.required_features == REQUIRED_HARNESS_FEATURES,
+        "{} does not declare the complete required harness baseline",
+        descriptor.provider_key,
+    );
+    Ok(())
 }
 
 pub struct CodexHarnessController;

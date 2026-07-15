@@ -1,13 +1,232 @@
 use std::collections::BTreeMap;
+use std::collections::{HashSet, VecDeque};
 
+use crate::archcar::harness::ClaudeHarnessController;
+use crate::archcar::harness_contract::{
+    HarnessAdapterContext, HarnessCapability, HarnessControl, HarnessControlPlan,
+    HarnessDescriptor, HarnessEffect, HarnessInput, HarnessPreflightSpec, HarnessRecoveryCause,
+    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, ManagedHarness, ManagedHarnessAdapter,
+    NativeRecord, NativeWrite, SupportMode, MANAGED_HARNESS_CONTRACT_VERSION,
+    REQUIRED_HARNESS_FEATURES,
+};
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
+use crate::workspace::SessionKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const CLAUDE_PROVIDER_NAME: &str = "claude";
+
+const CLAUDE_OPTIONAL_CAPABILITIES: &[(HarnessCapability, SupportMode)] = &[
+    (
+        HarnessCapability::Goals,
+        SupportMode::Unsupported {
+            reason: "Claude stream-json does not expose native goals",
+        },
+    ),
+    (
+        HarnessCapability::NativeSlashCommands,
+        SupportMode::Unsupported {
+            reason: "Claude stream-json does not expose interactive slash commands",
+        },
+    ),
+];
+
+pub static CLAUDE_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
+    contract_version: MANAGED_HARNESS_CONTRACT_VERSION,
+    kind: SessionKind::Claude,
+    provider_key: CLAUDE_PROVIDER_NAME,
+    display_name: "Claude Code",
+    default_executable: "claude",
+    preflight: HarnessPreflightSpec {
+        command: &["claude", "auth", "status"],
+        auth_guidance: "Run `claude auth login`.",
+    },
+    required_features: REQUIRED_HARNESS_FEATURES,
+    optional_capabilities: CLAUDE_OPTIONAL_CAPABILITIES,
+};
+
+impl ManagedHarness for ClaudeHarnessController {
+    fn descriptor(&self) -> &'static HarnessDescriptor {
+        &CLAUDE_MANAGED_HARNESS_DESCRIPTOR
+    }
+
+    fn create_adapter(
+        &self,
+        context: HarnessAdapterContext,
+    ) -> Result<Box<dyn ManagedHarnessAdapter>> {
+        Ok(Box::new(ClaudeManagedAdapter::new(context)))
+    }
+}
+
+pub(crate) struct ClaudeManagedAdapter {
+    context: HarnessAdapterContext,
+    parser: ClaudeStreamParser,
+    pending_inputs: VecDeque<String>,
+    active_input_id: Option<String>,
+    completed_inputs: HashSet<String>,
+}
+
+impl ClaudeManagedAdapter {
+    fn new(context: HarnessAdapterContext) -> Self {
+        Self {
+            context,
+            parser: ClaudeStreamParser::default(),
+            pending_inputs: VecDeque::new(),
+            active_input_id: None,
+            completed_inputs: HashSet::new(),
+        }
+    }
+
+    fn provider_context(&self) -> ProviderEventContext {
+        ProviderEventContext::runtime(
+            None,
+            Some(self.context.thread_id),
+            Some(self.context.session_id),
+            "claude-stream-json",
+        )
+    }
+}
+
+impl ManagedHarnessAdapter for ClaudeManagedAdapter {
+    fn encode_input(&mut self, input: HarnessInput) -> Result<NativeWrite> {
+        let payload = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": input.content}],
+            },
+        });
+        let mut native_payload =
+            serde_json::to_vec(&payload).context("serialize Claude stream-json input")?;
+        native_payload.push(b'\n');
+        self.pending_inputs.push_back(input.local_input_id.clone());
+
+        Ok(NativeWrite {
+            provider_key: CLAUDE_PROVIDER_NAME,
+            local_input_id: Some(input.local_input_id),
+            payload: native_payload,
+        })
+    }
+
+    fn observe_native(&mut self, record: NativeRecord) -> Result<Vec<HarnessEffect>> {
+        anyhow::ensure!(
+            record.provider_key == CLAUDE_PROVIDER_NAME,
+            "Claude adapter received native record for {}",
+            record.provider_key,
+        );
+        let input = std::str::from_utf8(&record.payload).context("decode Claude stream-json")?;
+        let mut effects = Vec::new();
+
+        for line in input.lines().filter(|line| !line.trim().is_empty()) {
+            let Some(event) = self.parser.parse_line(line)? else {
+                continue;
+            };
+            let event_kind = event.kind;
+            let native_session_id = event.session_id.clone();
+
+            if let Some(native_session_id) = native_session_id {
+                if self.context.native_session_id.as_deref() != Some(native_session_id.as_str()) {
+                    self.context.native_session_id = Some(native_session_id.clone());
+                    effects.push(HarnessEffect::Initialized {
+                        native_session_id,
+                        model: self.context.controls.model.clone(),
+                    });
+                    effects.push(HarnessEffect::Ready);
+                }
+            }
+
+            if matches!(
+                event_kind,
+                ClaudeProviderEventKind::UserMessage | ClaudeProviderEventKind::MessageStart
+            ) && self.active_input_id.is_none()
+            {
+                self.active_input_id = self.pending_inputs.pop_front();
+                if let Some(local_input_id) = self.active_input_id.clone() {
+                    effects.push(HarnessEffect::TurnStarted { local_input_id });
+                }
+            }
+
+            let turn_status = managed_claude_turn_status(event_kind, &event.raw_json);
+            effects.push(HarnessEffect::ProviderEvent(
+                event.into_provider_event_draft(self.provider_context()),
+            ));
+
+            if event_kind == ClaudeProviderEventKind::Result {
+                if let Some(local_input_id) = self.active_input_id.take() {
+                    if self.completed_inputs.insert(local_input_id.clone()) {
+                        effects.push(HarnessEffect::TurnCompleted {
+                            local_input_id,
+                            status: turn_status,
+                        });
+                    }
+                }
+                effects.push(HarnessEffect::Ready);
+            }
+        }
+
+        Ok(effects)
+    }
+
+    fn plan_control(&mut self, control: HarnessControl) -> HarnessControlPlan {
+        match control {
+            HarnessControl::Kill => {
+                HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup)
+            }
+            HarnessControl::Interrupt => HarnessControlPlan::Unsupported {
+                reason: "Claude stream-json interrupt is not implemented".to_owned(),
+            },
+            HarnessControl::SetModel(model) => {
+                self.context.controls.model = model;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::SetEffort(effort) => {
+                self.context.controls.effort = effort;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::SetPermissionMode(permission_mode) => {
+                self.context.controls.permission_mode = permission_mode;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::ResolveInteraction(_) => HarnessControlPlan::Unsupported {
+                reason: "Claude interaction resolution is not implemented".to_owned(),
+            },
+        }
+    }
+
+    fn recovery_plan(&self, _cause: HarnessRecoveryCause) -> HarnessRecoveryPlan {
+        match self.context.native_session_id.clone() {
+            Some(native_session_id) => HarnessRecoveryPlan::RestartAndResume {
+                native_session_id,
+                controls: self.context.controls.clone(),
+            },
+            None => HarnessRecoveryPlan::Fail {
+                message: "Claude session has no native session id to resume".to_owned(),
+            },
+        }
+    }
+}
+
+fn managed_claude_turn_status(kind: ClaudeProviderEventKind, payload: &Value) -> HarnessTurnStatus {
+    if kind != ClaudeProviderEventKind::Result {
+        return HarnessTurnStatus::Deferred;
+    }
+    if payload
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || matches!(
+            payload.get("subtype").and_then(Value::as_str),
+            Some("error" | "failed")
+        )
+    {
+        HarnessTurnStatus::Failed
+    } else {
+        HarnessTurnStatus::Success
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaudeStreamLaunchConfig {
