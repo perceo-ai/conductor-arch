@@ -1,0 +1,19 @@
+README.md
+  s_c4cea5bf5b8057::t_ee73b46c591ad8 385-388
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8254639ebb82e1095b3a154a924ea60b4358b324",
+  "prompts": {},
+  "sessions": {
+    "s_c4cea5bf5b8057": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649f-11bc-7262-b201-10776ed85481",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
