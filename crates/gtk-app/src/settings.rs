@@ -6,11 +6,11 @@ use archductor_core::settings::{
     default_repository_settings_toml, ensure_repository_config,
     explicit_empty_collection_fields_from_toml, inspect_repository_settings,
     load_app_shared_settings, load_effective_repository_settings,
-    load_repository_settings_for_layer, repository_settings_from_toml,
-    save_app_shared_settings_with_explicit_empty_collections, save_repository_settings,
-    save_repository_settings_with_explicit_empty_collections, AgentProfileSettings, GitSettings,
-    PromptKind, PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings,
-    SettingsCollectionField, SettingsLayer,
+    load_repository_settings_for_layer, present_collection_fields_from_toml,
+    repository_settings_from_toml, save_app_shared_settings_with_collection_intent,
+    save_repository_settings_replacing, save_repository_settings_with_collection_intent,
+    AgentProfileSettings, GitSettings, PromptKind, PromptSettings, ProviderSettings,
+    RepositorySettings, ScriptSettings, SettingsCollectionField, SettingsLayer,
 };
 use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
@@ -1150,7 +1150,7 @@ pub(crate) fn build_settings_page(
         *pending_autosave_target_recover.borrow_mut() = None;
         *recover_confirmation_for_click.borrow_mut() = None;
         match repository_root(&db_path_recover_settings, &repo_name).and_then(|repo_path| {
-            save_repository_settings(&repo_path, layer, &settings)?;
+            save_recovered_settings_for_layer(&repo_path, layer, &settings)?;
             let refreshed =
                 refresh_repository_prompt_snapshots(&db_path_recover_settings, &repo_name)?;
             Ok((repo_path, refreshed))
@@ -1675,7 +1675,7 @@ pub(crate) fn build_settings_page(
             },
             customization,
         };
-        let explicit_empty_collections = match explicit_empty_collections_for_settings_save(
+        let collection_intent = match collection_intent_for_settings_save(
             &edits,
             &settings,
             &text_buffer_text(&customization_view.1),
@@ -1691,20 +1691,20 @@ pub(crate) fn build_settings_page(
             }
         };
         let save_result = match (&save_target, repo_name.as_deref(), repo_path.as_ref()) {
-            (SettingsSaveTarget::Shared, _, _) => {
-                save_app_shared_settings_with_explicit_empty_collections(
-                    &shared_settings_path_save,
-                    &settings,
-                    &explicit_empty_collections,
-                )
-                .and_then(|()| refresh_all_prompt_snapshots(&db_path_save_settings))
-            }
+            (SettingsSaveTarget::Shared, _, _) => save_app_shared_settings_with_collection_intent(
+                &shared_settings_path_save,
+                &settings,
+                &collection_intent.explicit_empty,
+                &collection_intent.unset,
+            )
+            .and_then(|()| refresh_all_prompt_snapshots(&db_path_save_settings)),
             (SettingsSaveTarget::Local(_), Some(repo_name), Some(repo_path)) => {
-                save_repository_settings_with_explicit_empty_collections(
+                save_repository_settings_with_collection_intent(
                     repo_path,
                     SettingsLayer::LocalOverride,
                     &settings,
-                    &explicit_empty_collections,
+                    &collection_intent.explicit_empty,
+                    &collection_intent.unset,
                 )
                 .and_then(|()| {
                     refresh_repository_prompt_snapshots(&db_path_save_settings, repo_name)
@@ -1804,16 +1804,46 @@ fn setting_for_save<T>(edited: bool, current: T, displayed: T) -> T {
     }
 }
 
-fn explicit_empty_collections_for_settings_save(
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SettingsCollectionSaveIntent {
+    explicit_empty: Vec<SettingsCollectionField>,
+    unset: Vec<SettingsCollectionField>,
+}
+
+fn collection_intent_for_settings_save(
     edits: &HashSet<&'static str>,
     settings: &RepositorySettings,
     customization_toml: &str,
-) -> anyhow::Result<Vec<SettingsCollectionField>> {
-    let mut fields = if edits.contains("customization") {
+) -> anyhow::Result<SettingsCollectionSaveIntent> {
+    let customization_edited = edits.contains("customization");
+    let mut fields = if customization_edited {
         explicit_empty_collection_fields_from_toml(customization_toml)?
     } else {
         Vec::new()
     };
+    let mut unset = Vec::new();
+    if customization_edited {
+        let present = present_collection_fields_from_toml(customization_toml)?;
+        for field in [
+            SettingsCollectionField::AgentProfiles,
+            SettingsCollectionField::PrBodySections,
+            SettingsCollectionField::RequiredLocalFiles,
+            SettingsCollectionField::ViewColors,
+            SettingsCollectionField::DashboardColumns,
+            SettingsCollectionField::NotificationRules,
+            SettingsCollectionField::CommandPalettePresets,
+        ] {
+            if !present.contains(&field) {
+                unset.push(field);
+            }
+        }
+        for name in settings.customization.agent_profiles.keys() {
+            let field = SettingsCollectionField::AgentProfileMcpServers(name.clone());
+            if !present.contains(&field) {
+                unset.push(field);
+            }
+        }
+    }
     let mut add = |field| {
         if !fields.contains(&field) {
             fields.push(field);
@@ -1838,7 +1868,10 @@ fn explicit_empty_collections_for_settings_save(
     {
         add(SettingsCollectionField::NotificationRules);
     }
-    Ok(fields)
+    Ok(SettingsCollectionSaveIntent {
+        explicit_empty: fields,
+        unset,
+    })
 }
 
 fn settings_sections_for_scope(scope: SettingsUiScope) -> Vec<SettingsSection> {
@@ -2109,6 +2142,14 @@ fn recovered_settings_for_layer(layer: SettingsLayer) -> anyhow::Result<Reposito
         }
         SettingsLayer::LocalOverride => Ok(RepositorySettings::default()),
     }
+}
+
+fn save_recovered_settings_for_layer(
+    repo_path: &std::path::Path,
+    layer: SettingsLayer,
+    settings: &RepositorySettings,
+) -> anyhow::Result<()> {
+    save_repository_settings_replacing(repo_path, layer, settings)
 }
 
 fn prompt_settings_is_empty(settings: &PromptSettings) -> bool {
@@ -2445,7 +2486,7 @@ mod tests {
             "notifications",
             "customization",
         ]);
-        let fields = explicit_empty_collections_for_settings_save(
+        let intent = collection_intent_for_settings_save(
             &edits,
             &RepositorySettings::default(),
             r#"
@@ -2458,19 +2499,106 @@ colors = {}
         )
         .unwrap();
 
-        assert!(fields.contains(&SettingsCollectionField::FileIncludeGlobs));
-        assert!(fields.contains(&SettingsCollectionField::EnvironmentVariables));
-        assert!(fields.contains(&SettingsCollectionField::CommandPalettePresets));
-        assert!(fields.contains(&SettingsCollectionField::NotificationRules));
-        assert!(fields.contains(&SettingsCollectionField::PrBodySections));
-        assert!(fields.contains(&SettingsCollectionField::ViewColors));
-        assert!(explicit_empty_collections_for_settings_save(
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::FileIncludeGlobs));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::EnvironmentVariables));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::CommandPalettePresets));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::NotificationRules));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::PrBodySections));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::ViewColors));
+        assert!(collection_intent_for_settings_save(
             &HashSet::new(),
             &RepositorySettings::default(),
             "",
         )
         .unwrap()
+        .explicit_empty
         .is_empty());
+    }
+
+    #[test]
+    fn advanced_toml_removal_unsets_prior_collection_markers() {
+        let settings = RepositorySettings::default();
+        let intent =
+            collection_intent_for_settings_save(&HashSet::from(["customization"]), &settings, "")
+                .unwrap();
+
+        assert!(intent.explicit_empty.is_empty());
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::AgentProfiles));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::PrBodySections));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::RequiredLocalFiles));
+        assert!(intent.unset.contains(&SettingsCollectionField::ViewColors));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::DashboardColumns));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::NotificationRules));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::CommandPalettePresets));
+
+        let temp = tempfile::tempdir().unwrap();
+        archductor_core::settings::save_repository_settings_from_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            r#"
+[customization]
+agent_profiles = {}
+
+[customization.naming]
+pr_body_sections = []
+
+[customization.automation]
+required_local_files = []
+
+[customization.view]
+colors = {}
+dashboard_columns = []
+notification_rules = []
+command_palette_presets = []
+"#,
+        )
+        .unwrap();
+        save_repository_settings_with_collection_intent(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            &settings,
+            &intent.explicit_empty,
+            &intent.unset,
+        )
+        .unwrap();
+
+        let saved =
+            std::fs::read_to_string(temp.path().join(".archductor/settings.local.toml")).unwrap();
+        for removed in [
+            "agent_profiles",
+            "pr_body_sections",
+            "required_local_files",
+            "colors =",
+            "dashboard_columns",
+            "notification_rules",
+            "command_palette_presets",
+        ] {
+            assert!(!saved.contains(removed), "{removed} remained in:\n{saved}");
+        }
     }
 
     #[test]
@@ -2519,6 +2647,38 @@ colors = {}
 
         assert!(!changed);
         assert_eq!(project, "alpha");
+    }
+
+    #[test]
+    fn recover_defaults_removes_prior_empty_collection_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        archductor_core::settings::save_repository_settings_from_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            r#"
+file_include_globs = ""
+environment_variables = {}
+
+[customization.view]
+colors = {}
+notification_rules = []
+"#,
+        )
+        .unwrap();
+
+        save_recovered_settings_for_layer(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            &RepositorySettings::default(),
+        )
+        .unwrap();
+
+        let saved =
+            std::fs::read_to_string(temp.path().join(".archductor/settings.local.toml")).unwrap();
+        assert!(!saved.contains("file_include_globs"));
+        assert!(!saved.contains("environment_variables"));
+        assert!(!saved.contains("colors ="));
+        assert!(!saved.contains("notification_rules"));
     }
 
     #[test]

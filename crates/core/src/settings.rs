@@ -269,13 +269,22 @@ pub fn load_app_shared_settings(path: &Path) -> Result<RepositorySettings> {
 }
 
 pub fn save_app_shared_settings(path: &Path, settings: &RepositorySettings) -> Result<()> {
-    save_app_shared_settings_with_explicit_empty_collections(path, settings, &[])
+    save_app_shared_settings_with_collection_intent(path, settings, &[], &[])
 }
 
 pub fn save_app_shared_settings_with_explicit_empty_collections(
     path: &Path,
     settings: &RepositorySettings,
     explicit_empty_collections: &[SettingsCollectionField],
+) -> Result<()> {
+    save_app_shared_settings_with_collection_intent(path, settings, explicit_empty_collections, &[])
+}
+
+pub fn save_app_shared_settings_with_collection_intent(
+    path: &Path,
+    settings: &RepositorySettings,
+    explicit_empty_collections: &[SettingsCollectionField],
+    unset_collections: &[SettingsCollectionField],
 ) -> Result<()> {
     validate_repository_settings(settings)?;
     let parent = path
@@ -285,10 +294,11 @@ pub fn save_app_shared_settings_with_explicit_empty_collections(
     ensure_real_directory(parent)?;
     reject_symlink_file(path)?;
     let original = load_optional_settings(path)?;
-    let contents = repository_settings_to_toml_preserving_presence_and_explicit_empty(
+    let contents = repository_settings_to_toml_with_collection_intent(
         settings,
         &original,
         explicit_empty_collections,
+        unset_collections,
     )?;
     atomic_write_no_symlink(path, contents.as_bytes())
 }
@@ -574,7 +584,7 @@ pub fn save_repository_settings(
     layer: SettingsLayer,
     settings: &RepositorySettings,
 ) -> Result<()> {
-    save_repository_settings_with_explicit_empty_collections(repo_path, layer, settings, &[])
+    save_repository_settings_with_collection_intent(repo_path, layer, settings, &[], &[])
 }
 
 pub fn save_repository_settings_with_explicit_empty_collections(
@@ -582,6 +592,22 @@ pub fn save_repository_settings_with_explicit_empty_collections(
     layer: SettingsLayer,
     settings: &RepositorySettings,
     explicit_empty_collections: &[SettingsCollectionField],
+) -> Result<()> {
+    save_repository_settings_with_collection_intent(
+        repo_path,
+        layer,
+        settings,
+        explicit_empty_collections,
+        &[],
+    )
+}
+
+pub fn save_repository_settings_with_collection_intent(
+    repo_path: &Path,
+    layer: SettingsLayer,
+    settings: &RepositorySettings,
+    explicit_empty_collections: &[SettingsCollectionField],
+    unset_collections: &[SettingsCollectionField],
 ) -> Result<()> {
     validate_repository_settings(settings)?;
     let (conductor_dir, _) = ensure_settings_dir(repo_path)?;
@@ -592,11 +618,29 @@ pub fn save_repository_settings_with_explicit_empty_collections(
     reject_symlink_file(&path)?;
     let original = load_optional_settings(&path)?;
     backup_settings_file(&path)?;
-    let contents = repository_settings_to_toml_preserving_presence_and_explicit_empty(
+    let contents = repository_settings_to_toml_with_collection_intent(
         settings,
         &original,
         explicit_empty_collections,
+        unset_collections,
     )?;
+    atomic_write_no_symlink(&path, contents.as_bytes())
+}
+
+pub fn save_repository_settings_replacing(
+    repo_path: &Path,
+    layer: SettingsLayer,
+    settings: &RepositorySettings,
+) -> Result<()> {
+    validate_repository_settings(settings)?;
+    let (conductor_dir, _) = ensure_settings_dir(repo_path)?;
+    let path = match layer {
+        SettingsLayer::RepositoryShared => conductor_dir.join("settings.toml"),
+        SettingsLayer::LocalOverride => conductor_dir.join("settings.local.toml"),
+    };
+    reject_symlink_file(&path)?;
+    backup_settings_file(&path)?;
+    let contents = repository_settings_to_toml(settings)?;
     atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
@@ -662,13 +706,15 @@ fn repository_settings_to_toml_preserving_presence(
     toml::to_string_pretty(&raw).context("serialize repository settings")
 }
 
-fn repository_settings_to_toml_preserving_presence_and_explicit_empty(
+fn repository_settings_to_toml_with_collection_intent(
     settings: &RepositorySettings,
     original: &RawRepositorySettings,
     explicit_empty_collections: &[SettingsCollectionField],
+    unset_collections: &[SettingsCollectionField],
 ) -> Result<String> {
     let mut raw =
         RawRepositorySettings::from_settings_preserving_empty_collections(settings, original);
+    raw.unset_collections(unset_collections);
     raw.apply_explicit_empty_collections(settings, explicit_empty_collections);
     toml::to_string_pretty(&raw).context("serialize repository settings")
 }
@@ -801,6 +847,11 @@ pub fn explicit_empty_collection_fields_from_toml(
 ) -> Result<Vec<SettingsCollectionField>> {
     let raw = validated_raw_repository_settings_from_toml(contents)?;
     Ok(raw.explicit_empty_collection_fields())
+}
+
+pub fn present_collection_fields_from_toml(contents: &str) -> Result<Vec<SettingsCollectionField>> {
+    let raw = validated_raw_repository_settings_from_toml(contents)?;
+    Ok(raw.present_collection_fields())
 }
 
 fn validated_raw_repository_settings_from_toml(contents: &str) -> Result<RawRepositorySettings> {
@@ -1532,6 +1583,87 @@ impl RawRepositorySettings {
         }
     }
 
+    fn unset_collections(&mut self, fields: &[SettingsCollectionField]) {
+        for field in fields {
+            match field {
+                SettingsCollectionField::FileIncludeGlobs => self.file_include_globs = None,
+                SettingsCollectionField::EnvFileRefs => self.env_file_refs = None,
+                SettingsCollectionField::EnvironmentVariables => {
+                    self.environment_variables = None;
+                }
+                SettingsCollectionField::AgentProfiles => {
+                    if let Some(customization) = self.customization.as_mut() {
+                        customization.agent_profiles = None;
+                    }
+                }
+                SettingsCollectionField::AgentProfileMcpServers(name) => {
+                    if let Some(profile) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.agent_profiles.as_mut())
+                        .and_then(|profiles| profiles.get_mut(name))
+                    {
+                        profile.mcp_servers = None;
+                    }
+                }
+                SettingsCollectionField::PrBodySections => {
+                    if let Some(naming) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.naming.as_mut())
+                    {
+                        naming.pr_body_sections = None;
+                    }
+                }
+                SettingsCollectionField::RequiredLocalFiles => {
+                    if let Some(automation) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.automation.as_mut())
+                    {
+                        automation.required_local_files = None;
+                    }
+                }
+                SettingsCollectionField::ViewColors => {
+                    if let Some(view) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.view.as_mut())
+                    {
+                        view.colors = None;
+                    }
+                }
+                SettingsCollectionField::DashboardColumns => {
+                    if let Some(view) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.view.as_mut())
+                    {
+                        view.dashboard_columns = None;
+                    }
+                }
+                SettingsCollectionField::NotificationRules => {
+                    if let Some(view) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.view.as_mut())
+                    {
+                        view.notification_rules = None;
+                    }
+                }
+                SettingsCollectionField::CommandPalettePresets => {
+                    if let Some(view) = self
+                        .customization
+                        .as_mut()
+                        .and_then(|customization| customization.view.as_mut())
+                    {
+                        view.command_palette_presets = None;
+                    }
+                }
+            }
+        }
+    }
+
     fn explicit_empty_collection_fields(&self) -> Vec<SettingsCollectionField> {
         let mut fields = Vec::new();
         if self
@@ -1606,6 +1738,62 @@ impl RawRepositorySettings {
             .as_ref()
             .is_some_and(Vec::is_empty)
         {
+            fields.push(SettingsCollectionField::CommandPalettePresets);
+        }
+        fields
+    }
+
+    fn present_collection_fields(&self) -> Vec<SettingsCollectionField> {
+        let mut fields = Vec::new();
+        if self.file_include_globs.is_some() {
+            fields.push(SettingsCollectionField::FileIncludeGlobs);
+        }
+        if self.env_file_refs.is_some() {
+            fields.push(SettingsCollectionField::EnvFileRefs);
+        }
+        if self.environment_variables.is_some() {
+            fields.push(SettingsCollectionField::EnvironmentVariables);
+        }
+        let Some(customization) = self.customization.as_ref() else {
+            return fields;
+        };
+        if let Some(profiles) = customization.agent_profiles.as_ref() {
+            fields.push(SettingsCollectionField::AgentProfiles);
+            for (name, profile) in profiles {
+                if profile.mcp_servers.is_some() {
+                    fields.push(SettingsCollectionField::AgentProfileMcpServers(
+                        name.clone(),
+                    ));
+                }
+            }
+        }
+        if customization
+            .naming
+            .as_ref()
+            .is_some_and(|naming| naming.pr_body_sections.is_some())
+        {
+            fields.push(SettingsCollectionField::PrBodySections);
+        }
+        if customization
+            .automation
+            .as_ref()
+            .is_some_and(|automation| automation.required_local_files.is_some())
+        {
+            fields.push(SettingsCollectionField::RequiredLocalFiles);
+        }
+        let Some(view) = customization.view.as_ref() else {
+            return fields;
+        };
+        if view.colors.is_some() {
+            fields.push(SettingsCollectionField::ViewColors);
+        }
+        if view.dashboard_columns.is_some() {
+            fields.push(SettingsCollectionField::DashboardColumns);
+        }
+        if view.notification_rules.is_some() {
+            fields.push(SettingsCollectionField::NotificationRules);
+        }
+        if view.command_palette_presets.is_some() {
             fields.push(SettingsCollectionField::CommandPalettePresets);
         }
         fields
@@ -3471,6 +3659,159 @@ command_palette_presets = ["test"]
     }
 
     #[test]
+    fn repository_replacement_save_removes_collection_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            r##"
+file_include_globs = ".env"
+env_file_refs = ".env.local"
+
+[environment_variables]
+REPOSITORY = "1"
+
+[customization]
+agent_profiles = { default = { mcp_servers = ["github"] } }
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.view]
+colors = { accent = "#5b9dff" }
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+"##,
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            r##"
+file_include_globs = ""
+env_file_refs = "local.env"
+
+[environment_variables]
+
+[customization.naming]
+pr_body_sections = ["Local"]
+
+[customization.automation]
+required_local_files = []
+
+[customization.agent_profiles.default]
+mcp_servers = []
+
+[customization.view]
+colors = { accent = "#0ea5e9" }
+dashboard_columns = []
+notification_rules = ["local"]
+command_palette_presets = []
+"##,
+        )
+        .unwrap();
+
+        save_repository_settings_replacing(
+            &repo,
+            SettingsLayer::LocalOverride,
+            &RepositorySettings::default(),
+        )
+        .unwrap();
+
+        let raw = load_optional_settings(&repo.join(".archductor/settings.local.toml")).unwrap();
+        assert!(raw.file_include_globs.is_none());
+        assert!(raw.env_file_refs.is_none());
+        assert!(raw.environment_variables.is_none());
+        let customization = raw.customization.unwrap();
+        assert!(customization.agent_profiles.is_none());
+        assert!(customization.naming.unwrap().pr_body_sections.is_none());
+        assert!(customization
+            .automation
+            .unwrap()
+            .required_local_files
+            .is_none());
+        let view = customization.view.unwrap();
+        assert!(view.colors.is_none());
+        assert!(view.dashboard_columns.is_none());
+        assert!(view.notification_rules.is_none());
+        assert!(view.command_palette_presets.is_none());
+
+        let effective = load_repository_settings(&repo).unwrap();
+        assert_eq!(effective.file_include_globs, [".env"]);
+        assert_eq!(effective.env_file_refs, [".env.local"]);
+        assert_eq!(
+            effective.environment_variables,
+            [("REPOSITORY".into(), "1".into())]
+        );
+        assert_eq!(effective.customization.naming.pr_body_sections, ["Summary"]);
+        assert_eq!(
+            effective.customization.automation.required_local_files,
+            [".env"]
+        );
+        assert_eq!(
+            effective.customization.agent_profiles["default"].mcp_servers,
+            ["github"]
+        );
+        assert_eq!(effective.customization.view.colors["accent"], "#5b9dff");
+        assert_eq!(effective.customization.view.dashboard_columns, ["ready"]);
+        assert_eq!(
+            effective.customization.view.notification_rules,
+            ["checks_failed"]
+        );
+        assert_eq!(
+            effective.customization.view.command_palette_presets,
+            ["test"]
+        );
+    }
+
+    #[test]
+    fn repository_save_can_unset_existing_explicit_empty_collection_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            r#"
+file_include_globs = ""
+
+[environment_variables]
+
+[customization.view]
+colors = {}
+notification_rules = []
+"#,
+        )
+        .unwrap();
+        let settings =
+            load_repository_settings_for_layer(&repo, SettingsLayer::LocalOverride).unwrap();
+
+        save_repository_settings_with_collection_intent(
+            &repo,
+            SettingsLayer::LocalOverride,
+            &settings,
+            &[],
+            &[
+                SettingsCollectionField::FileIncludeGlobs,
+                SettingsCollectionField::EnvironmentVariables,
+                SettingsCollectionField::ViewColors,
+                SettingsCollectionField::NotificationRules,
+            ],
+        )
+        .unwrap();
+
+        let raw = load_optional_settings(&repo.join(".archductor/settings.local.toml")).unwrap();
+        assert!(raw.file_include_globs.is_none());
+        assert!(raw.environment_variables.is_none());
+        let view = raw.customization.unwrap().view.unwrap();
+        assert!(view.colors.is_none());
+        assert!(view.notification_rules.is_none());
+    }
+
+    #[test]
     fn explicit_empty_collection_fields_parse_from_advanced_toml() {
         let fields = explicit_empty_collection_fields_from_toml(
             r#"
@@ -3499,6 +3840,24 @@ command_palette_presets = []
         assert!(fields.contains(&SettingsCollectionField::DashboardColumns));
         assert!(fields.contains(&SettingsCollectionField::NotificationRules));
         assert!(fields.contains(&SettingsCollectionField::CommandPalettePresets));
+    }
+
+    #[test]
+    fn present_collection_fields_parse_from_advanced_toml() {
+        let fields = present_collection_fields_from_toml(
+            r#"
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.view]
+colors = {}
+"#,
+        )
+        .unwrap();
+
+        assert!(fields.contains(&SettingsCollectionField::PrBodySections));
+        assert!(fields.contains(&SettingsCollectionField::ViewColors));
+        assert!(!fields.contains(&SettingsCollectionField::NotificationRules));
     }
 
     #[test]

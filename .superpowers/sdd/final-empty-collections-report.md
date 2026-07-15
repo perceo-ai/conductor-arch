@@ -10,7 +10,8 @@ inherited value.
 Commits:
 
 - `7f90f41 fix(settings): preserve empty collection overrides`
-- `fix(settings): preserve empty collection round trips`
+- `f8dabef fix(settings): preserve empty collection round trips`
+- `fix(settings): restore inherited collections on reset`
 
 ## Root Cause
 
@@ -45,6 +46,23 @@ the persistence boundary:
   raw-source save/export helpers.
 - GTK passes a narrow `SettingsCollectionField` list only for edited empty
   fields. Untouched absent fields are not materialized as clears.
+
+### Reset And Exact-Edit Re-review Root Cause
+
+Destination-preserving saves could not distinguish an ordinary typed edit from
+an operation whose purpose is to remove an override. Consequently, Local
+Recover Defaults re-preserved old empty markers, and deleting a collection key
+from Advanced TOML could not remove the marker through the typed save path.
+
+The final fix makes save intent explicit:
+
+- Ordinary saves still preserve destination empty markers.
+- Recover Defaults uses an exact replacement save, so default-empty fields are
+  absent and inherited values become active again.
+- Advanced TOML derives both present and explicitly empty collection fields;
+  keys removed from the exact document are passed as targeted unsets.
+- Explicit-empty and unset intent is available at both app Shared and repository
+  save boundaries without changing public typed settings structs.
 
 ## Field Inventory
 
@@ -157,3 +175,39 @@ consumer path.
   narrow explicit-empty field list. GTK does this only for dirty fields; absent
   untouched values still inherit.
 - No database or settings schema migration was required.
+
+## Reset And Removal Follow-up TDD Evidence
+
+### RED
+
+- `cargo test -p archductor-core repository_replacement_save_removes_collection_overrides -- --nocapture`
+  - Compile failure for the wished-for exact replacement and collection-unset
+    save APIs.
+- `cargo test -p archductor-core present_collection_fields_parse_from_advanced_toml -- --nocapture`
+  - Compile failure for the wished-for collection-presence parser.
+- `cargo test -p archductor-gtk recover_defaults_removes_prior_empty_collection_markers -- --nocapture`
+  - Compile failure for the wished-for GTK recovery replacement boundary.
+- GTK Advanced TOML removal coverage was added before the new collection-intent
+  helper existed; it required an `unset` result in addition to explicit-empty
+  fields.
+
+### GREEN
+
+- `cargo test -p archductor-core settings::tests -- --nocapture`
+  - 48 passed, including exact replacement, targeted unset, effective
+    inheritance restoration, and Advanced TOML presence parsing.
+- `cargo test -p archductor-gtk settings::tests -- --nocapture`
+  - 23 passed, including Recover Defaults marker removal and exact Advanced TOML
+    unset intent.
+- `cargo test -p archductor-core -p archductor -p archductor-gtk --all-targets`
+  - 498 core unit tests, 26 CLI unit tests, 9 CLI integration tests, and 443 GTK
+    unit tests passed, plus core integration targets.
+- CLI smoke: the full CLI integration target passed, including Shared and
+  repository/Local explicit-empty import/export round trips.
+- GTK smoke: isolated `xvfb-run` launch directly to the Settings page passed.
+- `cargo check -p archductor-core -p archductor -p archductor-gtk --all-targets`
+  - Exit 0, no warnings.
+- `cargo clippy -p archductor-core -p archductor -p archductor-gtk --all-targets -- -D warnings`
+  - Exit 0, no warnings.
+- `cargo fmt --all -- --check`
+  - Exit 0.
