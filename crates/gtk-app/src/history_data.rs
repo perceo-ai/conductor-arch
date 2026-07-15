@@ -108,7 +108,11 @@ fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry 
 fn workspace_history_state(line: &WorkspaceStatusLine) -> &'static str {
     if line.workspace.status == "archived" {
         "Archived"
-    } else if line.pull_request.is_some() {
+    } else if line
+        .pull_request
+        .as_ref()
+        .is_some_and(|pull_request| pull_request.state.eq_ignore_ascii_case("open"))
+    {
         "Review"
     } else if line.run_running || line.active_sessions > 0 {
         "Running"
@@ -158,16 +162,16 @@ pub(crate) struct ChatSummary {
     pub(crate) message_count: i64,
 }
 
-pub(crate) fn history_recent_sessions(database_path: &Path) -> Vec<ChatSummary> {
-    let mut sessions = local_recent_sessions(database_path);
+pub(crate) fn history_recent_sessions(database_path: &Path) -> anyhow::Result<Vec<ChatSummary>> {
+    let mut sessions = local_recent_sessions(database_path)?;
     sessions.extend(conductor_recent_sessions());
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(200);
-    sessions
+    Ok(sessions)
 }
 
-fn local_recent_sessions(database_path: &Path) -> Vec<ChatSummary> {
-    query_local_sessions(database_path, None).unwrap_or_default()
+fn local_recent_sessions(database_path: &Path) -> anyhow::Result<Vec<ChatSummary>> {
+    query_local_sessions(database_path, None)
 }
 
 fn conductor_recent_sessions() -> Vec<ChatSummary> {
@@ -295,13 +299,13 @@ fn local_thread_messages(database_path: &Path, thread_id: i64) -> String {
     let Ok(store) = WorkspaceStore::open_app(database_path) else {
         return "Could not open Archductor history database.".to_owned();
     };
-    let Ok(messages) = store.local_chat_thread_messages(thread_id) else {
+    let Ok(messages) = store.list_chat_messages(thread_id) else {
         return "Could not read local chat thread.".to_owned();
     };
     format_local_messages(
         messages
             .into_iter()
-            .map(|message| (message.role, message.content)),
+            .map(|message| (message.role, message.content, Some(message.source))),
     )
 }
 
@@ -315,16 +319,18 @@ fn local_session_messages(database_path: &Path, process_id: i64) -> String {
     format_local_messages(
         messages
             .into_iter()
-            .map(|message| (message.role, message.content)),
+            .map(|message| (message.role, message.content, None)),
     )
 }
 
-fn format_local_messages(messages: impl Iterator<Item = (String, String)>) -> String {
+fn format_local_messages(
+    messages: impl Iterator<Item = (String, String, Option<String>)>,
+) -> String {
     let text = messages
-        .map(|(role, content)| {
+        .map(|(role, content, source)| {
             format!(
                 "{}\n{}\n",
-                chat_role_label(&role),
+                chat_role_label(&role, source.as_deref()),
                 truncate_message(&content, 2200)
             )
         })
@@ -337,7 +343,10 @@ fn format_local_messages(messages: impl Iterator<Item = (String, String)>) -> St
     }
 }
 
-fn chat_role_label(role: &str) -> &'static str {
+fn chat_role_label(role: &str, source: Option<&str>) -> &'static str {
+    if role.eq_ignore_ascii_case("user") && source == Some("staged_review_send") {
+        return "Review Prompt";
+    }
     match role.to_ascii_lowercase().as_str() {
         "user" => "You",
         "review" => "Review Prompt",
@@ -376,7 +385,7 @@ fn conductor_session_messages(session_id: &str) -> String {
     for (role, content, created_at) in rows.flatten() {
         text.push_str(&format!(
             "{} · {}\n{}\n\n",
-            chat_role_label(&role),
+            chat_role_label(&role, None),
             created_at,
             truncate_message(&content, 2200)
         ));
@@ -399,6 +408,43 @@ fn truncate_message(content: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{chat_role_label, ChatSource, HistoryTab, WorkspaceHistoryFilter};
+    use archductor_core::workspace::{PullRequest, Workspace, WorkspaceStatusLine};
+    use std::path::PathBuf;
+
+    fn workspace_line(pr_state: Option<&str>, run_running: bool) -> WorkspaceStatusLine {
+        WorkspaceStatusLine {
+            workspace: Workspace {
+                id: 1,
+                repository_id: 1,
+                name: "berlin".to_owned(),
+                path: PathBuf::from("/tmp/berlin"),
+                branch: "lc/berlin".to_owned(),
+                base_ref: "main".to_owned(),
+                port_base: 3000,
+                status: "active".to_owned(),
+                archived_at: None,
+                created_at: "1".to_owned(),
+                updated_at: "2".to_owned(),
+            },
+            repository_name: "demo".to_owned(),
+            open_todos: 0,
+            pull_request: pr_state.map(|state| PullRequest {
+                id: 1,
+                workspace_id: 1,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://example.test/pull/42".to_owned(),
+                state: state.to_owned(),
+                created_at: "1".to_owned(),
+                updated_at: "2".to_owned(),
+            }),
+            run_running,
+            active_sessions: 0,
+            branch_push_state: None,
+            diff_additions: 0,
+            diff_deletions: 0,
+        }
+    }
 
     #[test]
     fn history_defaults_to_workspaces() {
@@ -415,6 +461,31 @@ mod tests {
     }
 
     #[test]
+    fn workspace_review_state_requires_an_open_pull_request() {
+        assert_eq!(
+            super::workspace_history_state(&workspace_line(Some("open"), false)),
+            "Review"
+        );
+        assert_eq!(
+            super::workspace_history_state(&workspace_line(Some("closed"), false)),
+            "Ready"
+        );
+        assert_eq!(
+            super::workspace_history_state(&workspace_line(Some("merged"), true)),
+            "Running"
+        );
+    }
+
+    #[test]
+    fn local_history_database_failures_are_reported() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let result = super::history_recent_sessions(temp.path());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn chat_sources_explain_provenance() {
         assert_eq!(ChatSource::Archductor.label(), "Archductor");
         assert_eq!(ChatSource::Legacy.label(), "Legacy");
@@ -423,9 +494,17 @@ mod tests {
 
     #[test]
     fn chat_roles_keep_customer_facing_labels() {
-        assert_eq!(chat_role_label("user"), "You");
-        assert_eq!(chat_role_label("assistant"), "Agent");
-        assert_eq!(chat_role_label("system"), "System");
-        assert_eq!(chat_role_label("review"), "Review Prompt");
+        assert_eq!(chat_role_label("user", None), "You");
+        assert_eq!(
+            chat_role_label("user", Some("staged_review_send")),
+            "Review Prompt"
+        );
+        assert_eq!(
+            chat_role_label("assistant", Some("staged_review_send")),
+            "Agent"
+        );
+        assert_eq!(chat_role_label("assistant", None), "Agent");
+        assert_eq!(chat_role_label("system", None), "System");
+        assert_eq!(chat_role_label("review", None), "Review Prompt");
     }
 }

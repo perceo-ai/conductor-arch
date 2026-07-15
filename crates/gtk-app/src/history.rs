@@ -471,7 +471,7 @@ fn build_chat_history_view(database_path: PathBuf) -> (GBox, Rc<dyn Fn()>) {
         let rows = rows.clone();
         let list_generation = list_generation.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-            Ok(sessions) => {
+            Ok(Ok(sessions)) => {
                 if *list_generation.borrow() == request_generation {
                     clear_list(&list);
                     for (index, session) in sessions.into_iter().enumerate() {
@@ -482,6 +482,13 @@ fn build_chat_history_view(database_path: PathBuf) -> (GBox, Rc<dyn Fn()>) {
                     if rows.borrow().is_empty() {
                         append_history_status(&list, "No saved chats yet.");
                     }
+                }
+                glib::ControlFlow::Break
+            }
+            Ok(Err(err)) => {
+                if *list_generation.borrow() == request_generation {
+                    clear_list(&list);
+                    append_history_status(&list, &format!("Could not load saved chats: {err:#}"));
                 }
                 glib::ControlFlow::Break
             }
