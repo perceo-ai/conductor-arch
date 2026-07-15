@@ -105,14 +105,16 @@ fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry 
     }
 }
 
+pub(crate) fn workspace_has_open_pull_request(line: &WorkspaceStatusLine) -> bool {
+    line.pull_request
+        .as_ref()
+        .is_some_and(|pull_request| pull_request.state.eq_ignore_ascii_case("open"))
+}
+
 fn workspace_history_state(line: &WorkspaceStatusLine) -> &'static str {
     if line.workspace.status == "archived" {
         "Archived"
-    } else if line
-        .pull_request
-        .as_ref()
-        .is_some_and(|pull_request| pull_request.state.eq_ignore_ascii_case("open"))
-    {
+    } else if workspace_has_open_pull_request(line) {
         "Review"
     } else if line.run_running || line.active_sessions > 0 {
         "Running"

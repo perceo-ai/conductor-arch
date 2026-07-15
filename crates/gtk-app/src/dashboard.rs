@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::history_data::workspace_has_open_pull_request;
 use crate::motion::{append_revealed, clear_box};
 use crate::tabs::{set_standard_tab_active, standard_tab, standard_tab_strip};
 use crate::title_case_workspace;
@@ -24,7 +25,7 @@ enum DashboardBucket {
 fn dashboard_bucket(line: &WorkspaceStatusLine) -> DashboardBucket {
     if line.workspace.status == "archived" {
         DashboardBucket::Archived
-    } else if line.pull_request.is_some() {
+    } else if workspace_has_open_pull_request(line) {
         DashboardBucket::Review
     } else if line.run_running || line.active_sessions > 0 {
         DashboardBucket::Running
@@ -430,7 +431,7 @@ mod tests {
         status: &str,
         run_running: bool,
         active_sessions: usize,
-        pull_request_number: Option<i64>,
+        pull_request: Option<(i64, &str)>,
     ) -> WorkspaceStatusLine {
         WorkspaceStatusLine {
             workspace: Workspace {
@@ -448,13 +449,13 @@ mod tests {
             },
             repository_name: "demo".to_owned(),
             open_todos: 0,
-            pull_request: pull_request_number.map(|number| PullRequest {
+            pull_request: pull_request.map(|(number, state)| PullRequest {
                 id: 1,
                 workspace_id: 1,
                 provider: "github".to_owned(),
                 number,
                 url: format!("https://example.test/pull/{number}"),
-                state: "open".to_owned(),
+                state: state.to_owned(),
                 created_at: "1".to_owned(),
                 updated_at: "2".to_owned(),
             }),
@@ -481,12 +482,28 @@ mod tests {
             DashboardBucket::Running
         );
         assert_eq!(
-            dashboard_bucket(&line("active", false, 0, Some(42))),
+            dashboard_bucket(&line("active", false, 0, Some((42, "open")))),
             DashboardBucket::Review
         );
         assert_eq!(
             dashboard_bucket(&line("archived", false, 0, None)),
             DashboardBucket::Archived
+        );
+    }
+
+    #[test]
+    fn dashboard_review_bucket_requires_an_open_pull_request() {
+        assert_eq!(
+            dashboard_bucket(&line("active", false, 0, Some((42, "open")))),
+            DashboardBucket::Review
+        );
+        assert_eq!(
+            dashboard_bucket(&line("active", false, 0, Some((42, "closed")))),
+            DashboardBucket::Ready
+        );
+        assert_eq!(
+            dashboard_bucket(&line("active", true, 0, Some((42, "merged")))),
+            DashboardBucket::Running
         );
     }
 

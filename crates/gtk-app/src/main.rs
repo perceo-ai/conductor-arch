@@ -590,6 +590,17 @@ fn navigate_workspace_from_dashboard(
     show_workspace_stack();
 }
 
+fn with_upgraded_navigation_target<T>(
+    upgrade: impl FnOnce() -> Option<T>,
+    navigate: impl FnOnce(&T),
+) -> bool {
+    let Some(target) = upgrade() else {
+        return false;
+    };
+    navigate(&target);
+    true
+}
+
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
     let paths = AppPaths::from_env();
@@ -679,48 +690,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
     let runtime_error_reporter = Rc::new(RefCell::new(RuntimeErrorReporter::default()));
-    let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
-    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
-    let refresh_workspace_detail_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
-    let navigate_workspace: Rc<dyn Fn(String)> = {
-        let app_state = app_state.clone();
-        let main_stack_handle = main_stack_handle.clone();
-        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
-        let refresh_workspace_detail_handle = refresh_workspace_detail_handle.clone();
-        Rc::new(move |workspace_name| {
-            navigate_workspace_from_dashboard(
-                &app_state,
-                workspace_name,
-                &|| {
-                    if let Some(refresh) = refresh_view_preferences_handle.borrow().as_ref() {
-                        refresh();
-                    }
-                },
-                &|| {
-                    if let Some(refresh) = refresh_workspace_detail_handle.borrow().as_ref() {
-                        refresh();
-                    }
-                },
-                &|| {
-                    if let Some(stack) = main_stack_handle.borrow().as_ref() {
-                        stack.set_visible_child_name("workspace");
-                    }
-                },
-            );
-        })
-    };
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building dashboard"
-    );
-    let (dashboard, refresh_dashboard) =
-        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
-    dashboard.set_hexpand(true);
-    dashboard.set_vexpand(true);
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: dashboard built"
-    );
+    let main_stack = Stack::new();
+    main_stack.set_hexpand(true);
+    main_stack.set_vexpand(true);
+    let main_stack_weak = main_stack.downgrade();
 
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -733,7 +706,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             toast_overlay.clone(),
             collapse_sidebar.clone(),
         );
-    *refresh_workspace_detail_handle.borrow_mut() = Some(Rc::new(refresh_workspace_detail.clone()));
     let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
     workspace_preference_scope.set_hexpand(true);
     workspace_preference_scope.set_vexpand(true);
@@ -744,9 +716,62 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         &view_colors_css,
         &color_scope_class,
     );
+    let refresh_view_preferences: Rc<dyn Fn()> = {
+        let state_for_view = app_state.clone();
+        let workspace_preference_scope = workspace_preference_scope.clone();
+        let colors_css_for_view = view_colors_css.clone();
+        let color_scope_class = color_scope_class.clone();
+        let db_path_for_view = app_state.workspace_database_path();
+        let keybindings_for_view = Rc::clone(&current_keybindings);
+        Rc::new(move || {
+            let workspace = state_for_view.selected_workspace();
+            let preferences =
+                resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
+            apply_view_preferences(
+                &workspace_preference_scope,
+                &preferences,
+                &colors_css_for_view,
+                &color_scope_class,
+            );
+            *keybindings_for_view.borrow_mut() =
+                resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
+        })
+    };
+    let navigate_workspace: Rc<dyn Fn(String)> = {
+        let app_state = app_state.clone();
+        let main_stack_weak = main_stack_weak.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let refresh_workspace_detail = refresh_workspace_detail.clone();
+        Rc::new(move |workspace_name| {
+            navigate_workspace_from_dashboard(
+                &app_state,
+                workspace_name,
+                refresh_view_preferences.as_ref(),
+                &refresh_workspace_detail,
+                &|| {
+                    with_upgraded_navigation_target(
+                        || main_stack_weak.upgrade(),
+                        |stack| stack.set_visible_child_name("workspace"),
+                    );
+                },
+            );
+        })
+    };
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: workspace center built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building dashboard"
+    );
+    let (dashboard, refresh_dashboard) =
+        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
+    dashboard.set_hexpand(true);
+    dashboard.set_vexpand(true);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: dashboard built"
     );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -791,10 +816,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: history page built"
     );
 
-    let main_stack = Stack::new();
-    main_stack.set_hexpand(true);
-    main_stack.set_vexpand(true);
-    *main_stack_handle.borrow_mut() = Some(main_stack.clone());
     main_stack.add_named(&dashboard, Some("dashboard"));
     main_stack.add_named(&projects_page, Some("projects"));
     main_stack.add_named(&settings_page, Some("settings"));
@@ -814,29 +835,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         AppPage::PtyInspector if debug_mode => "pty-inspector",
         _ => "dashboard",
     });
-
-    let refresh_view_preferences: Rc<dyn Fn()> = {
-        let state_for_view = app_state.clone();
-        let workspace_preference_scope = workspace_preference_scope.clone();
-        let colors_css_for_view = view_colors_css.clone();
-        let color_scope_class = color_scope_class.clone();
-        let db_path_for_view = app_state.workspace_database_path();
-        let keybindings_for_view = Rc::clone(&current_keybindings);
-        Rc::new(move || {
-            let workspace = state_for_view.selected_workspace();
-            let preferences =
-                resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
-            apply_view_preferences(
-                &workspace_preference_scope,
-                &preferences,
-                &colors_css_for_view,
-                &color_scope_class,
-            );
-            *keybindings_for_view.borrow_mut() =
-                resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
-        })
-    };
-    *refresh_view_preferences_handle.borrow_mut() = Some(refresh_view_preferences.clone());
 
     let (sidebar, refresh_sidebar) = sidebar::build_app_sidebar(
         &app_state,
@@ -1766,6 +1764,27 @@ mod tests {
             events.borrow().as_slice(),
             ["preferences", "workspace-detail", "workspace-stack"]
         );
+    }
+
+    #[test]
+    fn navigation_callback_does_not_keep_its_target_alive() {
+        let target = Rc::new(RefCell::new(0));
+        let weak_target = Rc::downgrade(&target);
+        let navigate = {
+            let weak_target = weak_target.clone();
+            move || {
+                with_upgraded_navigation_target(
+                    || weak_target.upgrade(),
+                    |target| *target.borrow_mut() += 1,
+                )
+            }
+        };
+
+        assert_eq!(Rc::strong_count(&target), 1);
+        assert!(navigate());
+        assert_eq!(*target.borrow(), 1);
+        drop(target);
+        assert!(!navigate());
     }
 
     #[test]
