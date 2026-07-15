@@ -174,6 +174,8 @@ fn build_workspace_history_view(
         let filter_tabs = filter_tabs.clone();
         let generation = generation.clone();
         let toast_manager = toast_manager.clone();
+        // PER-190: This page-owned poll stops after the workspace worker replies
+        // or disconnects; remove it when a GLib main-context bridge replaces mpsc.
         glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
             Ok(Ok(loaded)) => {
                 if *generation.borrow() == request_generation {
@@ -431,6 +433,8 @@ fn build_chat_history_view(database_path: PathBuf) -> (GBox, Rc<dyn Fn()>) {
             });
             let transcript = transcript.clone();
             let transcript_generation = transcript_generation.clone();
+            // PER-190: This page-owned poll stops after the transcript worker
+            // replies or disconnects; remove it with a GLib main-context bridge.
             glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
                 Ok(messages) => {
                     if *transcript_generation.borrow() == request_generation {
@@ -470,6 +474,8 @@ fn build_chat_history_view(database_path: PathBuf) -> (GBox, Rc<dyn Fn()>) {
         let list = list.clone();
         let rows = rows.clone();
         let list_generation = list_generation.clone();
+        // PER-190: This page-owned poll stops after the chat-list worker replies
+        // or disconnects; remove it when a GLib main-context bridge replaces mpsc.
         glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
             Ok(Ok(sessions)) => {
                 if *list_generation.borrow() == request_generation {

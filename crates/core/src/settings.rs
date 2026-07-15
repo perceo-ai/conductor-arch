@@ -273,6 +273,7 @@ pub fn save_app_shared_settings(path: &Path, settings: &RepositorySettings) -> R
     let parent = path
         .parent()
         .with_context(|| format!("resolve parent for {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     ensure_real_directory(parent)?;
     reject_symlink_file(path)?;
     let contents = repository_settings_to_toml(settings)?;
@@ -2383,6 +2384,23 @@ mod tests {
             ..RepositorySettings::default()
         };
         save_app_shared_settings(&path, &settings).unwrap();
+        assert_eq!(load_app_shared_settings(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn shared_settings_save_creates_missing_parent_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fresh/config/archductor/settings.toml");
+        let settings = RepositorySettings {
+            prompts: Some(PromptSettings {
+                general: Some("Keep changes focused.".to_owned()),
+                ..PromptSettings::default()
+            }),
+            ..RepositorySettings::default()
+        };
+
+        save_app_shared_settings(&path, &settings).unwrap();
+
         assert_eq!(load_app_shared_settings(&path).unwrap(), settings);
     }
 
