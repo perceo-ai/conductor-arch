@@ -382,8 +382,10 @@ Teams should be able to encode their Git conventions once:
 
 - Branch name templates, such as `lc/{workspace}`, `{type}/{slug}`,
   `{issue_key}-{slug}`, or `{github_issue}-{slug}`.
-- Workspace name style: generated city names, prompt slug, issue key, branch
-  slug, or custom templates.
+- Workspace name style: generated open-source names, prompt slug, issue key,
+  branch slug, or custom templates. The backward-compatible `city` style uses
+  a curated mix of distros, tools, mascots, protocols, and tasteful Unix jokes.
+  Generated values stay unique, lowercase, and safe for Git branches and paths.
 - Commit message style: conventional commits, terse lowercase, team template, or
   "include tests run" format.
 - PR title source: branch, first commit, issue title, prompt summary, or custom
