@@ -1127,14 +1127,17 @@ separator {
 }
 
 .settings-content-shell {
-    background-color: #191919;
-    border: 1px solid #2a2a2a;
-    border-radius: 14px;
-    padding: 10px 12px;
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
 }
 
 .settings-content-panel {
-    padding: 2px;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
 }
 
 .settings-group {
@@ -1166,10 +1169,11 @@ separator {
 .settings-field,
 .settings-editor-field,
 .settings-toggle-row {
-    background-color: #191919;
-    border: 1px solid #2a2a2a;
-    border-radius: 10px;
-    padding: 10px;
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid #2a2a2a;
+    border-radius: 0;
+    padding: 10px 0 12px;
 }
 
 .settings-field-title {
@@ -1181,6 +1185,12 @@ separator {
 .settings-field-copy {
     color: #8a8a8a;
     font-size: 12px;
+}
+
+.settings-inherited-label {
+    color: #aaaaaa;
+    font-size: 11px;
+    font-style: italic;
 }
 
 .settings-machine-entry,
@@ -2400,6 +2410,25 @@ button.chat-inline-event-chip:checked {
     border-color: #6b5c2a;
     color: #e2cf8a;
 }
+.settings-page .page-body {
+    padding: 16px 24px;
+}
+
+.settings-page .settings-inspector,
+.settings-page .settings-content-panel {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.settings-page .settings-machine-entry:focus,
+.settings-page .settings-editor:focus,
+.settings-page .settings-editor-shell:focus-within {
+    border-color: #8a8a8a;
+    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
+    outline-offset: 2px;
+}
+
 .chat-context-usage-danger {
     background-color: #2c1f1f;
     border-color: #753838;
@@ -2537,7 +2566,6 @@ window,
 .chat-composer-box,
 .settings-toolbar,
 .settings-rail,
-.settings-content-panel,
 .workspace-card,
 .shell-card,
 .kanban-column,
@@ -2558,8 +2586,6 @@ window,
 .chat-composer-box,
 .workspace-card,
 .shell-card,
-.settings-content-panel,
-.settings-inspector,
 .workspace-modal-preview,
 .chat-menu-popover {
     background-color: #1f1f1f;
