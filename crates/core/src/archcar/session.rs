@@ -2251,7 +2251,7 @@ fn terminal_process_alive(process_id: u32) -> bool {
     crate::platform::process_alive(process_id)
 }
 
-fn terminate_process(process_id: u32) {
+pub(crate) fn terminate_process(process_id: u32) {
     #[cfg(unix)]
     let _ = std::process::Command::new("kill")
         .arg("-TERM")

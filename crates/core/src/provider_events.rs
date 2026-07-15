@@ -593,6 +593,76 @@ impl ProviderEventStore {
         Ok(rows)
     }
 
+    pub fn interrupt_active_turns_for_process(
+        &self,
+        process_id: i64,
+        reason: &str,
+    ) -> Result<usize> {
+        let events = self.list_for_process(process_id)?;
+        let terminal_turns = events
+            .iter()
+            .filter(|event| {
+                event.kind == ProviderEventKind::Turn
+                    && matches!(
+                        event.phase,
+                        ProviderEventPhase::Completed
+                            | ProviderEventPhase::Failed
+                            | ProviderEventPhase::Declined
+                            | ProviderEventPhase::Interrupted
+                    )
+            })
+            .map(provider_turn_recovery_key)
+            .collect::<std::collections::HashSet<_>>();
+        let active_turns = events
+            .into_iter()
+            .filter(|event| {
+                event.kind == ProviderEventKind::Turn
+                    && matches!(
+                        event.phase,
+                        ProviderEventPhase::Started
+                            | ProviderEventPhase::Delta
+                            | ProviderEventPhase::Progress
+                            | ProviderEventPhase::Unknown
+                    )
+                    && !terminal_turns.contains(&provider_turn_recovery_key(event))
+            })
+            .collect::<Vec<_>>();
+
+        for event in &active_turns {
+            let mut normalized_payload = event.normalized_payload.clone();
+            if let Some(payload) = normalized_payload.as_object_mut() {
+                payload.insert("status".to_owned(), Value::String("interrupted".to_owned()));
+                payload.insert("body".to_owned(), Value::String(reason.to_owned()));
+            }
+            self.upsert_event(&ProviderEventDraft {
+                provider: event.provider.clone(),
+                provider_event_id: event.provider_event_id.clone(),
+                provider_item_id: event.provider_item_id.clone(),
+                provider_thread_id: event.provider_thread_id.clone(),
+                provider_turn_id: event.provider_turn_id.clone(),
+                parent_provider_item_id: event.parent_provider_item_id.clone(),
+                parent_provider_thread_id: event.parent_provider_thread_id.clone(),
+                workspace_id: event.workspace_id,
+                chat_thread_id: event.chat_thread_id,
+                process_id: event.process_id,
+                phase: ProviderEventPhase::Interrupted,
+                kind: ProviderEventKind::Turn,
+                provider_subtype: Some("archcar/session-interrupted".to_owned()),
+                provider_sequence: event.provider_sequence,
+                occurred_at_ms: unix_millis(),
+                normalized_payload,
+                raw_json: serde_json::json!({
+                    "type": "archcar_session_interrupted",
+                    "reason": reason,
+                }),
+                schema_version: event.schema_version,
+                adapter_version: "archcar-recovery-v1".to_owned(),
+            })?;
+        }
+
+        Ok(active_turns.len())
+    }
+
     pub fn list_raw_payloads_for_identity(
         &self,
         identity_key: &str,
@@ -648,6 +718,16 @@ impl ProviderEventStore {
     fn open(&self) -> Result<Connection> {
         open_migrated_connection(&self.db_path)
     }
+}
+
+fn provider_turn_recovery_key(event: &ProviderEventRecord) -> String {
+    event
+        .provider_item_id
+        .as_ref()
+        .or(event.provider_turn_id.as_ref())
+        .or(event.provider_event_id.as_ref())
+        .cloned()
+        .unwrap_or_else(|| event.identity_key.clone())
 }
 
 pub fn project_timeline(events: Vec<ProviderEventRecord>) -> Vec<ProviderTimelineItem> {

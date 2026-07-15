@@ -2,8 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
@@ -41,6 +43,7 @@ struct ServerState {
 
 pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
     let store = WorkspaceStore::open(&paths.database_path)?;
+    let provider_events = ProviderEventStore::new(&paths.database_path);
     for workspace in store.list()? {
         let records = store.list_sessions(&workspace.name)?;
         for kind in [SessionKind::Codex, SessionKind::Claude] {
@@ -51,7 +54,15 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
                 if archcar_process_alive(record.pid) {
                     continue;
                 }
-                let _ = store.mark_session_process_exited(record.id, None)?;
+                let interrupted = provider_events.interrupt_active_turns_for_process(
+                    record.id,
+                    "Archcar stopped before the provider turn completed.",
+                )?;
+                if interrupted > 0 {
+                    let _ = store.mark_session_process_stopped(record.id, None)?;
+                } else {
+                    let _ = store.mark_session_process_exited(record.id, None)?;
+                }
             }
         }
     }
@@ -80,14 +91,30 @@ impl ArchcarServer {
     }
 
     pub fn serve(self) -> Result<()> {
-        for stream in self.listener.incoming() {
-            let stream = stream?;
-            let state = self.state.clone();
-            std::thread::spawn(move || {
-                let _ = handle_connection(stream, state);
-            });
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_signal = Arc::clone(&shutdown);
+        ctrlc::set_handler(move || {
+            shutdown_for_signal.store(true, Ordering::SeqCst);
+        })
+        .context("install archcar shutdown handler")?;
+        self.listener.set_nonblocking(true)?;
+
+        while !shutdown.load(Ordering::SeqCst) {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    let state = self.state.clone();
+                    std::thread::spawn(move || {
+                        let _ = handle_connection(stream, state);
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
-        Ok(())
+
+        shutdown_managed_sessions(&self.state, "Archcar is shutting down.")
     }
 }
 
@@ -110,7 +137,7 @@ fn handle_connection(stream: LocalStream, state: Arc<Mutex<ServerState>>) -> Res
     match envelope.payload {
         ArchcarRequest::Subscribe => {
             let (tx, rx) = mpsc::channel();
-            state.lock().unwrap().subscribers.push(tx);
+            register_subscriber_with_snapshot(&mut state.lock().unwrap(), tx);
             while let Ok(event) = rx.recv() {
                 let envelope = RpcEnvelope {
                     id: Uuid::new_v4().to_string(),
@@ -1115,6 +1142,68 @@ fn broadcast(state: &mut ServerState, event: ArchcarEvent) {
         .retain(|subscriber| subscriber.send(event.clone()).is_ok());
 }
 
+fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender<ArchcarEvent>) {
+    let mut snapshots = state
+        .sessions
+        .values()
+        .filter_map(|handle| handle.snapshot.lock().ok().map(|snapshot| snapshot.clone()))
+        .filter(|snapshot| snapshot.status == crate::workspace::ProcessStatus::Running)
+        .collect::<Vec<_>>();
+    snapshots.sort_by_key(|snapshot| snapshot.session_id);
+
+    state.subscribers.push(subscriber.clone());
+    for snapshot in snapshots {
+        let _ = subscriber.send(ArchcarEvent::SessionStarted {
+            session_id: snapshot.session_id,
+            thread_id: snapshot.thread_id,
+            workspace: snapshot.workspace,
+            kind: snapshot.kind,
+            pid: snapshot.pid,
+        });
+        if snapshot.ready {
+            let _ = subscriber.send(ArchcarEvent::SessionReady {
+                session_id: snapshot.session_id,
+                thread_id: snapshot.thread_id,
+            });
+        }
+    }
+}
+
+fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> Result<()> {
+    let (db_path, handles) = {
+        let guard = state.lock().unwrap();
+        (
+            guard.db_path.clone(),
+            guard.sessions.values().cloned().collect::<Vec<_>>(),
+        )
+    };
+    let store = WorkspaceStore::open(&db_path)?;
+    let provider_events = ProviderEventStore::new(&db_path);
+
+    for handle in handles {
+        let snapshot = match handle.snapshot.lock() {
+            Ok(snapshot) => snapshot.clone(),
+            Err(_) => continue,
+        };
+        if snapshot.status != crate::workspace::ProcessStatus::Running {
+            continue;
+        }
+        provider_events.interrupt_active_turns_for_process(snapshot.session_id, reason)?;
+        let _ = handle
+            .command_tx
+            .send(crate::archcar::session::SessionCommand::Kill);
+        crate::archcar::session::terminate_process(snapshot.pid);
+        let _ = store.mark_session_process_stopped(snapshot.session_id, None)?;
+        if let Ok(mut current) = handle.snapshot.lock() {
+            current.status = crate::workspace::ProcessStatus::Stopped;
+            current.ready = false;
+            current.runtime_state = crate::session_state::AgentSessionState::Interrupted;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1457,6 +1546,160 @@ mod tests {
             }
         );
         assert!(state.lock().unwrap().queued_defaults.is_empty());
+    }
+
+    #[test]
+    fn subscriber_snapshot_replays_started_and_ready_sessions() {
+        let ready_snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: 4,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            screen: String::new(),
+        };
+        let starting_snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 10,
+            thread_id: 5,
+            workspace: "paris".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12346,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Starting,
+            ready: false,
+            screen: String::new(),
+        };
+        let (ready_tx, _ready_rx) = mpsc::channel();
+        let (starting_tx, _starting_rx) = mpsc::channel();
+        let mut state = ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::from([
+                (
+                    9,
+                    crate::archcar::session::SessionHandle {
+                        snapshot: Arc::new(Mutex::new(ready_snapshot)),
+                        command_tx: ready_tx,
+                    },
+                ),
+                (
+                    10,
+                    crate::archcar::session::SessionHandle {
+                        snapshot: Arc::new(Mutex::new(starting_snapshot)),
+                        command_tx: starting_tx,
+                    },
+                ),
+            ]),
+            subscribers: Vec::new(),
+        };
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+
+        register_subscriber_with_snapshot(&mut state, subscriber_tx);
+
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(events.contains(&ArchcarEvent::SessionStarted {
+            session_id: 9,
+            thread_id: 4,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+        }));
+        assert!(events.contains(&ArchcarEvent::SessionReady {
+            session_id: 9,
+            thread_id: 4,
+        }));
+        assert!(events.contains(&ArchcarEvent::SessionStarted {
+            session_id: 10,
+            thread_id: 5,
+            workspace: "paris".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12346,
+        }));
+        assert!(!events.contains(&ArchcarEvent::SessionReady {
+            session_id: 10,
+            thread_id: 5,
+        }));
+        assert_eq!(state.subscribers.len(), 1);
+    }
+
+    #[test]
+    fn graceful_shutdown_interrupts_active_turn_and_stops_owned_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        let mut active_turn = provider_event(
+            thread.id,
+            "turn-1",
+            ProviderEventKind::Turn,
+            ProviderEventPhase::Started,
+            "turn/started",
+            "Turn started",
+            "",
+        );
+        active_turn.process_id = Some(process.id);
+        ProviderEventStore::new(&db_path)
+            .upsert_event(&active_turn)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: process.id,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: process.pid,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::from([(
+                process.id,
+                crate::archcar::session::SessionHandle {
+                    snapshot: Arc::new(Mutex::new(snapshot)),
+                    command_tx,
+                },
+            )]),
+            subscribers: Vec::new(),
+        }));
+
+        shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(crate::archcar::session::SessionCommand::Kill)
+        ));
+        assert_eq!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Stopped
+        );
+        let events = ProviderEventStore::new(&db_path)
+            .list_for_process(process.id)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.phase == ProviderEventPhase::Interrupted)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1978,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_startup_marks_dead_managed_codex_sessions_exited() {
+    fn reconcile_startup_marks_dead_active_codex_turn_interrupted() {
         let temp = tempfile::tempdir().unwrap();
         let paths = app_paths(temp.path());
         let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
@@ -1989,13 +2232,98 @@ mod tests {
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
+        let mut active_turn = provider_event(
+            thread.id,
+            "turn-1",
+            ProviderEventKind::Turn,
+            ProviderEventPhase::Started,
+            "turn/started",
+            "Turn started",
+            "",
+        );
+        active_turn.process_id = Some(process.id);
+        ProviderEventStore::new(&paths.database_path)
+            .upsert_event(&active_turn)
+            .unwrap();
 
         reconcile_managed_sessions_on_startup(&paths).unwrap();
 
         let reconciled = store.get_process_record(process.id).unwrap();
-        assert_eq!(reconciled.status, ProcessStatus::Exited);
+        assert_eq!(reconciled.status, ProcessStatus::Stopped);
         assert!(reconciled.ended_at.is_some());
         assert!(reconciled.log_path.starts_with(&paths.logs_dir));
+        let events = ProviderEventStore::new(&paths.database_path)
+            .list_for_process(process.id)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == ProviderEventKind::Turn
+                        && event.phase == ProviderEventPhase::Interrupted
+                })
+                .count(),
+            1
+        );
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+        let events = ProviderEventStore::new(&paths.database_path)
+            .list_for_process(process.id)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == ProviderEventKind::Turn
+                        && event.phase == ProviderEventPhase::Interrupted
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn reconcile_startup_does_not_interrupt_completed_codex_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        let provider_store = ProviderEventStore::new(&paths.database_path);
+        for phase in [ProviderEventPhase::Started, ProviderEventPhase::Completed] {
+            let mut turn = provider_event(
+                thread.id,
+                "turn-1",
+                ProviderEventKind::Turn,
+                phase,
+                if phase == ProviderEventPhase::Started {
+                    "turn/started"
+                } else {
+                    "turn/completed"
+                },
+                "Turn",
+                "",
+            );
+            turn.process_id = Some(process.id);
+            provider_store.upsert_event(&turn).unwrap();
+        }
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+
+        assert_eq!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Exited
+        );
+        assert!(!provider_store
+            .list_for_process(process.id)
+            .unwrap()
+            .iter()
+            .any(|event| event.phase == ProviderEventPhase::Interrupted));
     }
 
     #[test]

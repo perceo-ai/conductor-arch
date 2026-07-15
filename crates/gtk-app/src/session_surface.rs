@@ -6310,6 +6310,14 @@ fn ready_running_session_for_thread(
     })
 }
 
+fn ready_queued_session_for_thread(
+    records: &[ProcessRecord],
+    thread_id: i64,
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+) -> Option<i64> {
+    ready_running_session_for_thread(records, thread_id, SessionKind::Codex, ready_cache)
+}
+
 fn resolve_or_create_thread_id_for_send<F>(
     thread_state: &RefCell<Vec<ChatThreadRecord>>,
     selected_thread: &RefCell<Option<i64>>,
@@ -8169,25 +8177,10 @@ fn flush_pending_archcar_inputs(
         let records = WorkspaceStore::open(database_path)
             .and_then(|store| store.list_thread_processes(thread_id))
             .unwrap_or_default();
-        let Some(record) = records
-            .into_iter()
-            .find(|record| record.status == ProcessStatus::Running)
+        let Some(session_id) = ready_queued_session_for_thread(&records, thread_id, ready_cache)
         else {
             continue;
         };
-        if !ready_cache
-            .borrow()
-            .get(&record.id)
-            .copied()
-            .unwrap_or(false)
-        {
-            debug!(
-                thread_id,
-                process_id = record.id,
-                "archcar session not ready; deferring queued inputs"
-            );
-            continue;
-        }
 
         let pending_controls = flush_pending_commands_for_send(pending_commands, thread_id);
         for (index, control) in pending_controls.iter().enumerate() {
@@ -8195,20 +8188,20 @@ fn flush_pending_archcar_inputs(
                 bridge,
                 inflight_actions,
                 thread_id,
-                record.id,
+                session_id,
                 control.clone(),
             ) {
                 requeue_pending_controls(pending_commands, thread_id, &pending_controls, index);
                 warn!(
                     thread_id,
-                    process_id = record.id,
+                    process_id = session_id,
                     "archcar control send failed; requeued pending controls"
                 );
                 return flushed_any;
             }
             debug!(
                 thread_id,
-                process_id = record.id,
+                process_id = session_id,
                 control = %control,
                 "archcar control queued"
             );
@@ -8221,7 +8214,7 @@ fn flush_pending_archcar_inputs(
             database_path,
             workspace,
             thread_id,
-            Some(record.id),
+            Some(session_id),
             matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt),
         ) {
             Ok(checkpoint_id) => Some(checkpoint_id),
@@ -8229,7 +8222,7 @@ fn flush_pending_archcar_inputs(
                 warn!(
                     workspace = %workspace,
                     thread_id,
-                    process_id = record.id,
+                    process_id = session_id,
                     error = %err,
                     "turn checkpoint creation failed before queued archcar input submitted"
                 );
@@ -8240,7 +8233,7 @@ fn flush_pending_archcar_inputs(
             bridge,
             inflight_actions,
             thread_id,
-            record.id,
+            session_id,
             queued_input.input.clone(),
             queued_input.visible_input.clone(),
             queued_input.kind.clone(),
@@ -8252,19 +8245,19 @@ fn flush_pending_archcar_inputs(
             requeue_pending_input_front(pending_inputs, thread_id, queued_input);
             warn!(
                 thread_id,
-                process_id = record.id,
+                process_id = session_id,
                 "archcar queued input send failed; retained queued input"
             );
             return flushed_any;
         }
         debug!(
             thread_id,
-            process_id = record.id,
+            process_id = session_id,
             kind = ?queued_input.kind,
             chars = queued_input.input.len(),
             "archcar queued input submitted"
         );
-        note_archcar_ready(&mut ready_cache.borrow_mut(), record.id, false);
+        note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
         if matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt) {
             app_state.set_staged_review_prompt(None);
         }
@@ -9659,6 +9652,28 @@ fix it
     }
 
     #[test]
+    fn reconnect_ready_snapshot_releases_only_the_matching_queued_thread() {
+        let records = vec![
+            process_record_with_thread(11, ProcessStatus::Running, Some(7), "codex"),
+            process_record_with_thread(12, ProcessStatus::Running, Some(8), "codex"),
+        ];
+        let ready_cache = RefCell::new(HashMap::from([(11, true), (12, false)]));
+
+        assert_eq!(
+            ready_queued_session_for_thread(&records, 7, &ready_cache),
+            Some(11)
+        );
+        assert_eq!(
+            ready_queued_session_for_thread(&records, 8, &ready_cache),
+            None
+        );
+        assert_eq!(
+            ready_queued_session_for_thread(&records, 9, &ready_cache),
+            None
+        );
+    }
+
+    #[test]
     fn queued_composer_overlay_items_include_hover_actions() {
         let pending = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
         queue_archcar_input(
@@ -10497,7 +10512,7 @@ fix it
 
         assert!(
             flush_body
-                .contains("note_archcar_ready(&mut ready_cache.borrow_mut(), record.id, false);"),
+                .contains("note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);"),
             "flushing one queued input must wait for the next ready event before sending another"
         );
     }
