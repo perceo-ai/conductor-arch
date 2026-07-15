@@ -6,8 +6,8 @@ use archductor_core::paths::AppPaths;
 use archductor_core::settings::PromptKind;
 use archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
-    WorkspaceTimelineEvent,
+    PullRequestCheckRun, PullRequestReviewThread, ReviewComment, SessionKind, Workspace,
+    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use gtk::prelude::*;
 use gtk::{
@@ -4782,8 +4782,9 @@ fn connect_fix_blocked_prompt_button(
     let toast_for_fix = toast_overlay.clone();
     button.connect_clicked(move |_| {
         let failed_checks = WorkspaceStore::open_app(db_path.clone())
-            .and_then(|store| store.pull_request_checks(&workspace_name))
-            .ok();
+            .and_then(|store| store.pull_request_check_runs(&workspace_name))
+            .ok()
+            .and_then(|checks| failed_pull_request_checks_text(&checks));
         let prompt = workspace_conflict_resolution_prompt(
             &db_path,
             &workspace_name,
@@ -5123,22 +5124,42 @@ fn workspace_conflict_resolution_prompt(
     name: &str,
     failed_checks: Option<&str>,
 ) -> String {
+    workspace_conflict_resolution_prompt_from_parts(
+        name,
+        failed_checks,
+        resolved_workspace_prompt(db_path, name, PromptKind::ResolveMergeConflicts).as_deref(),
+        resolved_workspace_prompt(db_path, name, PromptKind::FixErrors).as_deref(),
+    )
+}
+
+fn failed_pull_request_checks_text(checks: &[PullRequestCheckRun]) -> Option<String> {
+    let failures = checks
+        .iter()
+        .filter(|check| check.is_failure())
+        .map(|check| match check.detail.as_deref() {
+            Some(detail) => format!("- {}: {} - {detail}", check.name, check.status),
+            None => format!("- {}: {}", check.name, check.status),
+        })
+        .collect::<Vec<_>>();
+    (!failures.is_empty()).then(|| failures.join("\n"))
+}
+
+fn workspace_conflict_resolution_prompt_from_parts(
+    name: &str,
+    failed_checks: Option<&str>,
+    resolve_conflicts_prompt: Option<&str>,
+    fix_errors_prompt: Option<&str>,
+) -> String {
     let mut prompt = format!(
         "Resolve the blockers for workspace {name} before PR/merge.\n\n\
          Inspect workspace conflicts, failing checks, and branch state. Make the smallest safe \
          fix, rerun the relevant verification, and report what changed."
     );
-    append_configured_prompt(
-        &mut prompt,
-        resolved_workspace_prompt(db_path, name, PromptKind::ResolveMergeConflicts).as_deref(),
-    );
+    append_configured_prompt(&mut prompt, resolve_conflicts_prompt);
     if let Some(failed_checks) = failed_checks {
         prompt.push_str("\n\nFailed checks:\n");
         prompt.push_str(failed_checks);
-        append_configured_prompt(
-            &mut prompt,
-            resolved_workspace_prompt(db_path, name, PromptKind::FixErrors).as_deref(),
-        );
+        append_configured_prompt(&mut prompt, fix_errors_prompt);
     }
     prompt
 }
@@ -7927,6 +7948,53 @@ mod tests {
 
         assert!(prompt.contains("Continue carefully."));
         assert!(!prompt.contains("Write a concise PR."));
+    }
+
+    #[test]
+    fn blocker_prompt_excludes_fix_errors_for_passing_checks() {
+        let checks = [archductor_core::workspace::PullRequestCheckRun {
+            name: "ci".to_owned(),
+            status: "success".to_owned(),
+            detail: Some("https://example.test/ci".to_owned()),
+        }];
+        let failed_checks = failed_pull_request_checks_text(&checks);
+        let prompt = workspace_conflict_resolution_prompt_from_parts(
+            "berlin",
+            failed_checks.as_deref(),
+            Some("Resolve configured conflicts."),
+            Some("Fix configured errors."),
+        );
+
+        assert!(prompt.contains("Resolve configured conflicts."));
+        assert!(!prompt.contains("Failed checks:"));
+        assert_eq!(prompt.matches("Fix configured errors.").count(), 0);
+    }
+
+    #[test]
+    fn blocker_prompt_includes_fix_errors_for_failing_checks() {
+        let checks = [
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "lint".to_owned(),
+                status: "success".to_owned(),
+                detail: None,
+            },
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "ci".to_owned(),
+                status: "failure".to_owned(),
+                detail: Some("https://example.test/ci".to_owned()),
+            },
+        ];
+        let failed_checks = failed_pull_request_checks_text(&checks);
+        let prompt = workspace_conflict_resolution_prompt_from_parts(
+            "berlin",
+            failed_checks.as_deref(),
+            Some("Resolve configured conflicts."),
+            Some("Fix configured errors."),
+        );
+
+        assert!(prompt.contains("Failed checks:\n- ci: failure - https://example.test/ci"));
+        assert!(!prompt.contains("lint: success"));
+        assert_eq!(prompt.matches("Fix configured errors.").count(), 1);
     }
 
     #[test]

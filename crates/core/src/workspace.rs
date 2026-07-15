@@ -5589,10 +5589,15 @@ mutation($threadId: ID!) {{
         let workspaces = stmt
             .query_map([repository_id], row_to_workspace)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut refreshed = 0;
         for workspace in &workspaces {
+            if !workspace.path.join(".context").is_dir() {
+                continue;
+            }
             write_managed_prompt_snapshot(&workspace.path, &settings)?;
+            refreshed += 1;
         }
-        Ok(workspaces.len())
+        Ok(refreshed)
     }
 
     pub fn workspace_changes_scope(&self, workspace_name: &str) -> Result<Option<String>> {
@@ -9773,6 +9778,16 @@ mod tests {
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
+        let archived = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "rome".to_owned(),
+                branch: "lc/rome".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store.archive("rome", true).unwrap();
+        assert!(!archived.path.exists());
         let original_brief = fs::read_to_string(first.path.join(".context/brief.md")).unwrap();
         let original_notes =
             fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap();
