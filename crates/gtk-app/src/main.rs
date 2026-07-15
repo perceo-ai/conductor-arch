@@ -6,6 +6,7 @@ mod buttons;
 mod command_palette;
 mod dashboard;
 mod history;
+mod history_data;
 mod logger;
 mod motion;
 mod projects;
@@ -762,7 +763,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 refresh_hub.refresh(RefreshScope::Sidebar);
             }
         },
-        navigate_workspace,
+        navigate_workspace.clone(),
         toast_manager.clone(),
     );
     tracing::info!(
@@ -784,7 +785,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: building history page"
     );
     let (history_page, refresh_history) =
-        history::build_history_page(app_state.workspace_database_path(), toast_manager.clone());
+        history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: history page built"

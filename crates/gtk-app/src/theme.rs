@@ -2927,6 +2927,54 @@ textview:focus,
 .ws-check-icon-fail {
     color: #fb7185;
 }
+
+.history-page-body {
+    padding: 14px 20px 20px;
+}
+
+.history-filter-tabs {
+    margin-bottom: 10px;
+}
+
+.history-split-pane {
+    background-color: @lc-bg;
+    border: 1px solid @lc-border;
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+.history-split-pane separator {
+    background-color: @lc-border;
+    min-width: 1px;
+}
+
+.history-list row {
+    margin: 0;
+    border-radius: 0;
+}
+
+.history-list row:selected,
+.history-list row:hover {
+    background-color: @lc-hover-soft;
+}
+
+.history-list .history-row {
+    background-color: transparent;
+    padding: 10px 12px;
+}
+
+.history-detail {
+    padding: 20px;
+}
+
+.history-transcript {
+    background-color: @lc-bg;
+    color: @lc-text;
+    padding: 18px;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}
 "#;
 
 #[cfg(test)]
@@ -3080,6 +3128,18 @@ mod tests {
         let card = selector_block(css, ".workspace-card-action .workspace-card");
         assert!(card.contains("border: 1px solid"));
         assert!(card.contains("box-shadow: none;"));
+    }
+
+    #[test]
+    fn history_uses_one_flat_split_pane_border() {
+        let css = app_css();
+
+        let split = selector_block(css, ".history-split-pane");
+        assert!(split.contains("border: 1px solid"));
+        assert!(split.contains("box-shadow: none;"));
+
+        let transcript = selector_block(css, ".history-transcript");
+        assert!(transcript.contains("box-shadow: none;"));
     }
 
     #[test]
