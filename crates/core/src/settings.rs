@@ -687,6 +687,29 @@ pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Resul
     toml::to_string_pretty(&raw).context("serialize customization settings")
 }
 
+pub fn app_shared_customization_settings_toml(path: &Path) -> Result<String> {
+    raw_customization_settings_to_toml(load_optional_settings(path)?)
+}
+
+pub fn repository_customization_settings_toml(
+    repo_path: &Path,
+    layer: SettingsLayer,
+) -> Result<String> {
+    let path = match layer {
+        SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
+        SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
+    };
+    raw_customization_settings_to_toml(load_optional_settings(&path)?)
+}
+
+fn raw_customization_settings_to_toml(raw: RawRepositorySettings) -> Result<String> {
+    let customization = RawRepositorySettings {
+        customization: raw.customization,
+        ..RawRepositorySettings::default()
+    };
+    toml::to_string_pretty(&customization).context("serialize customization settings")
+}
+
 pub fn customization_settings_from_toml(contents: &str) -> Result<CustomizationSettings> {
     let raw: RawRepositorySettings =
         toml::from_str(contents).context("parse customization settings")?;
@@ -4653,6 +4676,42 @@ surface = "#102030"
 
         assert!(text.contains("[customization.naming]"));
         assert_eq!(customization_settings_from_toml(&text).unwrap(), settings);
+    }
+
+    #[test]
+    fn customization_source_toml_preserves_collection_presence() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("config/settings.toml");
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(
+            &shared,
+            r#"
+[customization.view]
+theme = "dark"
+notification_rules = []
+"#,
+        )
+        .unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            r#"
+[customization.view]
+theme = "light"
+colors = {}
+"#,
+        )
+        .unwrap();
+
+        let shared_toml = app_shared_customization_settings_toml(&shared).unwrap();
+        let local_toml =
+            repository_customization_settings_toml(&repo, SettingsLayer::LocalOverride).unwrap();
+
+        assert!(shared_toml.contains("notification_rules = []"));
+        assert!(shared_toml.contains("theme = \"dark\""));
+        assert!(local_toml.contains("[customization.view.colors]"));
+        assert!(local_toml.contains("theme = \"light\""));
     }
 
     #[test]

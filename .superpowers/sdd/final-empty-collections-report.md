@@ -11,7 +11,8 @@ Commits:
 
 - `7f90f41 fix(settings): preserve empty collection overrides`
 - `f8dabef fix(settings): preserve empty collection round trips`
-- `fix(settings): restore inherited collections on reset`
+- `51e4808 fix(settings): restore inherited collections on reset`
+- `fix(settings): preserve advanced collection markers`
 
 ## Root Cause
 
@@ -63,6 +64,20 @@ The final fix makes save intent explicit:
   keys removed from the exact document are passed as targeted unsets.
 - Explicit-empty and unset intent is available at both app Shared and repository
   save boundaries without changing public typed settings structs.
+
+### Advanced Editor Baseline Re-review Root Cause
+
+The Advanced editor was still populated by serializing typed customization
+settings. That conversion intentionally omits empty collections, so an existing
+raw clear marker disappeared from the displayed document before any user edit.
+The exact-edit save path then mistook every absent collection for a deliberate
+deletion during an unrelated scalar edit.
+
+The editor now loads presence-preserving customization TOML from the current raw
+Shared or Local source and retains that displayed document as its baseline.
+Unset intent is derived only for collection fields that were present in the
+baseline and are absent after the edit. Existing markers that remain displayed
+stay explicit; deliberately deleted markers become absent and inherit again.
 
 ## Field Inventory
 
@@ -201,6 +216,38 @@ consumer path.
     unset intent.
 - `cargo test -p archductor-core -p archductor -p archductor-gtk --all-targets`
   - 498 core unit tests, 26 CLI unit tests, 9 CLI integration tests, and 443 GTK
+    unit tests passed, plus core integration targets.
+- CLI smoke: the full CLI integration target passed, including Shared and
+  repository/Local explicit-empty import/export round trips.
+- GTK smoke: isolated `xvfb-run` launch directly to the Settings page passed.
+- `cargo check -p archductor-core -p archductor -p archductor-gtk --all-targets`
+  - Exit 0, no warnings.
+- `cargo clippy -p archductor-core -p archductor -p archductor-gtk --all-targets -- -D warnings`
+  - Exit 0, no warnings.
+- `cargo fmt --all -- --check`
+  - Exit 0.
+
+## Advanced Editor Baseline Follow-up TDD Evidence
+
+### RED
+
+- `cargo test -p archductor-core customization_source_toml_preserves_collection_presence -- --nocapture`
+  - Compile failure for the wished-for app Shared and repository raw
+    customization-source APIs.
+- `cargo test -p archductor-gtk unrelated_advanced_scalar_edit_preserves_existing_empty_marker -- --nocapture`
+  - Compile failure for the raw-source API and baseline-aware collection-intent
+    helper.
+
+### GREEN
+
+- `cargo test -p archductor-core settings::tests -- --nocapture`
+  - 49 passed, including presence-preserving customization source output.
+- `cargo test -p archductor-gtk settings::tests -- --nocapture`
+  - 24 passed, including unrelated scalar edits preserving raw clear markers,
+    deliberate marker deletion restoring inherited values, Recover Defaults,
+    and dirty-empty intent.
+- `cargo test -p archductor-core -p archductor -p archductor-gtk --all-targets`
+  - 499 core unit tests, 26 CLI unit tests, 9 CLI integration tests, and 444 GTK
     unit tests passed, plus core integration targets.
 - CLI smoke: the full CLI integration target passed, including Shared and
   repository/Local explicit-empty import/export round trips.

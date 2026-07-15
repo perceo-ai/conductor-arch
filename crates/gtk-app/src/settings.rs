@@ -2,15 +2,16 @@ use crate::buttons::text_button;
 use archductor_core::paths::AppPaths;
 use archductor_core::repository::RepositoryStore;
 use archductor_core::settings::{
-    customization_settings_from_toml, customization_settings_to_toml,
+    app_shared_customization_settings_toml, customization_settings_from_toml,
     default_repository_settings_toml, ensure_repository_config,
     explicit_empty_collection_fields_from_toml, inspect_repository_settings,
     load_app_shared_settings, load_effective_repository_settings,
     load_repository_settings_for_layer, present_collection_fields_from_toml,
-    repository_settings_from_toml, save_app_shared_settings_with_collection_intent,
-    save_repository_settings_replacing, save_repository_settings_with_collection_intent,
-    AgentProfileSettings, GitSettings, PromptKind, PromptSettings, ProviderSettings,
-    RepositorySettings, ScriptSettings, SettingsCollectionField, SettingsLayer,
+    repository_customization_settings_toml, repository_settings_from_toml,
+    save_app_shared_settings_with_collection_intent, save_repository_settings_replacing,
+    save_repository_settings_with_collection_intent, AgentProfileSettings, GitSettings, PromptKind,
+    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsCollectionField,
+    SettingsLayer,
 };
 use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
@@ -256,6 +257,7 @@ pub(crate) fn build_settings_page(
     let field_edits: Rc<RefCell<HashSet<&'static str>>> = Rc::new(RefCell::new(HashSet::new()));
     let loaded_settings_target: Rc<RefCell<Option<SettingsSaveTarget>>> =
         Rc::new(RefCell::new(None));
+    let loaded_customization_source = Rc::new(RefCell::new(String::new()));
     let forced_save_target: Rc<RefCell<Option<SettingsSaveTarget>>> = Rc::new(RefCell::new(None));
     settings_tabs_row.append(&shared_tab);
     settings_tabs_row.append(&local_tab);
@@ -801,6 +803,7 @@ pub(crate) fn build_settings_page(
     let loading_settings_for_load = loading_settings_load.clone();
     let field_edits_load = field_edits.clone();
     let loaded_settings_target_load = loaded_settings_target.clone();
+    let loaded_customization_source_load = loaded_customization_source.clone();
     let setup_entry_load = setup_entry.clone();
     let run_entry_load = run_entry.clone();
     let archive_entry_load = archive_entry.clone();
@@ -869,6 +872,7 @@ pub(crate) fn build_settings_page(
             save_settings_btn_load.set_sensitive(content_enabled);
             if !content_enabled {
                 *loaded_settings_target_load.borrow_mut() = None;
+                loaded_customization_source_load.borrow_mut().clear();
                 settings_result_load.set_text("Select a project to edit Local overrides.");
                 *loading_settings_for_load.borrow_mut() = false;
                 return;
@@ -878,9 +882,22 @@ pub(crate) fn build_settings_page(
                 RepositorySettings,
                 RepositorySettings,
                 Option<archductor_core::settings::RepositorySettingsInspection>,
+                String,
             )> = match scope {
                 SettingsUiScope::Shared => load_app_shared_settings(&shared_settings_path_load)
-                    .map(|settings| (SettingsSaveTarget::Shared, settings.clone(), settings, None)),
+                    .and_then(|settings| {
+                        app_shared_customization_settings_toml(&shared_settings_path_load).map(
+                            |source| {
+                                (
+                                    SettingsSaveTarget::Shared,
+                                    settings.clone(),
+                                    settings,
+                                    None,
+                                    source,
+                                )
+                            },
+                        )
+                    }),
                 SettingsUiScope::Local => repository_root(&db_path_load_settings, &repo_name)
                     .and_then(|repo_path| {
                         let raw = load_repository_settings_for_layer(
@@ -892,17 +909,23 @@ pub(crate) fn build_settings_page(
                             &shared_settings_path_load,
                         )?;
                         let inspection = inspect_repository_settings(&repo_path)?;
+                        let source = repository_customization_settings_toml(
+                            &repo_path,
+                            SettingsLayer::LocalOverride,
+                        )?;
                         Ok((
                             SettingsSaveTarget::Local(repo_name.clone()),
                             effective,
                             raw,
                             Some(inspection),
+                            source,
                         ))
                     }),
             };
             match loaded {
-                Ok((target, settings, raw_settings, inspection)) => {
+                Ok((target, settings, raw_settings, inspection, customization_source)) => {
                     *loaded_settings_target_load.borrow_mut() = Some(target.clone());
+                    *loaded_customization_source_load.borrow_mut() = customization_source.clone();
                     setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
                     run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
                     archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
@@ -1072,14 +1095,7 @@ pub(crate) fn build_settings_page(
                                 && prompts.get(editor.kind).is_some(),
                         );
                     }
-                    let customization = if scope == SettingsUiScope::Local {
-                        &raw_settings.customization
-                    } else {
-                        &settings.customization
-                    };
-                    customization_buffer_load.set_text(
-                        &customization_settings_to_toml(customization).unwrap_or_default(),
-                    );
+                    customization_buffer_load.set_text(&customization_source);
                     settings_result_load.set_text(match target {
                         SettingsSaveTarget::Shared => "Shared defaults loaded.",
                         SettingsSaveTarget::Local(_) => "Local overrides loaded.",
@@ -1087,6 +1103,7 @@ pub(crate) fn build_settings_page(
                 }
                 Err(err) => {
                     *loaded_settings_target_load.borrow_mut() = None;
+                    loaded_customization_source_load.borrow_mut().clear();
                     inspector_load.set_sensitive(false);
                     save_settings_btn_load.set_sensitive(false);
                     surface_label_error(
@@ -1392,6 +1409,7 @@ pub(crate) fn build_settings_page(
     let shared_settings_path_save = paths.shared_settings_path();
     let forced_save_target_for_save = forced_save_target.clone();
     let loaded_settings_target_for_save = loaded_settings_target.clone();
+    let loaded_customization_source_for_save = loaded_customization_source.clone();
     let field_edits_for_save = field_edits.clone();
     let toast_save = toast_manager.clone();
     let load_selected_settings_after_save = load_selected_settings.clone();
@@ -1679,6 +1697,7 @@ pub(crate) fn build_settings_page(
             &edits,
             &settings,
             &text_buffer_text(&customization_view.1),
+            &loaded_customization_source_for_save.borrow(),
         ) {
             Ok(fields) => fields,
             Err(err) => {
@@ -1814,6 +1833,7 @@ fn collection_intent_for_settings_save(
     edits: &HashSet<&'static str>,
     settings: &RepositorySettings,
     customization_toml: &str,
+    original_customization_toml: &str,
 ) -> anyhow::Result<SettingsCollectionSaveIntent> {
     let customization_edited = edits.contains("customization");
     let mut fields = if customization_edited {
@@ -1824,22 +1844,9 @@ fn collection_intent_for_settings_save(
     let mut unset = Vec::new();
     if customization_edited {
         let present = present_collection_fields_from_toml(customization_toml)?;
-        for field in [
-            SettingsCollectionField::AgentProfiles,
-            SettingsCollectionField::PrBodySections,
-            SettingsCollectionField::RequiredLocalFiles,
-            SettingsCollectionField::ViewColors,
-            SettingsCollectionField::DashboardColumns,
-            SettingsCollectionField::NotificationRules,
-            SettingsCollectionField::CommandPalettePresets,
-        ] {
-            if !present.contains(&field) {
-                unset.push(field);
-            }
-        }
-        for name in settings.customization.agent_profiles.keys() {
-            let field = SettingsCollectionField::AgentProfileMcpServers(name.clone());
-            if !present.contains(&field) {
+        let original_present = present_collection_fields_from_toml(original_customization_toml)?;
+        for field in original_present {
+            if is_customization_collection_field(&field) && !present.contains(&field) {
                 unset.push(field);
             }
         }
@@ -1872,6 +1879,20 @@ fn collection_intent_for_settings_save(
         explicit_empty: fields,
         unset,
     })
+}
+
+fn is_customization_collection_field(field: &SettingsCollectionField) -> bool {
+    matches!(
+        field,
+        SettingsCollectionField::AgentProfiles
+            | SettingsCollectionField::AgentProfileMcpServers(_)
+            | SettingsCollectionField::PrBodySections
+            | SettingsCollectionField::RequiredLocalFiles
+            | SettingsCollectionField::ViewColors
+            | SettingsCollectionField::DashboardColumns
+            | SettingsCollectionField::NotificationRules
+            | SettingsCollectionField::CommandPalettePresets
+    )
 }
 
 fn settings_sections_for_scope(scope: SettingsUiScope) -> Vec<SettingsSection> {
@@ -2496,6 +2517,13 @@ pr_body_sections = []
 [customization.view]
 colors = {}
 "#,
+            r#"
+[customization.naming]
+pr_body_sections = []
+
+[customization.view]
+colors = {}
+"#,
         )
         .unwrap();
 
@@ -2521,6 +2549,7 @@ colors = {}
             &HashSet::new(),
             &RepositorySettings::default(),
             "",
+            "",
         )
         .unwrap()
         .explicit_empty
@@ -2528,11 +2557,91 @@ colors = {}
     }
 
     #[test]
+    fn unrelated_advanced_scalar_edit_preserves_existing_empty_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".archductor")).unwrap();
+        std::fs::write(
+            temp.path().join(".archductor/settings.toml"),
+            r#"
+[customization.view]
+notification_rules = ["checks_failed"]
+"#,
+        )
+        .unwrap();
+        archductor_core::settings::save_repository_settings_from_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            r#"
+[customization.view]
+theme = "dark"
+notification_rules = []
+"#,
+        )
+        .unwrap();
+        let original = archductor_core::settings::repository_customization_settings_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+        )
+        .unwrap();
+        assert!(original.contains("notification_rules = []"));
+        let edited = original.replace("theme = \"dark\"", "theme = \"light\"");
+        let mut settings = archductor_core::settings::load_repository_settings_for_layer(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+        )
+        .unwrap();
+        settings.customization = customization_settings_from_toml(&edited).unwrap();
+        let intent = collection_intent_for_settings_save(
+            &HashSet::from(["customization"]),
+            &settings,
+            &edited,
+            &original,
+        )
+        .unwrap();
+
+        save_repository_settings_with_collection_intent(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            &settings,
+            &intent.explicit_empty,
+            &intent.unset,
+        )
+        .unwrap();
+
+        let saved =
+            std::fs::read_to_string(temp.path().join(".archductor/settings.local.toml")).unwrap();
+        assert!(saved.contains("notification_rules = []"));
+        let effective = archductor_core::settings::load_repository_settings(temp.path()).unwrap();
+        assert!(effective.customization.view.notification_rules.is_empty());
+        assert_eq!(effective.customization.view.theme.as_deref(), Some("light"));
+    }
+
+    #[test]
     fn advanced_toml_removal_unsets_prior_collection_markers() {
         let settings = RepositorySettings::default();
-        let intent =
-            collection_intent_for_settings_save(&HashSet::from(["customization"]), &settings, "")
-                .unwrap();
+        let original = r#"
+[customization]
+agent_profiles = {}
+
+[customization.naming]
+pr_body_sections = []
+
+[customization.automation]
+required_local_files = []
+
+[customization.view]
+colors = {}
+dashboard_columns = []
+notification_rules = []
+command_palette_presets = []
+"#;
+        let intent = collection_intent_for_settings_save(
+            &HashSet::from(["customization"]),
+            &settings,
+            "",
+            original,
+        )
+        .unwrap();
 
         assert!(intent.explicit_empty.is_empty());
         assert!(intent
@@ -2556,25 +2665,31 @@ colors = {}
             .contains(&SettingsCollectionField::CommandPalettePresets));
 
         let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".archductor")).unwrap();
+        std::fs::write(
+            temp.path().join(".archductor/settings.toml"),
+            r##"
+[customization]
+agent_profiles = { default = { mcp_servers = ["github"] } }
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.view]
+colors = { accent = "#5b9dff" }
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+"##,
+        )
+        .unwrap();
         archductor_core::settings::save_repository_settings_from_toml(
             temp.path(),
             SettingsLayer::LocalOverride,
-            r#"
-[customization]
-agent_profiles = {}
-
-[customization.naming]
-pr_body_sections = []
-
-[customization.automation]
-required_local_files = []
-
-[customization.view]
-colors = {}
-dashboard_columns = []
-notification_rules = []
-command_palette_presets = []
-"#,
+            original,
         )
         .unwrap();
         save_repository_settings_with_collection_intent(
@@ -2599,6 +2714,13 @@ command_palette_presets = []
         ] {
             assert!(!saved.contains(removed), "{removed} remained in:\n{saved}");
         }
+        let effective = archductor_core::settings::load_repository_settings(temp.path()).unwrap();
+        assert_eq!(
+            effective.customization.view.notification_rules,
+            ["checks_failed"]
+        );
+        assert_eq!(effective.customization.view.colors["accent"], "#5b9dff");
+        assert_eq!(effective.customization.naming.pr_body_sections, ["Summary"]);
     }
 
     #[test]
