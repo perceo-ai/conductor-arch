@@ -1,0 +1,25 @@
+crates/core/Cargo.toml
+  s_334155ca48da57::t_cd974c21acba20 23-25
+crates/core/src/workspace.rs
+  s_334155ca48da57::t_cd974c21acba20 5594,5596-5597,8555-8561,8563-8564,8566-8591,8602-8607,8614-8629,8631-8667,8669-8698,8704-8731,8733-8746,8749-8750,8754
+  s_334155ca48da57::t_c2270a39a44983 8553-8554,8592-8601,8608-8613,8630,8668,8699-8703,8732,10106-10108,10127,10129-10131,10138-10140,10165-10167,10173-10176
+  s_334155ca48da57::t_37ffb32dc38664 10102-10105,10109-10126,10128,10132-10137,10141-10164,10168-10172,10177-10179
+Cargo.lock
+  s_334155ca48da57::t_7307e2ecdb5304 103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "377bd48d24a103913f7ab2731dbdb1d1f691df7b",
+  "prompts": {},
+  "sessions": {
+    "s_334155ca48da57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649a-658f-7b33-8c99-86fbdc632ce0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
