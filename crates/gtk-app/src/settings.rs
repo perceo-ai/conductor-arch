@@ -3,11 +3,14 @@ use archductor_core::paths::AppPaths;
 use archductor_core::repository::RepositoryStore;
 use archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml,
-    default_repository_settings_toml, ensure_repository_config, inspect_repository_settings,
+    default_repository_settings_toml, ensure_repository_config,
+    explicit_empty_collection_fields_from_toml, inspect_repository_settings,
     load_app_shared_settings, load_effective_repository_settings,
-    load_repository_settings_for_layer, repository_settings_from_toml, save_app_shared_settings,
-    save_repository_settings, AgentProfileSettings, GitSettings, PromptKind, PromptSettings,
-    ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
+    load_repository_settings_for_layer, repository_settings_from_toml,
+    save_app_shared_settings_with_explicit_empty_collections, save_repository_settings,
+    save_repository_settings_with_explicit_empty_collections, AgentProfileSettings, GitSettings,
+    PromptKind, PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings,
+    SettingsCollectionField, SettingsLayer,
 };
 use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
@@ -1672,16 +1675,40 @@ pub(crate) fn build_settings_page(
             },
             customization,
         };
+        let explicit_empty_collections = match explicit_empty_collections_for_settings_save(
+            &edits,
+            &settings,
+            &text_buffer_text(&customization_view.1),
+        ) {
+            Ok(fields) => fields,
+            Err(err) => {
+                surface_label_error(
+                    &settings_result,
+                    &toast_save,
+                    format!("Save failed: customization TOML invalid: {err:#}"),
+                );
+                return;
+            }
+        };
         let save_result = match (&save_target, repo_name.as_deref(), repo_path.as_ref()) {
             (SettingsSaveTarget::Shared, _, _) => {
-                save_app_shared_settings(&shared_settings_path_save, &settings)
-                    .and_then(|()| refresh_all_prompt_snapshots(&db_path_save_settings))
+                save_app_shared_settings_with_explicit_empty_collections(
+                    &shared_settings_path_save,
+                    &settings,
+                    &explicit_empty_collections,
+                )
+                .and_then(|()| refresh_all_prompt_snapshots(&db_path_save_settings))
             }
             (SettingsSaveTarget::Local(_), Some(repo_name), Some(repo_path)) => {
-                save_repository_settings(repo_path, SettingsLayer::LocalOverride, &settings)
-                    .and_then(|()| {
-                        refresh_repository_prompt_snapshots(&db_path_save_settings, repo_name)
-                    })
+                save_repository_settings_with_explicit_empty_collections(
+                    repo_path,
+                    SettingsLayer::LocalOverride,
+                    &settings,
+                    &explicit_empty_collections,
+                )
+                .and_then(|()| {
+                    refresh_repository_prompt_snapshots(&db_path_save_settings, repo_name)
+                })
             }
             _ => Err(anyhow::anyhow!("invalid settings save target")),
         };
@@ -1775,6 +1802,43 @@ fn setting_for_save<T>(edited: bool, current: T, displayed: T) -> T {
     } else {
         current
     }
+}
+
+fn explicit_empty_collections_for_settings_save(
+    edits: &HashSet<&'static str>,
+    settings: &RepositorySettings,
+    customization_toml: &str,
+) -> anyhow::Result<Vec<SettingsCollectionField>> {
+    let mut fields = if edits.contains("customization") {
+        explicit_empty_collection_fields_from_toml(customization_toml)?
+    } else {
+        Vec::new()
+    };
+    let mut add = |field| {
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    };
+    if edits.contains("file_globs") && settings.file_include_globs.is_empty() {
+        add(SettingsCollectionField::FileIncludeGlobs);
+    }
+    if edits.contains("environment") && settings.environment_variables.is_empty() {
+        add(SettingsCollectionField::EnvironmentVariables);
+    }
+    if edits.contains("command_presets")
+        && settings
+            .customization
+            .view
+            .command_palette_presets
+            .is_empty()
+    {
+        add(SettingsCollectionField::CommandPalettePresets);
+    }
+    if edits.contains("notifications") && settings.customization.view.notification_rules.is_empty()
+    {
+        add(SettingsCollectionField::NotificationRules);
+    }
+    Ok(fields)
 }
 
 fn settings_sections_for_scope(scope: SettingsUiScope) -> Vec<SettingsSection> {
@@ -2373,6 +2437,43 @@ mod tests {
     }
 
     #[test]
+    fn dirty_empty_collection_fields_are_forwarded_to_settings_save() {
+        let edits = HashSet::from([
+            "file_globs",
+            "environment",
+            "command_presets",
+            "notifications",
+            "customization",
+        ]);
+        let fields = explicit_empty_collections_for_settings_save(
+            &edits,
+            &RepositorySettings::default(),
+            r#"
+[customization.naming]
+pr_body_sections = []
+
+[customization.view]
+colors = {}
+"#,
+        )
+        .unwrap();
+
+        assert!(fields.contains(&SettingsCollectionField::FileIncludeGlobs));
+        assert!(fields.contains(&SettingsCollectionField::EnvironmentVariables));
+        assert!(fields.contains(&SettingsCollectionField::CommandPalettePresets));
+        assert!(fields.contains(&SettingsCollectionField::NotificationRules));
+        assert!(fields.contains(&SettingsCollectionField::PrBodySections));
+        assert!(fields.contains(&SettingsCollectionField::ViewColors));
+        assert!(explicit_empty_collections_for_settings_save(
+            &HashSet::new(),
+            &RepositorySettings::default(),
+            "",
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
     fn invalid_advanced_toml_blocks_scope_change_and_preserves_dirty_edit() {
         let dirty_toml = String::from("[view\ntheme = \"dark\"");
         let mut scope = SettingsUiScope::Shared;
@@ -2409,7 +2510,11 @@ mod tests {
         let mut project = String::from("alpha");
 
         let changed = apply_settings_navigation(&mut project, "bravo".to_owned(), || {
-            save_app_shared_settings(&settings_path, &RepositorySettings::default()).is_ok()
+            archductor_core::settings::save_app_shared_settings(
+                &settings_path,
+                &RepositorySettings::default(),
+            )
+            .is_ok()
         });
 
         assert!(!changed);

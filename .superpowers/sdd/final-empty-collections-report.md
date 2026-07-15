@@ -7,7 +7,10 @@ empty `[]` or `{}` while merging built-in, app Shared, repository-committed, and
 Local layers. Absent collections inherit. Explicit empty collections clear the
 inherited value.
 
-Commit: `fix(settings): preserve empty collection overrides`
+Commits:
+
+- `7f90f41 fix(settings): preserve empty collection overrides`
+- `fix(settings): preserve empty collection round trips`
 
 ## Root Cause
 
@@ -23,6 +26,25 @@ discarded presence inside their raw structs:
 
 The same raw merge serves every layer boundary, so the defect affected Shared,
 repository-committed, and Local settings.
+
+### Persistence Re-review Root Cause
+
+The first fix preserved presence only while raw layers were merged. Public
+load/edit/save and CLI import/export still projected raw settings into
+`RepositorySettings`, whose existing collection types intentionally represent
+both absent and empty as an empty collection. Typed-to-raw conversion then
+omitted every empty collection, so the next effective load inherited again.
+
+The follow-up keeps the public typed structs unchanged and preserves presence at
+the persistence boundary:
+
+- Normal load/edit/save reads the destination raw document and retains an empty
+  marker only for a field that was already present or was edited from non-empty
+  to empty.
+- Fresh CLI imports carry presence from the source TOML through new validated
+  raw-source save/export helpers.
+- GTK passes a narrow `SettingsCollectionField` list only for edited empty
+  fields. Untouched absent fields are not materialized as clears.
 
 ## Field Inventory
 
@@ -85,14 +107,53 @@ No visual GTK launch was required because this changes non-visible core merge
 semantics; the focused GTK app-aware boundary test compiled and exercised the
 consumer path.
 
+## Persistence Follow-up TDD Evidence
+
+### RED
+
+- `cargo test -p archductor-core load_save_preserves_explicit_empty_collection_presence -- --nocapture`
+  - Exit 101 for app Shared, repository, and Local at the first inherited empty
+    pattern assertion after public load/save.
+- `cargo test -p archductor-core toml_import -- --nocapture`
+  - Compile failure for the wished-for source-preserving Shared and repository
+    TOML persistence APIs.
+- `cargo test -p archductor --test cli_sessions cli_app_shared_import_export_preserves_explicit_empty_collections -- --nocapture`
+  - Exit 101 because exported Shared settings omitted `file_include_globs = ""`.
+- `cargo test -p archductor --test cli_sessions cli_exports_and_imports_repository_settings -- --nocapture`
+  - Exit 101 because repository-to-Local import omitted the empty color map.
+- `cargo test -p archductor-core explicit_empty_collection_fields -- --nocapture`
+  - Compile failure for the wished-for explicit-empty save-intent API and TOML field parser.
+- `cargo test -p archductor-gtk dirty_empty_collection_fields_are_forwarded_to_settings_save -- --nocapture`
+  - Compile failure for the wished-for GTK dirty-field forwarding helper.
+
+### GREEN
+
+- `cargo test -p archductor-core settings::tests -- --nocapture`
+  - 45 passed.
+- `cargo test -p archductor-core --all-targets`
+  - 495 unit tests, 2 PTY fixture tests, and 8 session-event integration tests passed.
+- `cargo test -p archductor --all-targets`
+  - 26 CLI unit tests and 9 CLI integration tests passed, including Shared and
+    repository/Local explicit-empty import/export round trips.
+- `cargo test -p archductor-gtk settings::tests -- --nocapture`
+  - 21 passed, including dirty inherited-empty forwarding.
+- `cargo check -p archductor-core -p archductor -p archductor-gtk --all-targets`
+  - Exit 0, no warnings.
+- `cargo clippy -p archductor-core -p archductor -p archductor-gtk --all-targets -- -D warnings`
+  - Exit 0, no warnings.
+- `cargo fmt --all -- --check`
+  - Exit 0.
+- Isolated `xvfb-run` GTK Settings launch
+  - Exit 0.
+
 ## Compatibility And Risks
 
 - Public typed settings structs and TOML field names are unchanged.
 - Existing non-empty serialization and map-overlay semantics are unchanged.
-- Typed serializers continue omitting default empty collections, preserving
-  existing import/export output. Explicit empty syntax is honored when it is
-  present in a raw layer file.
-- Presence remains an internal raw-layer concern. Once projected into the
-  public typed settings value, absent and empty collections are intentionally
-  both represented by the existing empty collection type.
-- No database, CLI command, or GTK UI code changed.
+- Standalone typed serializers continue omitting default empty collections,
+  preserving existing output. File-backed save and import/export paths preserve
+  explicit empty syntax from their raw destination/source document.
+- Callers that create a new empty override from a typed value must provide the
+  narrow explicit-empty field list. GTK does this only for dirty fields; absent
+  untouched values still inherit.
+- No database or settings schema migration was required.

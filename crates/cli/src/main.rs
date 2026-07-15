@@ -9,8 +9,8 @@ use archductor_core::import::{default_conductor_app_database, import_conductor_a
 use archductor_core::paths::AppPaths;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::settings::{
-    load_app_shared_settings, repository_settings_from_toml, repository_settings_to_toml,
-    save_app_shared_settings, save_repository_settings, SettingsLayer,
+    app_shared_settings_to_toml, save_app_shared_settings_from_toml,
+    save_repository_settings_from_toml, SettingsLayer,
 };
 use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
@@ -544,8 +544,7 @@ fn main() -> Result<()> {
         Command::Doctor => print_doctor(doctor::report_from_host()),
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
-                let settings = load_app_shared_settings(&paths.shared_settings_path())?;
-                let contents = repository_settings_to_toml(&settings)?;
+                let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
                 fs::write(&output, contents)
                     .with_context(|| format!("write {}", output.display()))?;
                 println!("Exported Shared settings to {}", output.display());
@@ -553,8 +552,7 @@ fn main() -> Result<()> {
             AppSettingsCommand::Import { input } => {
                 let contents = fs::read_to_string(&input)
                     .with_context(|| format!("read {}", input.display()))?;
-                let settings = repository_settings_from_toml(&contents)?;
-                save_app_shared_settings(&paths.shared_settings_path(), &settings)?;
+                save_app_shared_settings_from_toml(&paths.shared_settings_path(), &contents)?;
                 let refreshed = refresh_all_repository_prompt_snapshots(&paths)?;
                 println!(
                     "Imported Shared settings from {} and refreshed {refreshed} prompt snapshot(s)",
@@ -752,9 +750,8 @@ fn main() -> Result<()> {
                         RepoSettingsCommand::Import { input, local } => {
                             let contents = fs::read_to_string(&input)
                                 .with_context(|| format!("read {}", input.display()))?;
-                            let settings = repository_settings_from_toml(&contents)?;
                             let layer = repo_settings_layer(local);
-                            save_repository_settings(&repo.root_path, layer, &settings)?;
+                            save_repository_settings_from_toml(&repo.root_path, layer, &contents)?;
                             let refreshed = WorkspaceStore::open_app_with_logs(
                                 &paths.database_path,
                                 &paths.logs_dir,

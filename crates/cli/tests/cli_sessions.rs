@@ -91,6 +91,9 @@ run = "cargo run"
 
 [customization.view]
 keybindings = "vim"
+colors = {}
+notification_rules = []
+command_palette_presets = []
 
 [prompts]
 general = "Before import"
@@ -163,11 +166,53 @@ general = "Before import"
 
     let local_settings = fs::read_to_string(conductor_dir.join("settings.local.toml")).unwrap();
     assert!(local_settings.contains("keybindings = \"vim\""));
+    assert!(local_settings.contains("[customization.view.colors]"));
+    assert!(local_settings.contains("notification_rules = []"));
+    assert!(local_settings.contains("command_palette_presets = []"));
     assert!(
         fs::read_to_string(workspace_parent.join("berlin/.context/PROMPTS.md"))
             .unwrap()
             .contains("After import")
     );
+}
+
+#[test]
+fn cli_app_shared_import_export_preserves_explicit_empty_collections() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("shared-input.toml");
+    let output = temp.path().join("shared-output.toml");
+    fs::write(
+        &input,
+        r#"
+file_include_globs = ""
+env_file_refs = ""
+
+[environment_variables]
+
+[customization.view]
+colors = {}
+notification_rules = []
+command_palette_presets = []
+"#,
+    )
+    .unwrap();
+
+    app(temp.path())
+        .args(["settings", "import", input.to_str().unwrap()])
+        .assert()
+        .success();
+    app(temp.path())
+        .args(["settings", "export", "--output", output.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let exported = fs::read_to_string(output).unwrap();
+    assert!(exported.contains("file_include_globs = \"\""));
+    assert!(exported.contains("env_file_refs = \"\""));
+    assert!(exported.contains("[environment_variables]"));
+    assert!(exported.contains("[customization.view.colors]"));
+    assert!(exported.contains("notification_rules = []"));
+    assert!(exported.contains("command_palette_presets = []"));
 }
 
 #[test]
