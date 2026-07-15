@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -5591,7 +5591,7 @@ mutation($threadId: ID!) {{
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut refreshed = 0;
         for workspace in &workspaces {
-            if !workspace.path.join(".context").is_dir() {
+            if !managed_prompt_context_is_real(&workspace.path)? {
                 continue;
             }
             write_managed_prompt_snapshot(&workspace.path, &settings)?;
@@ -8550,15 +8550,92 @@ fn write_managed_prompt_snapshot(
     workspace_path: &Path,
     settings: &crate::settings::RepositorySettings,
 ) -> Result<()> {
+    anyhow::ensure!(
+        managed_prompt_context_is_real(workspace_path)?,
+        "{} must exist",
+        workspace_path.join(".context").display()
+    );
     let path = workspace_path.join(".context/PROMPTS.md");
+    managed_prompt_target_is_real(&path)?;
     match managed_prompt_snapshot(settings) {
-        Some(content) => fs::write(&path, content).context("write .context/PROMPTS.md"),
+        Some(content) => atomic_write_managed_prompt(&path, content.as_bytes())
+            .context("write .context/PROMPTS.md"),
         None => match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err).context("remove .context/PROMPTS.md"),
         },
     }
+}
+
+fn managed_prompt_context_is_real(workspace_path: &Path) -> Result<bool> {
+    let context_dir = workspace_path.join(".context");
+    let metadata = match fs::symlink_metadata(&context_dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", context_dir.display())),
+    };
+    let file_type = metadata.file_type();
+    anyhow::ensure!(
+        !file_type.is_symlink() && file_type.is_dir(),
+        "{} must be a real directory",
+        context_dir.display()
+    );
+    Ok(true)
+}
+
+fn managed_prompt_target_is_real(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                !metadata.file_type().is_symlink() && metadata.file_type().is_file(),
+                "{} must be a real file",
+                path.display()
+            );
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+fn atomic_write_managed_prompt(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("resolve parent for {}", path.display()))?;
+    let tmp_path = parent.join(format!(".PROMPTS.md.{}.tmp", Uuid::new_v4()));
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp_path.display()))?;
+        managed_prompt_target_is_real(path)?;
+        fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
+        sync_directory_if_supported(parent)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+#[cfg(unix)]
+fn sync_directory_if_supported(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("open {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory_if_supported(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -9823,6 +9900,73 @@ mod tests {
             fs::read_to_string(first.path.join(".context/todos.md")).unwrap(),
             original_todos
         );
+    }
+
+    fn prompt_snapshot_test_workspace() -> (tempfile::TempDir, i64, WorkspaceStore, Workspace) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let repository = RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        (temp, repository.id, store, workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_repository_prompt_snapshots_rejects_symlinked_context_directory() {
+        let (temp, repository_id, store, workspace) = prompt_snapshot_test_workspace();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        fs::remove_dir_all(workspace.path.join(".context")).unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        let result = store.refresh_repository_prompt_snapshots(repository_id);
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("must be a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_repository_prompt_snapshots_rejects_symlinked_prompts_file() {
+        let (temp, repository_id, store, workspace) = prompt_snapshot_test_workspace();
+        let outside_prompts = temp.path().join("outside-prompts.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        let managed_prompts = workspace.path.join(".context/PROMPTS.md");
+        fs::remove_file(&managed_prompts).unwrap();
+        std::os::unix::fs::symlink(&outside_prompts, &managed_prompts).unwrap();
+
+        let result = store.refresh_repository_prompt_snapshots(repository_id);
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("must be a real file"));
     }
 
     #[test]
