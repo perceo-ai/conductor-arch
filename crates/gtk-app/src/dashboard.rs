@@ -60,7 +60,7 @@ fn render_dashboard(
     clear_box(project_tabs);
     clear_box(board);
 
-    let Ok(store) = WorkspaceStore::open(db_path) else {
+    let Ok(store) = WorkspaceStore::open_app(db_path) else {
         append_empty_dashboard(project_tabs, board, "No workspace database yet.");
         return;
     };

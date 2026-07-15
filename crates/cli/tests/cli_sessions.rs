@@ -210,6 +210,68 @@ fn cli_session_open_print_command_uses_explicit_provider_models() {
 }
 
 #[test]
+fn cli_session_open_applies_app_shared_launch_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let shared_settings = temp.path().join("xdg/config/archductor/settings.toml");
+    fs::create_dir_all(shared_settings.parent().unwrap()).unwrap();
+    fs::write(
+        shared_settings,
+        r#"
+codex_executable_path = "/shared/bin/codex"
+
+[environment_variables]
+SHARED_SESSION_VALUE = "from-app-shared"
+"#,
+    )
+    .unwrap();
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    app(temp.path())
+        .args([
+            "session",
+            "open",
+            "berlin",
+            "--kind",
+            "codex",
+            "--print-command",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("SHARED_SESSION_VALUE=from-app-shared"))
+        .stdout(contains("exec /shared/bin/codex"));
+}
+
+#[test]
 fn cli_archcar_messages_renders_projected_provider_events() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));

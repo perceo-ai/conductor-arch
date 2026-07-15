@@ -24,7 +24,6 @@ use archductor_core::provider_projection::{
 };
 #[cfg(test)]
 use archductor_core::session_state::AgentSessionState;
-use archductor_core::settings::load_repository_settings;
 use archductor_core::workflow_actions::gtk_live_controls_for_provider;
 use archductor_core::workspace::{
     strip_archductor_metadata_block, ChatEventRecord, ChatMessageRecord, ChatThreadRecord,
@@ -542,12 +541,14 @@ pub fn agent_session_panel(
                                 existing_metadata.as_deref(),
                                 choice.model.as_deref(),
                             );
-                            match WorkspaceStore::open(database_path.clone()).and_then(|store| {
-                                store.update_chat_thread_harness_metadata(
-                                    thread_id,
-                                    metadata.as_deref(),
-                                )
-                            }) {
+                            match WorkspaceStore::open_app(database_path.clone()).and_then(
+                                |store| {
+                                    store.update_chat_thread_harness_metadata(
+                                        thread_id,
+                                        metadata.as_deref(),
+                                    )
+                                },
+                            ) {
                                 Ok(updated) => {
                                     replace_thread_state_record(thread_state.as_ref(), updated)
                                 }
@@ -564,7 +565,7 @@ pub fn agent_session_panel(
                         }
                         if let Some(thread_id) = *selected_thread.borrow() {
                             if current_kind == SessionKind::Codex {
-                                if let Ok(records) = WorkspaceStore::open(database_path.clone())
+                                if let Ok(records) = WorkspaceStore::open_app(database_path.clone())
                                     .and_then(|store| store.list_thread_processes(thread_id))
                                 {
                                     if let Some(session_id) = any_running_archcar_codex_ready(
@@ -635,7 +636,7 @@ pub fn agent_session_panel(
                         let metadata =
                             provider_model_harness_metadata(None, choice.model.as_deref());
                         let title = default_chat_thread_title(kind, &thread_state.borrow());
-                        match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+                        match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
                             let thread = store.create_chat_thread(
                                 &workspace_name,
                                 &choice.provider,
@@ -1028,14 +1029,14 @@ pub fn agent_session_panel(
             {
                 return;
             }
-            match WorkspaceStore::open(database_path.clone())
+            match WorkspaceStore::open_app(database_path.clone())
                 .and_then(|store| store.get_workspace_record_by_name(&workspace).map(|_| ()))
             {
                 Ok(()) => {}
                 Err(err) if workspace_lookup_returned_no_rows(&err) => {
                     let can_recover_from_selected_thread =
                         selected_thread.borrow().is_some_and(|thread_id| {
-                            WorkspaceStore::open(database_path.clone())
+                            WorkspaceStore::open_app(database_path.clone())
                                 .and_then(|store| {
                                     let thread = store.get_chat_thread_record(thread_id)?;
                                     store.get_workspace_record(thread.workspace_id).map(|_| ())
@@ -1056,7 +1057,7 @@ pub fn agent_session_panel(
                 }
                 Err(_) => {}
             }
-            let (workspace_name, loaded, loaded_threads) = match WorkspaceStore::open(
+            let (workspace_name, loaded, loaded_threads) = match WorkspaceStore::open_app(
                 database_path.clone(),
             )
             .and_then(|store| {
@@ -1067,8 +1068,8 @@ pub fn agent_session_panel(
                 Ok(loaded) => loaded,
                 Err(err) => {
                     if let Some(thread_id) = *selected_thread.borrow() {
-                        if let Ok(recovered) =
-                            WorkspaceStore::open(database_path.clone()).and_then(|store| {
+                        if let Ok(recovered) = WorkspaceStore::open_app(database_path.clone())
+                            .and_then(|store| {
                                 let thread = store.get_chat_thread_record(thread_id)?;
                                 let workspace_record =
                                     store.get_workspace_record(thread.workspace_id)?;
@@ -1515,7 +1516,7 @@ pub fn agent_session_panel(
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
                             let (thread_messages, thread_events, provider_events) =
-                                match WorkspaceStore::open(database_path.clone()).and_then(
+                                match WorkspaceStore::open_app(database_path.clone()).and_then(
                                     |store| {
                                         let messages = store.list_chat_messages(thread_id)?;
                                         let events = store.list_chat_events(thread_id)?;
@@ -1856,7 +1857,7 @@ pub fn agent_session_panel(
             "session send stage: cloned record state"
         );
         if records.is_empty() {
-            if let Ok(store) = WorkspaceStore::open(db_for_send.clone()) {
+            if let Ok(store) = WorkspaceStore::open_app(db_for_send.clone()) {
                 records = store.list_sessions(&workspace_for_send).unwrap_or_default();
                 debug!(
                     workspace = %workspace_for_send,
@@ -1871,7 +1872,7 @@ pub fn agent_session_panel(
             selected_thread_for_send.as_ref(),
             selected_kind,
             |title| {
-                WorkspaceStore::open(db_for_send.clone()).and_then(|store| {
+                WorkspaceStore::open_app(db_for_send.clone()).and_then(|store| {
                     store.create_chat_thread(
                         &workspace_for_send,
                         session_kind_provider(selected_kind),
@@ -1907,7 +1908,7 @@ pub fn agent_session_panel(
             thread_id,
             "session send stage: resolved thread"
         );
-        let thread = match WorkspaceStore::open(db_for_send.clone())
+        let thread = match WorkspaceStore::open_app(db_for_send.clone())
             .and_then(|store| store.get_chat_thread_record(thread_id))
         {
             Ok(thread) => thread,
@@ -1923,7 +1924,7 @@ pub fn agent_session_panel(
                 return false;
             }
         };
-        let thread_messages_for_send = match WorkspaceStore::open(db_for_send.clone())
+        let thread_messages_for_send = match WorkspaceStore::open_app(db_for_send.clone())
             .and_then(|store| store.list_chat_messages(thread_id))
         {
             Ok(messages) => messages,
@@ -2294,7 +2295,7 @@ pub fn agent_session_panel(
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
             let (records, threads) =
-                match WorkspaceStore::open(db_for_switch.clone()).map(|store| {
+                match WorkspaceStore::open_app(db_for_switch.clone()).map(|store| {
                     (
                         store
                             .list_sessions(&workspace_for_switch)
@@ -2708,7 +2709,7 @@ pub fn agent_session_panel(
             let title = default_chat_thread_title(kind, &thread_state.borrow());
             let metadata =
                 provider_model_harness_metadata(None, selected_model.borrow().as_deref());
-            match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+            match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
                 store.create_chat_thread(
                     &workspace_name,
                     session_kind_provider(kind),
@@ -3720,7 +3721,7 @@ fn apply_provider_projection_agent_metadata(
         return None;
     }
 
-    let store = WorkspaceStore::open(database_path).ok()?;
+    let store = WorkspaceStore::open_app(database_path).ok()?;
     for item in items.iter().filter(|item| {
         item.render_class == ProjectionRenderClass::AssistantChat
             && item.body.contains("<archductor_metadata>")
@@ -4425,9 +4426,8 @@ fn render_raw_message_content(transcript_display: &str) -> bool {
 }
 
 fn transcript_display_for_workspace(database_path: &Path, workspace_name: &str) -> String {
-    WorkspaceStore::open(database_path)
-        .and_then(|store| store.workspace_repository_root(workspace_name))
-        .and_then(|root| load_repository_settings(&root))
+    WorkspaceStore::open_app(database_path)
+        .and_then(|store| store.workspace_repo_settings(workspace_name))
         .ok()
         .and_then(|settings| settings.customization.view.transcript_display)
         .unwrap_or_else(|| "structured".to_owned())
@@ -5814,7 +5814,7 @@ fn model_switch_context_items(
     database_path: &Path,
     thread_id: i64,
 ) -> anyhow::Result<Vec<ModelSwitchContextMessage>> {
-    let store = WorkspaceStore::open(database_path)?;
+    let store = WorkspaceStore::open_app(database_path)?;
     let messages = store.list_chat_messages(thread_id)?;
     let mut context = messages
         .iter()
@@ -6067,7 +6067,7 @@ fn configured_ready_provider(
     workspace_name: &str,
     readiness: &SetupReadiness,
 ) -> Option<&'static str> {
-    let configured = WorkspaceStore::open(database_path)
+    let configured = WorkspaceStore::open_app(database_path)
         .ok()
         .and_then(|store| store.workspace_repo_settings(workspace_name).ok())
         .and_then(|settings| settings.customization.automation.auto_start_agent);
@@ -6763,7 +6763,7 @@ fn stop_active_chat_session(
 ) -> anyhow::Result<()> {
     active_sessions.borrow_mut().remove(&process_id);
     last_output.borrow_mut().remove(&process_id);
-    WorkspaceStore::open(database_path)?
+    WorkspaceStore::open_app(database_path)?
         .stop_session_process(workspace_name, process_id)
         .map(|_| ())
 }
@@ -6774,7 +6774,7 @@ fn seed_chat_running_sessions(
     active_sessions: &Rc<RefCell<HashSet<i64>>>,
     last_output: &Rc<RefCell<HashMap<i64, Instant>>>,
 ) {
-    let Ok(store) = WorkspaceStore::open(database_path) else {
+    let Ok(store) = WorkspaceStore::open_app(database_path) else {
         return;
     };
     let Ok(records) = store.list_sessions(workspace_name) else {
@@ -7186,7 +7186,7 @@ fn preserve_combo_selection(
 }
 
 fn initial_session_text(database_path: &Path, workspace_name: &str) -> String {
-    let sessions = WorkspaceStore::open(database_path)
+    let sessions = WorkspaceStore::open_app(database_path)
         .and_then(|store| store.list_sessions(workspace_name))
         .unwrap_or_default();
     if sessions.is_empty() {
@@ -8108,7 +8108,7 @@ fn seed_running_sessions(
     active_sessions: &Rc<RefCell<HashSet<i64>>>,
     transcript_buffer: &TextBuffer,
 ) {
-    let Ok(store) = WorkspaceStore::open(database_path) else {
+    let Ok(store) = WorkspaceStore::open_app(database_path) else {
         return;
     };
     let _ = store.reconcile_session_processes();
@@ -8436,7 +8436,7 @@ fn flush_pending_archcar_inputs(
     let thread_ids = pending_inputs.borrow().keys().copied().collect::<Vec<_>>();
     let mut flushed_any = false;
     for thread_id in thread_ids {
-        let records = WorkspaceStore::open(database_path)
+        let records = WorkspaceStore::open_app(database_path)
             .and_then(|store| store.list_thread_processes(thread_id))
             .unwrap_or_default();
         let Some(session_id) = ready_queued_session_for_thread(&records, thread_id, ready_cache)
@@ -8664,7 +8664,7 @@ fn create_turn_checkpoint_for_send(
     staged_review: bool,
 ) -> anyhow::Result<i64> {
     let prompt_kind = if staged_review { "review" } else { "user" };
-    let checkpoint = WorkspaceStore::open(db_path)?.checkpoint_create_turn_start(
+    let checkpoint = WorkspaceStore::open_app(db_path)?.checkpoint_create_turn_start(
         workspace,
         thread_id,
         session_id,
@@ -8674,7 +8674,7 @@ fn create_turn_checkpoint_for_send(
 }
 
 fn discard_turn_checkpoint(db_path: &Path, workspace: &str, checkpoint_id: i64) {
-    if let Err(err) = WorkspaceStore::open(db_path)
+    if let Err(err) = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.checkpoint_delete(workspace, checkpoint_id))
     {
         warn!(

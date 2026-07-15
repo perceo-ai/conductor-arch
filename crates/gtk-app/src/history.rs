@@ -223,7 +223,7 @@ fn workspace_history_row(workspace: &WorkspaceHistoryEntry) -> GBox {
 }
 
 fn history_recent_workspaces(database_path: &Path) -> anyhow::Result<Vec<WorkspaceHistoryEntry>> {
-    let store = WorkspaceStore::open(database_path)?;
+    let store = WorkspaceStore::open_app(database_path)?;
     let mut workspaces = store.list_status().map(|lines| {
         lines
             .iter()
@@ -414,7 +414,7 @@ fn query_local_sessions(
     database_path: &Path,
     path: Option<&Path>,
 ) -> anyhow::Result<Vec<ChatSummary>> {
-    let store = WorkspaceStore::open(database_path)?;
+    let store = WorkspaceStore::open_app(database_path)?;
     let mut sessions = store
         .list_local_chat_threads(path)?
         .into_iter()
@@ -519,7 +519,7 @@ fn history_session_messages(database_path: &Path, session_id: &str) -> String {
 }
 
 fn local_thread_messages(database_path: &Path, thread_id: i64) -> String {
-    let Ok(store) = WorkspaceStore::open(database_path) else {
+    let Ok(store) = WorkspaceStore::open_app(database_path) else {
         return "Could not open Archductor history database.".to_owned();
     };
     let Ok(messages) = store.local_chat_thread_messages(thread_id) else {
@@ -542,7 +542,7 @@ fn local_thread_messages(database_path: &Path, thread_id: i64) -> String {
 }
 
 fn local_session_messages(database_path: &Path, process_id: i64) -> String {
-    let Ok(store) = WorkspaceStore::open(database_path) else {
+    let Ok(store) = WorkspaceStore::open_app(database_path) else {
         return "Could not open Archductor history database.".to_owned();
     };
     let Ok(messages) = store.local_chat_history_messages(process_id) else {

@@ -1280,7 +1280,7 @@ impl WorkspaceStore {
                 )
             })?;
             initialize_context_files(&workspace.path, &settings)?;
-            copy_included_ignored_files(&repository.root_path, &workspace.path)?;
+            copy_included_ignored_files(&repository.root_path, &workspace.path, &settings)?;
 
             let auto_setup = settings
                 .customization
@@ -1803,7 +1803,7 @@ impl WorkspaceStore {
                 )
             })?;
             let settings = self.repository_settings(&repository.root_path)?;
-            copy_included_ignored_files(&repository.root_path, &workspace.path)?;
+            copy_included_ignored_files(&repository.root_path, &workspace.path, &settings)?;
             initialize_context_files(&workspace.path, &settings)?;
         }
 
@@ -4651,7 +4651,12 @@ mutation($threadId: ID!) {{
 
     pub fn mcp_status(&self, name: &str) -> Result<crate::mcp::McpStatus> {
         let workspace = self.get_by_name(name)?;
-        Ok(crate::mcp::workspace_mcp_status(&workspace.path))
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        Ok(crate::mcp::workspace_mcp_status_with_settings(
+            &workspace.path,
+            Some(&settings),
+        ))
     }
 
     /// Returns other active workspaces in the same repository that have overlapping changed files.
@@ -9070,8 +9075,12 @@ fn timestamp_nanos() -> String {
         .unwrap_or_else(|_| "0".to_owned())
 }
 
-fn copy_included_ignored_files(repo_path: &Path, workspace_path: &Path) -> Result<()> {
-    let patterns = included_file_patterns(repo_path)?;
+fn copy_included_ignored_files(
+    repo_path: &Path,
+    workspace_path: &Path,
+    settings: &RepositorySettings,
+) -> Result<()> {
+    let patterns = included_file_patterns(repo_path, settings)?;
     if patterns.is_empty() {
         return Ok(());
     }
@@ -9111,7 +9120,7 @@ fn copy_included_ignored_files(repo_path: &Path, workspace_path: &Path) -> Resul
     Ok(())
 }
 
-fn included_file_patterns(repo_path: &Path) -> Result<Vec<String>> {
+fn included_file_patterns(repo_path: &Path, settings: &RepositorySettings) -> Result<Vec<String>> {
     let mut patterns = Vec::new();
     let worktreeinclude_path = repo_path.join(".worktreeinclude");
     if worktreeinclude_path.exists() {
@@ -9120,7 +9129,7 @@ fn included_file_patterns(repo_path: &Path) -> Result<Vec<String>> {
                 .with_context(|| format!("read {}", worktreeinclude_path.display()))?,
         ));
     }
-    patterns.extend(load_repository_settings(repo_path)?.file_include_globs);
+    patterns.extend(settings.file_include_globs.iter().cloned());
     Ok(patterns)
 }
 
@@ -10871,6 +10880,117 @@ notes.local
             "{}\n"
         );
         assert!(!workspace.path.join("notes.local").exists());
+    }
+
+    #[test]
+    fn app_store_create_uses_shared_file_copy_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::write(repo_path.join(".gitignore"), "shared.cache\n").unwrap();
+        fs::write(repo_path.join("shared.cache"), "shared copy\n").unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "[scripts]\nrun_mode = \"concurrent\"\n",
+        )
+        .unwrap();
+        git(&repo_path, ["add", ".gitignore"]).unwrap();
+        git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore shared cache",
+            ],
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &app_settings_path,
+            "file_include_globs = \"shared.cache\"\n",
+        )
+        .unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap()
+        .create(CreateWorkspace {
+            repository_name: "demo".to_owned(),
+            name: "berlin".to_owned(),
+            branch: "lc/berlin".to_owned(),
+            base_ref: Some("main".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("shared.cache")).unwrap(),
+            "shared copy\n"
+        );
+    }
+
+    #[test]
+    fn app_store_mcp_status_uses_shared_provider_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(&app_settings_path, "codex_provider = \"shared-provider\"\n").unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .mcp_status("berlin")
+                .unwrap()
+                .codex_provider
+                .as_deref(),
+            Some("shared-provider")
+        );
     }
 
     #[test]

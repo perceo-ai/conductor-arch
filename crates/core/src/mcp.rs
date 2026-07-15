@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::settings::RepositorySettings;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
     pub name: String,
@@ -26,21 +28,22 @@ pub struct McpStatus {
 }
 
 pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
-    let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let settings = crate::settings::load_repository_settings(workspace_path).ok();
-    let codex_provider = settings
-        .as_ref()
-        .and_then(|settings| settings.providers.codex_provider.clone());
-    let claude_provider = settings
-        .as_ref()
-        .and_then(|settings| settings.providers.claude_provider.clone());
+    workspace_mcp_status_with_settings(workspace_path, settings.as_ref())
+}
+
+pub fn workspace_mcp_status_with_settings(
+    workspace_path: &Path,
+    settings: Option<&RepositorySettings>,
+) -> McpStatus {
+    let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let codex_provider = settings.and_then(|settings| settings.providers.codex_provider.clone());
+    let claude_provider = settings.and_then(|settings| settings.providers.claude_provider.clone());
     let codex_executable = settings
-        .as_ref()
         .and_then(|settings| settings.providers.codex_executable_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("codex");
     let claude_executable = settings
-        .as_ref()
         .and_then(|settings| settings.providers.claude_code_executable_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("claude");

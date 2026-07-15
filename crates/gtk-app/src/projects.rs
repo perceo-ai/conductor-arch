@@ -346,7 +346,7 @@ pub(crate) fn build_projects_page(
     let result_for_check_sources = result.clone();
     let toast_check_sources = toast_manager.clone();
     check_sources_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open(db_path_check_sources.clone()) {
+        match WorkspaceStore::open_app(db_path_check_sources.clone()) {
             Ok(store) => {
                 result_for_check_sources.set_text(&source_preflight_text(&store.source_preflight()))
             }
@@ -361,7 +361,7 @@ pub(crate) fn build_projects_page(
     let db_path_modal_check_sources = paths.database_path.clone();
     let toast_modal_check_sources = toast_manager.clone();
     open_source_check_btn.connect_clicked(move |_| {
-        let message = match WorkspaceStore::open(db_path_modal_check_sources.clone()) {
+        let message = match WorkspaceStore::open_app(db_path_modal_check_sources.clone()) {
             Ok(store) => source_preflight_text(&store.source_preflight()),
             Err(err) => {
                 let message = format!("Source preflight failed: {err:#}");
@@ -1029,7 +1029,7 @@ fn spawn_workspace_create_with_navigation<P, C>(
         {
             let inserted_workspace_name = inserted_workspace_name.clone();
             move |progress| {
-                WorkspaceStore::open(db_path).and_then(|store| {
+                WorkspaceStore::open_app(db_path).and_then(|store| {
                     request.create_workspace_with_progress(&store, &repository_name, |workspace| {
                         if let Ok(mut name) = inserted_workspace_name.lock() {
                             *name = Some(workspace.name.clone());

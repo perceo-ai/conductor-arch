@@ -63,7 +63,7 @@ fn workspace_repository_name(store: &WorkspaceStore, workspace_name: &str) -> St
 }
 
 fn workspace_repository_name_from_db(db_path: &Path, workspace_name: &str) -> String {
-    WorkspaceStore::open(db_path)
+    WorkspaceStore::open_app(db_path)
         .ok()
         .map(|store| workspace_repository_name(&store, workspace_name))
         .unwrap_or_else(|| workspace_name.to_owned())
@@ -118,7 +118,7 @@ pub(crate) fn build_workspace_command_center(
             body.append(&empty);
             return;
         };
-        let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+        let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
             return;
         };
         let Ok(Some(line)) = store
@@ -238,7 +238,7 @@ fn workspace_creation_status_shell(
             let state_done = state_after_delete.clone();
             spawn_background_job(
                 move || {
-                    WorkspaceStore::open(db_delete_job)
+                    WorkspaceStore::open_app(db_delete_job)
                         .and_then(|store| store.delete(&workspace_delete_job, true, false))
                         .map_err(|err| format!("{err:#}"))
                 },
@@ -502,7 +502,7 @@ fn latest_running_runtime_shell(
     database_path: &Path,
     workspace_name: &str,
 ) -> Option<ProcessRecord> {
-    WorkspaceStore::open(database_path)
+    WorkspaceStore::open_app(database_path)
         .and_then(|store| store.list_sessions(workspace_name))
         .ok()
         .and_then(|records| {
@@ -729,7 +729,7 @@ fn ws_center_panel(
                 let reopen_popover = reopen_popover.clone();
                 let thread_id = thread.id;
                 item.connect_clicked(move |_| {
-                    let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+                    let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
                         return;
                     };
                     if store.reopen_chat_thread(thread_id).is_err() {
@@ -927,7 +927,7 @@ fn ws_center_panel(
                 return;
             };
             let title = workspace_chat_default_title(&visible_existing);
-            let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+            let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
                 return;
             };
             let Ok(thread) = store.create_chat_thread(&workspace_name, &provider, &title, None)
@@ -1319,7 +1319,7 @@ fn close_workspace_chat_thread(
     thread_id: i64,
     archcar_paths: AppPaths,
 ) {
-    let Ok(store) = WorkspaceStore::open(db_path) else {
+    let Ok(store) = WorkspaceStore::open_app(db_path) else {
         return;
     };
     let records = store.list_thread_processes(thread_id).unwrap_or_default();
@@ -2171,7 +2171,7 @@ fn spawn_workspace_terminal_session(
     db_path: &Path,
     workspace_name: &str,
 ) -> anyhow::Result<WorkspaceRunConsoleTerminalConnection> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let _ = store.session_launch(workspace_name, SessionKind::Shell)?;
     crate::archcar_async::spawn_archcar_request(
         archductor_core::paths::AppPaths::from_env(),
@@ -2501,7 +2501,7 @@ fn agents_panel(
     profile_label.add_css_class("detail-label");
     let profile_select = ComboBoxText::new();
     profile_select.append(Some("default"), "Default");
-    let profile_names = WorkspaceStore::open(db_path)
+    let profile_names = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_view_defaults(&ws.name))
         .map(|defaults| defaults.agent_profile_names)
         .unwrap_or_default();
@@ -2527,7 +2527,7 @@ fn agents_panel(
                 .active_id()
                 .filter(|id| id != "default")
                 .map(|id| id.to_string());
-            let general_prompt = WorkspaceStore::open(db_for_launch.clone())
+            let general_prompt = WorkspaceStore::open_app(db_for_launch.clone())
                 .and_then(|store| store.workspace_repo_settings(&workspace))
                 .ok()
                 .and_then(|settings| settings.prompts.and_then(|p| p.general))
@@ -2673,7 +2673,7 @@ fn runtime_panel(
     let toast_setup = toast_overlay.clone();
     setup_btn.connect_clicked(move |_| {
         status_setup.set_text("Starting setup...");
-        match WorkspaceStore::open(db_path_setup.clone())
+        match WorkspaceStore::open_app(db_path_setup.clone())
             .and_then(|store| store.setup_workspace(&setup_workspace))
         {
             Ok(record) => {
@@ -2696,7 +2696,7 @@ fn runtime_panel(
     let toast_run = toast_overlay.clone();
     run_btn.connect_clicked(move |_| {
         status_run.set_text("Starting run...");
-        match WorkspaceStore::open(db_path_run.clone())
+        match WorkspaceStore::open_app(db_path_run.clone())
             .and_then(|store| store.run_workspace(&run_workspace))
         {
             Ok(record) => {
@@ -2719,7 +2719,7 @@ fn runtime_panel(
     let toast_stop = toast_overlay.clone();
     stop_btn.connect_clicked(move |_| {
         status_stop.set_text("Stopping run...");
-        match WorkspaceStore::open(db_path_stop.clone())
+        match WorkspaceStore::open_app(db_path_stop.clone())
             .and_then(|store| store.stop_workspace(&stop_workspace))
         {
             Ok(record) => {
@@ -2742,7 +2742,7 @@ fn runtime_panel(
     let toast_spotlight_on = toast_overlay.clone();
     spotlight_on_btn.connect_clicked(move |_| {
         status_spotlight_on.set_text("Starting Spotlight...");
-        match WorkspaceStore::open(db_path_spotlight_on.clone())
+        match WorkspaceStore::open_app(db_path_spotlight_on.clone())
             .and_then(|store| store.spotlight_start(&spotlight_workspace))
         {
             Ok(session) => {
@@ -2765,7 +2765,7 @@ fn runtime_panel(
     let toast_spotlight_sync = toast_overlay.clone();
     spotlight_sync_btn.connect_clicked(move |_| {
         status_spotlight_sync.set_text("Syncing Spotlight...");
-        match WorkspaceStore::open(db_path_spotlight_sync.clone())
+        match WorkspaceStore::open_app(db_path_spotlight_sync.clone())
             .and_then(|store| store.spotlight_sync(&spotlight_sync_workspace))
         {
             Ok(session) => {
@@ -2793,7 +2793,7 @@ fn runtime_panel(
     let toast_spotlight_repair = toast_overlay.clone();
     spotlight_repair_btn.connect_clicked(move |_| {
         status_spotlight_repair.set_text("Repairing Spotlight root: discarding root-only edits...");
-        match WorkspaceStore::open(db_path_spotlight_repair.clone())
+        match WorkspaceStore::open_app(db_path_spotlight_repair.clone())
             .and_then(|store| store.spotlight_repair_root(&spotlight_repair_workspace))
         {
             Ok(session) => {
@@ -2821,7 +2821,7 @@ fn runtime_panel(
     let toast_spotlight_off = toast_overlay;
     spotlight_off_btn.connect_clicked(move |_| {
         status_spotlight_off.set_text("Stopping Spotlight...");
-        match WorkspaceStore::open(db_path_spotlight_off.clone())
+        match WorkspaceStore::open_app(db_path_spotlight_off.clone())
             .and_then(|store| store.spotlight_stop(&spotlight_stop_workspace))
         {
             Ok(session) => {
@@ -2924,7 +2924,7 @@ fn lifecycle_panel(
             return;
         }
         progress_rename.set_text("Renaming...");
-        match WorkspaceStore::open(db_rename.clone())
+        match WorkspaceStore::open_app(db_rename.clone())
             .and_then(|store| store.rename(&current_name, &new_name))
         {
             Ok(workspace) => {
@@ -2955,7 +2955,7 @@ fn lifecycle_panel(
             return;
         }
         progress_duplicate.set_text("Duplicating...");
-        match WorkspaceStore::open(db_duplicate.clone()).and_then(|store| {
+        match WorkspaceStore::open_app(db_duplicate.clone()).and_then(|store| {
             store.duplicate(
                 &source_for_duplicate,
                 &new_name,
@@ -3009,7 +3009,7 @@ fn lifecycle_panel(
                 let state_after_delete = state_after_action.clone();
                 spawn_background_job(
                     move || {
-                        WorkspaceStore::open(db_delete)
+                        WorkspaceStore::open_app(db_delete)
                             .and_then(|store| store.delete(&workspace_delete, false, false))
                             .map_err(|err| format!("{err:#}"))
                     },
@@ -3025,7 +3025,7 @@ fn lifecycle_panel(
                                 let db_cleanup = db_cleanup_after_delete.clone();
                                 std::thread::spawn(move || {
                                     if let Err(err) =
-                                        WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                        WorkspaceStore::open_app(db_cleanup).and_then(|store| {
                                             store.cleanup_deleted_workspace_artifacts(
                                                 &deleted, true, true,
                                             )
@@ -3053,7 +3053,7 @@ fn lifecycle_panel(
                 );
                 return;
             }
-            let result = WorkspaceStore::open(db_action.clone()).and_then(|store| match action {
+            let result = WorkspaceStore::open_app(db_action.clone()).and_then(|store| match action {
                 "archive" => store.archive(&workspace, false),
                 "restore" => store.restore(&workspace),
                 "discard" => store.discard(&workspace),
@@ -3305,7 +3305,7 @@ fn workspace_branch_panel(
                 return;
             }
             let result =
-                WorkspaceStore::open(db_for_action.clone()).and_then(|store| match action {
+                WorkspaceStore::open_app(db_for_action.clone()).and_then(|store| match action {
                     "create" => store
                         .create_branch(&workspace_for_action, &branch)
                         .map(|_| format!("Created branch {branch}.")),
@@ -3468,7 +3468,7 @@ fn workspace_checkpoint_panel(
             );
             return;
         }
-        match WorkspaceStore::open(db_for_create.clone())
+        match WorkspaceStore::open_app(db_for_create.clone())
             .and_then(|store| store.checkpoint_create(&workspace_for_create, &message, None))
         {
             Ok(cp) => {
@@ -3496,7 +3496,7 @@ fn workspace_checkpoint_panel(
 
     let mut checkpoints_loaded = Vec::new();
     let mut list_error = None;
-    match WorkspaceStore::open(db_path).and_then(|store| store.checkpoint_list(name)) {
+    match WorkspaceStore::open_app(db_path).and_then(|store| store.checkpoint_list(name)) {
         Ok(checkpoints) => {
             checkpoints_loaded = checkpoints;
         }
@@ -3539,7 +3539,7 @@ fn workspace_checkpoint_panel(
         let feedback_for_restore = feedback.clone();
         let toast_for_restore = toast_overlay.clone();
         restore_btn.connect_clicked(move |_| {
-            match WorkspaceStore::open(db_for_restore.clone())
+            match WorkspaceStore::open_app(db_for_restore.clone())
                 .and_then(|store| store.checkpoint_restore(&workspace_for_restore, checkpoint_id))
             {
                 Ok(cp) => {
@@ -3738,7 +3738,7 @@ fn parallel_agents_panel(
     chat_box.append(&session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
-        &WorkspaceStore::open(db_path)
+        &WorkspaceStore::open_app(db_path)
             .ok()
             .map(|store| workspace_repository_name(&store, &ws.name))
             .unwrap_or_else(|| ws.name.clone()),
@@ -3778,13 +3778,13 @@ fn parallel_agents_panel(
     file_switcher.set_stack(Some(&file_tabs));
     file_switcher.add_css_class("panel-switcher");
 
-    let changes_text = WorkspaceStore::open(db_path)
+    let changes_text = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.diff_file_summaries(&ws.name))
         .map(|summaries| format_diff_file_summary(&summaries))
         .unwrap_or_else(|_| "No changes yet.\n".to_owned());
     file_tabs.add_titled(&text_panel(&changes_text), Some("changes"), "Changes");
 
-    let checks_text = WorkspaceStore::open(db_path)
+    let checks_text = WorkspaceStore::open_app(db_path)
         .map(|store| workspace_checks_text(&store, &ws.name))
         .unwrap_or_else(|_| "No checks yet.\n".to_owned());
     file_tabs.add_titled(&text_panel(&checks_text), Some("checks"), "Checks");
@@ -3797,7 +3797,7 @@ fn parallel_agents_panel(
     run_label.set_margin_start(8);
     right.append(&run_label);
 
-    let run_text = WorkspaceStore::open(db_path)
+    let run_text = WorkspaceStore::open_app(db_path)
         .map(|store| latest_run_log_line(&store, &ws.name))
         .unwrap_or_else(|_| "No run log yet.\n".to_owned());
     let run_view = TextView::new();
@@ -3864,7 +3864,7 @@ fn linked_directories_panel(
             buffer_for_link.set_text(message);
             return;
         }
-        match WorkspaceStore::open(db_for_link.clone())
+        match WorkspaceStore::open_app(db_for_link.clone())
             .and_then(|store| store.link_workspace_directory(&workspace_for_link, &target))
         {
             Ok(_) => {
@@ -3894,7 +3894,7 @@ fn linked_directories_panel(
             buffer_for_unlink.set_text(message);
             return;
         }
-        match WorkspaceStore::open(db_for_unlink.clone())
+        match WorkspaceStore::open_app(db_for_unlink.clone())
             .and_then(|store| store.unlink_workspace_directory(&workspace_for_unlink, &target))
         {
             Ok(_) => {
@@ -3916,7 +3916,7 @@ fn linked_directories_panel(
 }
 
 fn linked_directories_text(db_path: &Path, name: &str) -> String {
-    match WorkspaceStore::open(db_path).and_then(|store| store.list_linked_directories(name)) {
+    match WorkspaceStore::open_app(db_path).and_then(|store| store.list_linked_directories(name)) {
         Ok(links) if links.is_empty() => "No linked directories.\n".to_owned(),
         Ok(links) => links
             .into_iter()
@@ -4119,7 +4119,7 @@ fn workspace_changes_panel(
         item.connect_clicked(move |_| {
             body_stack_for_item.set_visible_child_name(&scope_item.stack_key);
             menu_btn_for_item.set_label(&scope_item.menu_label);
-            if let Err(err) = WorkspaceStore::open(&db_path_for_item).and_then(|store| {
+            if let Err(err) = WorkspaceStore::open_app(&db_path_for_item).and_then(|store| {
                 store.set_workspace_changes_scope(
                     &workspace_name_for_item,
                     Some(&scope_item.persisted_scope),
@@ -4348,7 +4348,7 @@ fn truncate_text_at_char_boundary(text: &str, limit: usize) -> (&str, bool) {
 }
 
 fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) -> String {
-    WorkspaceStore::open(db_path)
+    WorkspaceStore::open_app(db_path)
         .map(|store| workspace_diff_text(&store, name, path))
         .unwrap_or_else(|err| format!("Could not open workspace database: {err:#}\n"))
 }
@@ -4780,7 +4780,7 @@ fn connect_fix_blocked_prompt_button(
     let feedback_for_fix = feedback.clone();
     let toast_for_fix = toast_overlay.clone();
     button.connect_clicked(move |_| {
-        let prompt = WorkspaceStore::open(db_path.clone())
+        let prompt = WorkspaceStore::open_app(db_path.clone())
             .and_then(|store| store.pull_request_checks_agent_prompt(&workspace_name))
             .unwrap_or_else(|_| workspace_conflict_resolution_prompt(&db_path, &workspace_name));
         state.queue_pending_chat_prompt(prompt);
@@ -4807,7 +4807,7 @@ fn connect_merge_pr_button(
     let feedback_for_merge = feedback.clone();
     let toast_for_merge = toast_overlay.clone();
     button.connect_clicked(move |_| {
-        let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
+        let result = WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
             store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
         });
         apply_action_feedback(
@@ -5022,7 +5022,7 @@ fn workspace_run_prompt(db_path: &Path, name: &str) -> String {
 }
 
 fn workspace_continue_prompt(db_path: &Path, name: &str) -> String {
-    WorkspaceStore::open(db_path)
+    WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_repo_settings(name))
         .ok()
         .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr))
@@ -5039,7 +5039,7 @@ fn workspace_continue_prompt(db_path: &Path, name: &str) -> String {
 fn workspace_create_pr_chat_prompt(db_path: &Path, name: &str) -> String {
     let mut repo_prompt = None;
     let mut context_brief = None;
-    if let Ok(store) = WorkspaceStore::open(db_path) {
+    if let Ok(store) = WorkspaceStore::open_app(db_path) {
         repo_prompt = store
             .workspace_repo_settings(name)
             .ok()
@@ -5089,7 +5089,7 @@ fn workspace_commit_and_push_chat_prompt(_db_path: &Path, name: &str) -> String 
 }
 
 fn workspace_merge_source_branch_chat_prompt(db_path: &Path, name: &str) -> String {
-    let source = WorkspaceStore::open(db_path)
+    let source = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_base_ref(name))
         .unwrap_or_else(|_| "the source branch".to_owned());
     format!(
@@ -5109,7 +5109,7 @@ fn workspace_conflict_resolution_prompt(_db_path: &Path, name: &str) -> String {
 }
 
 fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: &str) -> String {
-    let current = WorkspaceStore::open(db_path)
+    let current = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_repo_settings(name))
         .ok()
         .and_then(|settings| match script_key {
@@ -5131,7 +5131,7 @@ fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: 
 }
 
 fn workspace_file_comments_text(db_path: &Path, name: &str, path: &str) -> String {
-    WorkspaceStore::open(db_path)
+    WorkspaceStore::open_app(db_path)
         .and_then(|store| store.list_review_comments(name))
         .map(|comments| file_inline_comments_text(&comments, path))
         .unwrap_or_else(|err| format!("Could not read comments for {path}: {err:#}\n"))
@@ -5433,7 +5433,7 @@ fn connect_push_branch_button(
     let feedback_for_push = feedback.clone();
     let toast_for_push = toast_overlay.clone();
     push_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open(db_for_push.clone())
+        match WorkspaceStore::open_app(db_for_push.clone())
             .and_then(|store| store.push_branch(&workspace_for_push))
         {
             Ok(output) => {
@@ -5482,7 +5482,7 @@ fn connect_force_push_button(
             return;
         }
         force_push_btn_for_click.set_sensitive(false);
-        match WorkspaceStore::open(db_for_force_push.clone())
+        match WorkspaceStore::open_app(db_for_force_push.clone())
             .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
         {
             Ok(output) => {
@@ -5554,7 +5554,7 @@ fn workspace_check_runner_panel(
                 let toast_for_run = toast_overlay.clone();
                 let refresh_after_run = refresh_hub.clone();
                 run_btn.connect_clicked(move |_| {
-                    let result = WorkspaceStore::open(db_for_run.clone()).and_then(|store| {
+                    let result = WorkspaceStore::open_app(db_for_run.clone()).and_then(|store| {
                         store.run_workspace_check(&workspace_for_run, &key_for_run)
                     });
                     match result {
@@ -5602,7 +5602,7 @@ fn workspace_check_runner_panel(
     let feedback_for_stage = feedback.clone();
     let toast_for_stage = toast_overlay;
     stage_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open(db_for_stage.clone())
+        match WorkspaceStore::open_app(db_for_stage.clone())
             .and_then(|store| latest_check_agent_prompt(&store, &workspace_for_stage))
         {
             Ok(prompt) => {
@@ -5752,7 +5752,7 @@ fn workspace_checks_panel(
                     let feedback_for_stage = feedback.clone();
                     let toast_for_stage = toast_overlay.clone();
                     summary_btn.connect_clicked(move |_| {
-                        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+                        match WorkspaceStore::open_app(db_for_stage.clone()).and_then(|store| {
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
@@ -5779,7 +5779,7 @@ fn workspace_checks_panel(
                     let feedback_for_review = feedback.clone();
                     let toast_for_review = toast_overlay.clone();
                     review_btn.connect_clicked(move |_| {
-                        match WorkspaceStore::open(db_for_review.clone()).and_then(|store| {
+                        match WorkspaceStore::open_app(db_for_review.clone()).and_then(|store| {
                             store.pull_request_review_agent_prompt(&workspace_for_review)
                         }) {
                             Ok(prompt) => {
@@ -5807,7 +5807,7 @@ fn workspace_checks_panel(
                     let toast_for_refresh = toast_overlay.clone();
                     refresh_btn.connect_clicked(move |_| {
                         let result =
-                            WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
+                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
                                 store.refresh_pull_request_state(&workspace_for_refresh)
                             });
                         let message = pull_request_refresh_feedback(result);
@@ -5849,12 +5849,13 @@ fn workspace_checks_panel(
                             .active_id()
                             .map(|method| method.to_string())
                             .unwrap_or_else(|| "squash".to_owned());
-                        let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
-                            store.merge_and_maybe_archive_pull_request(
-                                &workspace_for_merge,
-                                Some(&method),
-                            )
-                        });
+                        let result =
+                            WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
+                                store.merge_and_maybe_archive_pull_request(
+                                    &workspace_for_merge,
+                                    Some(&method),
+                                )
+                            });
                         apply_action_feedback(
                             &feedback_for_merge,
                             &toast_for_merge,
@@ -5870,7 +5871,7 @@ fn workspace_checks_panel(
                     let feedback_for_stage = feedback.clone();
                     let toast_for_stage = toast_overlay.clone();
                     summary_btn.connect_clicked(move |_| {
-                        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+                        match WorkspaceStore::open_app(db_for_stage.clone()).and_then(|store| {
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
@@ -5898,7 +5899,7 @@ fn workspace_checks_panel(
                     let toast_for_refresh = toast_overlay.clone();
                     refresh_btn.connect_clicked(move |_| {
                         let result =
-                            WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
+                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
                                 store.refresh_pull_request_state(&workspace_for_refresh)
                             });
                         let message = pull_request_refresh_feedback(result);
@@ -5931,7 +5932,7 @@ fn workspace_checks_panel(
                     let feedback_for_fix = feedback.clone();
                     let toast_for_fix = toast_overlay.clone();
                     fix_btn.connect_clicked(move |_| {
-                        match WorkspaceStore::open(db_for_fix.clone()).and_then(|store| {
+                        match WorkspaceStore::open_app(db_for_fix.clone()).and_then(|store| {
                             store.pull_request_checks_agent_prompt(&workspace_for_fix)
                         }) {
                             Ok(prompt) => {
@@ -5958,7 +5959,7 @@ fn workspace_checks_panel(
                     let feedback_for_stage = feedback.clone();
                     let toast_for_stage = toast_overlay.clone();
                     summary_btn.connect_clicked(move |_| {
-                        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+                        match WorkspaceStore::open_app(db_for_stage.clone()).and_then(|store| {
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
@@ -5986,7 +5987,7 @@ fn workspace_checks_panel(
                     let toast_for_refresh = toast_overlay.clone();
                     refresh_btn.connect_clicked(move |_| {
                         let result =
-                            WorkspaceStore::open(db_for_refresh.clone()).and_then(|store| {
+                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
                                 store.refresh_pull_request_state(&workspace_for_refresh)
                             });
                         let message = pull_request_refresh_feedback(result);
@@ -6025,7 +6026,7 @@ fn workspace_checks_panel(
                     let feedback_for_archive = feedback.clone();
                     let toast_for_archive = toast_overlay.clone();
                     archive_btn.connect_clicked(move |_| {
-                        let result = WorkspaceStore::open(db_for_archive.clone())
+                        let result = WorkspaceStore::open_app(db_for_archive.clone())
                             .and_then(|store| store.archive(&workspace_for_archive, false));
                         apply_action_feedback(
                             &feedback_for_archive,
@@ -6213,7 +6214,7 @@ fn workspace_conflict_resolution_panel(
             let mut sections = Vec::new();
             for file in &files_for_diff_all {
                 let file_path = Path::new(file).to_path_buf();
-                match WorkspaceStore::open(db_for_diff_all.clone()).and_then(|store| {
+                match WorkspaceStore::open_app(db_for_diff_all.clone()).and_then(|store| {
                     store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path()))
                 }) {
                     Ok(output) => {
@@ -6252,7 +6253,7 @@ fn workspace_conflict_resolution_panel(
             let mut copied = 0usize;
             let mut failures = Vec::new();
             for file in &files_for_copy_all {
-                let result = WorkspaceStore::open(db_for_copy_all.clone()).and_then(|store| {
+                let result = WorkspaceStore::open_app(db_for_copy_all.clone()).and_then(|store| {
                     store.copy_conflict_file_from_workspace(
                         &destination_workspace,
                         &source_workspace,
@@ -6321,7 +6322,7 @@ fn workspace_conflict_resolution_panel(
             let file_for_diff = Path::new(&file).to_path_buf();
             let diff_buffer = diff_preview.buffer();
             diff_btn.connect_clicked(move |_| {
-                let output = WorkspaceStore::open(db_for_diff.clone())
+                let output = WorkspaceStore::open_app(db_for_diff.clone())
                     .and_then(|store| {
                         store
                             .unified_diff(&source_workspace_for_diff, Some(file_for_diff.as_path()))
@@ -6350,7 +6351,7 @@ fn workspace_conflict_resolution_panel(
             let refresh_after_copy = refresh_hub.clone();
             let toast_for_copy = toast_manager.clone();
             copy_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open(db_for_copy.clone()).and_then(|store| {
+                let result = WorkspaceStore::open_app(db_for_copy.clone()).and_then(|store| {
                     store.copy_conflict_file_from_workspace(
                         &destination_workspace,
                         &source_workspace,
@@ -6631,8 +6632,8 @@ fn workspace_review_panel(
                         let action = if thread.resolved { "Reopen" } else { "Resolve" };
                         let resolved = !thread.resolved;
                         button.connect_clicked(move |_| {
-                            let result =
-                                WorkspaceStore::open(db_for_resolution.clone()).and_then(|store| {
+                            let result = WorkspaceStore::open_app(db_for_resolution.clone())
+                                .and_then(|store| {
                                     store.set_pull_request_review_thread_resolution(
                                         &workspace_for_resolution,
                                         &thread_id,
@@ -6720,7 +6721,7 @@ fn workspace_review_panel(
                 return;
             }
         };
-        match WorkspaceStore::open(db_for_add.clone())
+        match WorkspaceStore::open_app(db_for_add.clone())
             .and_then(|store| store.add_review_comment(&workspace_for_add, &file, line, &body))
         {
             Ok(comment) => {
@@ -6756,7 +6757,7 @@ fn workspace_review_panel(
     let db_for_stage = db_path.to_path_buf();
     let workspace_for_stage = name.to_owned();
     stage_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open(db_for_stage.clone()).and_then(|store| {
+        match WorkspaceStore::open_app(db_for_stage.clone()).and_then(|store| {
             let prompt = store.review_comments_agent_prompt(&workspace_for_stage)?;
             if prompt.contains("No open review comments.") {
                 anyhow::bail!("No open review comments to stage");
@@ -6803,7 +6804,7 @@ fn workspace_review_panel(
                     let feedback_for_resolve = feedback.clone();
                     let toast_for_resolve = toast_overlay.clone();
                     button.connect_clicked(move |_| {
-                        let result = WorkspaceStore::open(db_for_resolve.clone())
+                        let result = WorkspaceStore::open_app(db_for_resolve.clone())
                             .and_then(|store| store.resolve_review_comment(comment_id));
                         let message = match result {
                             Ok(ref comment) => {
@@ -6919,7 +6920,7 @@ fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
         if text.is_empty() {
             return;
         }
-        if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        if let Ok(store) = WorkspaceStore::open_app(db_path.clone()) {
             let _ = store.add_todo(&workspace, &text);
             entry_clone.set_text("");
         }

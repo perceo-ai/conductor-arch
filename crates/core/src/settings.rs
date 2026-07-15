@@ -232,7 +232,10 @@ pub fn load_effective_repository_settings(
 }
 
 fn default_app_shared_settings() -> RepositorySettings {
-    RepositorySettings::default()
+    RepositorySettings {
+        prompts: Some(default_prompt_settings()),
+        ..RepositorySettings::default()
+    }
 }
 
 fn load_repository_settings_strict(repo_path: &Path) -> Result<RepositorySettings> {
@@ -2214,28 +2217,40 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         let app = temp.path().join("config/settings.toml");
-        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::create_dir_all(repo.join(".archductor/prompt-packs")).unwrap();
         fs::create_dir_all(app.parent().unwrap()).unwrap();
         fs::write(
             &app,
-            "[prompts]\ngeneral = \"shared\"\ncontinue_work = \"shared continue\"\n",
+            "[prompts]\ncontinue_work = \"shared continue\"\ncode_review = \"shared review\"\n",
         )
         .unwrap();
         fs::write(
             repo.join(".archductor/settings.toml"),
-            "[prompts]\ngeneral = \"repository\"\n",
+            "[prompt_pack]\npath = \".archductor/prompt-packs/team.toml\"\n\n[prompts]\ngeneral = \"repository general\"\n",
         )
         .unwrap();
         fs::write(
             repo.join(".archductor/settings.local.toml"),
-            "[prompts]\ngeneral = \"local\"\n",
+            "[prompts]\nhandoff = \"local handoff\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/prompt-packs/team.toml"),
+            "[prompts]\ngeneral = \"pack general\"\ncode_review = \"pack review\"\n",
         )
         .unwrap();
 
         let settings = load_effective_repository_settings(&repo, &app).unwrap();
         let prompts = settings.prompts.unwrap();
-        assert_eq!(prompts.general.as_deref(), Some("local"));
+        assert_eq!(
+            prompts.new_workspace,
+            default_prompt_settings().new_workspace,
+            "built-in prompt should survive when no later layer overrides it"
+        );
         assert_eq!(prompts.continue_work.as_deref(), Some("shared continue"));
+        assert_eq!(prompts.code_review.as_deref(), Some("pack review"));
+        assert_eq!(prompts.general.as_deref(), Some("repository general"));
+        assert_eq!(prompts.handoff.as_deref(), Some("local handoff"));
     }
 
     #[test]

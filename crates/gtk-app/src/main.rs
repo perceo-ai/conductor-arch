@@ -380,7 +380,7 @@ fn percent_decode(value: &str) -> String {
 fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPreferences {
     workspace
         .and_then(|name| {
-            WorkspaceStore::open(db_path)
+            WorkspaceStore::open_app(db_path)
                 .and_then(|store| store.workspace_view_defaults(name))
                 .ok()
         })
@@ -391,7 +391,7 @@ fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPr
 fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings {
     workspace
         .and_then(|name| {
-            WorkspaceStore::open(db_path)
+            WorkspaceStore::open_app(db_path)
                 .and_then(|store| store.workspace_view_defaults(name))
                 .ok()
         })
@@ -594,7 +594,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             .workspace
             .as_deref()
             .and_then(|workspace| {
-                WorkspaceStore::open(paths.database_path.clone())
+                WorkspaceStore::open_app(paths.database_path.clone())
                     .and_then(|store| store.workspace_view_defaults(workspace))
                     .ok()
             })
@@ -890,7 +890,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let custom_commands = state_for_palette
                 .selected_workspace()
                 .and_then(|workspace| {
-                    WorkspaceStore::open(state_for_palette.workspace_database_path())
+                    WorkspaceStore::open_app(state_for_palette.workspace_database_path())
                         .and_then(|store| store.workspace_view_defaults(&workspace))
                         .ok()
                 })
@@ -1096,7 +1096,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 *prev_notif.borrow_mut() = None;
                 return glib::ControlFlow::Continue;
             };
-            let rules = WorkspaceStore::open(db_path_notif.clone())
+            let rules = WorkspaceStore::open_app(db_path_notif.clone())
                 .and_then(|store| store.workspace_view_defaults(&workspace))
                 .map(|defaults| defaults.notification_rules)
                 .unwrap_or_default();
@@ -1115,7 +1115,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             if !notify_session_stop && !notify_check_fail {
                 return glib::ControlFlow::Continue;
             }
-            let Ok(summary) = WorkspaceStore::open(db_path_notif.clone())
+            let Ok(summary) = WorkspaceStore::open_app(db_path_notif.clone())
                 .and_then(|store| store.checks_summary(&workspace))
             else {
                 return glib::ControlFlow::Continue;
@@ -1293,7 +1293,7 @@ fn apply_palette_target(
         PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
         PaletteTarget::RunCommand(cmd) => {
             if let Some(workspace) = state.selected_workspace() {
-                let _ = WorkspaceStore::open(state.workspace_database_path())
+                let _ = WorkspaceStore::open_app(state.workspace_database_path())
                     .and_then(|store| store.terminal_command(&workspace, &cmd));
                 refresh_hub.refresh(RefreshScope::Workspace);
             }
@@ -1377,7 +1377,7 @@ fn reconcile_runtime_state_for_ui(
 }
 
 fn reconcile_runtime_state(db_path: &Path) -> anyhow::Result<RuntimeReconciliationReport> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let synced = store.spotlight_sync_active_sessions()?;
     let reconciled = store.reconcile_terminal_processes()?;
     Ok(RuntimeReconciliationReport {
@@ -1402,7 +1402,7 @@ fn refresh_spotlight_file_watcher(
     event_tx: &Sender<()>,
     current: &Rc<RefCell<Option<SpotlightFileWatcher>>>,
 ) -> anyhow::Result<()> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let targets = store.spotlight_watch_targets()?;
     let target_keys = targets
         .iter()
@@ -1593,6 +1593,12 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn startup_runtime_reconciliation_marks_stale_terminal_rows_exited() {
@@ -1634,6 +1640,50 @@ mod tests {
                 .status,
             ProcessStatus::Exited
         );
+    }
+
+    #[test]
+    fn gtk_view_preferences_use_app_shared_settings() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::remove_file(repo_path.join(".archductor/settings.toml")).unwrap();
+
+        let config_home = temp.path().join("xdg/config");
+        let settings_path = config_home.join("archductor/settings.toml");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(settings_path, "[customization.view]\ntheme = \"light\"\n").unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let preferences = resolve_view_preferences(db_path, Some("berlin"));
+
+        if let Some(previous) = previous_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", previous);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        assert_eq!(preferences.theme, Some(ViewTheme::Light));
     }
 
     #[test]

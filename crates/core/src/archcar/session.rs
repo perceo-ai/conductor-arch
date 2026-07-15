@@ -233,7 +233,7 @@ pub fn spawn_managed_session(
     event_tx: Sender<ArchcarEvent>,
 ) -> Result<SessionHandle> {
     let _provider_native_launch_guard = provider_native_session_launch_guard(kind);
-    let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
+    let store = open_managed_session_store(db_path.clone(), logs_dir.clone())?;
     let controller = controller_for_kind(kind);
     if let Some((connection, snapshot_state)) = adopt_running_session(&store, &workspace, kind)? {
         return Ok(start_session_handle(
@@ -564,7 +564,7 @@ pub fn spawn_managed_session_for_thread(
     event_tx: Sender<ArchcarEvent>,
 ) -> Result<SessionHandle> {
     let _provider_native_launch_guard = provider_native_session_launch_guard(kind);
-    let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
+    let store = open_managed_session_store(db_path.clone(), logs_dir.clone())?;
     let thread_record = store.get_chat_thread_record(thread_id)?;
     let workspace_record = store.get_workspace_record_by_name(&workspace)?;
     anyhow::ensure!(
@@ -975,7 +975,7 @@ pub fn restore_managed_session(
     process_id: i64,
     event_tx: Sender<ArchcarEvent>,
 ) -> Result<Option<SessionHandle>> {
-    let store = WorkspaceStore::open_with_logs(&db_path, &logs_dir)?;
+    let store = open_managed_session_store(&db_path, &logs_dir)?;
     let process = match store.get_process_record(process_id) {
         Ok(process) => process,
         Err(_) => return Ok(None),
@@ -1017,6 +1017,13 @@ pub fn restore_managed_session(
     Ok(Some(start_session_handle(
         db_path, logs_dir, snapshot, controller, connection, event_tx,
     )))
+}
+
+fn open_managed_session_store(
+    db_path: impl AsRef<std::path::Path>,
+    logs_dir: impl AsRef<std::path::Path>,
+) -> Result<WorkspaceStore> {
+    WorkspaceStore::open_app_with_logs(db_path, logs_dir)
 }
 
 fn format_input_audit_log(
@@ -2434,6 +2441,12 @@ mod tests {
     use crate::workspace::{CreateWorkspace, ProcessRecord};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn user_and_review_inputs_write_auditable_logs() {
@@ -3354,6 +3367,40 @@ mod tests {
         assert_eq!(
             launch.session_resume_id.as_deref(),
             Some("codex-native-thread")
+        );
+    }
+
+    #[test]
+    fn managed_session_store_uses_app_shared_provider_settings() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        drop(seeded_workspace_store(temp.path()));
+        let config_home = temp.path().join("xdg/config");
+        let settings_path = config_home.join("archductor/settings.toml");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            settings_path,
+            "codex_executable_path = \"/shared/bin/codex\"\n",
+        )
+        .unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let store =
+            open_managed_session_store(temp.path().join("state.db"), temp.path().join("logs"))
+                .unwrap();
+
+        if let Some(previous) = previous_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", previous);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        assert_eq!(
+            store
+                .session_launch("berlin", SessionKind::Codex)
+                .unwrap()
+                .program,
+            PathBuf::from("/shared/bin/codex")
         );
     }
 
