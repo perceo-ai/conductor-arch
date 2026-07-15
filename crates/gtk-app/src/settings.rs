@@ -37,6 +37,128 @@ pub(crate) enum SettingsUiScope {
     Local,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum GeneralSettingField {
+    EnterprisePrivacy,
+    ClaudeExecutable,
+    CodexExecutable,
+    DefaultAgent,
+    DefaultModel,
+    ClaudeProvider,
+    CodexProvider,
+    BedrockRegion,
+    VertexProject,
+    SpotlightTesting,
+    EnvironmentVariables,
+}
+
+impl GeneralSettingField {
+    fn id(self) -> &'static str {
+        match self {
+            Self::EnterprisePrivacy => "enterprise_privacy",
+            Self::ClaudeExecutable => "claude_executable",
+            Self::CodexExecutable => "codex_executable",
+            Self::DefaultAgent => "default_agent",
+            Self::DefaultModel => "default_model",
+            Self::ClaudeProvider => "claude_provider",
+            Self::CodexProvider => "codex_provider",
+            Self::BedrockRegion => "bedrock_region",
+            Self::VertexProject => "vertex_project",
+            Self::SpotlightTesting => "spotlight_testing",
+            Self::EnvironmentVariables => "environment_variables",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneralGroupSpec {
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    scope: SettingsUiScope,
+    rows: Vec<Vec<GeneralSettingField>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsContentPresentation {
+    Editor,
+    SelectProject,
+}
+
+struct GeneralFieldWidgets<'a> {
+    privacy_check: &'a CheckButton,
+    spotlight_check: &'a CheckButton,
+    claude_path_entry: &'a Entry,
+    codex_path_entry: &'a Entry,
+    default_agent_entry: &'a Entry,
+    default_model_entry: &'a Entry,
+    claude_provider_entry: &'a Entry,
+    codex_provider_entry: &'a Entry,
+    bedrock_region_entry: &'a Entry,
+    vertex_project_entry: &'a Entry,
+    environment_view: &'a ScrolledWindow,
+}
+
+impl GeneralFieldWidgets<'_> {
+    fn render(&self, field: GeneralSettingField) -> GBox {
+        match field {
+            GeneralSettingField::EnterprisePrivacy => settings_toggle_row(
+                self.privacy_check,
+                "Uses privacy-safe behavior for repository and agent operations.",
+            ),
+            GeneralSettingField::ClaudeExecutable => settings_field(
+                "Claude executable",
+                "Absolute path or command name used to start Claude Code.",
+                self.claude_path_entry,
+            ),
+            GeneralSettingField::CodexExecutable => settings_field(
+                "Codex executable",
+                "Absolute path or command name used to start Codex.",
+                self.codex_path_entry,
+            ),
+            GeneralSettingField::DefaultAgent => settings_field(
+                "Default agent",
+                "Saved as `customization.automation.auto_start_agent`.",
+                self.default_agent_entry,
+            ),
+            GeneralSettingField::DefaultModel => settings_field(
+                "Default model",
+                "Saved as `customization.agent_profiles.default.model`.",
+                self.default_model_entry,
+            ),
+            GeneralSettingField::ClaudeProvider => settings_field(
+                "Claude provider",
+                "Provider override used when Claude sessions need a specific backend.",
+                self.claude_provider_entry,
+            ),
+            GeneralSettingField::CodexProvider => settings_field(
+                "Codex provider",
+                "Provider override used when Codex sessions need a specific backend.",
+                self.codex_provider_entry,
+            ),
+            GeneralSettingField::BedrockRegion => settings_field(
+                "Bedrock region",
+                "AWS region used for Bedrock requests when that provider is active.",
+                self.bedrock_region_entry,
+            ),
+            GeneralSettingField::VertexProject => settings_field(
+                "Vertex project id",
+                "Google Cloud project id used for Vertex provider calls.",
+                self.vertex_project_entry,
+            ),
+            GeneralSettingField::SpotlightTesting => settings_toggle_row(
+                self.spotlight_check,
+                "Turns on spotlight state tracking for workspace sync flows.",
+            ),
+            GeneralSettingField::EnvironmentVariables => settings_editor_field(
+                "Environment variables",
+                "One `KEY=value` per line. Leave blank when the project does not need extra environment.",
+                self.environment_view,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SettingsSaveTarget {
     Shared,
@@ -136,7 +258,24 @@ pub(crate) fn build_settings_page(
 
     let inspector = GBox::new(Orientation::Horizontal, 16);
     inspector.add_css_class("settings-inspector");
-    body.append(&inspector);
+    let settings_content_area = Stack::new();
+    settings_content_area.set_vexpand(true);
+    settings_content_area.add_named(&inspector, Some("editor"));
+    let select_project_state = GBox::new(Orientation::Vertical, 8);
+    select_project_state.set_valign(Align::Center);
+    select_project_state.set_halign(Align::Center);
+    let select_project_title = Label::new(Some("Select a project"));
+    select_project_title.add_css_class("settings-group-title");
+    let select_project_copy = Label::new(Some(
+        "Choose a project above to view and edit its Local overrides.",
+    ));
+    select_project_copy.add_css_class("settings-field-copy");
+    select_project_copy.set_wrap(true);
+    select_project_state.append(&select_project_title);
+    select_project_state.append(&select_project_copy);
+    settings_content_area.add_named(&select_project_state, Some("select-project"));
+    settings_content_area.set_visible_child_name("editor");
+    body.append(&settings_content_area);
 
     let settings_rail = GBox::new(Orientation::Vertical, 6);
     settings_rail.add_css_class("settings-rail");
@@ -245,38 +384,7 @@ pub(crate) fn build_settings_page(
     let delete_branch_check = CheckButton::with_label("Delete branch when archiving");
     let auto_upstream_check = CheckButton::with_label("Auto setup upstream remote");
 
-    let project_behavior_group = settings_group(
-        "Project behavior",
-        "High-level behavior for the selected project and its workspaces.",
-    );
-    general_panel.append(&project_behavior_group.0);
-    project_behavior_group.1.append(&settings_toggle_row(
-        &spotlight_check,
-        "Turns on spotlight state tracking for workspace sync flows.",
-    ));
-
-    let privacy_group = settings_group(
-        "Privacy",
-        "App-wide privacy defaults used across Archductor projects.",
-    );
-    general_panel.append(&privacy_group.0);
-    privacy_group.1.append(&settings_toggle_row(
-        &privacy_check,
-        "Uses privacy-safe behavior for repository and agent operations.",
-    ));
-
     let env_view = settings_editor_view(120);
-    let environment_group = settings_group(
-        "Environment",
-        "Machine-style environment values passed into scripts and sessions as `KEY=value` lines.",
-    );
-    general_panel.append(&environment_group.0);
-    environment_group.1.append(&settings_editor_field(
-        "Environment variables",
-        "One `KEY=value` per line. Leave blank when the repo does not need extra environment.",
-        &env_view.0,
-    ));
-
     let claude_path_entry = machine_entry("Claude executable");
     let codex_path_entry = machine_entry("Codex executable");
     let claude_provider_entry = machine_entry("Claude provider");
@@ -286,65 +394,41 @@ pub(crate) fn build_settings_page(
     let default_agent_entry = machine_entry("codex/claude/opencode");
     let default_model_entry = machine_entry("default model label");
 
-    let provider_paths = settings_group(
-        "Agents and providers",
-        "Executable paths, default agent, and provider routing for local agent launches.",
-    );
-    general_panel.append(&provider_paths.0);
-    provider_paths.1.append(&settings_field_pair(
-        settings_field(
-            "Claude executable",
-            "Absolute path or command name used to start Claude Code.",
-            &claude_path_entry,
-        ),
-        settings_field(
-            "Codex executable",
-            "Absolute path or command name used to start Codex.",
-            &codex_path_entry,
-        ),
-    ));
-    provider_paths.1.append(&settings_field_pair(
-        settings_field(
-            "Default agent",
-            "Saved as `customization.automation.auto_start_agent`.",
-            &default_agent_entry,
-        ),
-        settings_field(
-            "Default model",
-            "Saved as `customization.agent_profiles.default.model`. TODO: pass through once provider launch args land.",
-            &default_model_entry,
-        ),
-    ));
-    provider_paths.1.append(&settings_field_pair(
-        settings_field(
-            "Claude provider",
-            "Provider override used when Claude sessions need a specific backend.",
-            &claude_provider_entry,
-        ),
-        settings_field(
-            "Codex provider",
-            "Provider override used when Codex sessions need a specific backend.",
-            &codex_provider_entry,
-        ),
-    ));
-
-    let provider_platforms = settings_group(
-        "Platform settings",
-        "Provider-specific machine values for Bedrock, Vertex, and SSH-backed setups.",
-    );
-    general_panel.append(&provider_platforms.0);
-    provider_platforms.1.append(&settings_field_pair(
-        settings_field(
-            "Bedrock region",
-            "AWS region used for Bedrock requests when that provider is active.",
-            &bedrock_region_entry,
-        ),
-        settings_field(
-            "Vertex project id",
-            "Google Cloud project id used for Vertex provider calls.",
-            &vertex_project_entry,
-        ),
-    ));
+    let general_field_widgets = GeneralFieldWidgets {
+        privacy_check: &privacy_check,
+        spotlight_check: &spotlight_check,
+        claude_path_entry: &claude_path_entry,
+        codex_path_entry: &codex_path_entry,
+        default_agent_entry: &default_agent_entry,
+        default_model_entry: &default_model_entry,
+        claude_provider_entry: &claude_provider_entry,
+        codex_provider_entry: &codex_provider_entry,
+        bedrock_region_entry: &bedrock_region_entry,
+        vertex_project_entry: &vertex_project_entry,
+        environment_view: &env_view.0,
+    };
+    let mut general_group_widgets = Vec::new();
+    for spec in general_group_specs() {
+        let scope = spec.scope;
+        let group = settings_group(spec.title, spec.description);
+        for row in spec.rows {
+            let mut fields = row
+                .into_iter()
+                .map(|field| general_field_widgets.render(field))
+                .collect::<Vec<_>>();
+            let row = match fields.len() {
+                1 => fields.remove(0),
+                2 => {
+                    let right = fields.remove(1);
+                    settings_field_pair(fields.remove(0), right)
+                }
+                _ => unreachable!("General setting rows contain one or two fields"),
+            };
+            group.1.append(&row);
+        }
+        general_panel.append(&group.0);
+        general_group_widgets.push((scope, group.0));
+    }
 
     let script_group = settings_group(
         "Workspace scripts",
@@ -706,12 +790,9 @@ pub(crate) fn build_settings_page(
     let env_buffer_load = env_view.1.clone();
     let customization_buffer_load = customization_view.1.clone();
     let prompt_editors_load = prompt_views.clone();
-    let project_behavior_group_load = project_behavior_group.0.clone();
-    let privacy_group_load = privacy_group.0.clone();
-    let environment_group_load = environment_group.0.clone();
-    let provider_paths_load = provider_paths.0.clone();
-    let provider_platforms_load = provider_platforms.0.clone();
+    let general_group_widgets_load = general_group_widgets.clone();
     let inspector_load = inspector.clone();
+    let settings_content_area_load = settings_content_area.clone();
     let save_settings_btn_load = save_settings_btn.clone();
     let shared_settings_path_load = paths.shared_settings_path();
     let toast_load = toast_manager.clone();
@@ -731,15 +812,15 @@ pub(crate) fn build_settings_page(
             *loading_settings_for_load.borrow_mut() = true;
             field_edits_load.borrow_mut().clear();
             let repo_name = selected_repository_name(&settings_repo_select_load);
-            let visible_general_groups = general_group_ids_for_scope(scope);
-            project_behavior_group_load
-                .set_visible(visible_general_groups.contains(&"project_behavior"));
-            privacy_group_load.set_visible(visible_general_groups.contains(&"privacy"));
-            environment_group_load.set_visible(visible_general_groups.contains(&"environment"));
-            provider_paths_load.set_visible(visible_general_groups.contains(&"agents"));
-            provider_platforms_load
-                .set_visible(visible_general_groups.contains(&"provider_platforms"));
-            let content_enabled = settings_content_enabled(scope, !repo_name.is_empty());
+            for (group_scope, group) in &general_group_widgets_load {
+                group.set_visible(*group_scope == scope);
+            }
+            let presentation = settings_content_presentation(scope, !repo_name.is_empty());
+            settings_content_area_load.set_visible_child_name(match presentation {
+                SettingsContentPresentation::Editor => "editor",
+                SettingsContentPresentation::SelectProject => "select-project",
+            });
+            let content_enabled = presentation == SettingsContentPresentation::Editor;
             inspector_load.set_sensitive(content_enabled);
             save_settings_btn_load.set_sensitive(content_enabled);
             if !content_enabled {
@@ -1625,37 +1706,84 @@ fn settings_sections_for_scope(scope: SettingsUiScope) -> Vec<SettingsSection> {
         .collect()
 }
 
+fn general_group_specs() -> Vec<GeneralGroupSpec> {
+    use GeneralSettingField::*;
+
+    vec![
+        GeneralGroupSpec {
+            id: "privacy",
+            title: "Privacy",
+            description: "App-wide privacy defaults used across Archductor projects.",
+            scope: SettingsUiScope::Shared,
+            rows: vec![vec![EnterprisePrivacy]],
+        },
+        GeneralGroupSpec {
+            id: "agents",
+            title: "Agents and providers",
+            description:
+                "Executable paths, default agent, and provider routing for local agent launches.",
+            scope: SettingsUiScope::Shared,
+            rows: vec![
+                vec![ClaudeExecutable, CodexExecutable],
+                vec![DefaultAgent, DefaultModel],
+                vec![ClaudeProvider, CodexProvider],
+            ],
+        },
+        GeneralGroupSpec {
+            id: "provider_platforms",
+            title: "Platform settings",
+            description: "Provider-specific machine values for Bedrock and Vertex setups.",
+            scope: SettingsUiScope::Shared,
+            rows: vec![vec![BedrockRegion, VertexProject]],
+        },
+        GeneralGroupSpec {
+            id: "project_behavior",
+            title: "Project behavior",
+            description: "High-level behavior for the selected project and its workspaces.",
+            scope: SettingsUiScope::Local,
+            rows: vec![vec![SpotlightTesting]],
+        },
+        GeneralGroupSpec {
+            id: "environment",
+            title: "Environment",
+            description:
+                "Environment values passed into scripts and sessions for the selected project.",
+            scope: SettingsUiScope::Local,
+            rows: vec![vec![EnvironmentVariables]],
+        },
+    ]
+}
+
 fn general_group_ids_for_scope(scope: SettingsUiScope) -> Vec<&'static str> {
-    match scope {
-        SettingsUiScope::Shared => vec!["privacy", "agents", "provider_platforms"],
-        SettingsUiScope::Local => vec!["project_behavior", "environment"],
-    }
+    general_group_specs()
+        .into_iter()
+        .filter(|spec| spec.scope == scope)
+        .map(|spec| spec.id)
+        .collect()
 }
 
 fn general_field_ids_for_scope(scope: SettingsUiScope) -> Vec<&'static str> {
-    general_group_ids_for_scope(scope)
+    general_group_specs()
         .into_iter()
-        .flat_map(|group| match group {
-            "privacy" => &["enterprise_privacy"][..],
-            "agents" => &[
-                "claude_executable",
-                "codex_executable",
-                "default_agent",
-                "default_model",
-                "claude_provider",
-                "codex_provider",
-            ],
-            "provider_platforms" => &["bedrock_region", "vertex_project"],
-            "project_behavior" => &["spotlight_testing"],
-            "environment" => &["environment_variables"],
-            _ => &[],
-        })
-        .copied()
+        .filter(|spec| spec.scope == scope)
+        .flat_map(|spec| spec.rows.into_iter().flatten())
+        .map(GeneralSettingField::id)
         .collect()
 }
 
 fn settings_content_enabled(scope: SettingsUiScope, has_project: bool) -> bool {
-    scope == SettingsUiScope::Shared || has_project
+    settings_content_presentation(scope, has_project) == SettingsContentPresentation::Editor
+}
+
+fn settings_content_presentation(
+    scope: SettingsUiScope,
+    has_project: bool,
+) -> SettingsContentPresentation {
+    if scope == SettingsUiScope::Local && !has_project {
+        SettingsContentPresentation::SelectProject
+    } else {
+        SettingsContentPresentation::Editor
+    }
 }
 
 fn settings_rail_button(section: SettingsSection) -> Button {
@@ -2078,6 +2206,54 @@ mod tests {
         assert!(settings_content_enabled(SettingsUiScope::Shared, false));
         assert!(!settings_content_enabled(SettingsUiScope::Local, false));
         assert!(settings_content_enabled(SettingsUiScope::Local, true));
+    }
+
+    #[test]
+    fn local_without_project_replaces_editor_with_selection_state() {
+        assert_eq!(
+            settings_content_presentation(SettingsUiScope::Local, false),
+            SettingsContentPresentation::SelectProject
+        );
+        assert_eq!(
+            settings_content_presentation(SettingsUiScope::Local, true),
+            SettingsContentPresentation::Editor
+        );
+        assert_eq!(
+            settings_content_presentation(SettingsUiScope::Shared, false),
+            SettingsContentPresentation::Editor
+        );
+    }
+
+    #[test]
+    fn general_layout_specs_own_every_rendered_field_once() {
+        let specs = general_group_specs();
+        let fields = specs
+            .iter()
+            .flat_map(|spec| spec.rows.iter().flatten().copied())
+            .collect::<Vec<_>>();
+        let unique = fields.iter().copied().collect::<HashSet<_>>();
+
+        assert_eq!(fields.len(), 11);
+        assert_eq!(unique.len(), fields.len());
+        assert_eq!(
+            fields
+                .into_iter()
+                .map(GeneralSettingField::id)
+                .collect::<Vec<_>>(),
+            vec![
+                "enterprise_privacy",
+                "claude_executable",
+                "codex_executable",
+                "default_agent",
+                "default_model",
+                "claude_provider",
+                "codex_provider",
+                "bedrock_region",
+                "vertex_project",
+                "spotlight_testing",
+                "environment_variables",
+            ]
+        );
     }
 
     #[test]
