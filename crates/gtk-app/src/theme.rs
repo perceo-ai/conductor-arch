@@ -17,6 +17,75 @@ const APP_CSS: &str = r#"
 @define-color lc-success #d0d0d0;
 @define-color lc-danger #ff8a8a;
 
+toast {
+    background-color: #202020;
+    color: @lc-text-strong;
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.34);
+    margin: 6px;
+    padding: 6px;
+}
+
+toast > widget {
+    margin: 0;
+}
+
+toast > button.circular.flat {
+    color: #8f8f8f;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+}
+
+toast > button.circular.flat:hover {
+    background-color: #303030;
+    color: @lc-text-strong;
+}
+
+.toast-content {
+    min-width: 280px;
+    padding: 4px 2px 4px 4px;
+}
+
+.toast-icon-shell {
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: 8px;
+}
+
+.toast-icon {
+    min-width: 16px;
+    min-height: 16px;
+}
+
+.toast-message {
+    color: @lc-text-strong;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.35;
+}
+
+.toast-info .toast-icon-shell {
+    background-color: rgba(74, 144, 226, 0.16);
+    color: #7ab7ff;
+}
+
+.toast-success .toast-icon-shell {
+    background-color: rgba(54, 179, 126, 0.16);
+    color: #64d69b;
+}
+
+.toast-warning .toast-icon-shell {
+    background-color: rgba(245, 166, 35, 0.16);
+    color: #f4bf67;
+}
+
+.toast-error .toast-icon-shell {
+    background-color: rgba(232, 84, 84, 0.16);
+    color: #ff8a8a;
+}
+
 window {
     background-color: @lc-bg;
     color: @lc-text;
@@ -2938,5 +3007,17 @@ mod tests {
         assert!(!css.contains(".lc-density-compact .nav-row"));
         assert!(!css.contains(".lc-density-comfortable .nav-button"));
         assert!(!css.contains(".lc-density-comfortable .nav-row"));
+    }
+
+    #[test]
+    fn app_css_styles_compact_variant_toasts() {
+        let css = app_css();
+
+        assert!(css.contains("toast {"));
+        assert!(css.contains(".toast-content"));
+        assert!(css.contains(".toast-info"));
+        assert!(css.contains(".toast-success"));
+        assert!(css.contains(".toast-warning"));
+        assert!(css.contains(".toast-error"));
     }
 }
