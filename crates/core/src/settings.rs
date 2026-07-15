@@ -199,6 +199,42 @@ pub fn load_repository_settings(repo_path: &Path) -> Result<RepositorySettings> 
     }
 }
 
+pub fn load_app_shared_settings(path: &Path) -> Result<RepositorySettings> {
+    let settings = load_optional_settings(path)?.into_settings();
+    validate_repository_settings(&settings)?;
+    Ok(settings)
+}
+
+pub fn save_app_shared_settings(path: &Path, settings: &RepositorySettings) -> Result<()> {
+    validate_repository_settings(settings)?;
+    let parent = path
+        .parent()
+        .with_context(|| format!("resolve parent for {}", path.display()))?;
+    ensure_real_directory(parent)?;
+    reject_symlink_file(path)?;
+    let contents = repository_settings_to_toml(settings)?;
+    atomic_write_no_symlink(path, contents.as_bytes())
+}
+
+pub fn load_effective_repository_settings(
+    repo_path: &Path,
+    app_settings_path: &Path,
+) -> Result<RepositorySettings> {
+    let app_base = RawRepositorySettings::from_settings(&default_app_shared_settings())
+        .merge(load_optional_settings(app_settings_path)?)
+        .into_settings();
+    let repository = load_repository_settings_strict(repo_path)?;
+    let effective = RawRepositorySettings::from_settings(&app_base)
+        .merge(RawRepositorySettings::from_settings(&repository))
+        .into_settings();
+    validate_repository_settings(&effective)?;
+    Ok(effective)
+}
+
+fn default_app_shared_settings() -> RepositorySettings {
+    RepositorySettings::default()
+}
+
 fn load_repository_settings_strict(repo_path: &Path) -> Result<RepositorySettings> {
     let shared = load_optional_settings(&repo_path.join(".archductor/settings.toml"))?;
     let local = load_optional_settings(&repo_path.join(".archductor/settings.local.toml"))?;
@@ -2172,6 +2208,50 @@ fn normalize_workspace_tab(value: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn effective_settings_merge_shared_repository_and_local_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let app = temp.path().join("config/settings.toml");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::write(
+            &app,
+            "[prompts]\ngeneral = \"shared\"\ncontinue_work = \"shared continue\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            "[prompts]\ngeneral = \"repository\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            "[prompts]\ngeneral = \"local\"\n",
+        )
+        .unwrap();
+
+        let settings = load_effective_repository_settings(&repo, &app).unwrap();
+        let prompts = settings.prompts.unwrap();
+        assert_eq!(prompts.general.as_deref(), Some("local"));
+        assert_eq!(prompts.continue_work.as_deref(), Some("shared continue"));
+    }
+
+    #[test]
+    fn shared_settings_round_trip_uses_atomic_toml_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config/settings.toml");
+        let settings = RepositorySettings {
+            prompts: Some(PromptSettings {
+                general: Some("Keep changes focused.".to_owned()),
+                ..PromptSettings::default()
+            }),
+            ..RepositorySettings::default()
+        };
+        save_app_shared_settings(&path, &settings).unwrap();
+        assert_eq!(load_app_shared_settings(&path).unwrap(), settings);
+    }
 
     #[test]
     fn loads_shared_settings_file() {

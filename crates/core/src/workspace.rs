@@ -25,8 +25,8 @@ use crate::session_pipeline::{
 };
 use crate::session_state::AgentSessionState;
 use crate::settings::{
-    ensure_repository_config, gitignore_pattern_key, load_repository_settings,
-    save_local_default_agent_provider, RepositorySettings,
+    ensure_repository_config, gitignore_pattern_key, load_effective_repository_settings,
+    load_repository_settings, save_local_default_agent_provider, RepositorySettings,
 };
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
@@ -1116,6 +1116,7 @@ pub struct WorkspaceStore {
     conn: Connection,
     db_path: PathBuf,
     logs_dir: PathBuf,
+    app_settings_path: Option<PathBuf>,
 }
 
 impl WorkspaceStore {
@@ -1129,6 +1130,31 @@ impl WorkspaceStore {
     }
 
     pub fn open_with_logs(path: impl AsRef<Path>, logs_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_logs_and_app_settings(path, logs_dir, None)
+    }
+
+    pub fn open_app(path: impl AsRef<Path>) -> Result<Self> {
+        let logs_dir = path
+            .as_ref()
+            .parent()
+            .map(|parent| parent.join("logs"))
+            .unwrap_or_else(|| PathBuf::from("logs"));
+        Self::open_app_with_logs(path, logs_dir)
+    }
+
+    pub fn open_app_with_logs(path: impl AsRef<Path>, logs_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_logs_and_app_settings(
+            path,
+            logs_dir,
+            Some(crate::paths::AppPaths::from_env().shared_settings_path()),
+        )
+    }
+
+    fn open_with_logs_and_app_settings(
+        path: impl AsRef<Path>,
+        logs_dir: impl AsRef<Path>,
+        app_settings_path: Option<PathBuf>,
+    ) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create data directory {}", parent.display()))?;
@@ -1141,9 +1167,17 @@ impl WorkspaceStore {
             conn,
             db_path,
             logs_dir: logs_dir.as_ref().to_path_buf(),
+            app_settings_path,
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    fn repository_settings(&self, root: &Path) -> Result<RepositorySettings> {
+        match self.app_settings_path.as_deref() {
+            Some(path) => load_effective_repository_settings(root, path),
+            None => load_repository_settings(root),
+        }
     }
 
     pub(crate) fn owns_process_log_path(&self, log_path: &Path) -> bool {
@@ -1161,7 +1195,7 @@ impl WorkspaceStore {
     ) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
         ensure_repository_config(&repository.root_path)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
@@ -1303,7 +1337,7 @@ impl WorkspaceStore {
 
     pub fn project_model(&self, name: &str) -> Result<ProjectModel> {
         let repository = self.load_repository(name)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let mut stmt = self
             .conn
             .prepare("SELECT id FROM workspaces WHERE repository_id = ?1 ORDER BY id")?;
@@ -1481,7 +1515,7 @@ impl WorkspaceStore {
         }
 
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let base = slugify(message);
         let workspace_name =
             self.unique_message_workspace_name(&repository, workspace.id, &base)?;
@@ -1584,7 +1618,7 @@ impl WorkspaceStore {
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
 
         self.stop_workspace_processes(workspace.id)?;
 
@@ -1768,7 +1802,7 @@ impl WorkspaceStore {
                     workspace.path.display()
                 )
             })?;
-            let settings = load_repository_settings(&repository.root_path)?;
+            let settings = self.repository_settings(&repository.root_path)?;
             copy_included_ignored_files(&repository.root_path, &workspace.path)?;
             initialize_context_files(&workspace.path, &settings)?;
         }
@@ -1821,7 +1855,7 @@ impl WorkspaceStore {
     pub fn run_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let Some(run) = &settings.scripts.run else {
             anyhow::bail!("workspace {name} has no scripts.run configured");
         };
@@ -1856,7 +1890,7 @@ impl WorkspaceStore {
     pub fn setup_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let Some(setup) = &settings.scripts.setup else {
             anyhow::bail!("workspace {name} has no scripts.setup configured");
         };
@@ -1879,14 +1913,14 @@ impl WorkspaceStore {
     pub fn configured_check_commands(&self, name: &str) -> Result<Vec<ConfiguredCheckCommand>> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         Ok(configured_check_commands_from_settings(&settings))
     }
 
     pub fn run_workspace_check(&self, name: &str, key: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let check = configured_check_commands_from_settings(&settings)
             .into_iter()
             .find(|check| check.key == key)
@@ -2475,7 +2509,7 @@ impl WorkspaceStore {
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let started_at = timestamp();
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
@@ -2502,7 +2536,7 @@ impl WorkspaceStore {
     pub fn spotlight_start(&self, name: &str) -> Result<SpotlightSession> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         anyhow::ensure!(
             settings.spotlight_testing.unwrap_or(false),
             "spotlight_testing must be enabled for this repository"
@@ -3308,7 +3342,7 @@ impl WorkspaceStore {
     pub fn render_pull_request_template(&self, name: &str) -> Result<PullRequestTemplate> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let changed_files = self
             .changed_files(name)?
             .into_iter()
@@ -3428,7 +3462,7 @@ impl WorkspaceStore {
         )?;
         let title = extract_json_string_field(&output, "title")
             .unwrap_or_else(|| format!("issue-{issue_number}"));
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
 
         // Slugify title for branch name
         let slug = slugify(&title);
@@ -3508,7 +3542,7 @@ impl WorkspaceStore {
         let url = extract_json_string_field(&output, "url");
         let state =
             extract_json_string_field(&output, "state").unwrap_or_else(|| "open".to_owned());
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -3595,7 +3629,7 @@ impl WorkspaceStore {
         let prompt = prompt.trim();
         anyhow::ensure!(!prompt.is_empty(), "prompt is required");
         let repository = self.load_repository(repository_name)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -3660,7 +3694,7 @@ impl WorkspaceStore {
         anyhow::ensure!(!issue_id.is_empty(), "Linear issue id is required");
         let issue = fetch_linear_issue(issue_id)?;
         let repository = self.load_repository(repository_name)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -4781,7 +4815,7 @@ mutation($threadId: ID!) {{
     pub fn merge_pull_request(&self, name: &str, method: Option<&str>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let pr = self
             .pull_request_by_workspace_id(workspace.id)?
             .with_context(|| format!("no pull request recorded for workspace {name}"))?;
@@ -4872,7 +4906,7 @@ mutation($threadId: ID!) {{
         let merge_output = self.merge_pull_request(name, method)?;
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let archived_workspace = if settings.git.archive_on_merge.unwrap_or(false) {
             Some(self.archive(name, false)?)
         } else {
@@ -4887,7 +4921,7 @@ mutation($threadId: ID!) {{
     pub fn editor_launch(&self, name: &str, editor: &str) -> Result<SessionLaunch> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
@@ -4935,7 +4969,7 @@ mutation($threadId: ID!) {{
     ) -> Result<SessionLaunch> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
@@ -5385,7 +5419,7 @@ mutation($threadId: ID!) {{
         let launch = self.session_launch_with_options(name, kind, harness)?;
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let command = shell_words(&launch.program, &launch.args);
         self.start_process(StartProcessInput {
             kind: ProcessKind::Session,
@@ -5466,7 +5500,7 @@ mutation($threadId: ID!) {{
     pub fn workspace_view_defaults(&self, name: &str) -> Result<WorkspaceViewDefaults> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         Ok(WorkspaceViewDefaults {
             default_visible_tab: settings
                 .customization
@@ -5497,7 +5531,7 @@ mutation($threadId: ID!) {{
     ) -> Result<crate::settings::RepositorySettings> {
         let workspace = self.get_by_name(workspace_name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        load_repository_settings(&repository.root_path)
+        self.repository_settings(&repository.root_path)
     }
 
     pub fn workspace_changes_scope(&self, workspace_name: &str) -> Result<Option<String>> {
@@ -5785,7 +5819,7 @@ mutation($threadId: ID!) {{
 
     fn metadata_branch_name(&self, workspace: &Workspace, raw: &str) -> Result<String> {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults

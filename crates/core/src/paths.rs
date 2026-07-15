@@ -54,6 +54,10 @@ impl AppPaths {
         let name = "archcar.sock";
         self.state_dir.join(name)
     }
+
+    pub fn shared_settings_path(&self) -> PathBuf {
+        self.config_dir.join("settings.toml")
+    }
 }
 
 fn env_path(name: &str, fallback: PathBuf) -> PathBuf {

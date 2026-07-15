@@ -42,7 +42,7 @@ struct ServerState {
 }
 
 pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
-    let store = WorkspaceStore::open(&paths.database_path)?;
+    let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
     let provider_events = ProviderEventStore::new(&paths.database_path);
     for workspace in store.list()? {
         let records = store.list_sessions(&workspace.name)?;
@@ -426,7 +426,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
 }
 
 fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<ArchcarMessage>> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let mut persisted_messages: Vec<_> = store
         .list_chat_messages(thread_id)?
         .into_iter()
@@ -792,7 +792,7 @@ fn restore_workspace_session_from_store(
     kind: SessionKind,
 ) -> Option<ArchcarResponse> {
     let db_path = state.lock().ok()?.db_path.clone();
-    let store = match WorkspaceStore::open(&db_path) {
+    let store = match WorkspaceStore::open_app(&db_path) {
         Ok(store) => store,
         Err(err) => {
             warn!(
@@ -883,7 +883,7 @@ fn restore_thread_session_from_store(
     kind: SessionKind,
 ) -> Option<ArchcarResponse> {
     let db_path = state.lock().ok()?.db_path.clone();
-    let store = match WorkspaceStore::open(&db_path) {
+    let store = match WorkspaceStore::open_app(&db_path) {
         Ok(store) => store,
         Err(err) => {
             warn!(
@@ -976,7 +976,7 @@ fn validate_chat_thread_workspace(
     thread_id: i64,
     kind: SessionKind,
 ) -> Result<()> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let workspace_record = store.get_workspace_record_by_name(workspace)?;
     let thread_record = store.get_chat_thread_record(thread_id)?;
     anyhow::ensure!(
@@ -1179,7 +1179,7 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
             guard.sessions.values().cloned().collect::<Vec<_>>(),
         )
     };
-    let store = WorkspaceStore::open(&db_path)?;
+    let store = WorkspaceStore::open_app(&db_path)?;
     let provider_events = ProviderEventStore::new(&db_path);
 
     for handle in handles {

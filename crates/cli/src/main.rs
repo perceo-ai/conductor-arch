@@ -9,7 +9,8 @@ use archductor_core::import::{default_conductor_app_database, import_conductor_a
 use archductor_core::paths::AppPaths;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::settings::{
-    repository_settings_from_toml, save_repository_settings, SettingsLayer,
+    load_app_shared_settings, repository_settings_from_toml, repository_settings_to_toml,
+    save_app_shared_settings, save_repository_settings, SettingsLayer,
 };
 use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
@@ -37,6 +38,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
+    Settings {
+        #[command(subcommand)]
+        command: AppSettingsCommand,
+    },
     Repo {
         #[command(subcommand)]
         command: RepoCommand,
@@ -123,6 +128,17 @@ enum Command {
     Archcar {
         #[command(subcommand)]
         command: ArchcarCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppSettingsCommand {
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Import {
+        input: PathBuf,
     },
 }
 
@@ -526,6 +542,22 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
+        Command::Settings { command } => match command {
+            AppSettingsCommand::Export { output } => {
+                let settings = load_app_shared_settings(&paths.shared_settings_path())?;
+                let contents = repository_settings_to_toml(&settings)?;
+                fs::write(&output, contents)
+                    .with_context(|| format!("write {}", output.display()))?;
+                println!("Exported Shared settings to {}", output.display());
+            }
+            AppSettingsCommand::Import { input } => {
+                let contents = fs::read_to_string(&input)
+                    .with_context(|| format!("read {}", input.display()))?;
+                let settings = repository_settings_from_toml(&contents)?;
+                save_app_shared_settings(&paths.shared_settings_path(), &settings)?;
+                println!("Imported Shared settings from {}", input.display());
+            }
+        },
         Command::Import { command } => match command {
             ImportCommand::Conductor { source } => {
                 let source = source.unwrap_or_else(default_conductor_app_database);
@@ -551,7 +583,7 @@ fn main() -> Result<()> {
             }
         },
         Command::History { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 HistoryCommand::List { workspace } => {
                     let workspace_path = workspace
@@ -731,7 +763,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Workspace { command } => {
-            let store = WorkspaceStore::open(paths.database_path)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 WorkspaceCommand::Create {
                     repository,
@@ -930,7 +962,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Run { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let process = store.run_workspace(&workspace)?;
             println!(
                 "Started run for {} as pid {} (log: {})",
@@ -940,7 +972,7 @@ fn main() -> Result<()> {
             );
         }
         Command::Stop { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let process = store.stop_workspace(&workspace)?;
             println!("Stopped run for {} (pid {})", workspace, process.pid);
         }
@@ -954,7 +986,7 @@ fn main() -> Result<()> {
                     "choose exactly one log stream, for example: archductor logs {workspace} --run"
                 );
             }
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             if run {
                 print!("{}", store.read_latest_run_log(&workspace)?);
             } else {
@@ -962,7 +994,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Runs { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             for run in store.list_runs(&workspace)? {
                 println!(
                     "#{}\t{}\t{}\t{}\t{}",
@@ -979,7 +1011,7 @@ fn main() -> Result<()> {
             name_only,
             file,
         } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             if name_only {
                 for path in store.changed_files(&workspace)? {
                     println!("{path}");
@@ -989,7 +1021,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Pr { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 PrCommand::Create {
                     workspace,
@@ -1067,7 +1099,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Session { command } => {
-            let store = WorkspaceStore::open_with_logs(
+            let store = WorkspaceStore::open_app_with_logs(
                 paths.database_path.clone(),
                 paths.logs_dir.clone(),
             )?;
@@ -1247,7 +1279,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Todo { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 TodoCommand::Add { workspace, text } => {
                     let todo = store.add_todo(&workspace, &text.join(" "))?;
@@ -1269,11 +1301,11 @@ fn main() -> Result<()> {
             }
         }
         Command::Checks { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             print_checks_summary(store.checks_summary(&workspace)?);
         }
         Command::Open { workspace, editor } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let launch = store.editor_launch(&workspace, &editor)?;
             let mut cmd = std::process::Command::new(&launch.program);
             cmd.args(&launch.args)
@@ -1284,7 +1316,7 @@ fn main() -> Result<()> {
             println!("Opened {} in {editor}", launch.cwd.display());
         }
         Command::Mcp { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 McpCommand::Status { workspace } => {
                     print_mcp_status(store.mcp_status(&workspace)?);
@@ -1292,7 +1324,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Review { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 ReviewCommand::Add {
                     workspace,
@@ -1334,7 +1366,7 @@ fn main() -> Result<()> {
             name,
             remove_worktree,
         } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let workspace = store.archive(&name, remove_worktree)?;
             println!(
                 "Archived {} at {}",
@@ -1343,11 +1375,11 @@ fn main() -> Result<()> {
             );
         }
         Command::Status => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             print_status(store.list_status()?);
         }
         Command::Checkpoint { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 CheckpointCommand::Create {
                     workspace,
@@ -1376,7 +1408,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Conflicts { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let conflicts = store.find_conflicting_workspaces(&workspace)?;
             if conflicts.is_empty() {
                 println!("No file conflicts with other active workspaces.");
@@ -1390,7 +1422,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Discard { name } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let workspace = store.discard(&name)?;
             println!(
                 "Discarded {} — worktree removed and branch deleted",
@@ -2327,6 +2359,19 @@ fn print_doctor(report: doctor::DoctorReport) {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn parses_app_shared_settings_export() {
+        let cli = Cli::try_parse_from([
+            "archductor",
+            "settings",
+            "export",
+            "--output",
+            "shared.toml",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Settings { .. }));
+    }
 
     #[test]
     fn terminal_invocation_wraps_interactive_command() {
