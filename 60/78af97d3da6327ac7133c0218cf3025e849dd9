@@ -1,0 +1,22 @@
+crates/core/src/workspace.rs
+  s_334155ca48da57::t_c46914bd525aa5 8680,8688,8691-8692,8696,8700-8705
+  s_334155ca48da57::t_f1f2193f61945a 10135-10141
+  s_334155ca48da57::t_b55db7dd9f0d3f 8706-8707
+  s_334155ca48da57::t_8c341850d9e011 10134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6078af97d3da6327ac7133c0218cf3025e849dd9",
+  "prompts": {},
+  "sessions": {
+    "s_334155ca48da57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649a-658f-7b33-8c99-86fbdc632ce0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
