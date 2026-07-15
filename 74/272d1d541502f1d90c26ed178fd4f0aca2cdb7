@@ -1,0 +1,35 @@
+crates/core/src/settings.rs
+  s_334155ca48da57::t_4e5cb650671826 2212-2237,2239-2255
+  s_334155ca48da57::t_c49b673c62741f 202-237
+  s_334155ca48da57::t_5757aa310a5c3e 2238
+crates/core/src/workspace.rs
+  s_334155ca48da57::t_c49b673c62741f 28-29,1119,1133-1144,1146-1157,1170,1176-1181
+  s_334155ca48da57::t_5757aa310a5c3e 1145
+  s_334155ca48da57::t_69e32a4db3e128 1198,1340,1518,1621,1805,1858,1893,1916,1923,2512,2539,3345,3465,3545,3632,3697,4818,4909,4924,4972,5422,5503,5534,5822
+  s_334155ca48da57::t_49c225103e65b5 1182
+crates/core/src/archcar/server.rs
+  s_334155ca48da57::t_fff48ec5a5a0f8 45,429,795,886,979,1182
+crates/core/src/paths.rs
+  s_334155ca48da57::t_c49b673c62741f 57-60
+crates/cli/src/main.rs
+  s_334155ca48da57::t_91189d21610c3c 586,766,965,975,989,997,1014,1024,1102,1282,1304,1308,1319,1327,1369,1378,1382,1411,1425
+  s_334155ca48da57::t_738e3a3641d553 12-13,41-44,134-144,545-560
+  s_334155ca48da57::t_4e5cb650671826 2364-2375
+  s_334155ca48da57::t_c5e3588d15beeb 2363
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "74272d1d541502f1d90c26ed178fd4f0aca2cdb7",
+  "prompts": {},
+  "sessions": {
+    "s_334155ca48da57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649a-658f-7b33-8c99-86fbdc632ce0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
