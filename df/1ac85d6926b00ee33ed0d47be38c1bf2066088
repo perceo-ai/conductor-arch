@@ -1,0 +1,20 @@
+docs/superpowers/specs/2026-07-15-claude-code-parity-design.md
+  s_6e395f0089c433::t_fdf3ef4c6ffc07 41-44,91-95,153-155,158-160,166-171,173,179-184,191-196,201-202,204-292,477-478,480-482,577-579,642-644,648-650,677-680,693-695
+  s_6e395f0089c433::t_d56c40474e53c9 156-157,161-165,172,174-178,185-190,197-200,203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "df1ac85d6926b00ee33ed0d47be38c1bf2066088",
+  "prompts": {},
+  "sessions": {
+    "s_6e395f0089c433": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6497-4ab3-7392-9dba-ed216eb78dd7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
