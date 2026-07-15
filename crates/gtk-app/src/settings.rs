@@ -15,7 +15,7 @@ use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
     ScrolledWindow, Stack, TextView,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -163,6 +163,35 @@ impl GeneralFieldWidgets<'_> {
 enum SettingsSaveTarget {
     Shared,
     Local(String),
+}
+
+fn apply_settings_navigation<T: PartialEq>(
+    current: &mut T,
+    requested: T,
+    flush_pending_autosave: impl FnOnce() -> bool,
+) -> bool {
+    if *current == requested {
+        return true;
+    }
+    if !flush_pending_autosave() {
+        return false;
+    }
+    *current = requested;
+    true
+}
+
+fn flush_autosave_target<T: Clone>(
+    pending_target: &mut Option<T>,
+    save: impl FnOnce(T) -> bool,
+) -> bool {
+    let Some(target) = pending_target.clone() else {
+        return true;
+    };
+    if !save(target) {
+        return false;
+    }
+    *pending_target = None;
+    true
 }
 
 #[derive(Clone)]
@@ -314,6 +343,7 @@ pub(crate) fn build_settings_page(
 
     let rail_buttons: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
     let active_section = Rc::new(RefCell::new(String::from("general")));
+    let flush_pending_autosave_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn() -> bool>>));
     let sync_rail_state: Rc<dyn Fn()> = {
         let rail_buttons = rail_buttons.clone();
         let active_section = active_section.clone();
@@ -336,6 +366,7 @@ pub(crate) fn build_settings_page(
         let rail_buttons = rail_buttons.clone();
         let active_section = active_section.clone();
         let sync_rail_state = sync_rail_state.clone();
+        let flush_pending_autosave_handle = flush_pending_autosave_handle.clone();
         Rc::new(move |scope| {
             while let Some(child) = settings_rail.first_child() {
                 settings_rail.remove(&child);
@@ -353,9 +384,19 @@ pub(crate) fn build_settings_page(
                 let stack_for_button = content_stack.clone();
                 let active_for_button = active_section.clone();
                 let sync_for_button = sync_rail_state.clone();
+                let flush_for_button = flush_pending_autosave_handle.clone();
                 let id = section.id.to_owned();
                 button.connect_clicked(move |_| {
-                    *active_for_button.borrow_mut() = id.clone();
+                    let mut active = active_for_button.borrow().clone();
+                    if !apply_settings_navigation(&mut active, id.clone(), || {
+                        flush_for_button
+                            .borrow()
+                            .as_ref()
+                            .is_none_or(|flush| flush())
+                    }) {
+                        return;
+                    }
+                    *active_for_button.borrow_mut() = active;
                     stack_for_button.set_visible_child_name(&id);
                     sync_for_button();
                 });
@@ -1059,6 +1100,7 @@ pub(crate) fn build_settings_page(
     let pending_autosave: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
     let pending_autosave_target: Rc<RefCell<Option<SettingsSaveTarget>>> =
         Rc::new(RefCell::new(None));
+    let last_save_succeeded = Rc::new(Cell::new(false));
     let db_path_recover_settings = paths.database_path.clone();
     let settings_repo_select_recover = settings_repo_select.clone();
     let settings_result_recover = settings_result.clone();
@@ -1131,22 +1173,44 @@ pub(crate) fn build_settings_page(
         let pending_autosave_target = pending_autosave_target.clone();
         let forced_save_target = forced_save_target.clone();
         let save_settings_btn = save_settings_btn.clone();
-        Rc::new(move || {
+        let last_save_succeeded = last_save_succeeded.clone();
+        Rc::new(move || -> bool {
             if let Some(source_id) = pending_autosave.borrow_mut().take() {
                 source_id.remove();
-                if let Some(target) = pending_autosave_target.borrow_mut().take() {
-                    *forced_save_target.borrow_mut() = Some(target);
-                    save_settings_btn.emit_clicked();
-                }
             }
+            flush_autosave_target(&mut pending_autosave_target.borrow_mut(), |target| {
+                *forced_save_target.borrow_mut() = Some(target);
+                last_save_succeeded.set(false);
+                save_settings_btn.emit_clicked();
+                last_save_succeeded.get()
+            })
         })
     };
+    *flush_pending_autosave_handle.borrow_mut() = Some(flush_pending_autosave.clone());
     let flush_pending_autosave_for_repo = flush_pending_autosave.clone();
+    let settings_repo_select_for_change = settings_repo_select.clone();
+    let loaded_settings_target_for_repo = loaded_settings_target.clone();
     settings_repo_select.connect_changed(move |_| {
         if !*loading_settings_for_repo.borrow()
             && *settings_scope_for_repo.borrow() == SettingsUiScope::Local
         {
-            flush_pending_autosave_for_repo();
+            let requested = selected_repository_name(&settings_repo_select_for_change);
+            let mut current = loaded_settings_target_for_repo
+                .borrow()
+                .as_ref()
+                .and_then(|target| match target {
+                    SettingsSaveTarget::Local(project) => Some(project.clone()),
+                    SettingsSaveTarget::Shared => None,
+                })
+                .unwrap_or_else(|| requested.clone());
+            if !apply_settings_navigation(&mut current, requested, || {
+                flush_pending_autosave_for_repo()
+            }) {
+                *loading_settings_for_repo.borrow_mut() = true;
+                settings_repo_select_for_change.set_active_id(Some(&current));
+                *loading_settings_for_repo.borrow_mut() = false;
+                return;
+            }
             load_selected_settings_for_repo();
         }
     });
@@ -1156,8 +1220,13 @@ pub(crate) fn build_settings_page(
     let flush_pending_autosave_for_shared = flush_pending_autosave.clone();
     shared_tab.connect_clicked(move |_| {
         if *settings_scope_for_shared.borrow() != SettingsUiScope::Shared {
-            flush_pending_autosave_for_shared();
-            *settings_scope_for_shared.borrow_mut() = SettingsUiScope::Shared;
+            let mut scope = *settings_scope_for_shared.borrow();
+            if !apply_settings_navigation(&mut scope, SettingsUiScope::Shared, || {
+                flush_pending_autosave_for_shared()
+            }) {
+                return;
+            }
+            *settings_scope_for_shared.borrow_mut() = scope;
             rebuild_settings_rail_for_shared(SettingsUiScope::Shared);
             load_selected_settings_for_shared();
         }
@@ -1168,8 +1237,13 @@ pub(crate) fn build_settings_page(
     let flush_pending_autosave_for_local = flush_pending_autosave.clone();
     local_tab.connect_clicked(move |_| {
         if *settings_scope_for_local.borrow() != SettingsUiScope::Local {
-            flush_pending_autosave_for_local();
-            *settings_scope_for_local.borrow_mut() = SettingsUiScope::Local;
+            let mut scope = *settings_scope_for_local.borrow();
+            if !apply_settings_navigation(&mut scope, SettingsUiScope::Local, || {
+                flush_pending_autosave_for_local()
+            }) {
+                return;
+            }
+            *settings_scope_for_local.borrow_mut() = scope;
             rebuild_settings_rail_for_local(SettingsUiScope::Local);
             load_selected_settings_for_local();
         }
@@ -1181,6 +1255,8 @@ pub(crate) fn build_settings_page(
         let pending_autosave = pending_autosave.clone();
         let pending_autosave_target = pending_autosave_target.clone();
         let loaded_settings_target = loaded_settings_target.clone();
+        let forced_save_target = forced_save_target.clone();
+        let last_save_succeeded = last_save_succeeded.clone();
         Rc::new(move || {
             if !*loading_settings.borrow() {
                 if let Some(source_id) = pending_autosave.borrow_mut().take() {
@@ -1190,11 +1266,20 @@ pub(crate) fn build_settings_page(
                 let save_settings_btn = save_settings_btn.clone();
                 let pending_autosave_for_timeout = pending_autosave.clone();
                 let pending_autosave_target_for_timeout = pending_autosave_target.clone();
+                let forced_save_target_for_timeout = forced_save_target.clone();
+                let last_save_succeeded_for_timeout = last_save_succeeded.clone();
                 let source_id =
                     gtk::glib::timeout_add_local_once(Duration::from_millis(600), move || {
                         *pending_autosave_for_timeout.borrow_mut() = None;
-                        *pending_autosave_target_for_timeout.borrow_mut() = None;
-                        save_settings_btn.emit_clicked();
+                        flush_autosave_target(
+                            &mut pending_autosave_target_for_timeout.borrow_mut(),
+                            |target| {
+                                *forced_save_target_for_timeout.borrow_mut() = Some(target);
+                                last_save_succeeded_for_timeout.set(false);
+                                save_settings_btn.emit_clicked();
+                                last_save_succeeded_for_timeout.get()
+                            },
+                        );
                     });
                 *pending_autosave.borrow_mut() = Some(source_id);
             }
@@ -1307,7 +1392,9 @@ pub(crate) fn build_settings_page(
     let field_edits_for_save = field_edits.clone();
     let toast_save = toast_manager.clone();
     let load_selected_settings_after_save = load_selected_settings.clone();
+    let last_save_succeeded_for_save = last_save_succeeded.clone();
     save_settings_btn.connect_clicked(move |_| {
+        last_save_succeeded_for_save.set(false);
         let save_target = forced_save_target_for_save
             .borrow_mut()
             .take()
@@ -1600,6 +1687,7 @@ pub(crate) fn build_settings_page(
         };
         match save_result {
             Ok(_) => {
+                last_save_succeeded_for_save.set(true);
                 field_edits_for_save.borrow_mut().clear();
                 load_selected_settings_after_save();
                 let status = match save_target {
@@ -2282,6 +2370,62 @@ mod tests {
             setting_for_save(true, Some("Override".to_owned()), None::<String>),
             None
         );
+    }
+
+    #[test]
+    fn invalid_advanced_toml_blocks_scope_change_and_preserves_dirty_edit() {
+        let dirty_toml = String::from("[view\ntheme = \"dark\"");
+        let mut scope = SettingsUiScope::Shared;
+
+        let changed = apply_settings_navigation(&mut scope, SettingsUiScope::Local, || {
+            customization_settings_from_toml(&dirty_toml).is_ok()
+        });
+
+        assert!(!changed);
+        assert_eq!(scope, SettingsUiScope::Shared);
+        assert_eq!(dirty_toml, "[view\ntheme = \"dark\"");
+    }
+
+    #[test]
+    fn invalid_environment_blocks_section_change_and_preserves_dirty_edit() {
+        let dirty_environment = String::from("NOT KEY=value");
+        let mut section = String::from("general");
+
+        let changed = apply_settings_navigation(&mut section, "advanced".to_owned(), || {
+            parse_environment_lines(&dirty_environment).is_ok()
+        });
+
+        assert!(!changed);
+        assert_eq!(section, "general");
+        assert_eq!(dirty_environment, "NOT KEY=value");
+    }
+
+    #[test]
+    fn persistence_failure_blocks_project_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "file").unwrap();
+        let settings_path = blocked_parent.join("settings.toml");
+        let mut project = String::from("alpha");
+
+        let changed = apply_settings_navigation(&mut project, "bravo".to_owned(), || {
+            save_app_shared_settings(&settings_path, &RepositorySettings::default()).is_ok()
+        });
+
+        assert!(!changed);
+        assert_eq!(project, "alpha");
+    }
+
+    #[test]
+    fn failed_forced_autosave_keeps_its_original_target_for_retry() {
+        let mut pending = Some(SettingsSaveTarget::Local("alpha".to_owned()));
+
+        assert!(!flush_autosave_target(&mut pending, |_| false));
+        assert_eq!(pending, Some(SettingsSaveTarget::Local("alpha".to_owned())));
+        assert!(flush_autosave_target(&mut pending, |target| {
+            target == SettingsSaveTarget::Local("alpha".to_owned())
+        }));
+        assert_eq!(pending, None);
     }
 
     #[test]
