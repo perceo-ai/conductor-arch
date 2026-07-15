@@ -22,8 +22,21 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Clone a Git repository from the Projects page.
 - [ ] Confirm the repository row shows path, remote/default branch metadata, and
   workspace parent.
-- [ ] Edit shared `.archductor/settings.toml` from Projects.
-- [ ] Edit local `.archductor/settings.local.toml` from Projects.
+- [ ] Open Settings on Shared and confirm it describes defaults used by every
+  Archductor project on this machine, works with no registered projects, and
+  hides the project selector.
+- [ ] Open Settings on Local and confirm it shows the project selector, limits
+  edits to the selected project and its workspaces, and replaces the editor
+  with a project-selection state when no project is selected.
+- [ ] Confirm effective settings resolve in this order: built-in defaults, app
+  Shared defaults, repository-committed settings (including prompt-pack
+  values), then Local project overrides. Confirm a repository or Local value
+  can explicitly clear an inherited Shared value where empty values are valid.
+- [ ] Export and import app Shared defaults with
+  `archductor settings export --output <file>` and
+  `archductor settings import <file>`.
+- [ ] Edit repository-committed `.archductor/settings.toml` from Projects.
+- [ ] Edit machine-local `.archductor/settings.local.toml` from Projects.
 - [ ] Export shared settings with
   `archductor repo settings <name> export --output <file>`.
 - [ ] Import that file back into shared and local settings with
@@ -36,6 +49,23 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   new workspace, general, continue work, summarize session, handoff, code
   review, create PR, fix errors, resolve conflicts, rename branch, commit
   generation, test fixing, refactor style, setup script, and run script.
+- [ ] In Local, confirm inherited prompt values remain visible with an
+  inheritance label, editing creates only the selected Local override, and
+  clearing an override restores the inherited effective value.
+- [ ] Confirm General agent instructions are included only with the first user
+  message in a new chat and remain hidden from the visible/audited user text.
+- [ ] Confirm configured prompts are appended to their surfaced actions:
+  Continue after merge (`continue_work`), Create PR (`create_pr`), Commit and
+  push (`commit_generation`), conflict/blocker resolution
+  (`resolve_merge_conflicts`, plus `fix_errors` only for failed checks), setup
+  and run assistants (`setup_script`, `run_script`), review staging
+  (`code_review`), and local/PR check fixing (`test_fixing`).
+- [ ] Treat `new_workspace`, `summarize_session`, `handoff`, `rename_branch`,
+  and `refactor_style` as editable inherited defaults without dedicated
+  surfaced actions; do not claim those action routes are implemented.
+- [ ] After saving Shared or Local prompt changes, confirm existing live
+  workspace `.context/PROMPTS.md` snapshots refresh without rewriting
+  `brief.md`, `agent-notes.md`, or `todos.md`.
 - [ ] Confirm prompt pack active/version/path fields save to
   `.archductor/settings.toml` and that bootstrap creates
   `.archductor/prompt-packs/default.toml` when missing.
@@ -277,8 +307,22 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 ## History And Navigation
 
 - [ ] Sidebar search finds repositories and workspaces.
-- [ ] Dashboard groups active and archived workspaces.
-- [ ] History shows archived workspaces.
+- [ ] Dashboard uses Ready, Running, Review, and Archived columns; confirm an
+  archived workspace wins Archived, an active open-PR workspace uses Review, a
+  live run/session uses Running, and other workspaces use Ready.
+- [ ] Dashboard includes All projects plus every registered project, including
+  projects with no workspaces, and preserves a still-valid project filter.
+- [ ] Activate a Dashboard workspace card by pointer and keyboard and confirm it
+  opens that workspace on Chats after refreshing its preferences and detail.
+- [ ] History opens on Workspaces, provides All/Active/Archived workspace
+  filters, shows labeled workspace details, and offers Open Workspace only for
+  non-archived workspaces.
+- [ ] Switch History to Chats and confirm saved Archductor sessions and
+  available imported Conductor chats can be selected to show provenance and a
+  transcript with customer-facing role labels.
+- [ ] Confirm Settings Shared/Local tabs, Dashboard project tabs, History
+  Workspaces/Chats tabs, and History workspace filters reuse the same close-free,
+  horizontally scrollable tab UI as workspace chat tabs.
 - [ ] Workspace Timeline tab shows creation, branch changes, session
   start/stop, PR creation, archive/restore/delete, push, and check refresh
   events in timestamp order.

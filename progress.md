@@ -1,13 +1,14 @@
 # Progress
 
-Current as of 2026-07-14.
+Current as of 2026-07-15.
 
 ## Current State
 
 Archductor has a usable but rough GUI-first loop for one local repository:
 
 1. Add or clone a repository as a project.
-2. Edit shared and local repository settings.
+2. Edit app Shared defaults, repository-committed settings, and Local project
+   overrides.
 3. Create branch, prompt, GitHub issue, GitHub PR, or Linear workspaces.
 4. Run setup/run scripts, terminal commands, and Shell/Codex/Claude/Cursor
    sessions inside a workspace.
@@ -28,6 +29,9 @@ paths and known rough edges.
 - SQLite-backed project, workspace, process, PR, todo, review, checkpoint,
   timeline, chat, and history state.
 - Repository add/list/update/doctor plus shared/local settings import/export.
+- App Shared settings import/export and effective settings precedence from
+  built-in defaults through app Shared, repository-committed settings
+  (including prompt packs), and Local project overrides.
 - Workspace create/list/archive/restore/discard/delete/rename/duplicate.
 - Workspace creation from branch/base, prompt, GitHub issue, GitHub PR, and
   Linear issue.
@@ -41,6 +45,10 @@ paths and known rough edges.
   provider paths, Git behavior, merge rules, workspace defaults, view defaults,
   terminal preferences, keybindings, notification labels, and advanced TOML.
 - Prompt pack files are bootstrapped under `.archductor/prompt-packs`.
+- Effective prompt routing for first-chat General instructions, continue work,
+  PR creation, commit/push, blocker resolution, setup/run assistants, code
+  review staging, and local/PR check fixing. Shared/Local prompt saves refresh
+  managed prompt snapshots for existing live workspaces.
 - Monorepo working-directory defaults for scripts, terminal commands, editor
   launches, and agent sessions.
 - Linked workspace directories with persisted records, symlinks under
@@ -68,10 +76,16 @@ paths and known rough edges.
 ### GTK App
 
 - GTK/libadwaita app with Dashboard, Projects, History, Workspace, and
-  debug-only PTY Inspector pages.
+  debug-only PTY Inspector pages. Settings, Dashboard filters, and History tabs
+  reuse the standard close-free workspace chat-tab presentation.
 - Project onboarding from local repository path or Git clone URL.
-- Project settings for shared/local settings, prompts, scripts, Git, terminal,
-  shortcuts, notifications, provider paths, and advanced customization TOML.
+- Scope-aware Settings page: Shared applies machine-wide defaults to every
+  project without a project selector; Local selects one project and edits only
+  its project/workspace overrides. Local prompt editors show inherited values
+  without copying them into the override until edited.
+- Repository settings for committed team configuration remain available through
+  the Projects surface and remain between app Shared and Local in effective
+  precedence.
 - Workspace creation from branch/base, prompt, GitHub issue, GitHub PR, and
   Linear issue with source preflight feedback.
 - Workspace command center with status header, agents panel, runtime panel,
@@ -93,8 +107,11 @@ paths and known rough edges.
   branch push state, local comments, safe tracked-file revert, PR create/refresh,
   PR checks/comments/reviews, PR readiness summary, review-thread actions,
   merge blockers, merge, and archive-after-merge.
-- History reads saved Linux session history and older macOS Conductor chats when
-  the upstream database exists.
+- Dashboard cards open workspaces and group them as Ready, Running, Review, or
+  Archived, with filters for All projects and every registered project.
+- History defaults to a Workspaces tab with All/Active/Archived filters and also
+  provides a Chats tab for saved Linux sessions and older macOS Conductor chats
+  when the upstream database exists.
 - Command palette, global refresh/sidebar shortcuts, tab/deep-link navigation,
   view defaults, theme/accent/density classes, and terminal presets.
 
@@ -108,6 +125,9 @@ paths and known rough edges.
 - Prompt pack switching/import/export, naming templates, hooks, local check
   runner UI, richer notifications, and deeper layout/theme controls are not
   fully surfaced in the GUI.
+- `new_workspace`, `summarize_session`, `handoff`, `rename_branch`, and
+  `refactor_style` prompts remain editable inherited defaults without dedicated
+  surfaced actions.
 - Runtime ownership is still converging around the archcar/local daemon APIs.
 - Codex unsafe approval/sandbox bypass needs explicit product policy before a
   broad public launch.
