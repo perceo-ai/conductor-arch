@@ -16,6 +16,7 @@ mod settings;
 mod setup;
 mod sidebar;
 mod state;
+mod tabs;
 mod terminal;
 mod theme;
 mod toast;

@@ -1496,6 +1496,13 @@ separator {
     min-height: 1px;
     background-color: #282828;
 }
+button.ws-tab-shell {
+    background-image: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    text-shadow: none;
+}
 .ws-tab-shell {
     min-width: 132px;
     min-height: 46px;
