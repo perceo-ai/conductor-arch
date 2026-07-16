@@ -1,0 +1,47 @@
+crates/core/src/archcar/server.rs
+  s_7e20ed6ba888b4::t_0543b91a10681e 25,407-491,493-494
+  s_7e20ed6ba888b4::t_3c3211165c733b 492,1337-1397
+  s_7e20ed6ba888b4::t_6f9cfa3251862d 1319-1321,1398
+crates/core/src/archcar/harness_contract.rs
+  s_7e20ed6ba888b4::t_552d51ec0c429b 5,209-210,217,232-233
+crates/core/src/archcar/session.rs
+  s_7e20ed6ba888b4::t_3311e509ed46ec 562-576
+crates/core/src/runtime_session_store.rs
+  s_7e20ed6ba888b4::t_7a096c638347c6 10,20,29,124-128
+  s_7e20ed6ba888b4::t_2525168a4e1542 129-130
+crates/core/src/lib.rs
+  s_7e20ed6ba888b4::t_4e2811757e1533 20
+crates/core/src/storage.rs
+  s_7e20ed6ba888b4::t_4bd1c778f822e8 240-268
+crates/gtk-app/src/session_surface.rs
+  s_7e20ed6ba888b4::t_864a9ced325bd3 8801-8803,8905-8920,9295-9297
+crates/gtk-app/src/archcar_async.rs
+  s_7e20ed6ba888b4::t_76287012fa47df 67-84,594-622
+crates/cli/src/main.rs
+  s_7e20ed6ba888b4::t_27aaa2c84fb026 1517-1531
+crates/core/src/provider_interactions.rs
+  s_7e20ed6ba888b4::t_c3a62081d753ec 1-50,52-126,132-133,135-137,139,142-145,147,150-153,155,158-160,162,165,167-185,192-195,201-211,216-237,240-243,246-296,300-384
+  s_7e20ed6ba888b4::t_de63f3d67d4c21 51,127-131,138,140-141,146,148-149,154,156-157,161,163-164,186-191,196-200,212-215,238-239,244-245,297-299
+  s_7e20ed6ba888b4::t_37b20ed0282eaa 134,166
+crates/core/src/archcar/protocol.rs
+  s_7e20ed6ba888b4::t_5fa82b251aa8eb 4,6,107-125,160-164
+  s_7e20ed6ba888b4::t_cf06ee089fcad4 165,302-333,373-379,442-449,514-519
+  s_7e20ed6ba888b4::t_02c5fb416899c6 526
+  s_7e20ed6ba888b4::t_99a2059164f556 525,527,529,665-738
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "0041f4f53090f8f69d91cdea0f14a4ed9fe3925d",
+  "prompts": {},
+  "sessions": {
+    "s_7e20ed6ba888b4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6989-46fd-74c2-b2dd-ae33d67c261e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
