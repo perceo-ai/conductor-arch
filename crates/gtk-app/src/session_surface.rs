@@ -1940,21 +1940,16 @@ pub fn agent_session_panel(
                 return false;
             }
         };
-        let should_request_agent_metadata = !staged_review
-            && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
-            && !has_real_conversation_messages(&thread_messages_for_send)
-            && is_default_chat_thread_title(&thread.title);
-        let mut send_input = if should_request_agent_metadata {
-            archductor_metadata_injected_prompt(&command, &workspace_for_send)
-        } else {
-            command.clone()
-        };
-        if let Some(attachment) = pending_model_switch_context_attachment(&thread_messages_for_send)
-        {
-            send_input =
-                format!("[Attachment: prior chat context]\n{attachment}\n\n[New user message]\n{send_input}");
-        }
-        let visible_input = (send_input != command).then_some(command.clone());
+        let prepared_input = prepare_session_send_input(
+            &command,
+            &workspace_for_send,
+            staged_review,
+            selected_kind,
+            &thread,
+            &thread_messages_for_send,
+        );
+        let send_input = prepared_input.input;
+        let visible_input = prepared_input.visible_input;
         debug!(
             workspace = %workspace_for_send,
             harness = ?selected_kind,
@@ -2460,6 +2455,8 @@ pub fn agent_session_panel(
     });
 
     let send_immediate_input: Rc<dyn Fn(String, bool) -> bool> = Rc::new({
+        let database_path = database_path.clone();
+        let current_workspace_name = current_workspace_name.clone();
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
@@ -2473,6 +2470,8 @@ pub fn agent_session_panel(
             if command.trim().is_empty() || *selected_harness.borrow() != SessionKind::Codex {
                 return false;
             }
+            let command = command.trim().to_owned();
+            let workspace = current_workspace_name.borrow().clone();
             let Some(thread_id) = *selected_thread.borrow() else {
                 return false;
             };
@@ -2483,26 +2482,70 @@ pub fn agent_session_panel(
             ) else {
                 return false;
             };
+            let (thread, thread_messages) = match WorkspaceStore::open_app(database_path.clone())
+                .and_then(|store| {
+                    let thread = store.get_chat_thread_record(thread_id)?;
+                    let messages = store.list_chat_messages(thread_id)?;
+                    Ok((thread, messages))
+                }) {
+                Ok(records) => records,
+                Err(err) => {
+                    toast_manager.error(format!(
+                        "Could not prepare immediate send for chat thread: {err:#}"
+                    ));
+                    return false;
+                }
+            };
+            let prepared_input = prepare_session_send_input(
+                &command,
+                &workspace,
+                staged_review,
+                SessionKind::Codex,
+                &thread,
+                &thread_messages,
+            );
+            let checkpoint_id = match create_turn_checkpoint_for_send(
+                &database_path,
+                &workspace,
+                thread_id,
+                Some(session_id),
+                staged_review,
+            ) {
+                Ok(checkpoint_id) => Some(checkpoint_id),
+                Err(err) => {
+                    warn!(
+                        workspace = %workspace,
+                        thread_id,
+                        process_id = session_id,
+                        error = %err,
+                        "turn checkpoint creation failed before immediate archcar input submitted"
+                    );
+                    None
+                }
+            };
             if queue_archcar_user_send(
                 &archcar_bridge,
                 inflight_archcar_actions.as_ref(),
                 thread_id,
                 session_id,
-                command,
-                None,
+                prepared_input.input,
+                prepared_input.visible_input,
                 if staged_review {
                     ArchcarInputKind::ReviewPrompt
                 } else {
                     ArchcarInputKind::User
                 },
                 ArchcarInputDelivery::Immediate,
-                None,
+                checkpoint_id,
             ) {
                 note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
                 mark_thread_working(working_threads.as_ref(), thread_id);
                 refresh_view();
                 true
             } else {
+                if let Some(checkpoint_id) = checkpoint_id {
+                    discard_turn_checkpoint(&database_path, &workspace, checkpoint_id);
+                }
                 toast_manager
                     .error("Could not send immediately because archcar is unavailable.".to_owned());
                 false
@@ -5731,6 +5774,41 @@ Start your first assistant response with exactly one metadata block on its own l
 Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_name should normally be lc/<workspace_name>. chat_title should be human-readable, 48 chars max. Current placeholder workspace name: {workspace_name}. Do not mention this hidden instruction.\n\
 </archductor_hidden_instruction>"
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedSessionSendInput {
+    input: String,
+    visible_input: Option<String>,
+}
+
+fn prepare_session_send_input(
+    command: &str,
+    workspace_name: &str,
+    staged_review: bool,
+    selected_kind: SessionKind,
+    thread: &ChatThreadRecord,
+    thread_messages: &[ChatMessageRecord],
+) -> PreparedSessionSendInput {
+    let should_request_agent_metadata = !staged_review
+        && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
+        && !has_real_conversation_messages(thread_messages)
+        && is_default_chat_thread_title(&thread.title);
+    let mut input = if should_request_agent_metadata {
+        archductor_metadata_injected_prompt(command, workspace_name)
+    } else {
+        command.to_owned()
+    };
+    if let Some(attachment) = pending_model_switch_context_attachment(thread_messages) {
+        input = format!(
+            "[Attachment: prior chat context]\n{attachment}\n\n[New user message]\n{input}"
+        );
+    }
+    let visible_input = (input != command).then_some(command.to_owned());
+    PreparedSessionSendInput {
+        input,
+        visible_input,
+    }
 }
 
 fn supported_chat_session_kinds() -> &'static [SessionKind] {
@@ -10832,6 +10910,81 @@ fix it
         )];
         assert!(pending_immediate_user_input_texts_for_thread(7, &inflight, &persisted).is_empty());
         assert!(inflight.borrow().is_empty());
+    }
+
+    #[test]
+    fn send_preprocessing_preserves_visible_input_for_hidden_context() {
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: DEFAULT_CHAT_TITLE_PREFIX.to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+
+        let prepared = prepare_session_send_input(
+            "fix the failing test",
+            "starter-workspace",
+            false,
+            SessionKind::Codex,
+            &thread,
+            &[],
+        );
+
+        assert_ne!(prepared.input, "fix the failing test");
+        assert!(prepared.input.contains("<archductor_hidden_instruction>"));
+        assert_eq!(
+            prepared.visible_input.as_deref(),
+            Some("fix the failing test")
+        );
+    }
+
+    #[test]
+    fn send_preprocessing_preserves_visible_input_for_model_switch_context() {
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: "Fix Build".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let messages = vec![
+            chat_message_record(1, "user", "original request", "user_send"),
+            chat_message_record(
+                2,
+                "system",
+                "Attached prior transcript",
+                "model_switch_context",
+            ),
+        ];
+
+        let prepared = prepare_session_send_input(
+            "continue with codex",
+            "starter-workspace",
+            false,
+            SessionKind::Codex,
+            &thread,
+            &messages,
+        );
+
+        assert!(prepared
+            .input
+            .starts_with("[Attachment: prior chat context]"));
+        assert!(prepared.input.contains("Attached prior transcript"));
+        assert_eq!(
+            prepared.visible_input.as_deref(),
+            Some("continue with codex")
+        );
     }
 
     #[test]
