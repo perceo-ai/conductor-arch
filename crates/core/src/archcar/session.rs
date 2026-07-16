@@ -16,9 +16,14 @@ use tracing::{info, warn};
 use crate::archcar::harness::{
     controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
 };
+use crate::archcar::harness_contract::{
+    DesiredHarnessControls, HarnessAdapterContext, HarnessInput, ManagedHarnessAdapter,
+};
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind};
 use crate::codex_tui::codex_screen_ready_for_input;
-use crate::provider_adapters::claude_stream::{build_claude_stream_args, ClaudeStreamLaunchConfig};
+use crate::provider_adapters::claude_stream::{
+    build_claude_stream_args, ClaudeManagedAdapter, ClaudeStreamLaunchConfig,
+};
 use crate::provider_adapters::codex_app_server::{
     parse_jsonl_message, write_initialize_request_with_id, write_initialized_notification,
     write_thread_start_request_with_id, write_turn_interrupt_request_with_id,
@@ -665,11 +670,13 @@ fn claude_stream_session_launch(
     )?;
     launch.args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
         persistent_input: true,
+        replay_user_messages: true,
         resume: thread_record.native_thread_id.clone(),
         permission_mode: claude_stream_permission_mode(&harness),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         append_system_prompt: None,
+        settings_json: None,
     });
     launch.harness_metadata = non_interactive_harness_metadata("claude-stream-json", &harness);
     launch.session_resume_id = thread_record.native_thread_id.clone();
@@ -1918,6 +1925,17 @@ fn run_claude_stream_session_loop(
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
     let mut parser = crate::provider_adapters::claude_stream::ClaudeStreamParser::default();
+    let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        workspace: started.workspace.clone(),
+        native_session_id: connection.native_thread_id.clone(),
+        controls: DesiredHarnessControls {
+            model: connection.model.clone(),
+            effort: connection.effort_mode.clone(),
+            permission_mode: connection.approval_policy.clone(),
+        },
+    });
 
     loop {
         while let Ok(line) = connection.stdout_rx.try_recv() {
@@ -1968,16 +1986,27 @@ fn run_claude_stream_session_loop(
                     input,
                     visible_input,
                     kind,
-                    delivery: _,
+                    delivery,
                 } => {
-                    let payload = json!({
-                        "type": "user",
-                        "message": {
-                            "role": "user",
-                            "content": [{"type": "text", "text": input.clone()}],
-                        },
+                    let next_input_sequence = user_input_sequence + 1;
+                    let native_write = adapter.encode_input(HarnessInput {
+                        local_input_id: user_input_identity_suffix(next_input_sequence),
+                        content: input.clone(),
+                        visible_content: visible_input.clone(),
+                        kind: kind.clone(),
+                        delivery,
                     });
-                    if let Err(err) = write_provider_json_line(&mut connection.stdin, &payload) {
+                    let write_result = native_write.and_then(|native_write| {
+                        anyhow::ensure!(
+                            native_write.provider_key == "claude",
+                            "Claude adapter encoded input for {}",
+                            native_write.provider_key,
+                        );
+                        connection.stdin.write_all(&native_write.payload)?;
+                        connection.stdin.flush()?;
+                        Ok(())
+                    });
+                    if let Err(err) = write_result {
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
                             &runtime_store,
@@ -1987,7 +2016,7 @@ fn run_claude_stream_session_loop(
                             format!("Claude stream input failed: {err:#}"),
                         );
                     } else {
-                        user_input_sequence += 1;
+                        user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
                             &started,
@@ -2977,6 +3006,7 @@ mod tests {
                 "--include-partial-messages",
                 "--input-format",
                 "stream-json",
+                "--replay-user-messages",
                 "--resume",
                 "claude-session-1",
                 "--permission-mode",
@@ -2987,6 +3017,7 @@ mod tests {
                 "low",
             ]
         );
+        assert!(!launch.args.iter().any(|arg| arg == "--bare"));
         assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));
         let port = launch.env_value(PROVIDER_NATIVE_PORT_ENV).unwrap();
         let expected_metadata = format!(

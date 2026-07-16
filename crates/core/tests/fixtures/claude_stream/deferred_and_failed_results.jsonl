@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"session_fixture_results","uuid":"system_init_results","cwd":"/workspace/demo","model":"claude-sonnet-fixture","tools":["Bash"],"mcp_servers":[],"plugins":[]}
+{"type":"user","session_id":"session_fixture_results","uuid":"tool_deferred_result_1","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_fixture_deferred","content":"Tool execution deferred","is_error":false}]},"tool_use_result":{"type":"tool_deferred"}}
+{"type":"result","subtype":"error_during_execution","session_id":"session_fixture_results","uuid":"result_error_1","is_error":true,"result":"sanitized fixture failure","duration_ms":25,"num_turns":1}
+{"type":"result","subtype":"interrupted","session_id":"session_fixture_results","uuid":"result_interrupted_1","is_error":true,"result":"Interrupted by fixture","duration_ms":10,"num_turns":1}

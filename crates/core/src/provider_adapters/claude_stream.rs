@@ -70,7 +70,7 @@ pub(crate) struct ClaudeManagedAdapter {
 }
 
 impl ClaudeManagedAdapter {
-    fn new(context: HarnessAdapterContext) -> Self {
+    pub(crate) fn new(context: HarnessAdapterContext) -> Self {
         Self {
             context,
             parser: ClaudeStreamParser::default(),
@@ -92,13 +92,7 @@ impl ClaudeManagedAdapter {
 
 impl ManagedHarnessAdapter for ClaudeManagedAdapter {
     fn encode_input(&mut self, input: HarnessInput) -> Result<NativeWrite> {
-        let payload = json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": input.content}],
-            },
-        });
+        let payload = encode_claude_user_message(&input.content);
         let mut native_payload =
             serde_json::to_vec(&payload).context("serialize Claude stream-json input")?;
         native_payload.push(b'\n');
@@ -231,11 +225,24 @@ fn managed_claude_turn_status(kind: ClaudeProviderEventKind, payload: &Value) ->
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaudeStreamLaunchConfig {
     pub persistent_input: bool,
+    pub replay_user_messages: bool,
     pub resume: Option<String>,
     pub permission_mode: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub append_system_prompt: Option<String>,
+    pub settings_json: Option<String>,
+}
+
+pub fn encode_claude_user_message(input: &str) -> Value {
+    json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": input}],
+        },
+        "parent_tool_use_id": null,
+    })
 }
 
 pub fn build_claude_stream_args(config: &ClaudeStreamLaunchConfig) -> Vec<String> {
@@ -250,6 +257,9 @@ pub fn build_claude_stream_args(config: &ClaudeStreamLaunchConfig) -> Vec<String
     if config.persistent_input {
         args.push("--input-format".to_owned());
         args.push("stream-json".to_owned());
+        if config.replay_user_messages {
+            args.push("--replay-user-messages".to_owned());
+        }
     }
     push_optional_arg(&mut args, "--resume", config.resume.as_deref());
     push_optional_arg(
@@ -264,6 +274,7 @@ pub fn build_claude_stream_args(config: &ClaudeStreamLaunchConfig) -> Vec<String
         "--append-system-prompt",
         config.append_system_prompt.as_deref(),
     );
+    push_optional_arg(&mut args, "--settings", config.settings_json.as_deref());
 
     args
 }
@@ -758,6 +769,120 @@ fn claude_hook_body(raw_json: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    const BASIC_TURN_FIXTURE: &str =
+        include_str!("../../tests/fixtures/claude_stream/basic_turn.jsonl");
+    const TOOLS_HOOKS_LIMITS_FIXTURE: &str =
+        include_str!("../../tests/fixtures/claude_stream/tools_hooks_limits.jsonl");
+    const DEFERRED_AND_FAILED_RESULTS_FIXTURE: &str =
+        include_str!("../../tests/fixtures/claude_stream/deferred_and_failed_results.jsonl");
+
+    #[test]
+    fn claude_stream_contract_launches_persistent_native_stream_with_settings() {
+        let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
+            persistent_input: true,
+            replay_user_messages: true,
+            settings_json: Some(r#"{"hooks":{}}"#.to_owned()),
+            ..ClaudeStreamLaunchConfig::default()
+        });
+
+        assert!(args
+            .windows(2)
+            .any(|v| v == ["--input-format", "stream-json"]));
+        assert!(args.iter().any(|v| v == "--replay-user-messages"));
+        assert!(args.windows(2).any(|v| v[0] == "--settings"));
+        assert!(!args.iter().any(|v| v == "--bare"));
+    }
+
+    #[test]
+    fn claude_stream_contract_omits_replay_without_persistent_input() {
+        let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
+            persistent_input: false,
+            replay_user_messages: true,
+            ..ClaudeStreamLaunchConfig::default()
+        });
+
+        assert!(!args.iter().any(|v| v == "--replay-user-messages"));
+    }
+
+    #[test]
+    fn claude_stream_contract_encodes_native_user_input_through_adapter() {
+        assert_eq!(encode_claude_user_message("hello")["type"], "user");
+        assert_eq!(
+            encode_claude_user_message("hello")["parent_tool_use_id"],
+            Value::Null
+        );
+
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        let input = HarnessInput {
+            local_input_id: "local-input-fixture".to_owned(),
+            content: "hello".to_owned(),
+            visible_content: None,
+            kind: crate::archcar::protocol::ArchcarInputKind::User,
+            delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+        };
+        let write = adapter.encode_input(input).unwrap();
+
+        assert_eq!(write.provider_key, "claude");
+        assert_eq!(write.local_input_id.as_deref(), Some("local-input-fixture"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&write.payload).unwrap(),
+            encode_claude_user_message("hello")
+        );
+        assert_eq!(write.payload.last(), Some(&b'\n'));
+    }
+
+    #[test]
+    fn claude_stream_contract_fixtures_cover_native_record_families_losslessly() {
+        let basic = parse_claude_stream_json_lines(BASIC_TURN_FIXTURE).unwrap();
+        let tools = parse_claude_stream_json_lines(TOOLS_HOOKS_LIMITS_FIXTURE).unwrap();
+        let results = parse_claude_stream_json_lines(DEFERRED_AND_FAILED_RESULTS_FIXTURE).unwrap();
+
+        assert_eq!(basic.len(), BASIC_TURN_FIXTURE.lines().count());
+        assert_eq!(tools.len(), TOOLS_HOOKS_LIMITS_FIXTURE.lines().count());
+        assert_eq!(
+            results.len(),
+            DEFERRED_AND_FAILED_RESULTS_FIXTURE.lines().count()
+        );
+        assert_eq!(basic[0].raw_json["subtype"], "status");
+        assert_eq!(basic[1].raw_json["subtype"], "init");
+        assert_eq!(basic[1].raw_json["mcp_servers"][0]["name"], "fixture-mcp");
+        assert_eq!(basic[2].raw_json["isReplay"], true);
+        assert!(basic.iter().any(|event| {
+            event.raw_json["type"] == "assistant"
+                && event.raw_json["message"]["content"][0]["text"] == "Fixture complete."
+        }));
+        assert!(basic
+            .iter()
+            .any(|event| event.kind == ClaudeProviderEventKind::Unknown));
+        assert!(tools
+            .iter()
+            .any(|event| { event.raw_json["message"]["content"][0]["type"] == "tool_result" }));
+        assert!(tools
+            .iter()
+            .any(|event| event.raw_json["subtype"] == "hook_response"));
+        assert!(tools
+            .iter()
+            .any(|event| event.raw_json["subtype"] == "api_retry"));
+        assert!(tools
+            .iter()
+            .any(|event| event.raw_json["type"] == "rate_limit_event"));
+        assert!(results
+            .iter()
+            .any(|event| event.raw_json["tool_use_result"]["type"] == "tool_deferred"));
+        assert!(results.iter().any(|event| {
+            event.raw_json["type"] == "result" && event.raw_json["is_error"] == true
+        }));
+        assert!(results
+            .iter()
+            .any(|event| event.raw_json["subtype"] == "interrupted"));
+    }
+
     #[test]
     fn launch_args_use_structured_stream_json_without_bare_mode() {
         let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
@@ -788,6 +913,8 @@ mod tests {
             model: None,
             effort: Some("low".to_owned()),
             append_system_prompt: Some("Archductor context".to_owned()),
+            replay_user_messages: false,
+            settings_json: None,
         });
 
         assert_eq!(
