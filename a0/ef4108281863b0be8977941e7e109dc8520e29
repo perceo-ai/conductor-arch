@@ -1,0 +1,48 @@
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_7e20ed6ba888b4::t_366bf769516757 68
+crates/core/src/archcar/protocol.rs
+  s_7e20ed6ba888b4::t_95f756cdfe5eda 79-87,251-257,534,536-561,564
+  s_7e20ed6ba888b4::t_4d6bb6a87dc982 535
+  s_7e20ed6ba888b4::t_d2a7a4b352f335 562-563,565-566
+crates/core/src/archcar/session.rs
+  s_7e20ed6ba888b4::t_50447786229758 1556,2055,2057-2064,2195-2204
+  s_7e20ed6ba888b4::t_0f7d595c660ea6 21-23,62
+  s_7e20ed6ba888b4::t_03ef2a2a5f7981 3404,3428-3434,3438-3444
+  s_7e20ed6ba888b4::t_6d434986d44170 951-1037
+  s_7e20ed6ba888b4::t_c4e0a0e37a9f6e 39-40
+  s_7e20ed6ba888b4::t_2faecafdba2c5f 1743-1753,2056
+crates/cli/src/main.rs
+  s_7e20ed6ba888b4::t_80a73380db8b37 202-209,669-678,680,682-685
+  s_7e20ed6ba888b4::t_3c79901a35c46d 2698-2721
+  s_7e20ed6ba888b4::t_1d346927bd5706 679,681,2697
+crates/gtk-app/src/archcar_async.rs
+  s_7e20ed6ba888b4::t_6282fed75dc67c 48-55,239-246,537-546,548
+  s_7e20ed6ba888b4::t_5d8208c52fc2e4 547,681-707
+crates/core/src/archcar/harness_conformance.rs
+  s_7e20ed6ba888b4::t_81fc8fa117bd1c 4-5,63-73
+  s_7e20ed6ba888b4::t_3df2e8d86de024 3,74-78
+crates/gtk-app/src/session_surface.rs
+  s_7e20ed6ba888b4::t_fc191325782b92 5,6525-6527,6538-6549,9934-9943
+crates/core/src/archcar/client.rs
+  s_7e20ed6ba888b4::t_95f99a16c99ab5 210-211,306-317
+crates/core/src/archcar/server.rs
+  s_7e20ed6ba888b4::t_16d69fbcb89827 14,303,305-312
+  s_7e20ed6ba888b4::t_338ced37d9563b 412-435
+  s_7e20ed6ba888b4::t_01892e47e5e701 436-438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "a0ef4108281863b0be8977941e7e109dc8520e29",
+  "prompts": {},
+  "sessions": {
+    "s_7e20ed6ba888b4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6989-46fd-74c2-b2dd-ae33d67c261e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
