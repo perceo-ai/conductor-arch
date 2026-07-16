@@ -818,6 +818,18 @@ fn streaming_merge_incoming_payload(draft: &ProviderEventDraft) -> Value {
         .pointer("/params/delta")
         .and_then(Value::as_str)
         .or_else(|| draft.raw_json.pointer("/delta").and_then(Value::as_str))
+        .or_else(|| {
+            draft
+                .raw_json
+                .pointer("/event/delta/text")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            draft
+                .raw_json
+                .pointer("/event/delta/thinking")
+                .and_then(Value::as_str)
+        })
     else {
         return incoming;
     };
@@ -1286,6 +1298,28 @@ mod tests {
         let latest = store.upsert_event(&second).unwrap();
 
         assert_eq!(latest.normalized_payload["text"], "hello world");
+    }
+
+    #[test]
+    fn claude_projection_uses_native_text_delta_instead_of_final_snapshot() {
+        let mut incoming = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        incoming.provider = "claude".to_owned();
+        incoming.normalized_payload =
+            json!({"title": "Assistant output", "body": "Complete answer"});
+        incoming.raw_json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "answer"}
+            }
+        });
+
+        let payload = streaming_merge_incoming_payload(&incoming);
+
+        assert_eq!(payload["body"], "answer");
     }
 
     #[test]

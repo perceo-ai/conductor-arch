@@ -642,6 +642,7 @@ fn secret_like_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_adapters::claude_stream::parse_claude_stream_json_lines;
     use crate::provider_events::{ProviderEventKind, ProviderEventPhase};
     use serde_json::json;
 
@@ -709,6 +710,47 @@ mod tests {
             projection.items[0].status,
             ProviderProjectionStatus::Complete
         );
+    }
+
+    #[test]
+    fn claude_projection_combines_streaming_deltas_and_final_assistant_body() {
+        let native = r#"{"type":"stream_event","session_id":"claude-session","event":{"type":"message_start","message":{"id":"claude-message","role":"assistant","content":[]}}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Complete "}}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}}
+{"type":"assistant","session_id":"claude-session","message":{"id":"claude-message","role":"assistant","content":[{"type":"text","text":"Complete answer"}]}}"#;
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut records = Vec::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let mut draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            draft.provider_sequence = Some(sequence as i64);
+            records.push(store.upsert_event(&draft).unwrap());
+        }
+
+        let projection = provider_projection_from_records(&records);
+        let assistant = projection
+            .items
+            .iter()
+            .filter(|item| item.category == ProviderProjectionCategory::AssistantMessage)
+            .collect::<Vec<_>>();
+
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].body, "Complete answer");
+        assert_eq!(assistant[0].status, ProviderProjectionStatus::Complete);
     }
 
     #[test]

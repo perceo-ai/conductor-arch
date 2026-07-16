@@ -64,9 +64,16 @@ impl ManagedHarness for ClaudeHarnessController {
 pub(crate) struct ClaudeManagedAdapter {
     context: HarnessAdapterContext,
     parser: ClaudeStreamParser,
-    pending_inputs: VecDeque<String>,
+    pending_inputs: VecDeque<PendingClaudeInput>,
     active_input_id: Option<String>,
+    active_input_content: Option<String>,
+    active_input_acknowledged: bool,
     completed_inputs: HashSet<String>,
+}
+
+struct PendingClaudeInput {
+    local_input_id: String,
+    content: String,
 }
 
 impl ClaudeManagedAdapter {
@@ -76,6 +83,8 @@ impl ClaudeManagedAdapter {
             parser: ClaudeStreamParser::default(),
             pending_inputs: VecDeque::new(),
             active_input_id: None,
+            active_input_content: None,
+            active_input_acknowledged: false,
             completed_inputs: HashSet::new(),
         }
     }
@@ -91,10 +100,76 @@ impl ClaudeManagedAdapter {
 
     pub(crate) fn settle_failed_input_write(&mut self, local_input_id: &str) {
         self.pending_inputs
-            .retain(|pending_input_id| pending_input_id != local_input_id);
+            .retain(|pending| pending.local_input_id != local_input_id);
         if self.active_input_id.as_deref() == Some(local_input_id) {
             self.active_input_id = None;
+            self.active_input_content = None;
+            self.active_input_acknowledged = false;
         }
+    }
+
+    fn start_pending_turn(
+        &mut self,
+        effects: &mut Vec<HarnessEffect>,
+        replayed_text: Option<&str>,
+    ) {
+        if self.active_input_id.is_some() {
+            if let Some(text) = replayed_text {
+                if !self.active_input_acknowledged
+                    && self.active_input_content.as_deref() == Some(text)
+                {
+                    effects.push(HarnessEffect::InputAcknowledged {
+                        local_input_id: self.active_input_id.clone().expect("active input id"),
+                    });
+                    self.active_input_acknowledged = true;
+                }
+            }
+            return;
+        }
+        let pending = match replayed_text {
+            Some(text) => self
+                .pending_inputs
+                .iter()
+                .position(|pending| pending.content == text)
+                .and_then(|index| self.pending_inputs.remove(index)),
+            None => self.pending_inputs.pop_front(),
+        };
+        if let Some(pending) = pending {
+            self.active_input_id = Some(pending.local_input_id);
+            self.active_input_content = Some(pending.content);
+            self.active_input_acknowledged = replayed_text.is_some();
+        }
+        if let Some(local_input_id) = self.active_input_id.clone() {
+            if replayed_text.is_some() {
+                effects.push(HarnessEffect::InputAcknowledged {
+                    local_input_id: local_input_id.clone(),
+                });
+            }
+            effects.push(HarnessEffect::TurnStarted { local_input_id });
+        }
+    }
+
+    fn finish_active_turn(&mut self, effects: &mut Vec<HarnessEffect>, status: ClaudeResultStatus) {
+        let Some(local_input_id) = self.active_input_id.take() else {
+            return;
+        };
+        self.active_input_content = None;
+        self.active_input_acknowledged = false;
+        if self.completed_inputs.insert(local_input_id.clone()) {
+            effects.push(HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: claude_result_to_harness_status(status),
+            });
+        }
+    }
+}
+
+fn claude_result_to_harness_status(status: ClaudeResultStatus) -> HarnessTurnStatus {
+    match status {
+        ClaudeResultStatus::Success => HarnessTurnStatus::Success,
+        ClaudeResultStatus::Failed | ClaudeResultStatus::Declined => HarnessTurnStatus::Failed,
+        ClaudeResultStatus::Interrupted => HarnessTurnStatus::Interrupted,
+        ClaudeResultStatus::Deferred => HarnessTurnStatus::Deferred,
     }
 }
 
@@ -104,7 +179,10 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
         let mut native_payload =
             serde_json::to_vec(&payload).context("serialize Claude stream-json input")?;
         native_payload.push(b'\n');
-        self.pending_inputs.push_back(input.local_input_id.clone());
+        self.pending_inputs.push_back(PendingClaudeInput {
+            local_input_id: input.local_input_id.clone(),
+            content: input.content,
+        });
 
         Ok(NativeWrite {
             provider_key: CLAUDE_PROVIDER_NAME,
@@ -127,45 +205,69 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 continue;
             };
             let event_kind = event.kind;
-            let native_session_id = event.session_id.clone();
+            let lifecycle_signal = event.lifecycle_signal();
+            let replayed_input = matches!(
+                &lifecycle_signal,
+                Some(ClaudeLifecycleSignal::UserInputReplayed { .. })
+            );
+            let retry_message = string_at(&event.raw_json, &["error"]);
+            let retry_delay_ms = number_at(&event.raw_json, &["retry_delay_ms"]);
+            let limit_message = rate_limit_message(&event.raw_json);
+            let limit_retry_after_ms = rate_limit_retry_after_ms(&event.raw_json);
+            let limit_is_terminal = rate_limit_is_terminal(&event.raw_json);
+            effects.push(HarnessEffect::ProviderEvent(
+                event.into_provider_event_draft(self.provider_context()),
+            ));
 
-            if let Some(native_session_id) = native_session_id {
-                if self.context.native_session_id.as_deref() != Some(native_session_id.as_str()) {
-                    self.context.native_session_id = Some(native_session_id.clone());
+            match lifecycle_signal {
+                Some(ClaudeLifecycleSignal::Initialized(init)) => {
+                    self.context.native_session_id = Some(init.session_id.clone());
                     effects.push(HarnessEffect::Initialized {
-                        native_session_id,
-                        model: self.context.controls.model.clone(),
+                        native_session_id: init.session_id,
+                        model: init.model,
                     });
+                    effects.push(HarnessEffect::CapabilitiesObserved(init.capabilities));
                     effects.push(HarnessEffect::Ready);
                 }
+                Some(ClaudeLifecycleSignal::UserInputReplayed { text }) => {
+                    self.start_pending_turn(&mut effects, Some(&text));
+                }
+                Some(ClaudeLifecycleSignal::TurnFinished {
+                    status,
+                    stop_reason,
+                }) => {
+                    let _ = stop_reason;
+                    self.finish_active_turn(&mut effects, status);
+                    effects.push(HarnessEffect::Ready);
+                }
+                Some(ClaudeLifecycleSignal::DeferredTool { tool_use }) => {
+                    let _ = tool_use;
+                }
+                None => {}
             }
 
             if matches!(
                 event_kind,
                 ClaudeProviderEventKind::UserMessage | ClaudeProviderEventKind::MessageStart
-            ) && self.active_input_id.is_none()
+            ) && !replayed_input
             {
-                self.active_input_id = self.pending_inputs.pop_front();
-                if let Some(local_input_id) = self.active_input_id.clone() {
-                    effects.push(HarnessEffect::TurnStarted { local_input_id });
-                }
+                self.start_pending_turn(&mut effects, None);
             }
 
-            let turn_status = managed_claude_turn_status(event_kind, &event.raw_json);
-            effects.push(HarnessEffect::ProviderEvent(
-                event.into_provider_event_draft(self.provider_context()),
-            ));
-
-            if event_kind == ClaudeProviderEventKind::Result {
-                if let Some(local_input_id) = self.active_input_id.take() {
-                    if self.completed_inputs.insert(local_input_id.clone()) {
-                        effects.push(HarnessEffect::TurnCompleted {
-                            local_input_id,
-                            status: turn_status,
-                        });
-                    }
+            if event_kind == ClaudeProviderEventKind::ApiRetry {
+                effects.push(HarnessEffect::Retry {
+                    message: retry_message.unwrap_or_else(|| "Claude API retry".to_owned()),
+                    delay_ms: retry_delay_ms,
+                });
+            } else if event_kind == ClaudeProviderEventKind::RateLimit {
+                effects.push(HarnessEffect::RateLimited {
+                    message: limit_message,
+                    retry_after_ms: limit_retry_after_ms,
+                });
+                if limit_is_terminal {
+                    self.finish_active_turn(&mut effects, ClaudeResultStatus::Failed);
+                    effects.push(HarnessEffect::Ready);
                 }
-                effects.push(HarnessEffect::Ready);
             }
         }
 
@@ -208,25 +310,6 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 message: "Claude session has no native session id to resume".to_owned(),
             },
         }
-    }
-}
-
-fn managed_claude_turn_status(kind: ClaudeProviderEventKind, payload: &Value) -> HarnessTurnStatus {
-    if kind != ClaudeProviderEventKind::Result {
-        return HarnessTurnStatus::Deferred;
-    }
-    if payload
-        .get("is_error")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || matches!(
-            payload.get("subtype").and_then(Value::as_str),
-            Some("error" | "failed")
-        )
-    {
-        HarnessTurnStatus::Failed
-    } else {
-        HarnessTurnStatus::Success
     }
 }
 
@@ -301,41 +384,8 @@ fn non_empty(value: &str) -> Option<&str> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClaudeActionCapability {
-    AuthSession,
-    Messages,
-    ContentBlockDeltasAndFinals,
-    ToolUse,
-    FileEdits,
-    ShellCommands,
-    Mcp,
-    SkillsPluginsHooks,
-    PermissionsUserQuestions,
-    SubagentsTasks,
-    UsageCostContextRateLimits,
-    Errors,
-    UnknownEvents,
-}
-
-pub const CLAUDE_ACTION_CAPABILITIES: &[ClaudeActionCapability] = &[
-    ClaudeActionCapability::AuthSession,
-    ClaudeActionCapability::Messages,
-    ClaudeActionCapability::ContentBlockDeltasAndFinals,
-    ClaudeActionCapability::ToolUse,
-    ClaudeActionCapability::FileEdits,
-    ClaudeActionCapability::ShellCommands,
-    ClaudeActionCapability::Mcp,
-    ClaudeActionCapability::SkillsPluginsHooks,
-    ClaudeActionCapability::PermissionsUserQuestions,
-    ClaudeActionCapability::SubagentsTasks,
-    ClaudeActionCapability::UsageCostContextRateLimits,
-    ClaudeActionCapability::Errors,
-    ClaudeActionCapability::UnknownEvents,
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ClaudeProviderEventKind {
+    Initialization,
     Session,
     UserMessage,
     AssistantMessage,
@@ -352,9 +402,45 @@ pub enum ClaudeProviderEventKind {
     Hook,
     Subagent,
     Usage,
+    ApiRetry,
+    RateLimit,
+    PromptSuggestion,
+    Reasoning,
+    DeferredResult,
     Result,
     Error,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeInitMetadata {
+    pub session_id: String,
+    pub model: Option<String>,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeResultStatus {
+    Success,
+    Failed,
+    Interrupted,
+    Declined,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ClaudeLifecycleSignal {
+    Initialized(ClaudeInitMetadata),
+    UserInputReplayed {
+        text: String,
+    },
+    TurnFinished {
+        status: ClaudeResultStatus,
+        stop_reason: Option<String>,
+    },
+    DeferredTool {
+        tool_use: Value,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,18 +496,67 @@ pub struct ClaudeProviderEventDraft {
 }
 
 impl ClaudeProviderEventDraft {
+    fn lifecycle_signal(&self) -> Option<ClaudeLifecycleSignal> {
+        match self.kind {
+            ClaudeProviderEventKind::Initialization => {
+                Some(ClaudeLifecycleSignal::Initialized(ClaudeInitMetadata {
+                    session_id: self.session_id.clone()?,
+                    model: string_at(&self.raw_json, &["model"]),
+                    capabilities: string_array_at(&self.raw_json, &["capabilities"]),
+                }))
+            }
+            ClaudeProviderEventKind::UserMessage
+                if self
+                    .raw_json
+                    .get("isReplay")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false) =>
+            {
+                Some(ClaudeLifecycleSignal::UserInputReplayed {
+                    text: message_content_text(&self.raw_json, "text", "text")?,
+                })
+            }
+            ClaudeProviderEventKind::Result => Some(ClaudeLifecycleSignal::TurnFinished {
+                status: self.result_status()?,
+                stop_reason: string_at(&self.raw_json, &["stop_reason"]),
+            }),
+            ClaudeProviderEventKind::DeferredResult => Some(ClaudeLifecycleSignal::DeferredTool {
+                tool_use: self.raw_json.get("tool_use_result")?.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn result_status(&self) -> Option<ClaudeResultStatus> {
+        if self.kind == ClaudeProviderEventKind::DeferredResult {
+            return Some(ClaudeResultStatus::Deferred);
+        }
+        if self.kind != ClaudeProviderEventKind::Result {
+            return None;
+        }
+        Some(claude_result_status_from_json(&self.raw_json))
+    }
+
     pub fn into_provider_event_draft(self, context: ProviderEventContext) -> ProviderEventDraft {
         let kind = claude_kind_to_provider_kind(self.kind);
-        let phase = claude_phase_for(self.kind);
+        let phase = claude_phase_for(self.kind, &self.raw_json);
         let provider_event_id = self
             .provider_event_id
             .clone()
             .or_else(|| self.provider_tool_use_id.clone())
             .or_else(|| self.provider_message_id.clone());
-        let provider_item_id = self
-            .provider_tool_use_id
-            .clone()
-            .or_else(|| self.provider_message_id.clone());
+        let provider_item_id = self.provider_tool_use_id.clone().or_else(|| {
+            self.provider_message_id.as_ref().map(|message_id| {
+                if self.kind == ClaudeProviderEventKind::Reasoning {
+                    format!(
+                        "{message_id}:reasoning:{}",
+                        self.content_block_index.unwrap_or_default()
+                    )
+                } else {
+                    message_id.clone()
+                }
+            })
+        });
         let body = if self.kind == ClaudeProviderEventKind::Hook {
             claude_hook_body(&self.raw_json).unwrap_or_default()
         } else {
@@ -472,6 +607,7 @@ impl ClaudeProviderEventDraft {
 pub struct ClaudeStreamParser {
     current_message_id: Option<String>,
     tool_use_by_block: BTreeMap<u64, ToolBlockState>,
+    reasoning_blocks: HashSet<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -525,6 +661,38 @@ impl ClaudeStreamParser {
         if claude_system_hook_event(value) {
             return ClaudeProviderEventKind::Hook;
         }
+        let top_type = string_at(value, &["type"]);
+        let subtype = string_at(value, &["subtype"]);
+        if top_type.as_deref() == Some("system") && subtype.as_deref() == Some("init") {
+            return ClaudeProviderEventKind::Initialization;
+        }
+        if top_type.as_deref() == Some("system") && subtype.as_deref() == Some("api_retry") {
+            return ClaudeProviderEventKind::ApiRetry;
+        }
+        if matches!(
+            (top_type.as_deref(), subtype.as_deref()),
+            (Some("prompt_suggestion"), _) | (Some("system"), Some("prompt_suggestion"))
+        ) {
+            return ClaudeProviderEventKind::PromptSuggestion;
+        }
+        if matches!(
+            top_type.as_deref(),
+            Some("rate_limit_event" | "rate_limit" | "context_limit")
+        ) {
+            return ClaudeProviderEventKind::RateLimit;
+        }
+        if top_type.as_deref() == Some("user") && deferred_tool_result(value).is_some() {
+            return ClaudeProviderEventKind::DeferredResult;
+        }
+        if top_type.as_deref() == Some("user") && message_has_block_type(value, "tool_result") {
+            return ClaudeProviderEventKind::ToolResult;
+        }
+        if top_type.as_deref() == Some("assistant")
+            && message_has_block_type(value, "thinking")
+            && !message_has_block_type(value, "text")
+        {
+            return ClaudeProviderEventKind::Reasoning;
+        }
         match string_at(value, &["type"]).as_deref() {
             Some("system") => ClaudeProviderEventKind::Session,
             Some("user") => ClaudeProviderEventKind::UserMessage,
@@ -542,24 +710,33 @@ impl ClaudeStreamParser {
                 Some("content_block_start") => {
                     match string_at(value, &["event", "content_block", "type"]).as_deref() {
                         Some("tool_use") => ClaudeProviderEventKind::ToolUse,
+                        Some("thinking") => ClaudeProviderEventKind::Reasoning,
                         _ => ClaudeProviderEventKind::ContentBlockStart,
                     }
                 }
                 Some("content_block_delta") => {
                     match string_at(value, &["event", "delta", "type"]).as_deref() {
                         Some("input_json_delta") => ClaudeProviderEventKind::ToolInputDelta,
+                        Some("thinking_delta") => ClaudeProviderEventKind::Reasoning,
                         _ => ClaudeProviderEventKind::ContentBlockDelta,
                     }
                 }
-                Some("content_block_stop") => ClaudeProviderEventKind::ContentBlockStop,
+                Some("content_block_stop") => {
+                    let index = number_at(value, &["event", "index"]);
+                    if index.is_some_and(|index| self.tool_use_by_block.contains_key(&index)) {
+                        ClaudeProviderEventKind::ToolResult
+                    } else if index.is_some_and(|index| self.reasoning_blocks.contains(&index)) {
+                        ClaudeProviderEventKind::Reasoning
+                    } else {
+                        ClaudeProviderEventKind::ContentBlockStop
+                    }
+                }
                 Some("error") => ClaudeProviderEventKind::Error,
                 _ => ClaudeProviderEventKind::Unknown,
             },
             Some("tool_result") => ClaudeProviderEventKind::ToolResult,
             Some("subagent") | Some("task") => ClaudeProviderEventKind::Subagent,
-            Some("usage") | Some("rate_limit") | Some("context_limit") => {
-                ClaudeProviderEventKind::Usage
-            }
+            Some("usage") => ClaudeProviderEventKind::Usage,
             _ => ClaudeProviderEventKind::Unknown,
         }
     }
@@ -569,8 +746,13 @@ impl ClaudeStreamParser {
             ClaudeProviderEventKind::MessageStart => {
                 draft.provider_message_id = string_at(&draft.raw_json, &["event", "message", "id"]);
                 self.current_message_id = draft.provider_message_id.clone();
+                self.tool_use_by_block.clear();
+                self.reasoning_blocks.clear();
             }
-            ClaudeProviderEventKind::AssistantMessage | ClaudeProviderEventKind::UserMessage => {
+            ClaudeProviderEventKind::AssistantMessage
+            | ClaudeProviderEventKind::UserMessage
+            | ClaudeProviderEventKind::ToolResult
+            | ClaudeProviderEventKind::DeferredResult => {
                 draft.provider_message_id = string_at(&draft.raw_json, &["message", "id"]);
             }
             _ => {
@@ -588,16 +770,71 @@ impl ClaudeStreamParser {
                 draft.provider_tool_use_id = state.id.clone();
                 draft.tool_name = state.name.clone();
                 self.tool_use_by_block.insert(index, state);
+            } else if draft.kind == ClaudeProviderEventKind::Reasoning
+                && string_at(&draft.raw_json, &["event", "type"]).as_deref()
+                    == Some("content_block_start")
+            {
+                self.reasoning_blocks.insert(index);
             } else if let Some(state) = self.tool_use_by_block.get(&index) {
                 draft.provider_tool_use_id = state.id.clone();
                 draft.tool_name = state.name.clone();
             }
         }
 
-        if draft.kind == ClaudeProviderEventKind::ToolInputDelta {
-            draft.content_delta = string_at(&draft.raw_json, &["event", "delta", "partial_json"]);
-        } else if draft.kind == ClaudeProviderEventKind::ContentBlockDelta {
-            draft.content_delta = string_at(&draft.raw_json, &["event", "delta", "text"]);
+        if matches!(
+            draft.kind,
+            ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult
+        ) {
+            let message_tool_use_id = draft
+                .raw_json
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .and_then(|content| {
+                    content.iter().find_map(|block| {
+                        (block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                            .then(|| {
+                                block
+                                    .get("tool_use_id")
+                                    .and_then(Value::as_str)
+                                    .map(ToOwned::to_owned)
+                            })
+                            .flatten()
+                    })
+                });
+            if message_tool_use_id.is_some() {
+                draft.provider_tool_use_id = message_tool_use_id;
+            }
+        }
+
+        draft.content_delta = match draft.kind {
+            ClaudeProviderEventKind::ToolInputDelta => {
+                string_at(&draft.raw_json, &["event", "delta", "partial_json"])
+            }
+            ClaudeProviderEventKind::ContentBlockDelta => {
+                string_at(&draft.raw_json, &["event", "delta", "text"])
+            }
+            ClaudeProviderEventKind::Reasoning => {
+                string_at(&draft.raw_json, &["event", "delta", "thinking"])
+                    .or_else(|| message_content_text(&draft.raw_json, "thinking", "thinking"))
+            }
+            ClaudeProviderEventKind::AssistantMessage => {
+                message_content_text(&draft.raw_json, "text", "text")
+            }
+            ClaudeProviderEventKind::UserMessage => {
+                message_content_text(&draft.raw_json, "text", "text")
+            }
+            ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult => {
+                message_content_text(&draft.raw_json, "tool_result", "content")
+            }
+            ClaudeProviderEventKind::Result => string_at(&draft.raw_json, &["result"]),
+            _ => None,
+        };
+
+        if string_at(&draft.raw_json, &["event", "type"]).as_deref() == Some("content_block_stop") {
+            if let Some(index) = draft.content_block_index {
+                self.tool_use_by_block.remove(&index);
+                self.reasoning_blocks.remove(&index);
+            }
         }
     }
 }
@@ -645,6 +882,91 @@ fn number_at(value: &Value, path: &[&str]) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
+fn string_array_at(value: &Value, path: &[&str]) -> Vec<String> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn message_content_text(value: &Value, block_type: &str, field: &str) -> Option<String> {
+    let text = value
+        .pointer("/message/content")?
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some(block_type))
+        .filter_map(|block| block.get(field).and_then(Value::as_str))
+        .collect::<String>();
+    (!text.is_empty()).then_some(text)
+}
+
+fn message_has_block_type(value: &Value, block_type: &str) -> bool {
+    value
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .is_some_and(|content| {
+            content
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some(block_type))
+        })
+}
+
+fn deferred_tool_result(value: &Value) -> Option<&Value> {
+    value
+        .get("tool_use_result")
+        .filter(|result| result.get("type").and_then(Value::as_str) == Some("tool_deferred"))
+}
+
+fn rate_limit_message(value: &Value) -> String {
+    let status = string_at(value, &["rate_limit_info", "status"])
+        .unwrap_or_else(|| "rate limited".to_owned());
+    let limit_type = string_at(value, &["rate_limit_info", "rateLimitType"]);
+    match limit_type {
+        Some(limit_type) => format!("Claude {limit_type} limit: {status}"),
+        None => format!("Claude rate limit: {status}"),
+    }
+}
+
+fn rate_limit_retry_after_ms(value: &Value) -> Option<u64> {
+    number_at(value, &["rate_limit_info", "retry_after_ms"])
+        .or_else(|| number_at(value, &["retry_after_ms"]))
+}
+
+fn rate_limit_is_terminal(value: &Value) -> bool {
+    !string_at(value, &["rate_limit_info", "status"])
+        .is_some_and(|status| status.contains("allowed"))
+}
+
+fn claude_result_status_from_json(value: &Value) -> ClaudeResultStatus {
+    let subtype = value
+        .get("subtype")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(subtype, "interrupted" | "cancelled" | "canceled") {
+        ClaudeResultStatus::Interrupted
+    } else if matches!(subtype, "declined" | "denied" | "rejected") {
+        ClaudeResultStatus::Declined
+    } else if matches!(subtype, "deferred" | "tool_deferred") {
+        ClaudeResultStatus::Deferred
+    } else if value
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || matches!(subtype, "error" | "failed" | "error_during_execution")
+    {
+        ClaudeResultStatus::Failed
+    } else {
+        ClaudeResultStatus::Success
+    }
+}
+
 fn claude_system_hook_event(value: &Value) -> bool {
     string_at(value, &["subtype"]).is_some_and(|subtype| subtype.starts_with("hook_"))
         || string_at(value, &["hook_event"]).is_some()
@@ -654,7 +976,9 @@ fn claude_system_hook_event(value: &Value) -> bool {
 
 fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventKind {
     match kind {
-        ClaudeProviderEventKind::Session => ProviderEventKind::ThreadSession,
+        ClaudeProviderEventKind::Initialization | ClaudeProviderEventKind::Session => {
+            ProviderEventKind::ThreadSession
+        }
         ClaudeProviderEventKind::UserMessage => ProviderEventKind::UserInput,
         ClaudeProviderEventKind::AssistantMessage
         | ClaudeProviderEventKind::MessageStart
@@ -669,33 +993,72 @@ fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventK
         ClaudeProviderEventKind::Permission => ProviderEventKind::ApprovalPermission,
         ClaudeProviderEventKind::Hook => ProviderEventKind::SkillPluginHook,
         ClaudeProviderEventKind::Subagent => ProviderEventKind::SubagentCollaboration,
-        ClaudeProviderEventKind::Usage | ClaudeProviderEventKind::Error => {
-            ProviderEventKind::LimitFailure
-        }
+        ClaudeProviderEventKind::Usage
+        | ClaudeProviderEventKind::ApiRetry
+        | ClaudeProviderEventKind::RateLimit
+        | ClaudeProviderEventKind::Error => ProviderEventKind::LimitFailure,
+        ClaudeProviderEventKind::PromptSuggestion => ProviderEventKind::GoalTask,
+        ClaudeProviderEventKind::Reasoning => ProviderEventKind::PlanningReasoning,
+        ClaudeProviderEventKind::DeferredResult => ProviderEventKind::Tool,
         ClaudeProviderEventKind::Result => ProviderEventKind::Turn,
         ClaudeProviderEventKind::Unknown => ProviderEventKind::Unknown,
     }
 }
 
-fn claude_phase_for(kind: ClaudeProviderEventKind) -> ProviderEventPhase {
+fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> ProviderEventPhase {
     match kind {
         ClaudeProviderEventKind::MessageStart
         | ClaudeProviderEventKind::ContentBlockStart
         | ClaudeProviderEventKind::ToolUse
+        | ClaudeProviderEventKind::Initialization
         | ClaudeProviderEventKind::Session
         | ClaudeProviderEventKind::UserMessage => ProviderEventPhase::Started,
         ClaudeProviderEventKind::MessageDelta
         | ClaudeProviderEventKind::ContentBlockDelta
         | ClaudeProviderEventKind::ToolInputDelta => ProviderEventPhase::Delta,
+        ClaudeProviderEventKind::Reasoning
+            if string_at(raw_json, &["event", "type"]).as_deref()
+                == Some("content_block_delta") =>
+        {
+            ProviderEventPhase::Delta
+        }
+        ClaudeProviderEventKind::Reasoning
+            if string_at(raw_json, &["event", "type"]).as_deref() == Some("content_block_stop") =>
+        {
+            ProviderEventPhase::Completed
+        }
+        ClaudeProviderEventKind::Reasoning
+            if string_at(raw_json, &["type"]).as_deref() == Some("assistant") =>
+        {
+            ProviderEventPhase::Completed
+        }
+        ClaudeProviderEventKind::Reasoning => ProviderEventPhase::Started,
         ClaudeProviderEventKind::Permission
         | ClaudeProviderEventKind::Hook
         | ClaudeProviderEventKind::Subagent
-        | ClaudeProviderEventKind::Usage => ProviderEventPhase::Progress,
+        | ClaudeProviderEventKind::Usage
+        | ClaudeProviderEventKind::ApiRetry
+        | ClaudeProviderEventKind::PromptSuggestion => ProviderEventPhase::Progress,
+        ClaudeProviderEventKind::RateLimit
+            if string_at(raw_json, &["rate_limit_info", "status"])
+                .is_some_and(|status| status.contains("allowed")) =>
+        {
+            ProviderEventPhase::Progress
+        }
+        ClaudeProviderEventKind::RateLimit => ProviderEventPhase::Failed,
         ClaudeProviderEventKind::MessageStop
         | ClaudeProviderEventKind::ContentBlockStop
         | ClaudeProviderEventKind::ToolResult
-        | ClaudeProviderEventKind::Result
         | ClaudeProviderEventKind::AssistantMessage => ProviderEventPhase::Completed,
+        ClaudeProviderEventKind::DeferredResult => ProviderEventPhase::Declined,
+        ClaudeProviderEventKind::Result => match claude_result_status_from_json(raw_json) {
+            ClaudeResultStatus::Success => ProviderEventPhase::Completed,
+            ClaudeResultStatus::Failed => ProviderEventPhase::Failed,
+            ClaudeResultStatus::Interrupted => ProviderEventPhase::Interrupted,
+            ClaudeResultStatus::Declined | ClaudeResultStatus::Deferred => {
+                ProviderEventPhase::Declined
+            }
+        },
         ClaudeProviderEventKind::Error => ProviderEventPhase::Failed,
         ClaudeProviderEventKind::Unknown => ProviderEventPhase::Unknown,
     }
@@ -718,7 +1081,13 @@ fn claude_title_for(kind: ClaudeProviderEventKind, tool_name: Option<&str>) -> S
         ClaudeProviderEventKind::Hook => "Hook".to_owned(),
         ClaudeProviderEventKind::Subagent => "Subagent".to_owned(),
         ClaudeProviderEventKind::Usage => "Usage".to_owned(),
+        ClaudeProviderEventKind::ApiRetry => "API retry".to_owned(),
+        ClaudeProviderEventKind::RateLimit => "Rate limit".to_owned(),
+        ClaudeProviderEventKind::PromptSuggestion => "Prompt suggestion".to_owned(),
+        ClaudeProviderEventKind::Reasoning => "Reasoning".to_owned(),
+        ClaudeProviderEventKind::DeferredResult => "Deferred tool".to_owned(),
         ClaudeProviderEventKind::Result => "Turn result".to_owned(),
+        ClaudeProviderEventKind::Initialization => "Session initialized".to_owned(),
         ClaudeProviderEventKind::Session => "Session".to_owned(),
         ClaudeProviderEventKind::Error => "Provider error".to_owned(),
         ClaudeProviderEventKind::Unknown => "Unknown provider event".to_owned(),
@@ -1123,6 +1492,296 @@ mod tests {
     }
 
     #[test]
+    fn claude_fixture_classifies_native_lifecycle_and_output_records() {
+        let basic = parse_claude_stream_json_lines(BASIC_TURN_FIXTURE).unwrap();
+        let tools = parse_claude_stream_json_lines(TOOLS_HOOKS_LIMITS_FIXTURE).unwrap();
+        let results = parse_claude_stream_json_lines(DEFERRED_AND_FAILED_RESULTS_FIXTURE).unwrap();
+
+        let init = basic
+            .iter()
+            .find(|event| event.raw_json["subtype"] == "init")
+            .unwrap();
+        assert!(matches!(
+            init.lifecycle_signal(),
+            Some(ClaudeLifecycleSignal::Initialized(ClaudeInitMetadata {
+                ref session_id,
+                ref model,
+                ref capabilities,
+            })) if session_id == "session_fixture_basic"
+                && model.as_deref() == Some("claude-sonnet-fixture")
+                && capabilities == &["streaming"]
+        ));
+
+        let rate_limit = tools
+            .iter()
+            .find(|event| event.raw_json["type"] == "rate_limit_event")
+            .unwrap();
+        let api_retry = tools
+            .iter()
+            .find(|event| event.raw_json["subtype"] == "api_retry")
+            .unwrap();
+        let deferred = results
+            .iter()
+            .find(|event| event.raw_json["tool_use_result"]["type"] == "tool_deferred")
+            .unwrap();
+        let final_assistant = basic
+            .iter()
+            .find(|event| event.kind == ClaudeProviderEventKind::AssistantMessage)
+            .unwrap();
+        let unknown = parse_claude_stream_json_lines(
+            r#"{"type":"future_record","session_id":"future-session","future_field":42}"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+
+        assert_eq!(rate_limit.kind, ClaudeProviderEventKind::RateLimit);
+        assert_eq!(api_retry.kind, ClaudeProviderEventKind::ApiRetry);
+        assert_eq!(deferred.result_status(), Some(ClaudeResultStatus::Deferred));
+        assert_eq!(
+            final_assistant.content_delta.as_deref(),
+            Some("Fixture complete.")
+        );
+        assert_eq!(unknown.raw_json["future_field"], 42);
+    }
+
+    #[test]
+    fn claude_fixture_adapter_emits_lossless_common_effects_for_every_record() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "fixture-input".to_owned(),
+                content: "Summarize the fixture.".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let mut provider_event_count = 0;
+        let mut all_effects = Vec::<HarnessEffect>::new();
+        for line in BASIC_TURN_FIXTURE
+            .lines()
+            .chain(TOOLS_HOOKS_LIMITS_FIXTURE.lines())
+            .chain(DEFERRED_AND_FAILED_RESULTS_FIXTURE.lines())
+        {
+            let effects = adapter
+                .observe_native(NativeRecord {
+                    provider_key: CLAUDE_PROVIDER_NAME,
+                    payload: format!("{line}\n").into_bytes(),
+                })
+                .unwrap();
+            provider_event_count += effects
+                .iter()
+                .filter(|effect| matches!(effect, HarnessEffect::ProviderEvent(_)))
+                .count();
+            all_effects.extend(effects);
+        }
+
+        assert_eq!(
+            provider_event_count,
+            BASIC_TURN_FIXTURE.lines().count()
+                + TOOLS_HOOKS_LIMITS_FIXTURE.lines().count()
+                + DEFERRED_AND_FAILED_RESULTS_FIXTURE.lines().count()
+        );
+        assert!(all_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::CapabilitiesObserved(capabilities)
+                if capabilities == &["streaming"]
+        )));
+        assert!(all_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::Retry {
+                delay_ms: Some(250),
+                ..
+            }
+        )));
+        assert!(all_effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::RateLimited { .. })));
+    }
+
+    #[test]
+    fn claude_fixture_replay_acknowledges_only_matching_pending_input() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "current-input".to_owned(),
+                content: "Current prompt".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let historic = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Historic prompt"}]}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+        assert!(!historic.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { .. } | HarnessEffect::TurnStarted { .. }
+        )));
+
+        let current = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Current prompt"}]}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+        assert!(current.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { local_input_id }
+                if local_input_id == "current-input"
+        )));
+    }
+
+    #[test]
+    fn claude_fixture_replay_acknowledges_matching_active_input() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "active-input".to_owned(),
+                content: "Active prompt".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"stream_event","session_id":"s1","event":{"type":"message_start","message":{"id":"m1"}}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        let replay = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Active prompt"}]}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(replay.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { local_input_id }
+                if local_input_id == "active-input"
+        )));
+        assert!(!replay
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::TurnStarted { .. })));
+    }
+
+    #[test]
+    fn claude_fixture_terminal_rate_limit_finishes_active_turn_once() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "limited-input".to_owned(),
+                content: "Trigger limit".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"stream_event","session_id":"s1","event":{"type":"message_start","message":{"id":"m1"}}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"rate_limit_event","session_id":"s1","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "limited-input"
+        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+    }
+
+    #[test]
+    fn claude_fixture_reasoning_stream_projects_one_canonical_reasoning_item() {
+        let native = r#"{"type":"stream_event","session_id":"s1","event":{"type":"message_start","message":{"id":"m1"}}}
+{"type":"stream_event","session_id":"s1","event":{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}}
+{"type":"stream_event","session_id":"s1","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Consider this"}}}
+{"type":"stream_event","session_id":"s1","event":{"type":"content_block_stop","index":1}}"#;
+        let events = parse_claude_stream_json_lines(native).unwrap();
+        let reasoning = events
+            .into_iter()
+            .skip(1)
+            .map(|event| {
+                event.into_provider_event_draft(ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: 1,
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        assert!(reasoning
+            .iter()
+            .all(|event| event.kind == ProviderEventKind::PlanningReasoning));
+        assert_eq!(reasoning[0].phase, ProviderEventPhase::Started);
+        assert_eq!(reasoning[1].phase, ProviderEventPhase::Delta);
+        assert_eq!(reasoning[2].phase, ProviderEventPhase::Completed);
+        assert!(reasoning
+            .windows(2)
+            .all(|pair| pair[0].provider_item_id == pair[1].provider_item_id));
+    }
+
+    #[test]
     fn claude_stream_contract_fixtures_have_required_native_field_shapes() {
         let basic = fixture_values("basic", BASIC_TURN_FIXTURE).unwrap();
         let tools = fixture_values("tools", TOOLS_HOOKS_LIMITS_FIXTURE).unwrap();
@@ -1270,25 +1929,24 @@ mod tests {
     }
 
     #[test]
-    fn capability_list_covers_required_claude_event_categories() {
+    fn capability_discovery_uses_contract_baseline_and_observed_init_values() {
         assert_eq!(
-            CLAUDE_ACTION_CAPABILITIES,
-            &[
-                ClaudeActionCapability::AuthSession,
-                ClaudeActionCapability::Messages,
-                ClaudeActionCapability::ContentBlockDeltasAndFinals,
-                ClaudeActionCapability::ToolUse,
-                ClaudeActionCapability::FileEdits,
-                ClaudeActionCapability::ShellCommands,
-                ClaudeActionCapability::Mcp,
-                ClaudeActionCapability::SkillsPluginsHooks,
-                ClaudeActionCapability::PermissionsUserQuestions,
-                ClaudeActionCapability::SubagentsTasks,
-                ClaudeActionCapability::UsageCostContextRateLimits,
-                ClaudeActionCapability::Errors,
-                ClaudeActionCapability::UnknownEvents,
-            ]
+            CLAUDE_MANAGED_HARNESS_DESCRIPTOR.required_features,
+            REQUIRED_HARNESS_FEATURES
         );
+        let init = parse_claude_stream_json_lines(
+            r#"{"type":"system","subtype":"init","session_id":"s1","capabilities":["streaming","future-capability"]}"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        assert!(matches!(
+            init.lifecycle_signal(),
+            Some(ClaudeLifecycleSignal::Initialized(ClaudeInitMetadata {
+                capabilities,
+                ..
+            })) if capabilities == ["streaming", "future-capability"]
+        ));
     }
 
     #[test]
@@ -1307,7 +1965,7 @@ mod tests {
         let events = parse_claude_stream_json_lines(input).unwrap();
 
         assert_eq!(events.len(), 10);
-        assert_eq!(events[0].kind, ClaudeProviderEventKind::Session);
+        assert_eq!(events[0].kind, ClaudeProviderEventKind::Initialization);
         assert_eq!(events[1].kind, ClaudeProviderEventKind::MessageStart);
         assert_eq!(events[3].kind, ClaudeProviderEventKind::ContentBlockDelta);
         assert_eq!(events[4].kind, ClaudeProviderEventKind::ToolUse);
