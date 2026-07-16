@@ -6,6 +6,7 @@ const TAB_ACTIVE_CLASS: &str = "ws-tab-active";
 
 pub(crate) fn standard_tab(label: &str) -> gtk::Button {
     let button = gtk::Button::new();
+    button.set_accessible_role(gtk::AccessibleRole::Tab);
     button.add_css_class(TAB_SHELL_CLASS);
     let label = gtk::Label::new(Some(label));
     label.add_css_class(TAB_LABEL_CLASS);
@@ -19,10 +20,12 @@ pub(crate) fn set_standard_tab_active(button: &gtk::Button, active: bool) {
     } else {
         button.remove_css_class(TAB_ACTIVE_CLASS);
     }
+    button.update_state(&[gtk::accessible::State::Selected(Some(active))]);
 }
 
 pub(crate) fn standard_tab_strip() -> (gtk::ScrolledWindow, gtk::Box) {
     let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    tabs.set_accessible_role(gtk::AccessibleRole::TabList);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     scroll.set_hexpand(true);

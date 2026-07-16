@@ -297,7 +297,7 @@ fn append_dashboard_column(
         empty.set_xalign(0.0);
         append_revealed(&column, &empty);
     } else {
-        for line in lines.iter().take(12) {
+        for line in lines {
             append_revealed(
                 &column,
                 &build_dashboard_card(line, store, open_workspace.clone()),

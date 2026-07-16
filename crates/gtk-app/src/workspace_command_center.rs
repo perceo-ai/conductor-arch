@@ -4017,8 +4017,8 @@ fn workspace_changes_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
-    _refresh_hub: RefreshHub,
-    _toast_overlay: ToastOverlay,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let header_row = GBox::new(Orientation::Horizontal, 8);
@@ -4103,6 +4103,11 @@ fn workspace_changes_panel(
     body_stack.set_visible_child_name(&selected_scope.stack_key);
     menu_btn.set_label(&selected_scope.menu_label);
     panel.append(&body_stack);
+    let scope_feedback = Label::new(None);
+    scope_feedback.add_css_class("status-text");
+    scope_feedback.set_xalign(0.0);
+    scope_feedback.set_wrap(true);
+    panel.append(&scope_feedback);
 
     let popover = gtk::Popover::new();
     popover.add_css_class("context-menu-popover");
@@ -4117,6 +4122,9 @@ fn workspace_changes_panel(
         let popover_for_item = popover.clone();
         let db_path_for_item = db_path.to_path_buf();
         let workspace_name_for_item = name.to_owned();
+        let feedback_for_item = scope_feedback.clone();
+        let toast_for_item = toast_overlay.clone();
+        let refresh_for_item = refresh_hub.clone();
         item.connect_clicked(move |_| {
             body_stack_for_item.set_visible_child_name(&scope_item.stack_key);
             menu_btn_for_item.set_label(&scope_item.menu_label);
@@ -4126,7 +4134,11 @@ fn workspace_changes_panel(
                     Some(&scope_item.persisted_scope),
                 )
             }) {
-                error!("persist workspace changes scope failed: {err:#}");
+                let message = format!("Could not save changes scope: {err:#}");
+                error!("{message}");
+                apply_action_feedback(&feedback_for_item, &toast_for_item, &message, true);
+            } else {
+                refresh_for_item.refresh(RefreshScope::Workspace);
             }
             popover_for_item.popdown();
         });

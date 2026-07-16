@@ -1946,7 +1946,11 @@ fn render_manual_session_command(launch: &SessionLaunch) -> String {
         let env = launch
             .env
             .iter()
-            .filter_map(|(key, value)| value.to_str().map(|value| format!("set \"{key}={value}\"")))
+            .filter_map(|(key, value)| {
+                value
+                    .to_str()
+                    .map(|value| format!("set \"{key}={}\"", escape_cmd_set_value(value)))
+            })
             .collect::<Vec<_>>();
         let mut parts = env;
         parts.push(format!(
@@ -2336,6 +2340,11 @@ fn quote_shell_word(value: &str) -> String {
         }
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
+}
+
+#[cfg(windows)]
+fn escape_cmd_set_value(value: &str) -> String {
+    value.replace('"', "^\"")
 }
 
 fn escape_applescript_string(value: &str) -> String {

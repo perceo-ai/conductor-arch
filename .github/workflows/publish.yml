@@ -240,9 +240,6 @@ jobs:
       - name: Build Windows binaries
         run: cargo build --workspace --release --target x86_64-pc-windows-gnu --locked
 
-      - name: Smoke Windows CLI
-        run: .\target\x86_64-pc-windows-gnu\release\archductor.exe doctor
-
       - name: Assemble portable Windows bundle
         shell: pwsh
         env:
@@ -263,6 +260,17 @@ jobs:
           Copy-Item C:\msys64\ucrt64\share\glib-2.0 "$bundle\share" -Recurse
           Copy-Item C:\msys64\ucrt64\share\icons "$bundle\share" -Recurse
           Copy-Item C:\msys64\ucrt64\share\mime "$bundle\share" -Recurse
+          $originalPath = $env:PATH
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and ($_ -notlike 'C:\msys64\ucrt64\bin*')
+          }) -join ';'
+          try {
+            Push-Location $bundle
+            .\archductor.exe doctor
+          } finally {
+            Pop-Location
+            $env:PATH = $originalPath
+          }
           Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip"
           $archive = Get-Item "$bundle.zip"
           $hash = (Get-FileHash -Algorithm SHA256 $archive.FullName).Hash.ToLowerInvariant()

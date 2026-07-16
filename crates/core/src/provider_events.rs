@@ -613,20 +613,24 @@ impl ProviderEventStore {
             })
             .map(provider_turn_recovery_key)
             .collect::<std::collections::HashSet<_>>();
-        let active_turns = events
-            .into_iter()
-            .filter(|event| {
-                event.kind == ProviderEventKind::Turn
-                    && matches!(
-                        event.phase,
-                        ProviderEventPhase::Started
-                            | ProviderEventPhase::Delta
-                            | ProviderEventPhase::Progress
-                            | ProviderEventPhase::Unknown
-                    )
-                    && !terminal_turns.contains(&provider_turn_recovery_key(event))
-            })
-            .collect::<Vec<_>>();
+        let mut active_turns_by_key =
+            std::collections::HashMap::<String, ProviderEventRecord>::new();
+        for event in events.into_iter().filter(|event| {
+            event.kind == ProviderEventKind::Turn
+                && matches!(
+                    event.phase,
+                    ProviderEventPhase::Started
+                        | ProviderEventPhase::Delta
+                        | ProviderEventPhase::Progress
+                        | ProviderEventPhase::Unknown
+                )
+                && !terminal_turns.contains(&provider_turn_recovery_key(event))
+        }) {
+            active_turns_by_key
+                .entry(provider_turn_recovery_key(&event))
+                .or_insert(event);
+        }
+        let active_turns = active_turns_by_key.into_values().collect::<Vec<_>>();
 
         for event in &active_turns {
             let mut normalized_payload = event.normalized_payload.clone();
@@ -721,13 +725,18 @@ impl ProviderEventStore {
 }
 
 fn provider_turn_recovery_key(event: &ProviderEventRecord) -> String {
-    event
-        .provider_item_id
-        .as_ref()
-        .or(event.provider_turn_id.as_ref())
-        .or(event.provider_event_id.as_ref())
-        .cloned()
-        .unwrap_or_else(|| event.identity_key.clone())
+    let provider = event.provider.as_str();
+    let thread = event.provider_thread_id.as_deref().unwrap_or("-");
+    if let Some(item_id) = event.provider_item_id.as_deref() {
+        return format!("{provider}:thread:{thread}:item:{item_id}");
+    }
+    if let Some(turn_id) = event.provider_turn_id.as_deref() {
+        return format!("{provider}:thread:{thread}:turn:{turn_id}");
+    }
+    if let Some(event_id) = event.provider_event_id.as_deref() {
+        return format!("{provider}:thread:{thread}:event:{event_id}");
+    }
+    format!("{provider}:identity:{}", event.identity_key)
 }
 
 pub fn project_timeline(events: Vec<ProviderEventRecord>) -> Vec<ProviderTimelineItem> {

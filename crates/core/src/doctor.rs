@@ -207,7 +207,7 @@ fn install_command(id: Option<&str>, like: &[String]) -> Option<&'static str> {
     let matches = |needle: &str| id == Some(needle) || like.iter().any(|item| item == needle);
 
     if matches("windows") {
-        Some("winget install --id Git.Git --id GitHub.cli")
+        Some("winget install Git.Git GitHub.cli")
     } else if matches("ubuntu") || matches("debian") {
         Some("sudo apt update && sudo apt install git gh sqlite3 openssh-client")
     } else if matches("fedora") {
@@ -484,7 +484,7 @@ ID_LIKE=arch
         let report = report_from_os_release("ID=windows");
         assert_eq!(
             report.install_command,
-            Some("winget install --id Git.Git --id GitHub.cli")
+            Some("winget install Git.Git GitHub.cli")
         );
     }
 

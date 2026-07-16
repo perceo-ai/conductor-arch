@@ -2328,6 +2328,7 @@ button.chat-inline-event-chip:checked {
     opacity: 0;
 }
 .chat-queued-composer-row:hover .chat-queued-actions,
+.chat-queued-composer-row:focus-within .chat-queued-actions,
 .chat-queued-actions:hover {
     opacity: 1;
 }

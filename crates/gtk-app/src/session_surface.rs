@@ -789,6 +789,7 @@ pub fn agent_session_panel(
     let refresh_queue_overlay_fn: Rc<dyn Fn()> = Rc::new({
         let queue_overlay = queue_overlay.clone();
         let selected_thread = selected_thread.clone();
+        let selected_harness = selected_harness.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let buffer = buffer.clone();
         let send_immediate_after_ready_queue = send_immediate_after_ready_queue.clone();
@@ -797,8 +798,11 @@ pub fn agent_session_panel(
         let last_queue_overlay_signature = last_queue_overlay_signature.clone();
         move || {
             let thread_id = *selected_thread.borrow();
-            let queued_items =
-                queued_composer_overlay_items_for_thread(&queued_chat_inputs, thread_id);
+            let queued_items = queued_composer_overlay_items_for_thread(
+                &queued_chat_inputs,
+                thread_id,
+                *selected_harness.borrow(),
+            );
             let signature = QueueOverlaySignature {
                 thread_id,
                 items: queued_items.clone(),
@@ -2615,7 +2619,8 @@ pub fn agent_session_panel(
                 queued_count,
                 codex_waiting_for_startup,
             );
-            match composer_action_for_submit_intent(action, intent, has_text) {
+            let selected_kind = *selected_harness.borrow();
+            match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
                 ComposerAction::Queue => {
                     let Some(thread_id) = thread_id else {
                         buffer.set_text("");
@@ -2664,7 +2669,9 @@ pub fn agent_session_panel(
                 ComposerAction::Send => {
                     if has_text {
                         buffer.set_text("");
-                        if intent == ComposerSubmitIntent::Immediate {
+                        if intent == ComposerSubmitIntent::Immediate
+                            && selected_kind == SessionKind::Codex
+                        {
                             if !send_immediate_input(command.clone(), false) {
                                 (send_text)(command, false);
                             }
@@ -6363,6 +6370,7 @@ fn queued_chat_inputs_count(
 fn queued_composer_overlay_items_for_thread(
     pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     thread_id: Option<i64>,
+    selected_kind: SessionKind,
 ) -> Vec<QueuedComposerItem> {
     let Some(thread_id) = thread_id else {
         return Vec::new();
@@ -6372,14 +6380,16 @@ fn queued_composer_overlay_items_for_thread(
         .get(&thread_id)
         .into_iter()
         .flat_map(|items| items.iter().enumerate())
-        .map(|(index, input)| QueuedComposerItem {
-            index,
-            preview: truncate_queue_preview(&queued_archcar_input_visible_text(input)),
-            actions: vec![
-                QueuedComposerAction::Delete,
-                QueuedComposerAction::Edit,
-                QueuedComposerAction::SendImmediately,
-            ],
+        .map(|(index, input)| {
+            let mut actions = vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit];
+            if selected_kind == SessionKind::Codex {
+                actions.push(QueuedComposerAction::SendImmediately);
+            }
+            QueuedComposerItem {
+                index,
+                preview: truncate_queue_preview(&queued_archcar_input_visible_text(input)),
+                actions,
+            }
         })
         .collect()
 }
@@ -6544,9 +6554,11 @@ fn composer_action_for_submit_intent(
     action: ComposerAction,
     intent: ComposerSubmitIntent,
     has_text: bool,
+    selected_kind: SessionKind,
 ) -> ComposerAction {
     if has_text
         && intent == ComposerSubmitIntent::Immediate
+        && selected_kind == SessionKind::Codex
         && matches!(action, ComposerAction::Queue | ComposerAction::SendQueued)
     {
         ComposerAction::Send
@@ -9914,6 +9926,7 @@ fix it
                 ComposerAction::Queue,
                 ComposerSubmitIntent::Default,
                 true,
+                SessionKind::Codex,
             ),
             ComposerAction::Queue
         );
@@ -9922,6 +9935,7 @@ fix it
                 ComposerAction::Queue,
                 ComposerSubmitIntent::Immediate,
                 true,
+                SessionKind::Codex,
             ),
             ComposerAction::Send
         );
@@ -9930,6 +9944,7 @@ fix it
                 ComposerAction::SendQueued,
                 ComposerSubmitIntent::Immediate,
                 true,
+                SessionKind::Codex,
             ),
             ComposerAction::Send
         );
@@ -9938,8 +9953,18 @@ fix it
                 ComposerAction::SendQueued,
                 ComposerSubmitIntent::Immediate,
                 false,
+                SessionKind::Codex,
             ),
             ComposerAction::SendQueued
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Claude,
+            ),
+            ComposerAction::Queue
         );
     }
 
@@ -10085,13 +10110,19 @@ fix it
             ArchcarInputKind::User,
         );
 
-        let items = queued_composer_overlay_items_for_thread(&pending, Some(7));
+        let items = queued_composer_overlay_items_for_thread(&pending, Some(7), SessionKind::Codex);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].preview, "first follow-up");
         assert!(items[0].actions.contains(&QueuedComposerAction::Delete));
         assert!(items[0].actions.contains(&QueuedComposerAction::Edit));
         assert!(items[0]
+            .actions
+            .contains(&QueuedComposerAction::SendImmediately));
+
+        let claude_items =
+            queued_composer_overlay_items_for_thread(&pending, Some(7), SessionKind::Claude);
+        assert!(!claude_items[0]
             .actions
             .contains(&QueuedComposerAction::SendImmediately));
     }

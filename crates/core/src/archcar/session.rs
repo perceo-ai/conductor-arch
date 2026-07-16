@@ -1722,6 +1722,7 @@ fn run_codex_app_server_session_loop(
                                     );
                                 }
                                 CodexInputResponseAction::ReportError => {
+                                    mark_snapshot_running_not_ready(&snapshot);
                                     let _ = event_tx.send(ArchcarEvent::SessionError {
                                         session_id: Some(started.session_id),
                                         thread_id: Some(started.thread_id),
@@ -1769,9 +1770,23 @@ fn run_codex_app_server_session_loop(
                     kind,
                     delivery,
                 } => {
-                    let first_turn = kind != ArchcarInputKind::ControlCommand
-                        && durable_thread_is_first_user_turn(&db_path, started.thread_id)
-                            .unwrap_or(false);
+                    let first_turn = if kind == ArchcarInputKind::ControlCommand {
+                        false
+                    } else {
+                        match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
+                            Ok(first_turn) => first_turn,
+                            Err(err) => {
+                                let _ = event_tx.send(ArchcarEvent::SessionError {
+                                    session_id: Some(started.session_id),
+                                    thread_id: Some(started.thread_id),
+                                    message: format!(
+                                        "Could not prepare Codex input history: {err:#}"
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
+                    };
                     let provider_input =
                         compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
                     let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
@@ -2022,9 +2037,23 @@ fn run_claude_stream_session_loop(
                     kind,
                     delivery: _,
                 } => {
-                    let first_turn = kind != ArchcarInputKind::ControlCommand
-                        && durable_thread_is_first_user_turn(&db_path, started.thread_id)
-                            .unwrap_or(false);
+                    let first_turn = if kind == ArchcarInputKind::ControlCommand {
+                        false
+                    } else {
+                        match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
+                            Ok(first_turn) => first_turn,
+                            Err(err) => {
+                                let _ = event_tx.send(ArchcarEvent::SessionError {
+                                    session_id: Some(started.session_id),
+                                    thread_id: Some(started.thread_id),
+                                    message: format!(
+                                        "Could not prepare Claude input history: {err:#}"
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
+                    };
                     let provider_input =
                         compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
                     let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
@@ -2403,6 +2432,14 @@ fn mark_snapshot_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
     if let Ok(mut state) = snapshot.lock() {
         state.ready = true;
         state.runtime_state = AgentSessionState::WaitingForInput;
+    }
+}
+
+fn mark_snapshot_running_not_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.status = ProcessStatus::Running;
+        state.ready = false;
+        state.runtime_state = AgentSessionState::Running;
     }
 }
 

@@ -1587,6 +1587,13 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
         {
             return;
         }
+        if std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", "start", "cmd.exe", "/K", &full_cmd])
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
         eprintln!("Windows Terminal was not found. Run manually:\n  {cmd}");
     }
 

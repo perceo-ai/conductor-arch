@@ -493,6 +493,19 @@ for raw in sys.stdin:
     assert!(visible_messages
         .iter()
         .all(|message| !message.content.contains("Keep changes focused.")));
+    let second_session = store
+        .list_sessions("berlin")
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id != first_session)
+        .unwrap()
+        .id;
+    app(temp.path())
+        .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
+        .args(["archcar", "kill", &second_session.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), second_session);
 }
 
 #[test]
