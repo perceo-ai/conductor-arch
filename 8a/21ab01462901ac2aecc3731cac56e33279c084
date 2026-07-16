@@ -1,0 +1,30 @@
+crates/core/tests/fixtures/claude_stream/basic_turn.jsonl
+  s_6e395f0089c433::t_fc7f44861b6f0f 1-11
+crates/core/src/provider_adapters/claude_stream.rs
+  s_6e395f0089c433::t_b921fca817a566 73,95,228,234-245,260-262,277
+  s_6e395f0089c433::t_fc7f44861b6f0f 772-878,880,882,884-885,916
+  s_6e395f0089c433::t_a22011279d76a2 879,881,883,917
+crates/core/src/archcar/session.rs
+  s_6e395f0089c433::t_b921fca817a566 19-21,24-26,673,679,1928-1938,1989,1991-1997,1999-2009,2019
+  s_6e395f0089c433::t_dfc2b0f2c11146 3009,3020
+crates/core/tests/fixtures/claude_stream/deferred_and_failed_results.jsonl
+  s_6e395f0089c433::t_fc7f44861b6f0f 1-4
+crates/core/tests/fixtures/claude_stream/tools_hooks_limits.jsonl
+  s_6e395f0089c433::t_fc7f44861b6f0f 1-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8a21ab01462901ac2aecc3731cac56e33279c084",
+  "prompts": {},
+  "sessions": {
+    "s_6e395f0089c433": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6497-4ab3-7392-9dba-ed216eb78dd7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
