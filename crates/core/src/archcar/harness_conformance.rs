@@ -3,7 +3,9 @@ use super::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessEffect, HarnessInput,
     NativeRecord, SupportMode, REQUIRED_HARNESS_FEATURES,
 };
-use super::protocol::{ArchcarInputDelivery, ArchcarInputKind};
+use super::protocol::{
+    session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,
+};
 use crate::workspace::SessionKind;
 use serde_json::Value;
 
@@ -32,6 +34,29 @@ fn optional_goal_support_is_explicit() {
         claude.descriptor().optional(HarnessCapability::Goals),
         SupportMode::Unsupported { .. }
     ));
+}
+
+#[test]
+fn capability_snapshots_include_required_baseline_for_managed_providers() {
+    for kind in [SessionKind::Codex, SessionKind::Claude] {
+        let harness = managed_harness_for_kind(kind).expect("managed harness");
+        let capabilities = session_harness_capabilities_for_descriptor(
+            harness.descriptor(),
+            vec!["native-extra".to_owned()],
+        );
+        let required = REQUIRED_HARNESS_FEATURES
+            .iter()
+            .map(|feature| feature.as_str().to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(capabilities.contract_version, 1);
+        assert_eq!(capabilities.required, required);
+        assert_eq!(capabilities.observed_native, vec!["native-extra"]);
+        assert_eq!(
+            capabilities.optional.len(),
+            harness.descriptor().optional_capabilities.len()
+        );
+    }
 }
 
 #[test]

@@ -24,6 +24,28 @@ pub enum RequiredHarnessFeature {
     CapabilityDiscovery,
 }
 
+impl RequiredHarnessFeature {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequiredHarnessFeature::Preflight => "preflight",
+            RequiredHarnessFeature::ThreadScopedSession => "thread_scoped_session",
+            RequiredHarnessFeature::ProcessLifecycle => "process_lifecycle",
+            RequiredHarnessFeature::InputDelivery => "input_delivery",
+            RequiredHarnessFeature::InputAcknowledgement => "input_acknowledgement",
+            RequiredHarnessFeature::StreamingEvents => "streaming_events",
+            RequiredHarnessFeature::ExactlyOnceTurnCompletion => "exactly_once_turn_completion",
+            RequiredHarnessFeature::Queueing => "queueing",
+            RequiredHarnessFeature::Interrupt => "interrupt",
+            RequiredHarnessFeature::Resume => "resume",
+            RequiredHarnessFeature::CrashRecovery => "crash_recovery",
+            RequiredHarnessFeature::SessionControls => "session_controls",
+            RequiredHarnessFeature::ProviderInteractions => "provider_interactions",
+            RequiredHarnessFeature::StructuredErrors => "structured_errors",
+            RequiredHarnessFeature::CapabilityDiscovery => "capability_discovery",
+        }
+    }
+}
+
 pub const REQUIRED_HARNESS_FEATURES: &[RequiredHarnessFeature] = &[
     RequiredHarnessFeature::Preflight,
     RequiredHarnessFeature::ThreadScopedSession,
@@ -48,12 +70,39 @@ pub enum HarnessCapability {
     NativeSlashCommands,
 }
 
+impl HarnessCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessCapability::Goals => "goals",
+            HarnessCapability::NativeSlashCommands => "native_slash_commands",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupportMode {
     Native,
     RestartRequired,
     Emulated,
     Unsupported { reason: &'static str },
+}
+
+impl SupportMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SupportMode::Native => "native",
+            SupportMode::RestartRequired => "restart_required",
+            SupportMode::Emulated => "emulated",
+            SupportMode::Unsupported { .. } => "unsupported",
+        }
+    }
+
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            SupportMode::Unsupported { reason } => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

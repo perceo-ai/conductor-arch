@@ -359,6 +359,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         status: snapshot.status.as_str().to_owned(),
                         runtime_state: snapshot.runtime_state,
                         ready: snapshot.ready,
+                        capabilities: snapshot.capabilities,
                     }
                 }
                 Ok(None) => ArchcarResponse::Error {
@@ -1168,6 +1169,13 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
                 thread_id: snapshot.thread_id,
             });
         }
+        if let Some(capabilities) = snapshot.capabilities {
+            let _ = subscriber.send(ArchcarEvent::SessionCapabilitiesChanged {
+                session_id: snapshot.session_id,
+                thread_id: snapshot.thread_id,
+                capabilities,
+            });
+        }
     }
 }
 
@@ -1512,6 +1520,7 @@ mod tests {
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
+            capabilities: None,
             screen: String::new(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
@@ -1563,6 +1572,7 @@ mod tests {
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
+            capabilities: None,
             screen: String::new(),
         };
         let starting_snapshot = crate::archcar::session::SessionSnapshot {
@@ -1574,6 +1584,7 @@ mod tests {
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Starting,
             ready: false,
+            capabilities: None,
             screen: String::new(),
         };
         let (ready_tx, _ready_rx) = mpsc::channel();
@@ -1666,6 +1677,7 @@ mod tests {
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Running,
             ready: false,
+            capabilities: None,
             screen: String::new(),
         };
         let (command_tx, command_rx) = mpsc::channel();
@@ -1743,6 +1755,7 @@ mod tests {
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
+            capabilities: None,
             screen: String::new(),
         };
         let (command_tx, _command_rx) = mpsc::channel();

@@ -48,7 +48,8 @@ pub fn workspace_mcp_status_with_settings(
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("claude");
     let codex_authenticated = is_codex_auth_present(codex_provider.as_deref());
-    let claude_authenticated = is_claude_auth_present(claude_provider.as_deref());
+    let claude_authenticated =
+        is_claude_auth_present(claude_provider.as_deref(), claude_executable);
     let cursor_authenticated = is_file_non_empty(home.join(".cursor/mcp.json").as_path());
 
     McpStatus {
@@ -99,7 +100,7 @@ fn is_codex_auth_present(provider: Option<&str>) -> bool {
     }
 }
 
-fn is_claude_auth_present(provider: Option<&str>) -> bool {
+fn is_claude_auth_present(provider: Option<&str>, executable: &str) -> bool {
     let configured_anthropic = provider
         .map(|value| {
             value.to_ascii_lowercase().contains("anthropic")
@@ -108,6 +109,7 @@ fn is_claude_auth_present(provider: Option<&str>) -> bool {
         .unwrap_or(true);
     if configured_anthropic {
         std::env::var_os("ANTHROPIC_API_KEY").is_some()
+            || crate::doctor::claude_cli_status_for_command(executable).authenticated
     } else {
         false
     }

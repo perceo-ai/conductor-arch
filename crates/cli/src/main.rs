@@ -1457,6 +1457,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             status,
             runtime_state,
             ready,
+            capabilities,
         } => {
             println!(
                 "session {} status={} state={} ready={}",
@@ -1465,6 +1466,15 @@ fn print_archcar_response(response: ArchcarResponse) {
                 runtime_state.as_str(),
                 ready
             );
+            if let Some(capabilities) = capabilities {
+                println!(
+                    "capabilities contract={} required={} optional={} observed_native={}",
+                    capabilities.contract_version,
+                    capabilities.required.len(),
+                    capabilities.optional.len(),
+                    capabilities.observed_native.len()
+                );
+            }
         }
         ArchcarResponse::SessionScreen { screen, .. } => print!("{screen}"),
         ArchcarResponse::SessionMessages { messages, .. } => {

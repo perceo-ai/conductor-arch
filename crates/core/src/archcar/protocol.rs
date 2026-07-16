@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::archcar::harness_contract::HarnessDescriptor;
 use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::session_state::AgentSessionState;
 use crate::workspace::{SessionHarnessOptions, SessionKind};
@@ -115,6 +116,8 @@ pub enum ArchcarResponse {
         status: String,
         runtime_state: AgentSessionState,
         ready: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<SessionHarnessCapabilities>,
     },
     SessionScreen {
         session_id: i64,
@@ -127,6 +130,46 @@ pub enum ArchcarResponse {
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionHarnessCapabilities {
+    pub contract_version: u16,
+    pub required: Vec<String>,
+    pub optional: Vec<SessionCapabilitySupport>,
+    pub observed_native: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionCapabilitySupport {
+    pub name: String,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+pub fn session_harness_capabilities_for_descriptor(
+    descriptor: &HarnessDescriptor,
+    observed_native: Vec<String>,
+) -> SessionHarnessCapabilities {
+    SessionHarnessCapabilities {
+        contract_version: descriptor.contract_version,
+        required: descriptor
+            .required_features
+            .iter()
+            .map(|feature| feature.as_str().to_owned())
+            .collect(),
+        optional: descriptor
+            .optional_capabilities
+            .iter()
+            .map(|(capability, support)| SessionCapabilitySupport {
+                name: capability.as_str().to_owned(),
+                mode: support.as_str().to_owned(),
+                reason: support.reason().map(str::to_owned),
+            })
+            .collect(),
+        observed_native,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +282,7 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             status,
             runtime_state,
             ready,
+            capabilities: _,
         } => format!(
             "session_status session_id={session_id} status={status} state={} ready={ready}",
             runtime_state.as_str()
@@ -277,6 +321,16 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             session_id,
             thread_id,
         } => format!("session_ready session_id={session_id} thread_id={thread_id}"),
+        ArchcarEvent::SessionCapabilitiesChanged {
+            session_id,
+            thread_id,
+            capabilities,
+        } => format!(
+            "session_capabilities_changed session_id={session_id} thread_id={thread_id} required={} optional={} observed_native={}",
+            capabilities.required.len(),
+            capabilities.optional.len(),
+            capabilities.observed_native.len()
+        ),
         ArchcarEvent::TurnCompleted {
             session_id,
             thread_id,
@@ -339,6 +393,11 @@ pub enum ArchcarEvent {
     SessionReady {
         session_id: i64,
         thread_id: i64,
+    },
+    SessionCapabilitiesChanged {
+        session_id: i64,
+        thread_id: i64,
+        capabilities: SessionHarnessCapabilities,
     },
     TurnCompleted {
         session_id: i64,
@@ -591,17 +650,52 @@ mod tests {
     }
 
     #[test]
+    fn session_capabilities_event_serializes_descriptor_payload() {
+        let capabilities = SessionHarnessCapabilities {
+            contract_version: 1,
+            required: vec!["preflight".to_owned(), "streaming_events".to_owned()],
+            optional: vec![SessionCapabilitySupport {
+                name: "goals".to_owned(),
+                mode: "native".to_owned(),
+                reason: None,
+            }],
+            observed_native: vec!["streaming".to_owned()],
+        };
+        let event = ArchcarEvent::SessionCapabilitiesChanged {
+            session_id: 11,
+            thread_id: 5,
+            capabilities: capabilities.clone(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"session_capabilities_changed\""));
+        assert!(json.contains("\"observed_native\":[\"streaming\"]"));
+        assert_eq!(serde_json::from_str::<ArchcarEvent>(&json).unwrap(), event);
+        assert_eq!(
+            archcar_event_summary(&event),
+            "session_capabilities_changed session_id=11 thread_id=5 required=2 optional=1 observed_native=1"
+        );
+    }
+
+    #[test]
     fn session_status_response_carries_typed_runtime_state() {
         let response = ArchcarResponse::SessionStatus {
             session_id: 11,
             status: "running".to_owned(),
             ready: false,
             runtime_state: crate::session_state::AgentSessionState::ToolRunning,
+            capabilities: Some(SessionHarnessCapabilities {
+                contract_version: 1,
+                required: vec!["preflight".to_owned()],
+                optional: Vec::new(),
+                observed_native: Vec::new(),
+            }),
         };
 
         let encoded = serde_json::to_string(&response).unwrap();
 
         assert!(encoded.contains("\"runtime_state\":\"tool_running\""));
+        assert!(encoded.contains("\"capabilities\""));
         assert_eq!(
             archcar_response_summary(&response),
             "session_status session_id=11 status=running state=tool_running ready=false"

@@ -46,6 +46,15 @@ pub struct SetupCheck {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCliStatus {
+    pub installed: bool,
+    pub authenticated: bool,
+    pub version: Option<(u16, u16, u16)>,
+    pub supported: bool,
+    pub detail: String,
+}
+
 impl SetupCheck {
     pub fn missing(detail: impl Into<String>) -> Self {
         Self {
@@ -292,10 +301,137 @@ fn gh_status_has_active_github_account(stdout: &[u8]) -> bool {
 }
 
 fn provider_readiness(provider: &str) -> SetupCheck {
+    if provider == "claude" {
+        return setup_check_from_claude_status(claude_cli_status_from_host());
+    }
     let Some(tool) = tool_by_provider(provider) else {
         return SetupCheck::missing(format!("Install {provider}."));
     };
     readiness_for_tool(tool)
+}
+
+fn setup_check_from_claude_status(status: ClaudeCliStatus) -> SetupCheck {
+    if !status.installed {
+        SetupCheck::missing(status.detail)
+    } else if status.authenticated && status.supported {
+        SetupCheck::ready(status.detail)
+    } else {
+        SetupCheck::blocked(status.detail)
+    }
+}
+
+pub fn claude_cli_status_from_host() -> ClaudeCliStatus {
+    claude_cli_status_for_command("claude")
+}
+
+pub fn claude_cli_status_for_command(command: &str) -> ClaudeCliStatus {
+    if !Path::new(command).exists() && !command_exists(command) {
+        return ClaudeCliStatus {
+            installed: false,
+            authenticated: false,
+            version: None,
+            supported: false,
+            detail: "Install Claude Code.".to_owned(),
+        };
+    }
+
+    let version = command_output(command, &["--version"])
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|stdout| parse_claude_version(&stdout));
+    let supported = version.map(claude_version_supported).unwrap_or(true);
+
+    if !supported {
+        return ClaudeCliStatus {
+            installed: true,
+            authenticated: false,
+            version,
+            supported: false,
+            detail: version
+                .map(|version| {
+                    format!(
+                        "Upgrade Claude Code; found {}.{}.{} and need 2.1.89 or newer.",
+                        version.0, version.1, version.2
+                    )
+                })
+                .unwrap_or_else(|| "Upgrade Claude Code to 2.1.89 or newer.".to_owned()),
+        };
+    }
+
+    let auth_output = command_output(command, &["auth", "status"]);
+    let auth_status = auth_output
+        .as_ref()
+        .map(|output| {
+            parse_claude_auth_status(
+                &String::from_utf8_lossy(&output.stdout),
+                output.status.success(),
+            )
+        })
+        .unwrap_or_else(|| parse_claude_auth_status("", false));
+
+    ClaudeCliStatus {
+        installed: true,
+        authenticated: auth_status.authenticated,
+        version,
+        supported,
+        detail: if auth_status.authenticated {
+            match version {
+                Some((major, minor, patch)) => {
+                    format!("Claude Code {major}.{minor}.{patch} is authenticated.")
+                }
+                None => "Claude Code is authenticated.".to_owned(),
+            }
+        } else {
+            "Run `claude auth login`.".to_owned()
+        },
+    }
+}
+
+fn parse_claude_version(input: &str) -> Option<(u16, u16, u16)> {
+    input
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .filter(|candidate| candidate.matches('.').count() >= 2)
+        .find_map(|candidate| {
+            let parts = candidate
+                .split('.')
+                .take(3)
+                .map(str::parse::<u16>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            (parts.len() == 3).then(|| (parts[0], parts[1], parts[2]))
+        })
+}
+
+fn claude_version_supported(version: (u16, u16, u16)) -> bool {
+    version >= (2, 1, 89)
+}
+
+fn parse_claude_auth_status(output: &str, command_succeeded: bool) -> ClaudeCliStatus {
+    let parsed_authenticated = serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("authenticated")
+                .and_then(serde_json::Value::as_bool)
+                .or_else(|| {
+                    value
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|status| matches!(status, "authenticated" | "logged_in" | "ok"))
+                })
+        });
+    let authenticated = parsed_authenticated.unwrap_or(command_succeeded) && command_succeeded;
+
+    ClaudeCliStatus {
+        installed: true,
+        authenticated,
+        version: None,
+        supported: true,
+        detail: if authenticated {
+            "Claude Code is authenticated.".to_owned()
+        } else {
+            "Run `claude auth login`.".to_owned()
+        },
+    }
 }
 
 fn readiness_for_tool(tool: &ToolSpec) -> SetupCheck {
@@ -588,6 +724,32 @@ ID_LIKE=arch
 "#;
 
         assert!(!gh_status_has_active_github_account(stale));
+    }
+
+    #[test]
+    fn claude_cli_status_parses_versions_and_support_floor() {
+        assert_eq!(
+            parse_claude_version("2.1.177 (Claude Code)"),
+            Some((2, 1, 177))
+        );
+        assert!(claude_version_supported((2, 1, 177)));
+        assert!(!claude_version_supported((2, 1, 88)));
+    }
+
+    #[test]
+    fn claude_auth_status_accepts_local_cli_oauth_without_api_key() {
+        let success_json = r#"{"authenticated":true,"account":"local-oauth"}"#;
+        let status = parse_claude_auth_status(success_json, true);
+
+        assert!(status.installed);
+        assert!(status.authenticated);
+        assert!(status.supported);
+
+        let failure_json = r#"{"authenticated":false,"error":"login required"}"#;
+        let status = parse_claude_auth_status(failure_json, false);
+
+        assert!(status.installed);
+        assert!(!status.authenticated);
     }
 
     #[test]

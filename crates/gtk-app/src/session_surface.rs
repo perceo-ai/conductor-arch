@@ -8781,6 +8781,7 @@ fn update_working_indicator_for_archcar_event(
         }
         ArchcarEvent::SessionSpawnQueued { .. }
         | ArchcarEvent::SessionStarted { .. }
+        | ArchcarEvent::SessionCapabilitiesChanged { .. }
         | ArchcarEvent::SessionScreenUpdated { .. }
         | ArchcarEvent::SessionMessagesUpdated { .. } => false,
     }
@@ -8861,6 +8862,22 @@ fn handle_archcar_event(
                 },
             );
             set_codex_ready_state(codex_ready, update_composer_state, true);
+        }
+        ArchcarEvent::SessionCapabilitiesChanged {
+            session_id,
+            thread_id,
+            capabilities,
+        } => {
+            trace!(
+                session_id,
+                thread_id,
+                contract_version = capabilities.contract_version,
+                required = capabilities.required.len(),
+                optional = capabilities.optional.len(),
+                observed_native = capabilities.observed_native.len(),
+                "archcar session capabilities changed"
+            );
+            session_threads.borrow_mut().insert(*session_id, *thread_id);
         }
         ArchcarEvent::SessionScreenUpdated { session_id } => {
             trace!(session_id, "archcar session screen updated");
@@ -9240,6 +9257,7 @@ fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) 
             | ArchcarEvent::SessionExited { .. }
             | ArchcarEvent::SessionError { .. } => (true, true),
             ArchcarEvent::SessionReady { .. }
+            | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
             | ArchcarEvent::SessionMessagesUpdated { .. } => (true, false),
         },
@@ -13143,6 +13161,7 @@ Schema confirms the app moved CRM around businesses.";
                     status: "running".to_owned(),
                     runtime_state: AgentSessionState::WaitingForInput,
                     ready: true,
+                    capabilities: None,
                 }),
             }));
         let started_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(

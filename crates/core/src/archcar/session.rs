@@ -14,13 +14,17 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::archcar::harness::{
-    controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
+    controller_for_kind, ensure_thread_for_kind, managed_harness_for_kind, provider_name,
+    HarnessController,
 };
 use crate::archcar::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessEffect, HarnessInput, HarnessTurnStatus,
     ManagedHarnessAdapter, NativeRecord,
 };
-use crate::archcar::protocol::{ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind};
+use crate::archcar::protocol::{
+    session_harness_capabilities_for_descriptor, ArchcarEvent, ArchcarInputDelivery,
+    ArchcarInputKind, SessionHarnessCapabilities,
+};
 use crate::codex_tui::codex_screen_ready_for_input;
 use crate::provider_adapters::claude_stream::{
     build_claude_stream_args, ClaudeManagedAdapter, ClaudeStreamLaunchConfig,
@@ -74,6 +78,7 @@ pub struct SessionSnapshot {
     pub status: ProcessStatus,
     pub runtime_state: AgentSessionState,
     pub ready: bool,
+    pub capabilities: Option<SessionHarnessCapabilities>,
     pub screen: String,
 }
 
@@ -554,11 +559,23 @@ fn apply_harness_effect(
                 message,
             });
         }
+        HarnessEffect::CapabilitiesObserved(observed_native) => {
+            let capabilities = capabilities_for_kind(started.kind, observed_native);
+            if let Some(capabilities) = capabilities {
+                if let Ok(mut guard) = snapshot.lock() {
+                    guard.capabilities = Some(capabilities.clone());
+                }
+                let _ = event_tx.send(ArchcarEvent::SessionCapabilitiesChanged {
+                    session_id: started.session_id,
+                    thread_id: started.thread_id,
+                    capabilities,
+                });
+            }
+        }
         HarnessEffect::InputAcknowledged { .. }
         | HarnessEffect::TurnStarted { .. }
         | HarnessEffect::InteractionRequested(_)
         | HarnessEffect::InteractionResolved { .. }
-        | HarnessEffect::CapabilitiesObserved(_)
         | HarnessEffect::Retry { .. }
         | HarnessEffect::RateLimited { .. }
         | HarnessEffect::ResumeRequired => {}
@@ -610,8 +627,18 @@ fn running_session_snapshot(
         status: ProcessStatus::Running,
         runtime_state: AgentSessionState::Running,
         ready,
+        capabilities: capabilities_for_kind(kind, Vec::new()),
         screen: String::new(),
     }
+}
+
+fn capabilities_for_kind(
+    kind: SessionKind,
+    observed_native: Vec<String>,
+) -> Option<SessionHarnessCapabilities> {
+    managed_harness_for_kind(kind).map(|harness| {
+        session_harness_capabilities_for_descriptor(harness.descriptor(), observed_native)
+    })
 }
 
 pub fn spawn_managed_session_for_thread(
