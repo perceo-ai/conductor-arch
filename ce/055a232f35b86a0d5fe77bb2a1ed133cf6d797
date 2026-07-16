@@ -1,0 +1,21 @@
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_6e395f0089c433::t_f8c1673f1f18aa 1728-1794
+  s_6e395f0089c433::t_aa6f5f27fcaf2d 166-172
+  s_6e395f0089c433::t_b1a301356c729e 1727
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "ce055a232f35b86a0d5fe77bb2a1ed133cf6d797",
+  "prompts": {},
+  "sessions": {
+    "s_6e395f0089c433": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6497-4ab3-7392-9dba-ed216eb78dd7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
