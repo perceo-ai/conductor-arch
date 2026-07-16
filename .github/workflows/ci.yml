@@ -30,7 +30,6 @@ env:
 jobs:
   preflight:
     name: Preflight
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -624,7 +623,7 @@ jobs:
       - windows-port
       - linux-musl
       - linux-distros
-    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
