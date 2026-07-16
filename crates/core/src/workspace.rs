@@ -8682,10 +8682,8 @@ struct ManagedPromptContext;
 #[cfg(not(unix))]
 impl ManagedPromptContext {
     fn open(workspace_path: &Path) -> Result<Option<Self>> {
-        if !managed_prompt_context_is_real(workspace_path)? {
-            return Ok(None);
-        }
-        Ok(Some(Self))
+        let _ = workspace_path;
+        Ok(None)
     }
 
     fn replace(&self, _contents: &[u8]) -> Result<()> {
@@ -8703,23 +8701,6 @@ fn unsupported_managed_prompt_mutation() -> Result<()> {
         "managed prompt snapshot mutation requires handle-relative no-follow operations; \
          refusing to modify .context/PROMPTS.md on this platform"
     )
-}
-
-#[cfg(not(unix))]
-fn managed_prompt_context_is_real(workspace_path: &Path) -> Result<bool> {
-    let context_dir = workspace_path.join(".context");
-    let metadata = match fs::symlink_metadata(&context_dir) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err).with_context(|| format!("inspect {}", context_dir.display())),
-    };
-    let file_type = metadata.file_type();
-    anyhow::ensure!(
-        !file_type.is_symlink() && file_type.is_dir(),
-        "{} must be a real directory",
-        context_dir.display()
-    );
-    Ok(true)
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -8746,11 +8727,7 @@ fn resolve_source_base_ref(
         let _ = fetch_remote_source_branch(root_path, remote_name, remote_branch)?;
         return Ok(base_ref.to_owned());
     }
-    if fetch_remote_source_branch(root_path, remote_name, base_ref)? {
-        Ok(format!("{remote_name}/{base_ref}"))
-    } else {
-        Ok(base_ref.to_owned())
-    }
+    Ok(base_ref.to_owned())
 }
 
 fn fetch_remote_source_branch(root_path: &Path, remote_name: &str, branch: &str) -> Result<bool> {
@@ -9905,6 +9882,65 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn create_workspace_with_default_prompts_does_not_fail_on_non_unix() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "[prompts]\ngeneral = \"Use the project defaults.\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add prompts",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert!(workspace.path.join(".context/brief.md").exists());
+        assert!(workspace.path.join(".context/agent-notes.md").exists());
+        assert!(workspace.path.join(".context/todos.md").exists());
     }
 
     #[test]
@@ -12088,7 +12124,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn create_with_explicit_local_base_ref_uses_remote_source_branch() {
+    fn create_with_explicit_local_base_ref_preserves_local_branch() {
         let temp = tempfile::tempdir().unwrap();
         let remote_path = temp.path().join("origin.git");
         Command::new("git")
@@ -12157,8 +12193,11 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        assert_eq!(workspace.base_ref, "origin/main");
-        assert!(!workspace.path.join("local-only.txt").exists());
+        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("local-only.txt")).unwrap(),
+            "local\n"
+        );
         assert_eq!(git_output(&repo_path, ["rev-parse", "main"]), local_head);
     }
 

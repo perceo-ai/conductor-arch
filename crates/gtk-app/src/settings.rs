@@ -2499,6 +2499,25 @@ mod tests {
     }
 
     #[test]
+    fn local_unedited_effective_values_are_not_copied_into_overrides() {
+        assert_eq!(
+            setting_for_save(false, None::<String>, Some("pnpm dev".to_owned())),
+            None,
+            "unedited inherited script values must stay absent from Local overrides"
+        );
+        assert_eq!(
+            setting_for_save(false, None::<u32>, Some(5000)),
+            None,
+            "unedited inherited view values must stay absent from Local overrides"
+        );
+        assert_eq!(
+            setting_for_save(true, None::<String>, Some("codex".to_owned())),
+            Some("codex".to_owned()),
+            "edited Local-only values should still write overrides"
+        );
+    }
+
+    #[test]
     fn dirty_empty_collection_fields_are_forwarded_to_settings_save() {
         let edits = HashSet::from([
             "file_globs",

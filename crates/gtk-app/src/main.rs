@@ -389,6 +389,15 @@ fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPr
         .unwrap_or_default()
 }
 
+fn resolve_workspace_default_tab(db_path: &Path, workspace: &str) -> WorkspaceTab {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.workspace_view_defaults(workspace))
+        .ok()
+        .and_then(|defaults| defaults.default_visible_tab)
+        .and_then(|tab| WorkspaceTab::from_config(&tab))
+        .unwrap_or(WorkspaceTab::Chats)
+}
+
 fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings {
     workspace
         .and_then(|name| {
@@ -579,12 +588,12 @@ window.lc-custom-colors,
 fn navigate_workspace_from_dashboard(
     app_state: &AppState,
     workspace_name: String,
+    default_tab: Option<WorkspaceTab>,
     refresh_view_preferences: &dyn Fn(),
     refresh_workspace_detail: &dyn Fn(),
     show_workspace_stack: &dyn Fn(),
 ) {
-    app_state
-        .navigate_to_workspace_with_default_tab(Some(workspace_name), Some(WorkspaceTab::Chats));
+    app_state.navigate_to_workspace_with_default_tab(Some(workspace_name), default_tab);
     refresh_view_preferences();
     refresh_workspace_detail();
     show_workspace_stack();
@@ -625,9 +634,14 @@ impl WorkspaceNavigationCoordinator {
         with_upgraded_navigation_target(
             || self.main_stack.upgrade(),
             |main_stack| {
+                let default_tab = resolve_workspace_default_tab(
+                    &self.app_state.paths.database_path,
+                    &workspace_name,
+                );
                 navigate_workspace_from_dashboard(
                     &self.app_state,
                     workspace_name,
+                    Some(default_tab),
                     self.refresh_view_preferences.as_ref(),
                     self.refresh_workspace_detail.as_ref(),
                     &|| main_stack.set_visible_child_name("workspace"),
@@ -1763,6 +1777,7 @@ mod tests {
         navigate_workspace_from_dashboard(
             &state,
             "berlin".to_owned(),
+            Some(WorkspaceTab::Checks),
             &{
                 let state = state.clone();
                 let events = events.clone();
@@ -1788,7 +1803,7 @@ mod tests {
         let snapshot = state.snapshot();
         assert_eq!(snapshot.selected_workspace.as_deref(), Some("berlin"));
         assert_eq!(snapshot.active_page, AppPage::Workspace);
-        assert_eq!(snapshot.active_workspace_tab, WorkspaceTab::Chats);
+        assert_eq!(snapshot.active_workspace_tab, WorkspaceTab::Checks);
         assert_eq!(
             events.borrow().as_slice(),
             ["preferences", "workspace-detail", "workspace-stack"]

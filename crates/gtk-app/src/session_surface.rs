@@ -9083,20 +9083,6 @@ fn handle_archcar_response(
                     chars = input.len(),
                     "archcar input accepted"
                 );
-                if delivery == ArchcarInputDelivery::Immediate {
-                    inflight_actions.borrow_mut().insert(
-                        response.token,
-                        PendingArchcarAction::UserSend {
-                            thread_id,
-                            session_id,
-                            input,
-                            visible_input,
-                            kind,
-                            delivery,
-                            checkpoint_id,
-                        },
-                    );
-                }
             }
             Ok(other) => {
                 warn!(thread_id, session_id, kind = ?kind, delivery = ?delivery, ?other, "unexpected archcar input response");
@@ -10846,6 +10832,21 @@ fix it
         )];
         assert!(pending_immediate_user_input_texts_for_thread(7, &inflight, &persisted).is_empty());
         assert!(inflight.borrow().is_empty());
+    }
+
+    #[test]
+    fn immediate_ack_does_not_reinsert_user_send_as_inflight() {
+        let source = include_str!("session_surface.rs");
+        let user_send_ack_body = source
+            .split("Ok(ArchcarResponse::Ack) => {")
+            .nth(4)
+            .and_then(|tail| tail.split("Ok(other) =>").next())
+            .expect("user-send ack branch should be present");
+
+        assert!(
+            !user_send_ack_body.contains("inflight_actions.borrow_mut().insert("),
+            "accepted immediate user sends must leave inflight tracking so ready refresh can flush follow-ups"
+        );
     }
 
     #[test]
