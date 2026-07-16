@@ -583,7 +583,7 @@ jobs:
 
       - name: Install openSUSE dependencies
         if: matrix.family == 'opensuse'
-        run: zypper --non-interactive install bash ca-certificates curl git gcc gtk4-devel libadwaita-devel pkg-config
+        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc gtk4-devel libadwaita-devel pkg-config rust
 
       - name: Install Alpine dependencies
         if: matrix.family == 'alpine'
@@ -596,7 +596,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        if: matrix.family != 'alpine'
+        if: matrix.family != 'alpine' && matrix.family != 'opensuse'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Install Alpine Rust toolchain
@@ -604,6 +604,12 @@ jobs:
         run: |
           rustup-init -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Show openSUSE Rust toolchain
+        if: matrix.family == 'opensuse'
+        run: |
+          rustc --version
+          cargo --version
 
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
