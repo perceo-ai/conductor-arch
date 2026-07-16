@@ -12391,9 +12391,7 @@ CUSTOM_VALUE = "from-settings"
             .unwrap();
 
         let run = store.run_workspace("berlin").unwrap();
-        wait_for_path(&workspace.path.join(".context/run-env"));
-
-        let run_env = fs::read_to_string(workspace.path.join(".context/run-env")).unwrap();
+        let run_env = wait_for_file_lines(&workspace.path.join(".context/run-env"), 7);
         let lines = run_env.lines().collect::<Vec<_>>();
         assert_eq!(run.workspace_id, workspace.id);
         assert_eq!(run.kind, ProcessKind::Run);
@@ -20931,6 +20929,21 @@ spotlight_testing = true
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("timed out waiting for {}", path.display());
+    }
+
+    fn wait_for_file_lines(path: &Path, expected_lines: usize) -> String {
+        for _ in 0..50 {
+            if let Ok(contents) = fs::read_to_string(path) {
+                if contents.lines().count() >= expected_lines {
+                    return contents;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {} to contain {expected_lines} lines",
+            path.display()
+        );
     }
 
     fn wait_for_log(path: &Path, needle: &str) {
