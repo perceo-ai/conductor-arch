@@ -485,6 +485,9 @@ jobs:
       - name: Smoke Windows platform helpers
         run: cargo test -p archductor-core --locked platform::tests
 
+      - name: Smoke Windows workspace creation
+        run: cargo test -p archductor-core --locked create_workspace_with_default_prompts_does_not_fail_on_non_unix
+
       - name: Smoke Windows CLI adapters
         run: cargo test -p archductor --locked windows_
 

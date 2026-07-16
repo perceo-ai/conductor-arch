@@ -8546,6 +8546,7 @@ fn managed_prompt_snapshot(settings: &crate::settings::RepositorySettings) -> Op
     None
 }
 
+#[cfg(unix)]
 fn write_managed_prompt_snapshot(
     workspace_path: &Path,
     settings: &crate::settings::RepositorySettings,
@@ -8553,6 +8554,15 @@ fn write_managed_prompt_snapshot(
     let context = ManagedPromptContext::open(workspace_path)?
         .with_context(|| format!("{} must exist", workspace_path.join(".context").display()))?;
     write_managed_prompt_snapshot_in_context(&context, settings)
+}
+
+#[cfg(not(unix))]
+fn write_managed_prompt_snapshot(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let _ = (workspace_path, settings);
+    Ok(())
 }
 
 fn write_managed_prompt_snapshot_in_context(
@@ -9511,12 +9521,26 @@ fn stop_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn shell_words(program: &Path, args: &[String]) -> String {
     let mut words = vec![quote_shell_word(&program.to_string_lossy())];
     words.extend(args.iter().map(|arg| quote_shell_word(arg)));
     words.join(" ")
 }
 
+#[cfg(windows)]
+fn shell_words(program: &Path, args: &[String]) -> String {
+    windows_shell_words(program, args)
+}
+
+#[cfg(any(test, windows))]
+fn windows_shell_words(program: &Path, args: &[String]) -> String {
+    let mut words = vec![quote_windows_cmd_word(&program.to_string_lossy())];
+    words.extend(args.iter().map(|arg| quote_windows_cmd_word(arg)));
+    words.join(" ")
+}
+
+#[cfg(not(windows))]
 fn quote_shell_word(value: &str) -> String {
     if value
         .bytes()
@@ -9525,6 +9549,18 @@ fn quote_shell_word(value: &str) -> String {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(any(test, windows))]
+fn quote_windows_cmd_word(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'\\' | b'/' | b'.' | b'_' | b'-' | b':')
+        })
+    {
+        return value.to_owned();
+    }
+    format!("\"{}\"", value.replace('"', r#"\""#))
 }
 
 fn first_pull_request_url_from_json(output: &str) -> Option<String> {
@@ -10173,6 +10209,24 @@ mod tests {
 
         assert!(format!("{err:#}").contains("handle-relative no-follow operations"));
         assert!(format!("{err:#}").contains("refusing to modify"));
+    }
+
+    #[test]
+    fn windows_session_shell_words_quote_paths_for_cmd() {
+        let command = windows_shell_words(
+            Path::new(r"C:\Program Files\Archductor\agent.exe"),
+            &[
+                "--profile".to_owned(),
+                "Codex Fast".to_owned(),
+                r"C:\Users\Ada\project workspace".to_owned(),
+            ],
+        );
+
+        assert_eq!(
+            command,
+            r#""C:\Program Files\Archductor\agent.exe" --profile "Codex Fast" "C:\Users\Ada\project workspace""#
+        );
+        assert!(!command.contains('\''));
     }
 
     #[test]
