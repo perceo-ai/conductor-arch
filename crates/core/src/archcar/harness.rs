@@ -158,6 +158,15 @@ mod tests {
     }
 
     #[test]
+    fn managed_harness_registry_validates_codex_and_claude_baseline() {
+        for kind in [SessionKind::Codex, SessionKind::Claude] {
+            let harness = managed_harness_for_kind(kind).unwrap();
+            validate_managed_harness(harness.as_ref()).unwrap();
+        }
+        assert!(managed_harness_for_kind(SessionKind::Shell).is_none());
+    }
+
+    #[test]
     fn claude_harness_reports_runtime_capabilities() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("test.db");

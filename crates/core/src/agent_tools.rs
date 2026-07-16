@@ -55,7 +55,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         aliases: &["claude", "claudecode", "claude-code"],
         kind: ToolKind::ChatAgent,
         chat_launchable: true,
-        launch_owner: LaunchOwner::LocalWorkspace,
+        launch_owner: LaunchOwner::ArchcarManaged,
         readiness_probe: &["claude", "auth", "status"],
         auth_guidance: "Run `claude auth login`.",
     },
@@ -158,6 +158,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(launchable, ["codex", "claude"]);
+        assert!(
+            launchable_agent_tools().all(|tool| tool.launch_owner == LaunchOwner::ArchcarManaged)
+        );
     }
 
     #[test]

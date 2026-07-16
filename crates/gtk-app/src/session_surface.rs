@@ -3,7 +3,8 @@ use archductor_core::agent_tools::{
 };
 use archductor_core::archcar::harness::managed_harness_for_kind;
 use archductor_core::archcar::harness_contract::{
-    HarnessDescriptor, ProviderInteractionKind, RequiredHarnessFeature,
+    HarnessCapability, HarnessDescriptor, ProviderInteractionKind, RequiredHarnessFeature,
+    SupportMode,
 };
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
@@ -6603,6 +6604,9 @@ fn visible_live_controls_for_harness(descriptor: &HarnessDescriptor) -> Vec<Stri
         controls.push("model".to_owned());
         controls.push("thinking".to_owned());
     }
+    if descriptor.optional(HarnessCapability::Goals) == SupportMode::Native {
+        controls.push("goal".to_owned());
+    }
     controls
 }
 
@@ -10032,7 +10036,7 @@ fix it
         assert!(!controls.contains(&"continue".to_owned()));
         assert!(!controls.contains(&"retry".to_owned()));
         assert!(!controls.contains(&"restart".to_owned()));
-        assert!(!controls.contains(&"goal".to_owned()));
+        assert!(controls.contains(&"goal".to_owned()));
         assert!(!controls.contains(&"attach".to_owned()));
         assert!(!visible_live_controls_for_provider("claude").contains(&"interrupt".to_owned()));
     }
@@ -10044,7 +10048,23 @@ fix it
 
         assert!(controls.contains(&"model".to_owned()));
         assert!(controls.contains(&"thinking".to_owned()));
+        assert!(!controls.contains(&"goal".to_owned()));
         assert!(!controls.contains(&"interrupt".to_owned()));
+    }
+
+    #[test]
+    fn harness_capabilities_gate_goal_control_by_descriptor_support() {
+        let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+        let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+        let codex_controls = visible_live_controls_for_harness(codex.descriptor());
+        let claude_controls = visible_live_controls_for_harness(claude.descriptor());
+
+        for control in ["provider", "model", "thinking"] {
+            assert!(codex_controls.contains(&control.to_owned()));
+            assert!(claude_controls.contains(&control.to_owned()));
+        }
+        assert!(codex_controls.contains(&"goal".to_owned()));
+        assert!(!claude_controls.contains(&"goal".to_owned()));
     }
 
     #[test]

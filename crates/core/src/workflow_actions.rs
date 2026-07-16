@@ -15,6 +15,7 @@ pub struct GtkLiveControl {
 pub const ACTION_SESSION_PROVIDER_SELECT: &str = "session.provider.select";
 pub const ACTION_SESSION_CONTROL_MODEL: &str = "session.control.model";
 pub const ACTION_SESSION_CONTROL_THINKING: &str = "session.control.thinking";
+pub const ACTION_SESSION_CONTROL_GOAL: &str = "session.control.goal";
 
 pub const WORKFLOW_ACTIONS: &[WorkflowAction] = &[
     WorkflowAction {
@@ -283,6 +284,11 @@ pub const WORKFLOW_ACTIONS: &[WorkflowAction] = &[
         mutates_state: true,
     },
     WorkflowAction {
+        id: ACTION_SESSION_CONTROL_GOAL,
+        cli_route: "archcar send <session-id> --kind control-command /goal <text>",
+        mutates_state: true,
+    },
+    WorkflowAction {
         id: "session.input.user",
         cli_route: "archcar send <session-id> --kind user <input>",
         mutates_state: true,
@@ -396,6 +402,11 @@ pub const GTK_LIVE_CONTROLS: &[GtkLiveControl] = &[
         workflow_action_id: ACTION_SESSION_CONTROL_THINKING,
     },
     GtkLiveControl {
+        provider: "codex",
+        control: "goal",
+        workflow_action_id: ACTION_SESSION_CONTROL_GOAL,
+    },
+    GtkLiveControl {
         provider: "claude",
         control: "provider",
         workflow_action_id: ACTION_SESSION_PROVIDER_SELECT,
@@ -471,10 +482,15 @@ mod tests {
             control.control == "thinking"
                 && control.workflow_action_id == ACTION_SESSION_CONTROL_THINKING
         }));
+        assert!(controls.iter().any(|control| {
+            control.control == "goal" && control.workflow_action_id == ACTION_SESSION_CONTROL_GOAL
+        }));
 
         let model = workflow_action_by_id(ACTION_SESSION_CONTROL_MODEL).unwrap();
         let thinking = workflow_action_by_id(ACTION_SESSION_CONTROL_THINKING).unwrap();
+        let goal = workflow_action_by_id(ACTION_SESSION_CONTROL_GOAL).unwrap();
         assert!(model.cli_route.starts_with("archcar model "));
         assert!(thinking.cli_route.contains("--kind control-command"));
+        assert!(goal.cli_route.contains("--kind control-command"));
     }
 }

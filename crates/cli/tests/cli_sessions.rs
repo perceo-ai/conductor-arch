@@ -1,7 +1,9 @@
+use archductor_core::archcar::harness::managed_harness_for_kind;
+use archductor_core::archcar::harness_contract::{HarnessCapability, SupportMode};
 use archductor_core::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
 };
-use archductor_core::workspace::WorkspaceStore;
+use archductor_core::workspace::{SessionKind, WorkspaceStore};
 use assert_cmd::Command as AssertCommand;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
@@ -562,6 +564,28 @@ fn provider_interactions_help_lists_cli_actions() {
         .stdout(contains("allow"))
         .stdout(contains("deny"))
         .stdout(contains("answer"));
+}
+
+#[test]
+fn harness_capabilities_gate_goals_to_codex_descriptor() {
+    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+
+    assert_eq!(
+        codex.descriptor().optional(HarnessCapability::Goals),
+        SupportMode::Native
+    );
+    assert!(matches!(
+        claude.descriptor().optional(HarnessCapability::Goals),
+        SupportMode::Unsupported { reason } if !reason.is_empty()
+    ));
+    for harness in [codex, claude] {
+        assert!(harness
+            .descriptor()
+            .required_features
+            .iter()
+            .any(|feature| feature.as_str() == "session_controls"));
+    }
 }
 
 fn app(root: &Path) -> AssertCommand {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MANAGED_HARNESS_CONTRACT_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RequiredHarnessFeature {
     Preflight,
     ThreadScopedSession,
