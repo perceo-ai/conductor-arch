@@ -126,25 +126,16 @@ impl ClaudeManagedAdapter {
             }
             return;
         }
-        let pending = match replayed_text {
-            Some(text) => self
-                .pending_inputs
-                .iter()
-                .position(|pending| pending.content == text)
-                .and_then(|index| self.pending_inputs.remove(index)),
-            None => self.pending_inputs.pop_front(),
-        };
+        if replayed_text.is_some() {
+            return;
+        }
+        let pending = self.pending_inputs.pop_front();
         if let Some(pending) = pending {
             self.active_input_id = Some(pending.local_input_id);
             self.active_input_content = Some(pending.content);
-            self.active_input_acknowledged = replayed_text.is_some();
+            self.active_input_acknowledged = false;
         }
         if let Some(local_input_id) = self.active_input_id.clone() {
-            if replayed_text.is_some() {
-                effects.push(HarnessEffect::InputAcknowledged {
-                    local_input_id: local_input_id.clone(),
-                });
-            }
             effects.push(HarnessEffect::TurnStarted { local_input_id });
         }
     }
@@ -215,9 +206,12 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             let limit_message = rate_limit_message(&event.raw_json);
             let limit_retry_after_ms = rate_limit_retry_after_ms(&event.raw_json);
             let limit_is_terminal = rate_limit_is_terminal(&event.raw_json);
-            effects.push(HarnessEffect::ProviderEvent(
-                event.into_provider_event_draft(self.provider_context()),
-            ));
+            effects.extend(
+                event
+                    .into_provider_event_drafts(self.provider_context())
+                    .into_iter()
+                    .map(HarnessEffect::ProviderEvent),
+            );
 
             match lifecycle_signal {
                 Some(ClaudeLifecycleSignal::Initialized(init)) => {
@@ -465,6 +459,12 @@ impl ClaudeUsageDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ClaudeReasoningBlockDraft {
+    content_block_index: u64,
+    thinking: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeProviderEventDraft {
     pub provider: String,
     pub kind: ClaudeProviderEventKind,
@@ -492,6 +492,8 @@ pub struct ClaudeProviderEventDraft {
     pub subtype: Option<String>,
     #[serde(default, skip_serializing_if = "ClaudeUsageDraft::is_empty")]
     pub usage: ClaudeUsageDraft,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reasoning_blocks: Vec<ClaudeReasoningBlockDraft>,
     pub raw_json: Value,
 }
 
@@ -537,26 +539,67 @@ impl ClaudeProviderEventDraft {
         Some(claude_result_status_from_json(&self.raw_json))
     }
 
+    pub fn into_provider_event_drafts(
+        mut self,
+        context: ProviderEventContext,
+    ) -> Vec<ProviderEventDraft> {
+        let reasoning_blocks = std::mem::take(&mut self.reasoning_blocks);
+        let reasoning_base = self.clone();
+        let mut drafts = vec![self.into_provider_event_draft(context.clone())];
+        drafts.extend(reasoning_blocks.into_iter().map(|block| {
+            ClaudeProviderEventDraft {
+                provider: reasoning_base.provider.clone(),
+                kind: ClaudeProviderEventKind::Reasoning,
+                provider_event_id: reasoning_base
+                    .provider_event_id
+                    .as_ref()
+                    .map(|event_id| format!("{event_id}:reasoning:{}", block.content_block_index)),
+                session_id: reasoning_base.session_id.clone(),
+                parent_tool_use_id: reasoning_base.parent_tool_use_id.clone(),
+                provider_message_id: reasoning_base.provider_message_id.clone(),
+                provider_tool_use_id: None,
+                content_block_index: Some(block.content_block_index),
+                tool_name: None,
+                content_delta: Some(block.thinking),
+                cost_usd: reasoning_base.cost_usd,
+                duration_ms: reasoning_base.duration_ms,
+                subtype: Some("thinking".to_owned()),
+                usage: ClaudeUsageDraft::default(),
+                reasoning_blocks: Vec::new(),
+                raw_json: reasoning_base.raw_json.clone(),
+            }
+            .into_provider_event_draft(context.clone())
+        }));
+        drafts
+    }
+
     pub fn into_provider_event_draft(self, context: ProviderEventContext) -> ProviderEventDraft {
         let kind = claude_kind_to_provider_kind(self.kind);
         let phase = claude_phase_for(self.kind, &self.raw_json);
-        let provider_event_id = self
-            .provider_event_id
-            .clone()
-            .or_else(|| self.provider_tool_use_id.clone())
-            .or_else(|| self.provider_message_id.clone());
-        let provider_item_id = self.provider_tool_use_id.clone().or_else(|| {
-            self.provider_message_id.as_ref().map(|message_id| {
-                if self.kind == ClaudeProviderEventKind::Reasoning {
+        let provider_event_id = self.provider_event_id.clone();
+        let provider_item_id = match self.kind {
+            ClaudeProviderEventKind::ToolUse
+            | ClaudeProviderEventKind::ToolInputDelta
+            | ClaudeProviderEventKind::ToolResult
+            | ClaudeProviderEventKind::DeferredResult => self.provider_tool_use_id.clone(),
+            ClaudeProviderEventKind::Reasoning => {
+                self.provider_message_id.as_ref().map(|message_id| {
                     format!(
                         "{message_id}:reasoning:{}",
                         self.content_block_index.unwrap_or_default()
                     )
-                } else {
-                    message_id.clone()
-                }
-            })
-        });
+                })
+            }
+            ClaudeProviderEventKind::AssistantMessage
+            | ClaudeProviderEventKind::MessageStart
+            | ClaudeProviderEventKind::MessageDelta
+            | ClaudeProviderEventKind::MessageStop
+            | ClaudeProviderEventKind::ContentBlockStart
+            | ClaudeProviderEventKind::ContentBlockDelta
+            | ClaudeProviderEventKind::ContentBlockStop
+            | ClaudeProviderEventKind::UserMessage => self.provider_message_id.clone(),
+            _ => None,
+        };
         let body = if self.kind == ClaudeProviderEventKind::Hook {
             claude_hook_body(&self.raw_json).unwrap_or_default()
         } else {
@@ -565,6 +608,9 @@ impl ClaudeProviderEventDraft {
                 .or_else(|| string_at(&self.raw_json, &["result"]))
                 .unwrap_or_default()
         };
+        let stream_delta = (phase == ProviderEventPhase::Delta)
+            .then(|| self.content_delta.clone())
+            .flatten();
         let provider_subtype = self
             .subtype
             .clone()
@@ -591,6 +637,7 @@ impl ClaudeProviderEventDraft {
             normalized_payload: json!({
                 "title": claude_event_title(self.kind, self.tool_name.as_deref(), &self.raw_json),
                 "body": body,
+                "stream_delta": stream_delta,
                 "tool_name": self.tool_name,
                 "cost_usd": self.cost_usd,
                 "duration_ms": self.duration_ms,
@@ -630,9 +677,10 @@ impl ClaudeStreamParser {
 
     fn map_value(&mut self, raw_json: Value) -> ClaudeProviderEventDraft {
         let top_type = string_at(&raw_json, &["type"]);
+        let kind = self.kind_for(&raw_json);
         let mut draft = ClaudeProviderEventDraft {
             provider: CLAUDE_PROVIDER_NAME.to_owned(),
-            kind: self.kind_for(&raw_json),
+            kind,
             provider_event_id: string_at(&raw_json, &["uuid"])
                 .or_else(|| string_at(&raw_json, &["event", "uuid"]))
                 .or_else(|| string_at(&raw_json, &["event", "id"])),
@@ -650,10 +698,18 @@ impl ClaudeStreamParser {
                 .or_else(|| string_at(&raw_json, &["event", "content_block", "type"]))
                 .or(top_type),
             usage: usage_from(&raw_json),
+            reasoning_blocks: if kind == ClaudeProviderEventKind::AssistantMessage {
+                reasoning_blocks_from(&raw_json)
+            } else {
+                Vec::new()
+            },
             raw_json,
         };
 
         self.apply_identity_state(&mut draft);
+        if draft.provider_event_id.is_none() {
+            draft.provider_event_id = Some(claude_fallback_event_id(&draft.raw_json));
+        }
         draft
     }
 
@@ -743,6 +799,11 @@ impl ClaudeStreamParser {
 
     fn apply_identity_state(&mut self, draft: &mut ClaudeProviderEventDraft) {
         match draft.kind {
+            ClaudeProviderEventKind::Initialization => {
+                self.current_message_id = None;
+                self.tool_use_by_block.clear();
+                self.reasoning_blocks.clear();
+            }
             ClaudeProviderEventKind::MessageStart => {
                 draft.provider_message_id = string_at(&draft.raw_json, &["event", "message", "id"]);
                 self.current_message_id = draft.provider_message_id.clone();
@@ -755,10 +816,15 @@ impl ClaudeStreamParser {
             | ClaudeProviderEventKind::DeferredResult => {
                 draft.provider_message_id = string_at(&draft.raw_json, &["message", "id"]);
             }
-            _ => {
-                draft.provider_message_id = string_at(&draft.raw_json, &["message", "id"])
-                    .or_else(|| self.current_message_id.clone());
+            ClaudeProviderEventKind::MessageDelta
+            | ClaudeProviderEventKind::MessageStop
+            | ClaudeProviderEventKind::ContentBlockStart
+            | ClaudeProviderEventKind::ContentBlockDelta
+            | ClaudeProviderEventKind::ContentBlockStop
+            | ClaudeProviderEventKind::Reasoning => {
+                draft.provider_message_id = self.current_message_id.clone();
             }
+            _ => {}
         }
 
         if let Some(index) = draft.content_block_index {
@@ -882,6 +948,21 @@ fn number_at(value: &Value, path: &[&str]) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
+fn claude_fallback_event_id(value: &Value) -> String {
+    let hash = value
+        .to_string()
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    let native_type = string_at(value, &["type"]).unwrap_or_else(|| "unknown".to_owned());
+    let subtype = string_at(value, &["subtype"]);
+    match subtype {
+        Some(subtype) => format!("{native_type}:{subtype}:{hash:016x}"),
+        None => format!("{native_type}:{hash:016x}"),
+    }
+}
+
 fn string_array_at(value: &Value, path: &[&str]) -> Vec<String> {
     path.iter()
         .try_fold(value, |current, key| current.get(*key))
@@ -905,6 +986,30 @@ fn message_content_text(value: &Value, block_type: &str, field: &str) -> Option<
         .filter_map(|block| block.get(field).and_then(Value::as_str))
         .collect::<String>();
     (!text.is_empty()).then_some(text)
+}
+
+fn reasoning_blocks_from(value: &Value) -> Vec<ClaudeReasoningBlockDraft> {
+    value
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            (block.get("type").and_then(Value::as_str) == Some("thinking"))
+                .then(|| {
+                    block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .filter(|thinking| !thinking.is_empty())
+                        .map(|thinking| ClaudeReasoningBlockDraft {
+                            content_block_index: index as u64,
+                            thinking: thinking.to_owned(),
+                        })
+                })
+                .flatten()
+        })
+        .collect()
 }
 
 fn message_has_block_type(value: &Value, block_type: &str) -> bool {
@@ -1546,6 +1651,50 @@ mod tests {
     }
 
     #[test]
+    fn claude_fixture_non_item_records_use_stable_event_identity_only() {
+        let input = format!("{BASIC_TURN_FIXTURE}\n{TOOLS_HOOKS_LIMITS_FIXTURE}");
+        let events = parse_claude_stream_json_lines(&input).unwrap();
+
+        for event in events.iter().filter(|event| {
+            matches!(
+                event.kind,
+                ClaudeProviderEventKind::Result
+                    | ClaudeProviderEventKind::ApiRetry
+                    | ClaudeProviderEventKind::RateLimit
+                    | ClaudeProviderEventKind::Hook
+                    | ClaudeProviderEventKind::Unknown
+            )
+        }) {
+            let canonical = event
+                .clone()
+                .into_provider_event_draft(ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: 1,
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                });
+            assert!(canonical.provider_item_id.is_none(), "{:?}", event.kind);
+            assert!(canonical.provider_event_id.is_some(), "{:?}", event.kind);
+        }
+
+        let first = parse_claude_stream_json_lines(
+            r#"{"type":"future_record","session_id":"s1","future_field":42}"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let second = parse_claude_stream_json_lines(
+            r#"{"type":"future_record","session_id":"s1","future_field":42}"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        assert_eq!(first.provider_event_id, second.provider_event_id);
+    }
+
+    #[test]
     fn claude_fixture_adapter_emits_lossless_common_effects_for_every_record() {
         let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
             session_id: 7,
@@ -1608,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_fixture_replay_acknowledges_only_matching_pending_input() {
+    fn claude_fixture_same_text_replay_does_not_acknowledge_inactive_pending_input() {
         let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
             session_id: 7,
             thread_id: 11,
@@ -1626,7 +1775,7 @@ mod tests {
             })
             .unwrap();
 
-        let historic = adapter
+        let replay = adapter
             .observe_native(NativeRecord {
                 provider_key: CLAUDE_PROVIDER_NAME,
                 payload: br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Historic prompt"}]}}
@@ -1634,12 +1783,12 @@ mod tests {
                 .to_vec(),
             })
             .unwrap();
-        assert!(!historic.iter().any(|effect| matches!(
+        assert!(!replay.iter().any(|effect| matches!(
             effect,
             HarnessEffect::InputAcknowledged { .. } | HarnessEffect::TurnStarted { .. }
         )));
 
-        let current = adapter
+        let same_text_replay = adapter
             .observe_native(NativeRecord {
                 provider_key: CLAUDE_PROVIDER_NAME,
                 payload: br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Current prompt"}]}}
@@ -1647,11 +1796,83 @@ mod tests {
                 .to_vec(),
             })
             .unwrap();
-        assert!(current.iter().any(|effect| matches!(
+        assert!(!same_text_replay.iter().any(|effect| matches!(
             effect,
-            HarnessEffect::InputAcknowledged { local_input_id }
-                if local_input_id == "current-input"
+            HarnessEffect::InputAcknowledged { .. } | HarnessEffect::TurnStarted { .. }
         )));
+
+        let start = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"stream_event","session_id":"s1","event":{"type":"message_start","message":{"id":"m1"}}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+        assert!(start.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnStarted { local_input_id } if local_input_id == "current-input"
+        )));
+    }
+
+    #[test]
+    fn claude_fixture_mixed_final_snapshot_emits_assistant_and_reasoning_events() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        let raw = json!({
+            "type": "assistant",
+            "session_id": "s1",
+            "uuid": "mixed-final-1",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Private reasoning"},
+                    {"type": "text", "text": "Public answer"}
+                ]
+            }
+        });
+        let parsed = parse_claude_stream_json_lines(&format!("{raw}\n"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(parsed.kind, ClaudeProviderEventKind::AssistantMessage);
+        assert_eq!(parsed.content_delta.as_deref(), Some("Public answer"));
+        assert_eq!(parsed.reasoning_blocks.len(), 1);
+        assert_eq!(parsed.reasoning_blocks[0].thinking, "Private reasoning");
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: format!("{raw}\n").into_bytes(),
+            })
+            .unwrap();
+        let events = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                HarnessEffect::ProviderEvent(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let assistant = events
+            .iter()
+            .find(|event| event.kind == ProviderEventKind::AssistantOutput)
+            .unwrap();
+        let reasoning = events
+            .iter()
+            .find(|event| event.kind == ProviderEventKind::PlanningReasoning)
+            .unwrap();
+
+        assert_eq!(assistant.normalized_payload["body"], "Public answer");
+        assert_eq!(reasoning.normalized_payload["body"], "Private reasoning");
+        assert_ne!(assistant.provider_item_id, reasoning.provider_item_id);
+        assert_eq!(assistant.raw_json, raw);
+        assert_eq!(reasoning.raw_json, raw);
     }
 
     #[test]

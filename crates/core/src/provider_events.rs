@@ -784,13 +784,6 @@ fn merge_existing_streaming_payload(
     identity_key: &str,
     draft: &ProviderEventDraft,
 ) -> Result<Value> {
-    if !matches!(
-        draft.phase,
-        ProviderEventPhase::Started | ProviderEventPhase::Delta | ProviderEventPhase::Progress
-    ) {
-        return Ok(draft.normalized_payload.clone());
-    }
-
     let existing: Option<String> = tx
         .query_row(
             "SELECT normalized_payload_json FROM provider_events WHERE identity_key = ?1",
@@ -814,22 +807,11 @@ fn streaming_merge_incoming_payload(draft: &ProviderEventDraft) -> Value {
     }
 
     let Some(delta) = draft
-        .raw_json
-        .pointer("/params/delta")
+        .normalized_payload
+        .get("stream_delta")
         .and_then(Value::as_str)
-        .or_else(|| draft.raw_json.pointer("/delta").and_then(Value::as_str))
-        .or_else(|| {
-            draft
-                .raw_json
-                .pointer("/event/delta/text")
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            draft
-                .raw_json
-                .pointer("/event/delta/thinking")
-                .and_then(Value::as_str)
-        })
+        .or_else(|| draft.normalized_payload.get("body").and_then(Value::as_str))
+        .or_else(|| draft.normalized_payload.get("text").and_then(Value::as_str))
     else {
         return incoming;
     };
@@ -854,6 +836,18 @@ fn merge_streaming_payload(
         let Some(incoming_text) = incoming.get(key).and_then(Value::as_str) else {
             continue;
         };
+        if matches!(
+            phase,
+            ProviderEventPhase::Completed
+                | ProviderEventPhase::Failed
+                | ProviderEventPhase::Declined
+                | ProviderEventPhase::Interrupted
+        ) {
+            if incoming_text.is_empty() && !existing_text.is_empty() {
+                incoming[key] = Value::String(existing_text.to_owned());
+            }
+            continue;
+        }
         if phase == ProviderEventPhase::Delta {
             incoming[key] = Value::String(format!("{existing_text}{incoming_text}"));
             continue;
@@ -1105,7 +1099,11 @@ mod tests {
             provider_subtype: Some("agent_message_delta".to_owned()),
             provider_sequence: Some(1),
             occurred_at_ms: 42,
-            normalized_payload: json!({"title": "Assistant", "text": "hello"}),
+            normalized_payload: json!({
+                "title": "Assistant",
+                "text": "hello",
+                "stream_delta": "hello"
+            }),
             raw_json: json!({"method": "agent/message/delta", "params": {"delta": "hello"}}),
             schema_version: 1,
             adapter_version: "test-adapter".to_owned(),
@@ -1156,7 +1154,11 @@ mod tests {
             ProviderEventPhase::Delta,
         );
         let mut second = first.clone();
-        second.normalized_payload = json!({"title": "Assistant", "text": "hello world"});
+        second.normalized_payload = json!({
+            "title": "Assistant",
+            "text": "hello world",
+            "stream_delta": " world"
+        });
         second.raw_json = json!({"method": "agent/message/delta", "params": {"delta": " world"}});
 
         let inserted = store.upsert_event(&first).unwrap();
@@ -1214,7 +1216,11 @@ mod tests {
         second.phase = ProviderEventPhase::Delta;
         second.provider_event_id = Some("evt-2".to_owned());
         second.provider_sequence = Some(2);
-        second.normalized_payload = json!({"title": "Assistant", "text": "hello world"});
+        second.normalized_payload = json!({
+            "title": "Assistant",
+            "text": "hello world",
+            "stream_delta": " world"
+        });
         second.raw_json = json!({"method": "agent/message/delta", "params": {"delta": " world"}});
         let mut third = second.clone();
         third.phase = ProviderEventPhase::Progress;
@@ -1279,7 +1285,11 @@ mod tests {
             ProviderEventKind::AssistantOutput,
             ProviderEventPhase::Delta,
         );
-        first.normalized_payload = json!({"title": "Assistant", "text": "hello"});
+        first.normalized_payload = json!({
+            "title": "Assistant",
+            "text": "hello",
+            "stream_delta": "hello"
+        });
         first.raw_json = json!({
             "method": "agent/message/delta",
             "params": {"delta": {"unexpected": true}},
@@ -1288,6 +1298,11 @@ mod tests {
         let mut second = first.clone();
         second.provider_event_id = Some("evt-2".to_owned());
         second.provider_sequence = Some(2);
+        second.normalized_payload = json!({
+            "title": "Assistant",
+            "text": "hello world",
+            "stream_delta": " world"
+        });
         second.raw_json = json!({
             "method": "agent/message/delta",
             "params": {"delta": {"unexpected": true}},
@@ -1301,19 +1316,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_projection_uses_native_text_delta_instead_of_final_snapshot() {
+    fn provider_neutral_stream_merge_uses_normalized_delta_not_raw_json() {
         let mut incoming = draft(
             ProviderEventKind::AssistantOutput,
             ProviderEventPhase::Delta,
         );
         incoming.provider = "claude".to_owned();
-        incoming.normalized_payload =
-            json!({"title": "Assistant output", "body": "Complete answer"});
+        incoming.normalized_payload = json!({
+            "title": "Assistant output",
+            "body": "answer",
+            "stream_delta": "answer"
+        });
         incoming.raw_json = json!({
             "type": "stream_event",
             "event": {
                 "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "answer"}
+                "delta": {"type": "text_delta", "text": "wrong raw value"}
             }
         });
 
@@ -1331,12 +1349,20 @@ mod tests {
             ProviderEventKind::AssistantOutput,
             ProviderEventPhase::Delta,
         );
-        first.normalized_payload = json!({"title": "Assistant", "text": "a"});
+        first.normalized_payload = json!({
+            "title": "Assistant",
+            "text": "a",
+            "stream_delta": "a"
+        });
         first.raw_json = json!({"method": "agent/message/delta", "params": {"delta": "a"}});
         let mut second = first.clone();
         second.provider_event_id = Some("evt-2".to_owned());
         second.provider_sequence = Some(2);
-        second.normalized_payload = json!({"title": "Assistant", "text": "abc"});
+        second.normalized_payload = json!({
+            "title": "Assistant",
+            "text": "abc",
+            "stream_delta": "abc"
+        });
         second.raw_json = json!({"method": "agent/message/delta", "params": {"delta": "abc"}});
 
         store.upsert_event(&first).unwrap();
@@ -1468,6 +1494,32 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row.phase == ProviderEventPhase::Completed));
+    }
+
+    #[test]
+    fn completed_snapshot_replaces_partial_body_and_empty_stop_preserves_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut partial = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Completed,
+        );
+        partial.normalized_payload = json!({"title": "Assistant", "body": "stale partial"});
+        let mut final_snapshot = partial.clone();
+        final_snapshot.provider_event_id = Some("evt-final".to_owned());
+        final_snapshot.normalized_payload =
+            json!({"title": "Assistant", "body": "Complete answer"});
+        let mut empty_stop = final_snapshot.clone();
+        empty_stop.provider_event_id = Some("evt-stop".to_owned());
+        empty_stop.normalized_payload = json!({"title": "Assistant", "body": ""});
+
+        store.upsert_event(&partial).unwrap();
+        let repaired = store.upsert_event(&final_snapshot).unwrap();
+        let completed = store.upsert_event(&empty_stop).unwrap();
+
+        assert_eq!(repaired.normalized_payload["body"], "Complete answer");
+        assert_eq!(completed.normalized_payload["body"], "Complete answer");
     }
 
     #[test]

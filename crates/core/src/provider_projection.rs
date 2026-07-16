@@ -641,6 +641,8 @@ fn secret_like_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::provider_adapters::claude_stream::parse_claude_stream_json_lines;
     use crate::provider_events::{ProviderEventKind, ProviderEventPhase};
@@ -751,6 +753,138 @@ mod tests {
         assert_eq!(assistant.len(), 1);
         assert_eq!(assistant[0].body, "Complete answer");
         assert_eq!(assistant[0].status, ProviderProjectionStatus::Complete);
+    }
+
+    #[test]
+    fn claude_projection_full_fixture_keeps_non_message_events_out_of_assistant_identity() {
+        let native = include_str!("../tests/fixtures/claude_stream/basic_turn.jsonl");
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut latest = BTreeMap::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let mut draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            draft.provider_sequence = Some(sequence as i64);
+            let record = store.upsert_event(&draft).unwrap();
+            latest.insert(record.identity_key.clone(), record);
+        }
+
+        let projection = provider_projection_from_records(
+            &latest.into_values().collect::<Vec<ProviderEventRecord>>(),
+        );
+        let assistant = projection
+            .items
+            .iter()
+            .find(|item| item.category == ProviderProjectionCategory::AssistantMessage)
+            .unwrap();
+
+        assert_eq!(assistant.body, "Fixture complete.");
+        assert_eq!(assistant.status, ProviderProjectionStatus::Complete);
+        assert!(projection
+            .items
+            .iter()
+            .any(|item| item.category == ProviderProjectionCategory::Status
+                && item.id != assistant.id));
+        assert!(projection
+            .items
+            .iter()
+            .any(|item| item.category == ProviderProjectionCategory::Unknown
+                && item.id != assistant.id));
+    }
+
+    #[test]
+    fn claude_projection_authoritative_final_repairs_partial_delta_before_empty_stops() {
+        let native = r#"{"type":"stream_event","session_id":"claude-session","event":{"type":"message_start","message":{"id":"claude-message","role":"assistant","content":[]}}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Complete "}}}
+{"type":"assistant","session_id":"claude-session","message":{"id":"claude-message","role":"assistant","content":[{"type":"text","text":"Complete answer"}]}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","session_id":"claude-session","event":{"type":"message_stop"}}"#;
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut latest = BTreeMap::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            let record = store.upsert_event(&draft).unwrap();
+            latest.insert(record.identity_key.clone(), record);
+        }
+
+        let projection = provider_projection_from_records(
+            &latest.into_values().collect::<Vec<ProviderEventRecord>>(),
+        );
+        let assistant = projection
+            .items
+            .iter()
+            .filter(|item| item.category == ProviderProjectionCategory::AssistantMessage)
+            .collect::<Vec<_>>();
+
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].body, "Complete answer");
+        assert_eq!(assistant[0].status, ProviderProjectionStatus::Complete);
+    }
+
+    #[test]
+    fn claude_projection_mixed_final_snapshot_keeps_assistant_and_reasoning_rows_distinct() {
+        let native = r#"{"type":"assistant","session_id":"claude-session","uuid":"mixed-final-1","message":{"id":"claude-message","role":"assistant","content":[{"type":"thinking","thinking":"Private reasoning"},{"type":"text","text":"Public answer"}]}}"#;
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let event = parse_claude_stream_json_lines(native)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let records = event
+            .into_provider_event_drafts(crate::provider_events::ProviderEventContext {
+                workspace_id: None,
+                chat_thread_id: None,
+                process_id: None,
+                occurred_at_ms: 1,
+                schema_version: 1,
+                adapter_version: "claude-projection-test".to_owned(),
+            })
+            .iter()
+            .map(|draft| store.upsert_event(draft).unwrap())
+            .collect::<Vec<_>>();
+
+        let projection = provider_projection_from_records(&records);
+        let assistant = projection
+            .items
+            .iter()
+            .find(|item| item.category == ProviderProjectionCategory::AssistantMessage)
+            .unwrap();
+        let reasoning = projection
+            .items
+            .iter()
+            .find(|item| item.category == ProviderProjectionCategory::Reasoning)
+            .unwrap();
+
+        assert_eq!(assistant.body, "Public answer");
+        assert_eq!(reasoning.body, "Private reasoning");
+        assert_ne!(assistant.id, reasoning.id);
     }
 
     #[test]

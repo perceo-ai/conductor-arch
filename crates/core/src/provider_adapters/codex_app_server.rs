@@ -1124,6 +1124,7 @@ impl CodexProviderEventDraft {
         } else {
             body
         };
+        let stream_delta = (phase == ProviderEventPhase::Delta).then(|| body.clone());
 
         ProviderEventDraft {
             provider: self.provider,
@@ -1153,6 +1154,7 @@ impl CodexProviderEventDraft {
             normalized_payload: json!({
                 "title": title,
                 "body": body,
+                "stream_delta": stream_delta,
                 "message_kind": self.message_kind,
             }),
             raw_json,
