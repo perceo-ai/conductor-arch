@@ -64,16 +64,145 @@ impl ManagedHarness for ClaudeHarnessController {
 pub(crate) struct ClaudeManagedAdapter {
     context: HarnessAdapterContext,
     parser: ClaudeStreamParser,
-    pending_inputs: VecDeque<PendingClaudeInput>,
-    active_input_id: Option<String>,
-    active_input_content: Option<String>,
-    active_input_acknowledged: bool,
-    completed_inputs: HashSet<String>,
+    pub(crate) tracker: ClaudeTurnTracker,
 }
 
-struct PendingClaudeInput {
+#[derive(Debug, Clone)]
+struct TrackedClaudeInput {
     local_input_id: String,
     content: String,
+    turn_id: u64,
+    acknowledged: bool,
+    started: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ClaudeTurnTracker {
+    initialized: bool,
+    next_local_turn: u64,
+    written_inputs: VecDeque<TrackedClaudeInput>,
+    active_turn: Option<TrackedClaudeInput>,
+    completed_result_ids: HashSet<(u64, String)>,
+}
+
+impl ClaudeTurnTracker {
+    pub(crate) fn ready(&self) -> bool {
+        self.initialized && self.written_inputs.is_empty() && self.active_turn.is_none()
+    }
+
+    fn note_initialized(&mut self) {
+        self.initialized = true;
+    }
+
+    fn note_input_written(&mut self, local_input_id: String, content: String) {
+        self.next_local_turn = self.next_local_turn.saturating_add(1);
+        self.written_inputs.push_back(TrackedClaudeInput {
+            local_input_id,
+            content,
+            turn_id: self.next_local_turn,
+            acknowledged: false,
+            started: false,
+        });
+    }
+
+    fn settle_failed_input_write(&mut self, local_input_id: &str) {
+        self.written_inputs
+            .retain(|pending| pending.local_input_id != local_input_id);
+        if self
+            .active_turn
+            .as_ref()
+            .is_some_and(|active| active.local_input_id == local_input_id)
+        {
+            self.active_turn = None;
+        }
+    }
+
+    fn note_replayed_user(&mut self, text: &str, effects: &mut Vec<HarnessEffect>) {
+        if self.active_turn.is_none() {
+            let Some(front) = self.written_inputs.front() else {
+                return;
+            };
+            if front.content != text {
+                return;
+            }
+            self.active_turn = self.written_inputs.pop_front();
+        }
+
+        let Some(active) = self.active_turn.as_mut() else {
+            return;
+        };
+        if active.content == text && !active.acknowledged {
+            active.acknowledged = true;
+            effects.push(HarnessEffect::InputAcknowledged {
+                local_input_id: active.local_input_id.clone(),
+            });
+        }
+        if active.content == text && !active.started {
+            active.started = true;
+            effects.push(HarnessEffect::TurnStarted {
+                local_input_id: active.local_input_id.clone(),
+            });
+        }
+    }
+
+    fn note_provider_turn_started(&mut self, effects: &mut Vec<HarnessEffect>) {
+        if self.active_turn.is_none() {
+            self.active_turn = self.written_inputs.pop_front();
+        }
+        if let Some(active) = self.active_turn.as_mut().filter(|active| !active.started) {
+            active.started = true;
+            effects.push(HarnessEffect::TurnStarted {
+                local_input_id: active.local_input_id.clone(),
+            });
+        }
+    }
+
+    fn result_completed(&self, result_id: &str) -> bool {
+        if let Some(turn_id) = self
+            .active_turn
+            .as_ref()
+            .map(|active| active.turn_id)
+            .or_else(|| self.written_inputs.front().map(|pending| pending.turn_id))
+        {
+            return self
+                .completed_result_ids
+                .contains(&(turn_id, result_id.to_owned()));
+        }
+
+        self.completed_result_ids
+            .iter()
+            .any(|(_, completed_id)| completed_id == result_id)
+    }
+
+    fn note_terminal_result(
+        &mut self,
+        result_id: String,
+        status: ClaudeResultStatus,
+        effects: &mut Vec<HarnessEffect>,
+    ) {
+        if self.active_turn.is_none() {
+            self.active_turn = self.written_inputs.pop_front();
+            if let Some(active) = self.active_turn.as_mut().filter(|active| !active.started) {
+                active.started = true;
+                effects.push(HarnessEffect::TurnStarted {
+                    local_input_id: active.local_input_id.clone(),
+                });
+            }
+        }
+        let Some(active) = self.active_turn.take() else {
+            return;
+        };
+        if !self
+            .completed_result_ids
+            .insert((active.turn_id, result_id))
+        {
+            return;
+        }
+        effects.push(HarnessEffect::TurnCompleted {
+            local_input_id: active.local_input_id,
+            status: claude_result_to_harness_status(status),
+        });
+    }
 }
 
 impl ClaudeManagedAdapter {
@@ -81,11 +210,7 @@ impl ClaudeManagedAdapter {
         Self {
             context,
             parser: ClaudeStreamParser::default(),
-            pending_inputs: VecDeque::new(),
-            active_input_id: None,
-            active_input_content: None,
-            active_input_acknowledged: false,
-            completed_inputs: HashSet::new(),
+            tracker: ClaudeTurnTracker::default(),
         }
     }
 
@@ -99,59 +224,7 @@ impl ClaudeManagedAdapter {
     }
 
     pub(crate) fn settle_failed_input_write(&mut self, local_input_id: &str) {
-        self.pending_inputs
-            .retain(|pending| pending.local_input_id != local_input_id);
-        if self.active_input_id.as_deref() == Some(local_input_id) {
-            self.active_input_id = None;
-            self.active_input_content = None;
-            self.active_input_acknowledged = false;
-        }
-    }
-
-    fn start_pending_turn(
-        &mut self,
-        effects: &mut Vec<HarnessEffect>,
-        replayed_text: Option<&str>,
-    ) {
-        if self.active_input_id.is_some() {
-            if let Some(text) = replayed_text {
-                if !self.active_input_acknowledged
-                    && self.active_input_content.as_deref() == Some(text)
-                {
-                    effects.push(HarnessEffect::InputAcknowledged {
-                        local_input_id: self.active_input_id.clone().expect("active input id"),
-                    });
-                    self.active_input_acknowledged = true;
-                }
-            }
-            return;
-        }
-        if replayed_text.is_some() {
-            return;
-        }
-        let pending = self.pending_inputs.pop_front();
-        if let Some(pending) = pending {
-            self.active_input_id = Some(pending.local_input_id);
-            self.active_input_content = Some(pending.content);
-            self.active_input_acknowledged = false;
-        }
-        if let Some(local_input_id) = self.active_input_id.clone() {
-            effects.push(HarnessEffect::TurnStarted { local_input_id });
-        }
-    }
-
-    fn finish_active_turn(&mut self, effects: &mut Vec<HarnessEffect>, status: ClaudeResultStatus) {
-        let Some(local_input_id) = self.active_input_id.take() else {
-            return;
-        };
-        self.active_input_content = None;
-        self.active_input_acknowledged = false;
-        if self.completed_inputs.insert(local_input_id.clone()) {
-            effects.push(HarnessEffect::TurnCompleted {
-                local_input_id,
-                status: claude_result_to_harness_status(status),
-            });
-        }
+        self.tracker.settle_failed_input_write(local_input_id);
     }
 }
 
@@ -170,10 +243,8 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
         let mut native_payload =
             serde_json::to_vec(&payload).context("serialize Claude stream-json input")?;
         native_payload.push(b'\n');
-        self.pending_inputs.push_back(PendingClaudeInput {
-            local_input_id: input.local_input_id.clone(),
-            content: input.content,
-        });
+        self.tracker
+            .note_input_written(input.local_input_id.clone(), input.content);
 
         Ok(NativeWrite {
             provider_key: CLAUDE_PROVIDER_NAME,
@@ -197,6 +268,14 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             };
             let event_kind = event.kind;
             let lifecycle_signal = event.lifecycle_signal();
+            let terminal_result_id = matches!(event_kind, ClaudeProviderEventKind::Result)
+                .then(|| claude_terminal_result_id(&event));
+            if terminal_result_id
+                .as_deref()
+                .is_some_and(|result_id| self.tracker.result_completed(result_id))
+            {
+                continue;
+            }
             let replayed_input = matches!(
                 &lifecycle_signal,
                 Some(ClaudeLifecycleSignal::UserInputReplayed { .. })
@@ -208,6 +287,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             let limit_is_terminal = rate_limit_is_terminal(&event.raw_json);
             effects.extend(
                 event
+                    .clone()
                     .into_provider_event_drafts(self.provider_context())
                     .into_iter()
                     .map(HarnessEffect::ProviderEvent),
@@ -215,24 +295,34 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
 
             match lifecycle_signal {
                 Some(ClaudeLifecycleSignal::Initialized(init)) => {
+                    self.tracker.note_initialized();
                     self.context.native_session_id = Some(init.session_id.clone());
                     effects.push(HarnessEffect::Initialized {
                         native_session_id: init.session_id,
                         model: init.model,
                     });
                     effects.push(HarnessEffect::CapabilitiesObserved(init.capabilities));
-                    effects.push(HarnessEffect::Ready);
+                    if self.tracker.ready() {
+                        effects.push(HarnessEffect::Ready);
+                    }
                 }
                 Some(ClaudeLifecycleSignal::UserInputReplayed { text }) => {
-                    self.start_pending_turn(&mut effects, Some(&text));
+                    self.tracker.note_replayed_user(&text, &mut effects);
                 }
                 Some(ClaudeLifecycleSignal::TurnFinished {
                     status,
                     stop_reason,
                 }) => {
                     let _ = stop_reason;
-                    self.finish_active_turn(&mut effects, status);
-                    effects.push(HarnessEffect::Ready);
+                    self.tracker.note_terminal_result(
+                        terminal_result_id
+                            .unwrap_or_else(|| claude_fallback_event_id(&event.raw_json)),
+                        status,
+                        &mut effects,
+                    );
+                    if self.tracker.ready() {
+                        effects.push(HarnessEffect::Ready);
+                    }
                 }
                 Some(ClaudeLifecycleSignal::DeferredTool { tool_use }) => {
                     let _ = tool_use;
@@ -245,7 +335,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 ClaudeProviderEventKind::UserMessage | ClaudeProviderEventKind::MessageStart
             ) && !replayed_input
             {
-                self.start_pending_turn(&mut effects, None);
+                self.tracker.note_provider_turn_started(&mut effects);
             }
 
             if event_kind == ClaudeProviderEventKind::ApiRetry {
@@ -259,8 +349,14 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                     retry_after_ms: limit_retry_after_ms,
                 });
                 if limit_is_terminal {
-                    self.finish_active_turn(&mut effects, ClaudeResultStatus::Failed);
-                    effects.push(HarnessEffect::Ready);
+                    self.tracker.note_terminal_result(
+                        claude_fallback_event_id(&event.raw_json),
+                        ClaudeResultStatus::Failed,
+                        &mut effects,
+                    );
+                    if self.tracker.ready() {
+                        effects.push(HarnessEffect::Ready);
+                    }
                 }
             }
         }
@@ -305,6 +401,13 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             },
         }
     }
+}
+
+fn claude_terminal_result_id(event: &ClaudeProviderEventDraft) -> String {
+    event
+        .provider_event_id
+        .clone()
+        .unwrap_or_else(|| claude_fallback_event_id(&event.raw_json))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1516,8 +1619,8 @@ mod tests {
 
         pending_adapter.settle_failed_input_write("pending-input");
 
-        assert!(pending_adapter.pending_inputs.is_empty());
-        assert!(pending_adapter.active_input_id.is_none());
+        assert!(pending_adapter.tracker.written_inputs.is_empty());
+        assert!(pending_adapter.tracker.active_turn.is_none());
 
         let mut active_adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
             session_id: 7,
@@ -1546,8 +1649,8 @@ mod tests {
 
         active_adapter.settle_failed_input_write("active-input");
 
-        assert!(active_adapter.pending_inputs.is_empty());
-        assert!(active_adapter.active_input_id.is_none());
+        assert!(active_adapter.tracker.written_inputs.is_empty());
+        assert!(active_adapter.tracker.active_turn.is_none());
     }
 
     #[test]
@@ -2086,10 +2189,159 @@ mod tests {
                 if event.raw_json["subtype"] == "api_retry"
         )));
         assert!(edge_effects.iter().any(|effect| matches!(
-            effect,
-            HarnessEffect::ProviderEvent(event)
-                if event.raw_json["type"] == "rate_limit_event"
+        effect,
+        HarnessEffect::ProviderEvent(event)
+            if event.raw_json["type"] == "rate_limit_event"
         )));
+    }
+
+    #[test]
+    fn claude_turn_tracker_drives_readiness_and_exactly_once_completion() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        let init = br#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-fixture","capabilities":["streaming"]}
+"#;
+        let replayed_user = br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"hello tracker"}]}}
+"#;
+        let success_result = br#"{"type":"result","subtype":"success","session_id":"s1","result":"done","duration_ms":1}
+"#;
+
+        assert!(!adapter.tracker.ready());
+        let init_effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: init.to_vec(),
+            })
+            .unwrap();
+        assert!(init_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::Initialized { native_session_id, model }
+                if native_session_id == "s1" && model.as_deref() == Some("claude-sonnet-fixture")
+        )));
+        assert!(init_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::CapabilitiesObserved(capabilities) if capabilities == &["streaming"]
+        )));
+        assert!(init_effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert!(adapter.tracker.ready());
+
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "local-input-1".to_owned(),
+                content: "hello tracker".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        assert!(!adapter.tracker.ready());
+
+        let replay_effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: replayed_user.to_vec(),
+            })
+            .unwrap();
+        assert!(replay_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { local_input_id }
+                if local_input_id == "local-input-1"
+        )));
+        assert!(replay_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnStarted { local_input_id } if local_input_id == "local-input-1"
+        )));
+
+        let result_effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: success_result.to_vec(),
+            })
+            .unwrap();
+        assert!(result_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Success,
+            } if local_input_id == "local-input-1"
+        )));
+        assert!(result_effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert!(adapter.tracker.ready());
+
+        let duplicate_effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: success_result.to_vec(),
+            })
+            .unwrap();
+        assert!(
+            duplicate_effects.is_empty(),
+            "duplicate terminal result must not produce lifecycle or provider effects: {duplicate_effects:?}"
+        );
+    }
+
+    #[test]
+    fn claude_turn_tracker_allows_reused_result_payload_for_new_local_turn() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-fixture"}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+        let success_result = br#"{"type":"result","subtype":"success","session_id":"s1","result":"done","duration_ms":1}
+"#;
+
+        for (local_input_id, content) in [
+            ("local-input-1", "first identical result"),
+            ("local-input-2", "second identical result"),
+        ] {
+            adapter
+                .encode_input(HarnessInput {
+                    local_input_id: local_input_id.to_owned(),
+                    content: content.to_owned(),
+                    visible_content: None,
+                    kind: crate::archcar::protocol::ArchcarInputKind::User,
+                    delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+                })
+                .unwrap();
+            let mut start_effects = Vec::new();
+            adapter
+                .tracker
+                .note_provider_turn_started(&mut start_effects);
+
+            let result_effects = adapter
+                .observe_native(NativeRecord {
+                    provider_key: CLAUDE_PROVIDER_NAME,
+                    payload: success_result.to_vec(),
+                })
+                .unwrap();
+            assert!(result_effects.iter().any(|effect| matches!(
+                effect,
+                HarnessEffect::TurnCompleted {
+                    local_input_id: completed_id,
+                    status: HarnessTurnStatus::Success,
+                } if completed_id == local_input_id
+            )));
+            assert!(adapter.tracker.ready());
+        }
     }
 
     #[test]
