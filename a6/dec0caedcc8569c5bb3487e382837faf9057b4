@@ -1,0 +1,21 @@
+.github/workflows/ci.yml
+  s_28d28baeac6b8d::t_8305ddf3605601 558,560,562,564,566
+.github/workflows/publish.yml
+  s_28d28baeac6b8d::t_d80299eb62e160 224-225,228,231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "a6dec0caedcc8569c5bb3487e382837faf9057b4",
+  "prompts": {},
+  "sessions": {
+    "s_28d28baeac6b8d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6980-2aaf-7762-9fa9-c21a1a12ddb4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
