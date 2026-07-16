@@ -7,6 +7,7 @@ use crate::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventRecord, ProviderEventStore,
 };
 use crate::provider_inputs::{ProviderInputInput, ProviderInputRecord, ProviderInputStore};
+use crate::provider_interactions::{ProviderInteractionRecord, ProviderInteractionStore};
 use crate::session_pipeline::PtyChunkInput;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
@@ -16,6 +17,7 @@ pub struct RuntimeSessionStore {
     chat_store: ChatStore,
     provider_event_store: ProviderEventStore,
     provider_input_store: ProviderInputStore,
+    provider_interaction_store: ProviderInteractionStore,
 }
 
 impl RuntimeSessionStore {
@@ -24,6 +26,7 @@ impl RuntimeSessionStore {
             chat_store: ChatStore::new(db_path.clone()),
             provider_event_store: ProviderEventStore::new(db_path.clone()),
             provider_input_store: ProviderInputStore::new(db_path.clone()),
+            provider_interaction_store: ProviderInteractionStore::new(db_path.clone()),
             db_path,
         }
     }
@@ -116,6 +119,13 @@ impl RuntimeSessionStore {
 
     pub fn mark_provider_input_failed(&self, id: &str, error: &str) -> Result<()> {
         self.provider_input_store.mark_failed(id, error)
+    }
+
+    pub fn register_provider_interaction(
+        &self,
+        draft: crate::archcar::harness_contract::ProviderInteractionDraft,
+    ) -> Result<ProviderInteractionRecord> {
+        self.provider_interaction_store.register(draft)
     }
 
     pub fn max_runtime_input_provider_sequence(&self, process_id: i64) -> Result<u64> {

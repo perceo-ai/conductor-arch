@@ -1514,6 +1514,21 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::SessionMessages { messages, .. } => {
             print!("{}", render_archcar_protocol_messages(&messages));
         }
+        ArchcarResponse::ProviderInteraction { interaction } => {
+            println!(
+                "provider interaction {} kind={:?} status={:?}",
+                interaction.id, interaction.kind, interaction.status
+            );
+        }
+        ArchcarResponse::ProviderInteractions { interactions } => {
+            println!("provider interactions {}", interactions.len());
+            for interaction in interactions {
+                println!(
+                    "- {} kind={:?} status={:?}",
+                    interaction.id, interaction.kind, interaction.status
+                );
+            }
+        }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }

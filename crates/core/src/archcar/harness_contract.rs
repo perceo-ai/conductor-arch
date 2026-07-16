@@ -2,6 +2,7 @@ use crate::archcar::harness::HarnessController;
 use crate::archcar::protocol::{ArchcarInputDelivery, ArchcarInputKind};
 use crate::provider_events::ProviderEventDraft;
 use crate::workspace::SessionKind;
+use serde::{Deserialize, Serialize};
 
 pub const MANAGED_HARNESS_CONTRACT_VERSION: u16 = 1;
 
@@ -205,14 +206,15 @@ pub enum HarnessRecoveryPlan {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderInteractionKind {
     Permission,
     UserQuestion,
     PlanApproval,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderInteractionDraft {
     pub provider_key: String,
     pub workspace: String,
@@ -227,7 +229,8 @@ pub struct ProviderInteractionDraft {
     pub native_request: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderInteractionResolution {
     Approve,
     Deny { reason: Option<String> },

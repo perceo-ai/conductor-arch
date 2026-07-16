@@ -64,6 +64,24 @@ pub enum AsyncArchcarRequestKind {
     KillSession {
         session_id: i64,
     },
+    RegisterProviderInteraction {
+        session_id: i64,
+        thread_id: i64,
+        native_id: String,
+    },
+    GetProviderInteraction {
+        interaction_id: String,
+    },
+    ListProviderInteractions {
+        thread_id: Option<i64>,
+        pending_only: bool,
+    },
+    ResolveProviderInteraction {
+        interaction_id: String,
+    },
+    ConsumeProviderInteraction {
+        interaction_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,6 +589,35 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         ArchcarRequest::GetSessionMessages { thread_id } => {
             AsyncArchcarRequestKind::GetSessionStatus {
                 session_id: *thread_id,
+            }
+        }
+        ArchcarRequest::RegisterProviderInteraction { interaction } => {
+            AsyncArchcarRequestKind::RegisterProviderInteraction {
+                session_id: interaction.session_id,
+                thread_id: interaction.thread_id,
+                native_id: interaction.native_id.clone(),
+            }
+        }
+        ArchcarRequest::GetProviderInteraction { interaction_id } => {
+            AsyncArchcarRequestKind::GetProviderInteraction {
+                interaction_id: interaction_id.clone(),
+            }
+        }
+        ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        } => AsyncArchcarRequestKind::ListProviderInteractions {
+            thread_id: *thread_id,
+            pending_only: *pending_only,
+        },
+        ArchcarRequest::ResolveProviderInteraction { interaction_id, .. } => {
+            AsyncArchcarRequestKind::ResolveProviderInteraction {
+                interaction_id: interaction_id.clone(),
+            }
+        }
+        ArchcarRequest::ConsumeProviderInteraction { interaction_id, .. } => {
+            AsyncArchcarRequestKind::ConsumeProviderInteraction {
+                interaction_id: interaction_id.clone(),
             }
         }
         ArchcarRequest::Subscribe => AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 },

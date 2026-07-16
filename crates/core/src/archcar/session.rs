@@ -559,6 +559,21 @@ fn apply_harness_effect(
                 thread_id: started.thread_id,
             });
         }
+        HarnessEffect::InteractionRequested(draft) => {
+            match runtime_store.register_provider_interaction(draft) {
+                Ok(interaction) => {
+                    let _ =
+                        event_tx.send(ArchcarEvent::ProviderInteractionRequested { interaction });
+                }
+                Err(err) => {
+                    let _ = event_tx.send(ArchcarEvent::SessionError {
+                        session_id: Some(started.session_id),
+                        thread_id: Some(started.thread_id),
+                        message: format!("Provider interaction registration failed: {err:#}"),
+                    });
+                }
+            }
+        }
         HarnessEffect::Warning(message) | HarnessEffect::Fatal(message) => {
             let _ = event_tx.send(ArchcarEvent::SessionError {
                 session_id: Some(started.session_id),
@@ -580,7 +595,6 @@ fn apply_harness_effect(
             }
         }
         HarnessEffect::TurnStarted { .. }
-        | HarnessEffect::InteractionRequested(_)
         | HarnessEffect::InteractionResolved { .. }
         | HarnessEffect::Retry { .. }
         | HarnessEffect::RateLimited { .. }

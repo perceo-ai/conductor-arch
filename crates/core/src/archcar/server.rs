@@ -22,6 +22,7 @@ use crate::archcar::session::{
 use crate::archcar::transport::{self, LocalListener, LocalStream};
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
+use crate::provider_interactions::ProviderInteractionStore;
 use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
@@ -398,6 +399,94 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 Ok(None) => ArchcarResponse::Error {
                     message: format!("unknown session {session_id}"),
                 },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RegisterProviderInteraction { interaction } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.register(interaction) {
+                Ok(interaction) => {
+                    broadcast(
+                        &mut state.lock().unwrap(),
+                        ArchcarEvent::ProviderInteractionRequested {
+                            interaction: interaction.clone(),
+                        },
+                    );
+                    ArchcarResponse::ProviderInteraction { interaction }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetProviderInteraction { interaction_id } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.get(&interaction_id) {
+                Ok(Some(interaction)) => ArchcarResponse::ProviderInteraction { interaction },
+                Ok(None) => ArchcarResponse::Error {
+                    message: format!("unknown provider interaction {interaction_id}"),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.list(thread_id, pending_only) {
+                Ok(interactions) => ArchcarResponse::ProviderInteractions { interactions },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ResolveProviderInteraction {
+            interaction_id,
+            resolution,
+        } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.resolve(&interaction_id, resolution) {
+                Ok(interaction) => {
+                    broadcast(
+                        &mut state.lock().unwrap(),
+                        ArchcarEvent::ProviderInteractionResolved {
+                            interaction: interaction.clone(),
+                        },
+                    );
+                    ArchcarResponse::ProviderInteraction { interaction }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ConsumeProviderInteraction {
+            interaction_id,
+            native_response,
+        } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.consume_resolution(&interaction_id, native_response) {
+                Ok(interaction) => ArchcarResponse::ProviderInteraction { interaction },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1227,6 +1316,9 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archcar::harness_contract::{
+        ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
+    };
     use crate::archcar::protocol::{ArchcarInputDelivery, ArchcarInputKind};
     use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
@@ -1241,6 +1333,68 @@ mod tests {
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessStatus};
     use serde_json::json;
+
+    #[test]
+    fn provider_interaction_dispatch_registers_lists_and_resolves() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        crate::storage::migrate_workspace_db(&rusqlite::Connection::open(&db_path).unwrap())
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::RegisterProviderInteraction {
+                interaction: ProviderInteractionDraft {
+                    provider_key: "claude".to_owned(),
+                    workspace: "berlin".to_owned(),
+                    thread_id: 7,
+                    session_id: 11,
+                    native_session_id: None,
+                    native_id: "tool-1".to_owned(),
+                    kind: ProviderInteractionKind::Permission,
+                    title: "Permission".to_owned(),
+                    detail: "Allow?".to_owned(),
+                    choices: Vec::new(),
+                    native_request: json!({"tool": "bash"}),
+                },
+            },
+            &state,
+        );
+        let ArchcarResponse::ProviderInteraction { interaction } = response else {
+            panic!("expected provider interaction response");
+        };
+
+        let listed = dispatch_request(
+            ArchcarRequest::ListProviderInteractions {
+                thread_id: Some(7),
+                pending_only: true,
+            },
+            &state,
+        );
+        assert!(matches!(
+            listed,
+            ArchcarResponse::ProviderInteractions { ref interactions } if interactions.len() == 1
+        ));
+
+        let resolved = dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id,
+                resolution: ProviderInteractionResolution::Approve,
+            },
+            &state,
+        );
+        assert!(matches!(
+            resolved,
+            ArchcarResponse::ProviderInteraction { interaction } if interaction.status == crate::provider_interactions::ProviderInteractionStatus::Allowed
+        ));
+    }
 
     #[test]
     fn ensure_default_session_debounces_repeat_requests() {

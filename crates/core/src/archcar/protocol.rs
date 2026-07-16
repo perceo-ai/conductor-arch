@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::archcar::harness_contract::HarnessDescriptor;
+use crate::archcar::harness_contract::{ProviderInteractionDraft, ProviderInteractionResolution};
 use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
+use crate::provider_interactions::ProviderInteractionRecord;
 use crate::session_state::AgentSessionState;
 use crate::workspace::{SessionHarnessOptions, SessionKind};
 
@@ -102,6 +104,25 @@ pub enum ArchcarRequest {
     KillSession {
         session_id: i64,
     },
+    RegisterProviderInteraction {
+        interaction: ProviderInteractionDraft,
+    },
+    GetProviderInteraction {
+        interaction_id: String,
+    },
+    ListProviderInteractions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+        pending_only: bool,
+    },
+    ResolveProviderInteraction {
+        interaction_id: String,
+        resolution: ProviderInteractionResolution,
+    },
+    ConsumeProviderInteraction {
+        interaction_id: String,
+        native_response: serde_json::Value,
+    },
     Subscribe,
 }
 
@@ -135,6 +156,12 @@ pub enum ArchcarResponse {
     SessionMessages {
         thread_id: i64,
         messages: Vec<ArchcarMessage>,
+    },
+    ProviderInteraction {
+        interaction: ProviderInteractionRecord,
+    },
+    ProviderInteractions {
+        interactions: Vec<ProviderInteractionRecord>,
     },
     Error {
         message: String,
@@ -272,6 +299,38 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::KillSession { session_id } => {
             format!("kill_session session_id={session_id}")
         }
+        ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
+            "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
+            interaction.provider_key,
+            interaction.session_id,
+            interaction.thread_id,
+            interaction.kind,
+            interaction.native_id,
+            interaction.native_request.to_string().len()
+        ),
+        ArchcarRequest::GetProviderInteraction { interaction_id } => {
+            format!("get_provider_interaction id={interaction_id}")
+        }
+        ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        } => format!(
+            "list_provider_interactions thread_id={thread_id:?} pending_only={pending_only}"
+        ),
+        ArchcarRequest::ResolveProviderInteraction {
+            interaction_id,
+            resolution,
+        } => format!(
+            "resolve_provider_interaction id={interaction_id} resolution={:?}",
+            resolution
+        ),
+        ArchcarRequest::ConsumeProviderInteraction {
+            interaction_id,
+            native_response,
+        } => format!(
+            "consume_provider_interaction id={interaction_id} response_bytes={}",
+            native_response.to_string().len()
+        ),
         ArchcarRequest::Subscribe => "subscribe".to_owned(),
     }
 }
@@ -311,6 +370,13 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "session_messages thread_id={thread_id} count={}",
             messages.len()
         ),
+        ArchcarResponse::ProviderInteraction { interaction } => format!(
+            "provider_interaction id={} kind={:?} status={:?}",
+            interaction.id, interaction.kind, interaction.status
+        ),
+        ArchcarResponse::ProviderInteractions { interactions } => {
+            format!("provider_interactions count={}", interactions.len())
+        }
         ArchcarResponse::Error { message } => {
             format!("error chars={}", message.chars().count())
         }
@@ -372,6 +438,14 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
         } => format!(
             "session_error session_id={session_id:?} thread_id={thread_id:?} chars={}",
             message.chars().count()
+        ),
+        ArchcarEvent::ProviderInteractionRequested { interaction } => format!(
+            "provider_interaction_requested id={} kind={:?} status={:?}",
+            interaction.id, interaction.kind, interaction.status
+        ),
+        ArchcarEvent::ProviderInteractionResolved { interaction } => format!(
+            "provider_interaction_resolved id={} kind={:?} status={:?}",
+            interaction.id, interaction.kind, interaction.status
         ),
     }
 }
@@ -437,12 +511,22 @@ pub enum ArchcarEvent {
         thread_id: Option<i64>,
         message: String,
     },
+    ProviderInteractionRequested {
+        interaction: ProviderInteractionRecord,
+    },
+    ProviderInteractionResolved {
+        interaction: ProviderInteractionRecord,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archcar::harness_contract::{
+        ProviderInteractionKind, ProviderInteractionResolution,
+    };
     use crate::codex_tui::{CodexContextUsage, CodexInlineEvent, CodexToolCall};
+    use crate::provider_interactions::ProviderInteractionStatus;
 
     #[test]
     fn protocol_round_trips_spawn_event() {
@@ -575,6 +659,80 @@ mod tests {
         assert_eq!(
             archcar_request_summary(&request),
             "resize_session session_id=9 rows=33 cols=111"
+        );
+    }
+
+    #[test]
+    fn provider_interaction_protocol_round_trips_and_summarizes_without_bodies() {
+        let request = ArchcarRequest::RegisterProviderInteraction {
+            interaction: ProviderInteractionDraft {
+                provider_key: "claude".to_owned(),
+                workspace: "berlin".to_owned(),
+                thread_id: 7,
+                session_id: 11,
+                native_session_id: Some("session-1".to_owned()),
+                native_id: "tool-1".to_owned(),
+                kind: ProviderInteractionKind::UserQuestion,
+                title: "Question".to_owned(),
+                detail: "secret detail".to_owned(),
+                choices: vec!["yes".to_owned()],
+                native_request: serde_json::json!({"prompt":"secret"}),
+            },
+        };
+
+        let summary = archcar_request_summary(&request);
+        assert!(summary.contains("register_provider_interaction"));
+        assert!(summary.contains("request_bytes="));
+        assert!(!summary.contains("secret"));
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+            request
+        );
+
+        let resolve = ArchcarRequest::ResolveProviderInteraction {
+            interaction_id: "interaction-1".to_owned(),
+            resolution: ProviderInteractionResolution::Approve,
+        };
+        assert!(archcar_request_summary(&resolve).contains("interaction-1"));
+    }
+
+    #[test]
+    fn provider_interaction_event_summary_reports_identity_and_status() {
+        let interaction = ProviderInteractionRecord {
+            id: "interaction-1".to_owned(),
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id: 7,
+            session_id: 11,
+            native_session_id: None,
+            native_id: "tool-1".to_owned(),
+            kind: ProviderInteractionKind::Permission,
+            title: "Permission".to_owned(),
+            detail: "secret".to_owned(),
+            choices: Vec::new(),
+            native_request: serde_json::json!({"secret": true}),
+            request_fingerprint: "abc".to_owned(),
+            status: ProviderInteractionStatus::Pending,
+            resolution: None,
+            native_response: None,
+            error: None,
+            created_at: "1".to_owned(),
+            resolved_at: None,
+            consumed_at: None,
+        };
+        let event = ArchcarEvent::ProviderInteractionRequested {
+            interaction: interaction.clone(),
+        };
+
+        let summary = archcar_event_summary(&event);
+        assert!(summary.contains("interaction-1"));
+        assert!(summary.contains("Pending"));
+        assert!(!summary.contains("secret"));
+        assert_eq!(
+            serde_json::from_str::<ArchcarEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
+            event
         );
     }
 

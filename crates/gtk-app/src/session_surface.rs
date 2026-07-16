@@ -8798,7 +8798,9 @@ fn update_working_indicator_for_archcar_event(
         | ArchcarEvent::SessionStarted { .. }
         | ArchcarEvent::SessionCapabilitiesChanged { .. }
         | ArchcarEvent::SessionScreenUpdated { .. }
-        | ArchcarEvent::SessionMessagesUpdated { .. } => false,
+        | ArchcarEvent::SessionMessagesUpdated { .. }
+        | ArchcarEvent::ProviderInteractionRequested { .. }
+        | ArchcarEvent::ProviderInteractionResolved { .. } => false,
     }
 }
 
@@ -8899,6 +8901,22 @@ fn handle_archcar_event(
         }
         ArchcarEvent::SessionMessagesUpdated { thread_id } => {
             trace!(thread_id, "archcar session messages updated");
+        }
+        ArchcarEvent::ProviderInteractionRequested { interaction } => {
+            trace!(
+                id = %interaction.id,
+                thread_id = interaction.thread_id,
+                session_id = interaction.session_id,
+                "archcar provider interaction requested"
+            );
+        }
+        ArchcarEvent::ProviderInteractionResolved { interaction } => {
+            trace!(
+                id = %interaction.id,
+                thread_id = interaction.thread_id,
+                session_id = interaction.session_id,
+                "archcar provider interaction resolved"
+            );
         }
         ArchcarEvent::SessionExited {
             session_id,
@@ -9274,7 +9292,9 @@ fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) 
             ArchcarEvent::SessionReady { .. }
             | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
-            | ArchcarEvent::SessionMessagesUpdated { .. } => (true, false),
+            | ArchcarEvent::SessionMessagesUpdated { .. }
+            | ArchcarEvent::ProviderInteractionRequested { .. }
+            | ArchcarEvent::ProviderInteractionResolved { .. } => (true, false),
         },
         AsyncArchcarMessage::Response(_) => (false, false),
         AsyncArchcarMessage::BridgeError { .. } => (true, false),
