@@ -1,0 +1,22 @@
+progress.md
+  s_7e20ed6ba888b4::t_f7d4cbc6231a44 3,55-61,91-93,121-124
+  s_7e20ed6ba888b4::t_762269ea754667 167-192
+docs/manual-testing-checklist.md
+  s_7e20ed6ba888b4::t_e5ae39b04c672f 142-168
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "7e56835afd9221ca5b02ef4a4be0085ec42dae2e",
+  "prompts": {},
+  "sessions": {
+    "s_7e20ed6ba888b4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6989-46fd-74c2-b2dd-ae33d67c261e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
