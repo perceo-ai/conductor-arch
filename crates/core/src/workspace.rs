@@ -9925,6 +9925,7 @@ mod tests {
     fn create_workspace_with_default_prompts_does_not_fail_on_non_unix() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor")).unwrap();
         fs::write(
             repo_path.join(".archductor/settings.toml"),
             "[prompts]\ngeneral = \"Use the project defaults.\"\n",
