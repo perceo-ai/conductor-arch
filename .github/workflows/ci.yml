@@ -555,15 +555,15 @@ jobs:
       matrix:
         include:
           - family: debian
-            image: debian:trixie
+            image: docker.io/library/debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4
           - family: fedora
-            image: fedora:latest
+            image: docker.io/library/fedora@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898
           - family: arch
-            image: archlinux:latest
+            image: docker.io/library/archlinux@sha256:fe6972d4dc1f660c0c10f4c41b2de8986bab89e7e2955378f8beadb8ebcd7433
           - family: opensuse
-            image: opensuse/tumbleweed:latest
+            image: docker.io/opensuse/tumbleweed@sha256:c42607d066cb63d2d3fbc36614deb14acced3568838b3d5d5663e2298f65a8ce
           - family: alpine
-            image: alpine:3.23
+            image: docker.io/library/alpine@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
     container:
       image: ${{ matrix.image }}
     steps:
