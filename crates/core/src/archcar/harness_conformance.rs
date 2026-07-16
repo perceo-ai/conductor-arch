@@ -1,8 +1,8 @@
 use super::harness::{managed_harness_for_kind, validate_managed_harness};
 use super::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessControl,
-    HarnessControlPlan, HarnessEffect, HarnessInput, NativeRecord, SupportMode,
-    REQUIRED_HARNESS_FEATURES,
+    HarnessControlPlan, HarnessEffect, HarnessInput, HarnessRecoveryCause, HarnessRecoveryPlan,
+    HarnessSignal, NativeRecord, SupportMode, REQUIRED_HARNESS_FEATURES,
 };
 use super::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,
@@ -73,6 +73,45 @@ fn claude_reconfigure_controls_require_resume_with_desired_controls() {
             effort: Some(ref effort),
             ..
         }) if effort == "high"
+    ));
+}
+
+#[test]
+fn claude_interrupt_uses_process_group_and_resume_recovery() {
+    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let mut adapter = claude
+        .create_adapter(adapter_context(Some("claude-session-1")))
+        .unwrap();
+
+    assert_eq!(
+        adapter.plan_control(HarnessControl::Interrupt),
+        HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup)
+    );
+    assert!(matches!(
+        adapter.recovery_plan(HarnessRecoveryCause::InterruptDeadline),
+        HarnessRecoveryPlan::RestartAndResume {
+            native_session_id,
+            ..
+        } if native_session_id == "claude-session-1"
+    ));
+}
+
+#[test]
+fn codex_interrupt_uses_native_turn_interrupt_when_active() {
+    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let mut adapter = codex
+        .create_adapter(adapter_context(Some("codex-thread-1")))
+        .unwrap();
+    adapter
+        .observe_native(NativeRecord {
+            provider_key: "codex",
+            payload: br#"{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}"#.to_vec(),
+        })
+        .unwrap();
+
+    assert!(matches!(
+        adapter.plan_control(HarnessControl::Interrupt),
+        HarnessControlPlan::NativeWrite(_)
     ));
 }
 

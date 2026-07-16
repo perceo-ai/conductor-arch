@@ -71,6 +71,55 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(unix)]
+pub fn configure_new_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+pub fn configure_new_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
+    Command::new("kill")
+        .arg("-INT")
+        .arg(format!("-{pid}"))
+        .status()
+        .map(|status| status.success())
+}
+
+#[cfg(windows)]
+pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
+    terminate_process_tree(pid, false)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn interrupt_process_group(_pid: u32) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+pub fn terminate_process_group(pid: u32, force: bool) -> std::io::Result<bool> {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    Command::new("kill")
+        .arg(signal)
+        .arg(format!("-{pid}"))
+        .status()
+        .map(|status| status.success())
+}
+
+#[cfg(windows)]
+pub fn terminate_process_group(pid: u32, force: bool) -> std::io::Result<bool> {
+    terminate_process_tree(pid, force)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn terminate_process_group(_pid: u32, _force: bool) -> std::io::Result<bool> {
+    Ok(false)
+}
+
 #[cfg(windows)]
 pub fn terminate_process_tree(pid: u32, force: bool) -> std::io::Result<bool> {
     let mut command = Command::new("taskkill.exe");
@@ -100,5 +149,32 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             ["/D", "/S", "/C", "echo archductor"]
         );
+    }
+
+    #[test]
+    fn provider_process_group_interrupt_reaches_child_process() {
+        #[cfg(unix)]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let marker = temp.path().join("interrupted");
+            let script = format!(
+                "trap '' INT; (trap 'echo child > {} ; exit 0' INT; while true; do sleep 1; done) & wait",
+                marker.display()
+            );
+            let mut command = shell_command(&script);
+            configure_new_process_group(&mut command);
+            let mut child = command.spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            assert!(interrupt_process_group(child.id()).unwrap());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline && !marker.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let _ = terminate_process_group(child.id(), true);
+            let _ = child.wait();
+
+            assert!(marker.exists());
+        }
     }
 }

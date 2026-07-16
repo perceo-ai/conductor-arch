@@ -207,6 +207,9 @@ enum ArchcarCommand {
         session_id: i64,
         mode: String,
     },
+    Interrupt {
+        session_id: i64,
+    },
     Resize {
         session_id: i64,
         rows: u16,
@@ -679,6 +682,12 @@ fn main() -> Result<()> {
                     match client
                         .send(ArchcarRequest::SetSessionPermissionMode { session_id, mode })?
                     {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::Interrupt { session_id } => {
+                    match client.send(ArchcarRequest::InterruptTurn { session_id })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
                     }
@@ -2717,6 +2726,20 @@ mod tests {
         };
         assert_eq!(session_id, 7);
         assert_eq!(mode, "default");
+    }
+
+    #[test]
+    fn cli_archcar_interrupt_parses_session_id() {
+        let cli = Cli::try_parse_from(["archductor", "archcar", "interrupt", "7"]).unwrap();
+
+        let Command::Archcar {
+            command: ArchcarCommand::Interrupt { session_id },
+        } = cli.command
+        else {
+            panic!("expected archcar interrupt");
+        };
+
+        assert_eq!(session_id, 7);
     }
 
     #[test]

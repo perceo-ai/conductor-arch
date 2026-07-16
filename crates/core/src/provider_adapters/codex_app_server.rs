@@ -76,6 +76,14 @@ impl CodexManagedAdapter {
         }
     }
 
+    pub(crate) fn set_active_turn_id(&mut self, turn_id: Option<String>) {
+        self.active_turn_id = turn_id;
+    }
+
+    pub(crate) fn set_native_session_id(&mut self, native_session_id: Option<String>) {
+        self.context.native_session_id = native_session_id;
+    }
+
     fn take_request_id(&mut self) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);

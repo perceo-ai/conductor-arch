@@ -32,12 +32,10 @@ use crate::provider_adapters::claude_stream::{
 };
 use crate::provider_adapters::codex_app_server::{
     parse_jsonl_message, write_initialize_request_with_id, write_initialized_notification,
-    write_thread_start_request_with_id, write_turn_interrupt_request_with_id,
-    write_turn_start_request_with_id, write_turn_steer_request_with_id,
-    CodexAppServerInitializeParams, CodexAppServerMessage, CodexAppServerThreadStartParams,
-    CodexAppServerTurnInterruptParams, CodexAppServerTurnStartParams,
-    CodexAppServerTurnSteerParams, CodexAppServerUserInput, CodexManagedAdapter,
-    CODEX_APP_SERVER_DEFAULT_ARGS,
+    write_thread_start_request_with_id, write_turn_start_request_with_id,
+    write_turn_steer_request_with_id, CodexAppServerInitializeParams, CodexAppServerMessage,
+    CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
+    CodexAppServerUserInput, CodexManagedAdapter, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -346,6 +344,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
     for (key, value) in &start.launch.env {
         command.env(key, value);
     }
+    crate::platform::configure_new_process_group(&mut command);
 
     let mut child = command
         .spawn()
@@ -997,10 +996,10 @@ fn apply_provider_control_plan(
             }
         }
         HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup) => {
-            let _ = connection.child.kill();
+            let _ = crate::platform::terminate_process_group(connection.child.id(), false);
         }
         HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup) => {
-            let _ = connection.child.kill();
+            let _ = crate::platform::interrupt_process_group(connection.child.id());
         }
         HarnessControlPlan::RestartRequired(controls) => {
             if started.kind == SessionKind::Claude && connection.native_thread_id.is_none() {
@@ -1736,7 +1735,6 @@ fn run_codex_app_server_session_loop(
     let mut user_input_sequence = runtime_store
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
-    let mut control_request_sequence = 0_u64;
     let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
     let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
@@ -1893,9 +1891,11 @@ fn run_codex_app_server_session_loop(
                     }
                     if let Some(turn_id) = codex_turn_id_from_message(&message) {
                         active_turn_id = Some(turn_id);
+                        control_adapter.set_active_turn_id(active_turn_id.clone());
                     }
                     if message.method.as_deref() == Some("turn/completed") {
                         active_turn_id = None;
+                        control_adapter.set_active_turn_id(None);
                         let _ = event_tx.send(ArchcarEvent::TurnCompleted {
                             session_id: started.session_id,
                             thread_id: started.thread_id,
@@ -2013,41 +2013,17 @@ fn run_codex_app_server_session_loop(
                     let _ = connection.child.kill();
                 }
                 SessionCommand::InterruptTurn => {
-                    let Some(thread_id) = provider_thread_id.as_deref() else {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: "Codex app-server thread is not initialized yet".to_owned(),
-                        });
-                        continue;
-                    };
-                    let Some(turn_id) = active_turn_id.as_deref() else {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: "No active Codex turn id is available to interrupt".to_owned(),
-                        });
-                        continue;
-                    };
-                    control_request_sequence = control_request_sequence.saturating_add(1);
-                    let request_id = next_control_request_id(control_request_sequence);
-                    if let Err(err) = write_turn_interrupt_request_with_id(
-                        &mut connection.stdin,
-                        request_id,
-                        &CodexAppServerTurnInterruptParams {
-                            thread_id: thread_id.to_owned(),
-                            turn_id: turn_id.to_owned(),
-                        },
-                    ) {
-                        let _ = connection.child.kill();
-                        mark_provider_session_failed(
-                            &runtime_store,
-                            &snapshot,
-                            &event_tx,
-                            &started,
-                            format!("Codex turn interrupt failed: {err:#}"),
-                        );
-                    } else if let Ok(mut state) = snapshot.lock() {
+                    control_adapter.set_native_session_id(provider_thread_id.clone());
+                    let plan = control_adapter.plan_control(HarnessControl::Interrupt);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
+                    if let Ok(mut state) = snapshot.lock() {
                         state.ready = false;
                         state.runtime_state = AgentSessionState::Running;
                     }
@@ -2191,7 +2167,17 @@ fn run_claude_stream_session_loop(
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
                 }
-                SessionCommand::InterruptTurn => {}
+                SessionCommand::InterruptTurn => {
+                    let plan = adapter.plan_control(HarnessControl::Interrupt);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
+                }
                 SessionCommand::ApplyControl(control) => {
                     let plan = adapter.plan_control(control);
                     apply_provider_control_plan(
@@ -2639,10 +2625,6 @@ fn next_turn_request_id(sequence: u64) -> u64 {
     sequence.saturating_add(10)
 }
 
-fn next_control_request_id(sequence: u64) -> u64 {
-    sequence.saturating_add(1_000_000)
-}
-
 fn next_fallback_request_id(sequence: u64) -> u64 {
     sequence.saturating_add(2_000_000)
 }
@@ -2659,15 +2641,7 @@ fn terminal_process_alive(process_id: u32) -> bool {
 }
 
 pub(crate) fn terminate_process(process_id: u32) {
-    #[cfg(unix)]
-    let _ = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(process_id.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    #[cfg(windows)]
-    let _ = crate::platform::terminate_process_tree(process_id, true);
+    let _ = crate::platform::terminate_process_group(process_id, true);
 }
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {

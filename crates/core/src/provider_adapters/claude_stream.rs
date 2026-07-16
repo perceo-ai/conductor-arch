@@ -369,9 +369,9 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             HarnessControl::Kill => {
                 HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup)
             }
-            HarnessControl::Interrupt => HarnessControlPlan::Unsupported {
-                reason: "Claude stream-json interrupt is not implemented".to_owned(),
-            },
+            HarnessControl::Interrupt => {
+                HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup)
+            }
             HarnessControl::SetModel(model) => {
                 self.context.controls.model = model;
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
