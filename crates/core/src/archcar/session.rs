@@ -1961,16 +1961,14 @@ fn run_claude_stream_session_loop(
                                 );
                             }
                             HarnessEffect::ProviderEvent(draft) => {
+                                let completed_turn = draft.phase == ProviderEventPhase::Completed
+                                    && draft.kind == ProviderEventKind::Turn;
                                 let _ = runtime_store.append_provider_event(&draft);
                                 let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                                     thread_id: started.thread_id,
                                 });
-                            }
-                            HarnessEffect::Ready => {
-                                let was_ready =
-                                    snapshot.lock().map(|state| state.ready).unwrap_or(false);
-                                mark_snapshot_ready(&snapshot);
-                                if !was_ready {
+                                if completed_turn {
+                                    mark_snapshot_ready(&snapshot);
                                     let _ = event_tx.send(ArchcarEvent::SessionReady {
                                         session_id: started.session_id,
                                         thread_id: started.thread_id,
@@ -2703,6 +2701,116 @@ mod tests {
         assert!(loop_source.contains("adapter.observe_native(NativeRecord"));
         assert!(loop_source.contains("adapter.settle_failed_input_write"));
         assert!(!loop_source.contains("ClaudeStreamParser"));
+    }
+
+    #[test]
+    fn managed_claude_init_after_first_input_does_not_restore_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43991, pid);
+        let (native_tx, native_rx) = mpsc::channel();
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: native_rx,
+            next_read_line: 0,
+            native_thread_id: None,
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("claude-sonnet-fixture".to_owned()),
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Claude,
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_thread = thread::spawn(move || {
+            run_claude_stream_session_loop(
+                db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
+        );
+        assert!(snapshot.lock().unwrap().ready);
+
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "fixture input".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        wait_for_snapshot_readiness(&snapshot, false);
+
+        let fixture = include_str!("../../tests/fixtures/claude_stream/basic_turn.jsonl");
+        let init = fixture
+            .lines()
+            .find(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|record| record["subtype"] == "init")
+            })
+            .unwrap();
+        native_tx.send(init.to_owned()).unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionMessagesUpdated { thread_id } if *thread_id == thread.id),
+        );
+        let ready_after_init = snapshot.lock().unwrap().ready;
+
+        let result = fixture
+            .lines()
+            .find(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|record| record["type"] == "result")
+            })
+            .unwrap();
+        native_tx.send(result.to_owned()).unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionMessagesUpdated { thread_id } if *thread_id == thread.id),
+        );
+        wait_for_snapshot_readiness(&snapshot, true);
+
+        command_tx.send(SessionCommand::Kill).unwrap();
+        loop_thread.join().unwrap();
+
+        assert!(
+            !ready_after_init,
+            "startup init must not restore readiness after the first input"
+        );
     }
 
     #[test]
@@ -3597,6 +3705,36 @@ mod tests {
 
     fn seeded_workspace_store(root: &Path) -> WorkspaceStore {
         seeded_workspace_store_with_logs(root, &root.join("logs"))
+    }
+
+    fn recv_archcar_event_until(
+        receiver: &Receiver<ArchcarEvent>,
+        predicate: impl Fn(&ArchcarEvent) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = receiver
+                .recv_timeout(remaining)
+                .expect("timed out waiting for archcar event");
+            if predicate(&event) {
+                return;
+            }
+        }
+    }
+
+    fn wait_for_snapshot_readiness(snapshot: &Arc<Mutex<SessionSnapshot>>, expected: bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if snapshot.lock().unwrap().ready == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for snapshot readiness={expected}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn record_running_thread_session_with_port(
