@@ -507,6 +507,17 @@ fn cli_archcar_messages_renders_claude_projected_provider_events() {
         .stdout(predicates::str::contains("\"method\"").not());
 }
 
+#[test]
+fn claude_thread_session_send_help_exposes_thread_targeting() {
+    let temp = tempfile::tempdir().unwrap();
+    app(temp.path())
+        .args(["session", "send", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--thread-id"))
+        .stdout(contains("claude"));
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command

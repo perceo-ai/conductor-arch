@@ -1,6 +1,8 @@
 use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
+use archductor_core::archcar::harness::managed_harness_for_kind;
+use archductor_core::archcar::harness_contract::HarnessDescriptor;
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
 };
@@ -1468,26 +1470,29 @@ pub fn agent_session_panel(
                     };
                     let working_elapsed =
                         working_elapsed_for_thread(working_threads.as_ref(), thread_id);
-                    if current_kind == SessionKind::Codex
-                        && thread_has_live_codex_session(&current, thread_id)
-                        && !matches!(startup_state, CodexStartupState::Error { .. })
-                        && !codex_thread_ready_for_ui(
-                            thread_id,
-                            &current,
-                            archcar_ready_cache.as_ref(),
-                            codex_startup_states.borrow().get(&thread_id),
-                        )
-                        && !has_pending_archcar_ensure_for_thread(
-                            inflight_archcar_actions.as_ref(),
-                            thread_id,
-                        )
-                    {
-                        request_archcar_ensure(
-                            &archcar_bridge,
-                            inflight_archcar_actions.as_ref(),
-                            workspace.clone(),
-                            Some(thread_id),
-                        );
+                    if let Some(harness) = managed_harness_for_kind(current_kind) {
+                        let descriptor = harness.descriptor();
+                        if thread_has_live_managed_session(&current, thread_id, descriptor)
+                            && !matches!(startup_state, CodexStartupState::Error { .. })
+                            && !codex_thread_ready_for_ui(
+                                thread_id,
+                                &current,
+                                archcar_ready_cache.as_ref(),
+                                codex_startup_states.borrow().get(&thread_id),
+                            )
+                            && !has_pending_archcar_ensure_for_thread(
+                                inflight_archcar_actions.as_ref(),
+                                thread_id,
+                            )
+                        {
+                            request_archcar_ensure(
+                                &archcar_bridge,
+                                inflight_archcar_actions.as_ref(),
+                                workspace.clone(),
+                                Some(thread_id),
+                                descriptor,
+                            );
+                        }
                     }
                     let runtime_summary = record.as_ref().map(|record| {
                         let attached_sessions = active_sessions
@@ -1908,6 +1913,8 @@ pub fn agent_session_panel(
             thread_id,
             "session send stage: resolved thread"
         );
+        let selected_harness_descriptor =
+            managed_harness_for_kind(selected_kind).map(|harness| harness.descriptor());
         let thread = match WorkspaceStore::open_app(db_for_send.clone())
             .and_then(|store| store.get_chat_thread_record(thread_id))
         {
@@ -2005,12 +2012,12 @@ pub fn agent_session_panel(
                 None
             }
         };
-        if matches!(selected_kind, SessionKind::Codex) {
+        if let Some(harness_descriptor) = selected_harness_descriptor {
             let running_record = thread_records
                 .iter()
                 .find(|record| {
                     record.status == ProcessStatus::Running
-                        && session_kind_matches_record(record, SessionKind::Codex)
+                        && session_kind_matches_record(record, harness_descriptor.kind)
                 })
                 .cloned();
             if let Some(record) = running_record.as_ref() {
@@ -2062,6 +2069,7 @@ pub fn agent_session_panel(
                         kind.clone(),
                         ArchcarInputDelivery::Auto,
                         checkpoint_id,
+                        harness_descriptor.kind,
                     ) {
                         if let Some(checkpoint_id) = checkpoint_id {
                             discard_turn_checkpoint(
@@ -2103,6 +2111,7 @@ pub fn agent_session_panel(
                 inflight_archcar_actions_for_send.as_ref(),
                 workspace_for_send.clone(),
                 Some(thread_id),
+                harness_descriptor,
             ) {
                 queue_archcar_input(
                     &pending_archcar_inputs_for_send,
@@ -2114,6 +2123,7 @@ pub fn agent_session_panel(
                     } else {
                         ArchcarInputKind::User
                     },
+                    harness_descriptor.kind,
                 );
                 apply_codex_startup_signal(
                     &mut codex_startup_states_for_send.borrow_mut(),
@@ -2169,8 +2179,11 @@ pub fn agent_session_panel(
             .cloned();
 
         let Some(record) = running_record else {
-            let token =
-                archcar_bridge_for_send.spawn_session(workspace_for_send.clone(), selected_kind);
+            let token = request_archcar_spawn_session(
+                &archcar_bridge_for_send,
+                workspace_for_send.clone(),
+                selected_kind,
+            );
             let Some(token) = token else {
                 append_session_status_message(
                     &messages_for_send,
@@ -2183,6 +2196,7 @@ pub fn agent_session_panel(
                 PendingArchcarAction::EnsureWorkspace {
                     workspace: workspace_for_send.clone(),
                     thread_id: Some(thread_id),
+                    kind: selected_kind,
                 },
             );
             queue_archcar_input(
@@ -2195,6 +2209,7 @@ pub fn agent_session_panel(
                 } else {
                     ArchcarInputKind::User
                 },
+                selected_kind,
             );
             let queued = Label::new(Some(
                 "[session start] Runtime session requested through archcar. Queued message will send when the session is ready.",
@@ -2252,6 +2267,7 @@ pub fn agent_session_panel(
             input_kind,
             ArchcarInputDelivery::Auto,
             checkpoint_id,
+            selected_kind,
         ) {
             if let Some(checkpoint_id) = checkpoint_id {
                 discard_turn_checkpoint(&db_for_send, &workspace_for_send, checkpoint_id);
@@ -2452,7 +2468,7 @@ pub fn agent_session_panel(
                 set_codex_ready_state(codex_ready.as_ref(), &|| {}, false);
             } else {
                 toast_manager.error(
-                    "Could not interrupt the active Codex turn because archcar is unavailable."
+                    "Could not interrupt the active agent turn because archcar is unavailable."
                         .to_owned(),
                 );
             }
@@ -2470,7 +2486,8 @@ pub fn agent_session_panel(
         let refresh_view = refresh_view.clone();
         let toast_manager = toast_manager.clone();
         move |command: String, staged_review: bool| -> bool {
-            if command.trim().is_empty() || *selected_harness.borrow() != SessionKind::Codex {
+            let current_kind = *selected_harness.borrow();
+            if command.trim().is_empty() || managed_harness_for_kind(current_kind).is_none() {
                 return false;
             }
             let Some(thread_id) = *selected_thread.borrow() else {
@@ -2497,6 +2514,7 @@ pub fn agent_session_panel(
                 },
                 ArchcarInputDelivery::Immediate,
                 None,
+                current_kind,
             ) {
                 note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
                 mark_thread_working(working_threads.as_ref(), thread_id);
@@ -2586,6 +2604,7 @@ pub fn agent_session_panel(
                         command.clone(),
                         None,
                         ArchcarInputKind::User,
+                        *selected_harness.borrow(),
                     );
                     buffer.set_text("");
                     refresh_view();
@@ -6157,6 +6176,7 @@ fn queue_archcar_input(
     input: String,
     visible_input: Option<String>,
     kind: ArchcarInputKind,
+    session_kind: SessionKind,
 ) {
     let input = input.trim().to_owned();
     if input.is_empty() {
@@ -6170,6 +6190,7 @@ fn queue_archcar_input(
             input,
             visible_input,
             kind,
+            session_kind,
         });
 }
 
@@ -6574,9 +6595,10 @@ fn ready_running_session_for_thread(
 fn ready_queued_session_for_thread(
     records: &[ProcessRecord],
     thread_id: i64,
+    harness: &'static HarnessDescriptor,
     ready_cache: &RefCell<HashMap<i64, bool>>,
 ) -> Option<i64> {
-    ready_running_session_for_thread(records, thread_id, SessionKind::Codex, ready_cache)
+    ready_running_session_for_thread(records, thread_id, harness.kind, ready_cache)
 }
 
 fn resolve_or_create_thread_id_for_send<F>(
@@ -7725,7 +7747,7 @@ enum CodexStartupSignal {
 
 fn default_codex_loading_state() -> CodexStartupState {
     CodexStartupState::Loading {
-        message: "Starting Codex...".to_owned(),
+        message: "Starting agent...".to_owned(),
     }
 }
 
@@ -7791,10 +7813,21 @@ fn apply_codex_startup_signal(
 }
 
 fn thread_has_live_codex_session(records: &[ProcessRecord], thread_id: i64) -> bool {
+    let Some(harness) = managed_harness_for_kind(SessionKind::Codex) else {
+        return false;
+    };
+    thread_has_live_managed_session(records, thread_id, harness.descriptor())
+}
+
+fn thread_has_live_managed_session(
+    records: &[ProcessRecord],
+    thread_id: i64,
+    harness: &'static HarnessDescriptor,
+) -> bool {
     records.iter().any(|record| {
         record.status == ProcessStatus::Running
             && record.chat_thread_id == Some(thread_id)
-            && session_kind_matches_record(record, SessionKind::Codex)
+            && session_kind_matches_record(record, harness.kind)
     })
 }
 
@@ -8350,6 +8383,7 @@ struct QueuedArchcarInput {
     input: String,
     visible_input: Option<String>,
     kind: ArchcarInputKind,
+    session_kind: SessionKind,
 }
 
 #[derive(Default)]
@@ -8379,6 +8413,7 @@ enum PendingArchcarAction {
     EnsureWorkspace {
         workspace: String,
         thread_id: Option<i64>,
+        kind: SessionKind,
     },
     ControlSend {
         thread_id: i64,
@@ -8402,6 +8437,7 @@ enum PendingArchcarAction {
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
         checkpoint_id: Option<i64>,
+        session_kind: SessionKind,
     },
 }
 
@@ -8439,7 +8475,17 @@ fn flush_pending_archcar_inputs(
         let records = WorkspaceStore::open_app(database_path)
             .and_then(|store| store.list_thread_processes(thread_id))
             .unwrap_or_default();
-        let Some(session_id) = ready_queued_session_for_thread(&records, thread_id, ready_cache)
+        let session_kind = pending_inputs
+            .borrow()
+            .get(&thread_id)
+            .and_then(|inputs| inputs.first())
+            .map(|input| input.session_kind)
+            .unwrap_or(SessionKind::Codex);
+        let Some(harness) = managed_harness_for_kind(session_kind) else {
+            continue;
+        };
+        let Some(session_id) =
+            ready_queued_session_for_thread(&records, thread_id, harness.descriptor(), ready_cache)
         else {
             continue;
         };
@@ -8501,6 +8547,7 @@ fn flush_pending_archcar_inputs(
             queued_input.kind.clone(),
             ArchcarInputDelivery::Auto,
             checkpoint_id,
+            queued_input.session_kind,
         ) {
             if let Some(checkpoint_id) = checkpoint_id {
                 discard_turn_checkpoint(database_path, workspace, checkpoint_id);
@@ -8622,6 +8669,7 @@ fn queue_archcar_user_send(
     kind: ArchcarInputKind,
     delivery: ArchcarInputDelivery,
     checkpoint_id: Option<i64>,
+    session_kind: SessionKind,
 ) -> bool {
     let token = match delivery {
         ArchcarInputDelivery::Auto => bridge.send_input(
@@ -8648,6 +8696,7 @@ fn queue_archcar_user_send(
                 kind,
                 delivery,
                 checkpoint_id,
+                session_kind,
             },
         );
         true
@@ -8882,6 +8931,7 @@ fn handle_archcar_response(
         PendingArchcarAction::EnsureWorkspace {
             workspace,
             thread_id,
+            kind: _,
         } => match response.result {
             Ok(
                 success @ (ArchcarResponse::SessionSpawnQueued { .. }
@@ -8946,6 +8996,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
             Err(err) => {
@@ -8967,6 +9020,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
         },
@@ -9042,6 +9098,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
             Err(err) => {
@@ -9062,6 +9121,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
         },
@@ -9073,6 +9135,7 @@ fn handle_archcar_response(
             kind,
             delivery,
             checkpoint_id,
+            session_kind,
         } => match response.result {
             Ok(ArchcarResponse::Ack) => {
                 info!(
@@ -9094,6 +9157,7 @@ fn handle_archcar_response(
                             kind,
                             delivery,
                             checkpoint_id,
+                            session_kind,
                         },
                     );
                 }
@@ -9103,7 +9167,14 @@ fn handle_archcar_response(
                 if let Some(checkpoint_id) = checkpoint_id {
                     discard_turn_checkpoint(database_path, workspace, checkpoint_id);
                 }
-                queue_archcar_input(pending_inputs, thread_id, input, visible_input, kind);
+                queue_archcar_input(
+                    pending_inputs,
+                    thread_id,
+                    input,
+                    visible_input,
+                    kind,
+                    session_kind,
+                );
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 let message = format!("Unexpected archcar input response: {other:?}");
                 toast_manager.error(message.clone());
@@ -9114,11 +9185,12 @@ fn handle_archcar_response(
                 clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
-                request_archcar_ensure(
+                request_archcar_ensure_for_kind(
                     &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    session_kind,
                 );
             }
             Err(err) => {
@@ -9126,7 +9198,14 @@ fn handle_archcar_response(
                 if let Some(checkpoint_id) = checkpoint_id {
                     discard_turn_checkpoint(database_path, workspace, checkpoint_id);
                 }
-                queue_archcar_input(pending_inputs, thread_id, input, visible_input, kind);
+                queue_archcar_input(
+                    pending_inputs,
+                    thread_id,
+                    input,
+                    visible_input,
+                    kind,
+                    session_kind,
+                );
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 toast_manager.error(err.clone());
                 apply_codex_startup_signal(
@@ -9139,11 +9218,12 @@ fn handle_archcar_response(
                 clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
-                request_archcar_ensure(
+                request_archcar_ensure_for_kind(
                     &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    session_kind,
                 );
             }
         },
@@ -9173,11 +9253,12 @@ fn request_archcar_ensure(
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     workspace: String,
     thread_id: Option<i64>,
+    harness: &'static HarnessDescriptor,
 ) -> bool {
     let token = if let Some(thread_id) = thread_id {
-        bridge.ensure_thread_session(workspace.clone(), thread_id, SessionKind::Codex)
+        bridge.ensure_thread_session(workspace.clone(), thread_id, harness.kind)
     } else {
-        bridge.ensure_default_session(workspace.clone(), SessionKind::Codex)
+        bridge.ensure_default_session(workspace.clone(), harness.kind)
     };
     if let Some(token) = token {
         inflight_actions.borrow_mut().insert(
@@ -9185,12 +9266,40 @@ fn request_archcar_ensure(
             PendingArchcarAction::EnsureWorkspace {
                 workspace,
                 thread_id,
+                kind: harness.kind,
             },
         );
         true
     } else {
         false
     }
+}
+
+fn request_archcar_ensure_for_kind(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    workspace: String,
+    thread_id: Option<i64>,
+    kind: SessionKind,
+) -> bool {
+    let Some(harness) = managed_harness_for_kind(kind) else {
+        return false;
+    };
+    request_archcar_ensure(
+        bridge,
+        inflight_actions,
+        workspace,
+        thread_id,
+        harness.descriptor(),
+    )
+}
+
+fn request_archcar_spawn_session(
+    bridge: &AsyncArchcarBridge,
+    workspace: String,
+    kind: SessionKind,
+) -> Option<u64> {
+    bridge.spawn_session(workspace, kind)
 }
 
 fn has_pending_archcar_ensure_for_thread(
@@ -9970,6 +10079,7 @@ fix it
             " first ".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
         queue_archcar_input(
             &pending,
@@ -9977,6 +10087,7 @@ fix it
             "second".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
 
         assert_eq!(queued_chat_inputs_count(&pending, 7), 2);
@@ -9993,20 +10104,74 @@ fix it
         let records = vec![
             process_record_with_thread(11, ProcessStatus::Running, Some(7), "codex"),
             process_record_with_thread(12, ProcessStatus::Running, Some(8), "codex"),
+            process_record_with_thread(13, ProcessStatus::Running, Some(9), "claude"),
         ];
-        let ready_cache = RefCell::new(HashMap::from([(11, true), (12, false)]));
+        let ready_cache = RefCell::new(HashMap::from([(11, true), (12, false), (13, true)]));
+        let codex = archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Codex)
+            .unwrap();
+        let claude =
+            archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Claude)
+                .unwrap();
 
         assert_eq!(
-            ready_queued_session_for_thread(&records, 7, &ready_cache),
+            ready_queued_session_for_thread(&records, 7, codex.descriptor(), &ready_cache),
             Some(11)
         );
         assert_eq!(
-            ready_queued_session_for_thread(&records, 8, &ready_cache),
+            ready_queued_session_for_thread(&records, 8, codex.descriptor(), &ready_cache),
             None
         );
         assert_eq!(
-            ready_queued_session_for_thread(&records, 9, &ready_cache),
+            ready_queued_session_for_thread(&records, 9, claude.descriptor(), &ready_cache),
+            Some(13)
+        );
+        assert_eq!(
+            ready_queued_session_for_thread(&records, 10, claude.descriptor(), &ready_cache),
             None
+        );
+    }
+
+    #[test]
+    fn claude_first_send_uses_managed_thread_ensure_request() {
+        assert_eq!(
+            request_kind_for_first_send(SessionKind::Claude, "berlin", 42),
+            Some(AsyncArchcarRequestKind::EnsureChatThreadSession {
+                workspace: "berlin".to_owned(),
+                thread_id: 42,
+                kind: SessionKind::Claude,
+            })
+        );
+    }
+
+    fn request_kind_for_first_send(
+        kind: SessionKind,
+        workspace: &str,
+        thread_id: i64,
+    ) -> Option<AsyncArchcarRequestKind> {
+        let harness = managed_harness_for_kind(kind)?;
+        Some(AsyncArchcarRequestKind::EnsureChatThreadSession {
+            workspace: workspace.to_owned(),
+            thread_id,
+            kind: harness.descriptor().kind,
+        })
+    }
+
+    #[test]
+    fn claude_first_send_source_uses_managed_registry_not_spawn_fallback() {
+        let source = include_str!("session_surface.rs");
+        let send_body = source
+            .split("let send_text = Rc::new(move |text: String, staged_review: bool| {")
+            .nth(1)
+            .and_then(|tail| tail.split("let send_immediate_input").next())
+            .expect("send_text body should be present");
+
+        assert!(
+            send_body.contains("managed_harness_for_kind(selected_kind)"),
+            "first send should discover managed providers from the registry"
+        );
+        assert!(
+            !send_body.contains("spawn_session(workspace_for_send.clone(), selected_kind)"),
+            "first send must not use the generic Claude workspace-spawn fallback"
         );
     }
 
@@ -10019,6 +10184,7 @@ fix it
             "first follow-up".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
 
         let items = queued_composer_overlay_items_for_thread(&pending, Some(7));
@@ -10728,7 +10894,14 @@ fix it
     fn queue_archcar_input_ignores_blank_messages() {
         let pending = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
 
-        queue_archcar_input(&pending, 5, "   ".to_owned(), None, ArchcarInputKind::User);
+        queue_archcar_input(
+            &pending,
+            5,
+            "   ".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
 
         assert!(pending.borrow().is_empty());
     }
@@ -10747,6 +10920,7 @@ fix it
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Auto,
                 checkpoint_id: None,
+                session_kind: SessionKind::Codex,
             },
         )]));
         queue_archcar_input(
@@ -10755,6 +10929,7 @@ fix it
             "queued while busy".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
         queue_archcar_input(
             &starting_queue,
@@ -10762,6 +10937,7 @@ fix it
             "[metadata]\nqueued while starting".to_owned(),
             Some("queued while starting".to_owned()),
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
 
         let pending =
@@ -10788,6 +10964,7 @@ fix it
             "already persisted".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
         let persisted = vec![chat_message_record(
             1,
@@ -10819,6 +10996,7 @@ fix it
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Immediate,
                 checkpoint_id: None,
+                session_kind: SessionKind::Codex,
             },
         )]));
         let immediate = pending_immediate_user_input_texts_for_thread(7, &inflight, &[]);
@@ -10858,6 +11036,7 @@ fix it
             "  review this diff  ".to_owned(),
             None,
             ArchcarInputKind::ReviewPrompt,
+            SessionKind::Codex,
         );
 
         let queued = pending.borrow();
@@ -10904,6 +11083,7 @@ fix it
                 PendingArchcarAction::EnsureWorkspace {
                     workspace: "berlin".to_owned(),
                     thread_id: Some(7),
+                    kind: SessionKind::Codex,
                 },
             ),
             (
@@ -10911,6 +11091,7 @@ fix it
                 PendingArchcarAction::EnsureWorkspace {
                     workspace: "berlin".to_owned(),
                     thread_id: None,
+                    kind: SessionKind::Codex,
                 },
             ),
         ]));
@@ -12872,6 +13053,7 @@ Schema confirms the app moved CRM around businesses.";
                 input: "run tests".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
             }],
         )]));
         let working_threads = RefCell::new(HashMap::new());

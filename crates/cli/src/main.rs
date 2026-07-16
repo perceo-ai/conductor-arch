@@ -190,7 +190,7 @@ enum ArchcarCommand {
         visible_input: Option<String>,
         #[arg(
             long,
-            help = "Deliver now: steer an active Codex turn or start a new turn"
+            help = "Deliver now: steer an active agent turn or start a new turn"
         )]
         immediate: bool,
         input: Vec<String>,
@@ -434,7 +434,7 @@ enum SessionCommand {
         timeout_ms: u64,
         #[arg(
             long,
-            help = "Deliver now: steer an active Codex turn or start a new turn"
+            help = "Deliver now: steer an active agent turn or start a new turn"
         )]
         immediate: bool,
         message: Vec<String>,
@@ -2725,6 +2725,63 @@ mod tests {
             message,
             vec!["fix".to_owned(), "the".to_owned(), "bug".to_owned()]
         );
+    }
+
+    #[test]
+    fn cli_session_send_keeps_distinct_claude_thread_targets() {
+        let first = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--thread-id",
+            "101",
+            "first",
+        ])
+        .unwrap();
+        let second = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--thread-id",
+            "202",
+            "second",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            session_send_thread_target(first),
+            Some((101, "first".to_owned()))
+        );
+        assert_eq!(
+            session_send_thread_target(second),
+            Some((202, "second".to_owned()))
+        );
+    }
+
+    fn session_send_thread_target(cli: Cli) -> Option<(i64, String)> {
+        let Command::Session {
+            command:
+                SessionCommand::Send {
+                    kind,
+                    thread_id,
+                    message,
+                    ..
+                },
+        } = cli.command
+        else {
+            return None;
+        };
+        if kind == CliSessionKind::Claude {
+            thread_id.map(|thread_id| (thread_id, message.join(" ")))
+        } else {
+            None
+        }
     }
 
     #[test]
