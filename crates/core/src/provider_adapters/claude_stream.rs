@@ -1195,7 +1195,23 @@ fn claude_terminal_failure_message(event: &ClaudeProviderEventDraft) -> Option<S
     let message = string_at(&event.raw_json, &["result"])
         .or_else(|| string_at(&event.raw_json, &["error"]))
         .unwrap_or_else(|| "Claude Code returned a failed result.".to_owned());
+    if claude_auth_failure(&event.raw_json) {
+        return Some(format!(
+            "Claude is not logged in. Run `claude auth login`, then try again. {message}"
+        ));
+    }
     Some(message)
+}
+
+fn claude_auth_failure(value: &Value) -> bool {
+    number_at(value, &["api_error_status"]) == Some(401)
+        || number_at(value, &["error_status"]) == Some(401)
+        || string_at(value, &["error"]).is_some_and(|error| {
+            let error = error.to_ascii_lowercase();
+            error.contains("authentication")
+                || error.contains("unauthorized")
+                || error.contains("auth")
+        })
 }
 
 fn claude_system_hook_event(value: &Value) -> bool {
@@ -1762,7 +1778,9 @@ mod tests {
         assert!(effects.iter().any(|effect| matches!(
             effect,
             HarnessEffect::Fatal(message)
-                if message.contains("Failed to authenticate")
+                if message.contains("Claude is not logged in")
+                    && message.contains("claude auth login")
+                    && message.contains("Failed to authenticate")
                     && message.contains("Re-authenticate")
         )));
         assert!(effects.iter().any(|effect| matches!(

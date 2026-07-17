@@ -615,12 +615,15 @@ fn apply_harness_effect(
                 }
             }
         }
-        HarnessEffect::Warning(message) | HarnessEffect::Fatal(message) => {
+        HarnessEffect::Warning(message) => {
             let _ = event_tx.send(ArchcarEvent::SessionError {
                 session_id: Some(started.session_id),
                 thread_id: Some(started.thread_id),
                 message,
             });
+        }
+        HarnessEffect::Fatal(message) => {
+            mark_provider_session_failed(runtime_store, snapshot, event_tx, started, message);
         }
         HarnessEffect::CapabilitiesObserved(observed_native) => {
             let capabilities = capabilities_for_kind(started.kind, observed_native);
@@ -3181,6 +3184,65 @@ mod tests {
     fn provider_input_local_ids_are_session_scoped() {
         assert_eq!(provider_input_local_id(7, 3), "session-7-input-3");
         assert_ne!(provider_input_local_id(1, 1), provider_input_local_id(2, 1));
+    }
+
+    #[test]
+    fn fatal_harness_effect_persists_chat_visible_session_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43991);
+        let db_path = temp.path().join("state.db");
+        let runtime_store = RuntimeSessionStore::new(db_path.clone());
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Claude,
+            process.pid,
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut native_thread_id = None;
+
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut native_thread_id,
+            HarnessEffect::Fatal(
+                "Claude authentication failed. You are not logged in. Run `claude auth login`."
+                    .to_owned(),
+            ),
+        );
+
+        let event = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            event,
+            ArchcarEvent::SessionError { message, .. }
+                if message.contains("not logged in")
+        ));
+        let records = crate::provider_events::ProviderEventStore::new(&db_path)
+            .list_for_process(process.id)
+            .unwrap();
+        assert!(records.iter().any(|event| {
+            event.kind == ProviderEventKind::ThreadSession
+                && event.phase == ProviderEventPhase::Failed
+                && event.provider_subtype.as_deref() == Some("session_error")
+                && event
+                    .normalized_payload
+                    .get("body")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|body| body.contains("not logged in"))
+        }));
+        assert_eq!(
+            snapshot.lock().unwrap().runtime_state,
+            AgentSessionState::Failed
+        );
     }
 
     #[test]

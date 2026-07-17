@@ -2426,8 +2426,15 @@ fn ensure_session_send_target(
         ArchcarResponse::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected archcar response: {:?}", other),
     };
-    wait_for_archcar_session_ready(client, target.0, deadline)?;
+    let thread_has_visible_history = !store.list_chat_messages(target.1)?.is_empty();
+    if session_send_waits_for_ready(kind, thread_has_visible_history) {
+        wait_for_archcar_session_ready(client, target.0, deadline)?;
+    }
     Ok(target)
+}
+
+fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
+    !matches!(kind, SessionKind::Claude) || thread_has_visible_history
 }
 
 fn wait_for_archcar_session_ready(
@@ -3189,6 +3196,13 @@ mod tests {
             session_send_thread_target(second),
             Some((202, "second".to_owned()))
         );
+    }
+
+    #[test]
+    fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
+        assert!(!session_send_waits_for_ready(SessionKind::Claude, false));
+        assert!(session_send_waits_for_ready(SessionKind::Claude, true));
+        assert!(session_send_waits_for_ready(SessionKind::Codex, false));
     }
 
     fn session_send_thread_target(cli: Cli) -> Option<(i64, String)> {
