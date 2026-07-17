@@ -1,0 +1,21 @@
+crates/core/src/provider_adapters/claude_stream.rs
+  s_1eb68b094167a6::t_85f5c56478d5d5 1733-1804
+  s_1eb68b094167a6::t_842ad3362dbfcd 317-319,1054-1061,1188-1198
+  s_1eb68b094167a6::t_219026f4ccb982 1199-1200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4d4853aa0be1b3b4813dce738db3cd196f25ca9e",
+  "prompts": {},
+  "sessions": {
+    "s_1eb68b094167a6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e83-ff72-73d3-a93a-7d67e3c26856",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
