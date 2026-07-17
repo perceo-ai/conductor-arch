@@ -1,0 +1,19 @@
+README.md
+  s_10d3951069b861::t_b98bab180847bd 167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "ac698b188ba138e3dee97771d1b96a1af44e32a7",
+  "prompts": {},
+  "sessions": {
+    "s_10d3951069b861": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e4a-4f70-7892-ba27-dbb1b2ae9957",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
