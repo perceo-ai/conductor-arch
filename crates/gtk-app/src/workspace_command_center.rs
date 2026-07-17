@@ -30,7 +30,7 @@ const WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH: i32 = 1280;
 const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
-const WORKSPACE_TURN_CHANGE_LIMIT: usize = 25;
+const WORKSPACE_COMMIT_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
@@ -691,6 +691,7 @@ fn ws_center_panel(
         let state = state.clone();
         let external_thread_selection = external_thread_selection.clone();
         let content = content.clone();
+        let refresh_hub = refresh_hub.clone();
         Rc::new(move |threads, selected| {
             *known_threads.borrow_mut() = threads.clone();
             if let Some(selected) = selected {
@@ -728,6 +729,7 @@ fn ws_center_panel(
                 let external_thread_selection = external_thread_selection.clone();
                 let content = content.clone();
                 let reopen_popover = reopen_popover.clone();
+                let refresh_hub = refresh_hub.clone();
                 let thread_id = thread.id;
                 item.connect_clicked(move |_| {
                     let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
@@ -748,6 +750,7 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
+                    refresh_hub.refresh(RefreshScope::Workspace);
                     reopen_popover.popdown();
                 });
                 reopen_menu.append(&item);
@@ -770,6 +773,7 @@ fn ws_center_panel(
                 let chat_tab_buttons_for_click = chat_tab_buttons.clone();
                 let file_tab_buttons_for_click = file_tab_buttons.clone();
                 let state_for_click = state.clone();
+                let refresh_hub_for_click = refresh_hub.clone();
                 let thread_id = thread.id;
                 let select_tab: Rc<dyn Fn()> = Rc::new(move || {
                     closed_chat_tabs_for_click.borrow_mut().remove(&thread_id);
@@ -783,6 +787,7 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
+                    refresh_hub_for_click.refresh(RefreshScope::Workspace);
                 });
                 let close_tab: Rc<dyn Fn()> = Rc::new({
                     let db_path = db_path.clone();
@@ -800,6 +805,7 @@ fn ws_center_panel(
                     let content = content.clone();
                     let add_tab_btn = add_tab_btn.clone();
                     let setup_readiness = setup_readiness.clone();
+                    let refresh_hub = refresh_hub.clone();
                     move || {
                         let workspace_name = current_workspace_name.borrow().clone();
                         close_workspace_chat_thread(
@@ -838,6 +844,7 @@ fn ws_center_panel(
                         {
                             select_thread(next);
                         }
+                        refresh_hub.refresh(RefreshScope::Workspace);
                     }
                 });
                 connect_ws_tab_surface_clicks(&tab_shell, select_tab.clone());
@@ -898,6 +905,7 @@ fn ws_center_panel(
         let content = content.clone();
         let setup_readiness = setup_readiness.clone();
         let add_tab_btn_for_feedback = add_tab_btn.clone();
+        let refresh_hub = refresh_hub.clone();
         add_tab_btn.connect_clicked(move |_| {
             let workspace_name = current_workspace_name.borrow().clone();
             let existing = { known_threads.borrow().clone() };
@@ -949,6 +957,7 @@ fn ws_center_panel(
             {
                 select_thread(Some(thread.id));
             }
+            refresh_hub.refresh(RefreshScope::Workspace);
         });
     }
     // Sync active tab state
@@ -1400,6 +1409,7 @@ fn ws_right_panel(
         db_path,
         store,
         &ws.name,
+        state.selected_chat_thread(),
         refresh_hub.clone(),
         toast_overlay.clone(),
     );
@@ -3590,6 +3600,7 @@ fn changes_checks_review_tabs(
             db_path,
             store,
             name,
+            app_state.selected_chat_thread(),
             refresh_hub.clone(),
             toast_overlay.clone(),
         ),
@@ -4017,6 +4028,7 @@ fn workspace_changes_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
+    selected_chat_thread: Option<i64>,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
 ) -> GBox {
@@ -4050,52 +4062,71 @@ fn workspace_changes_panel(
         persisted_scope: "uncommitted".to_owned(),
     }];
 
-    match store.turn_file_change_summaries(name, WORKSPACE_TURN_CHANGE_LIMIT) {
-        Ok(turns) => {
-            for (index, turn) in turns.iter().enumerate() {
-                let key = format!("turn_{index}");
-                let label = turn_scope_label(index);
+    match store.commit_file_change_summaries(name, WORKSPACE_COMMIT_CHANGE_LIMIT) {
+        Ok(commits) => {
+            for (index, commit) in commits.iter().enumerate() {
+                let key = format!("commit_{index}");
+                let label = commit_scope_label(&commit.commit, &commit.subject);
                 body_stack.add_named(
-                    &workspace_file_summary_scope_view(&turn.files, false),
+                    &workspace_file_summary_scope_view(&commit.files, false),
                     Some(&key),
                 );
                 scope_items.push(WorkspaceChangesScopeItem {
                     label: label.clone(),
                     stack_key: key,
                     menu_label: label,
-                    persisted_scope: persisted_turn_changes_scope(&turn.provider_turn_id),
+                    persisted_scope: persisted_commit_changes_scope(&commit.commit),
                 });
             }
-            if turns.is_empty() {
+            if commits.is_empty() {
                 body_stack.add_named(
-                    &workspace_empty_changes_scope_view(
-                        "No file changes recorded for recent agent turns.",
-                    ),
-                    Some("turns_empty"),
+                    &workspace_empty_changes_scope_view("No commits on this workspace branch yet."),
+                    Some("commits_empty"),
                 );
                 scope_items.push(WorkspaceChangesScopeItem {
-                    label: "Latest turn".to_owned(),
-                    stack_key: "turns_empty".to_owned(),
-                    menu_label: "Latest turn".to_owned(),
-                    persisted_scope: "turn:latest".to_owned(),
+                    label: "Commits".to_owned(),
+                    stack_key: "commits_empty".to_owned(),
+                    menu_label: "Commits".to_owned(),
+                    persisted_scope: "commits".to_owned(),
                 });
             }
         }
         Err(err) => {
             body_stack.add_named(
                 &workspace_empty_changes_scope_view(&format!(
-                    "Could not read recent agent-turn file changes: {err:#}"
+                    "Could not read commit file changes: {err:#}"
                 )),
-                Some("turns_error"),
+                Some("commits_error"),
             );
             scope_items.push(WorkspaceChangesScopeItem {
-                label: "Latest turn".to_owned(),
-                stack_key: "turns_error".to_owned(),
-                menu_label: "Latest turn".to_owned(),
-                persisted_scope: "turn:latest".to_owned(),
+                label: "Commits".to_owned(),
+                stack_key: "commits_error".to_owned(),
+                menu_label: "Commits".to_owned(),
+                persisted_scope: "commits".to_owned(),
             });
         }
     }
+
+    let last_turn_key = "last_turn";
+    let last_turn_view = match selected_chat_thread {
+        Some(thread_id) => match store.last_turn_file_change_summary(name, thread_id) {
+            Ok(Some(turn)) => workspace_file_summary_scope_view(&turn.files, false),
+            Ok(None) => workspace_empty_changes_scope_view(
+                "No file changes recorded for the focused chat's last turn.",
+            ),
+            Err(err) => workspace_empty_changes_scope_view(&format!(
+                "Could not read focused chat's last turn changes: {err:#}"
+            )),
+        },
+        None => workspace_empty_changes_scope_view("Select a chat to see its last turn changes."),
+    };
+    body_stack.add_named(&last_turn_view, Some(last_turn_key));
+    scope_items.push(WorkspaceChangesScopeItem {
+        label: "Last turn".to_owned(),
+        stack_key: last_turn_key.to_owned(),
+        menu_label: "Last turn".to_owned(),
+        persisted_scope: "last_turn".to_owned(),
+    });
 
     let saved_scope = store.workspace_changes_scope(name).unwrap_or_default();
     let selected_scope =
@@ -4227,16 +4258,21 @@ fn diff_counts_text(summary: &DiffFileSummary) -> String {
     }
 }
 
-fn turn_scope_label(index: usize) -> String {
-    match index {
-        0 => "Latest turn".to_owned(),
-        1 => "1 turn before".to_owned(),
-        value => format!("{value} turns before"),
+fn commit_scope_label(commit: &str, subject: &str) -> String {
+    let short = short_commit(commit);
+    if subject.trim().is_empty() {
+        format!("Commit {short}")
+    } else {
+        format!("Commit {short}: {}", subject.trim())
     }
 }
 
-fn persisted_turn_changes_scope(provider_turn_id: &str) -> String {
-    format!("turn:{provider_turn_id}")
+fn persisted_commit_changes_scope(commit: &str) -> String {
+    format!("commit:{commit}")
+}
+
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(7).collect()
 }
 
 fn workspace_changes_selected_scope<'a>(
@@ -4253,7 +4289,7 @@ fn workspace_changes_selected_scope<'a>(
         if saved_scope.starts_with("turn:") {
             if let Some(item) = items
                 .iter()
-                .find(|item| item.persisted_scope.starts_with("turn:"))
+                .find(|item| item.persisted_scope == "last_turn")
             {
                 return item;
             }
@@ -7769,14 +7805,16 @@ mod tests {
     }
 
     #[test]
-    fn turn_scope_labels_match_recent_chat_write_filters() {
-        assert_eq!(turn_scope_label(0), "Latest turn");
-        assert_eq!(turn_scope_label(1), "1 turn before");
-        assert_eq!(turn_scope_label(24), "24 turns before");
+    fn commit_scope_labels_use_short_hash_and_subject() {
+        assert_eq!(
+            commit_scope_label("abcdef1234567890", "fix parser"),
+            "Commit abcdef1: fix parser"
+        );
+        assert_eq!(commit_scope_label("abcdef1234567890", ""), "Commit abcdef1");
     }
 
     #[test]
-    fn workspace_changes_scope_selects_saved_turn_after_restart() {
+    fn workspace_changes_scope_uses_stable_last_turn_scope() {
         let items = vec![
             WorkspaceChangesScopeItem {
                 label: "Uncommitted changes".to_owned(),
@@ -7785,27 +7823,21 @@ mod tests {
                 persisted_scope: "uncommitted".to_owned(),
             },
             WorkspaceChangesScopeItem {
-                label: "Latest turn".to_owned(),
-                stack_key: "turn_0".to_owned(),
-                menu_label: "Latest turn".to_owned(),
-                persisted_scope: persisted_turn_changes_scope("thread:7:user:42"),
-            },
-            WorkspaceChangesScopeItem {
-                label: "1 turn before".to_owned(),
-                stack_key: "turn_1".to_owned(),
-                menu_label: "1 turn before".to_owned(),
-                persisted_scope: persisted_turn_changes_scope("thread:7:user:41"),
+                label: "Last turn".to_owned(),
+                stack_key: "last_turn".to_owned(),
+                menu_label: "Last turn".to_owned(),
+                persisted_scope: "last_turn".to_owned(),
             },
         ];
 
         let selected = workspace_changes_selected_scope(&items, Some("turn:thread:7:user:41"));
 
-        assert_eq!(selected.stack_key, "turn_1");
-        assert_eq!(selected.menu_label, "1 turn before");
+        assert_eq!(selected.stack_key, "last_turn");
+        assert_eq!(selected.menu_label, "Last turn");
     }
 
     #[test]
-    fn workspace_changes_scope_falls_back_to_latest_turn_when_saved_turn_rolls_out() {
+    fn workspace_changes_scope_selects_saved_commit_scope() {
         let items = vec![
             WorkspaceChangesScopeItem {
                 label: "Uncommitted changes".to_owned(),
@@ -7814,17 +7846,17 @@ mod tests {
                 persisted_scope: "uncommitted".to_owned(),
             },
             WorkspaceChangesScopeItem {
-                label: "Latest turn".to_owned(),
-                stack_key: "turn_0".to_owned(),
-                menu_label: "Latest turn".to_owned(),
-                persisted_scope: persisted_turn_changes_scope("thread:7:user:52"),
+                label: "Commit abc1234".to_owned(),
+                stack_key: "commit_0".to_owned(),
+                menu_label: "Commit abc1234".to_owned(),
+                persisted_scope: "commit:abc123456789".to_owned(),
             },
         ];
 
-        let selected = workspace_changes_selected_scope(&items, Some("turn:thread:7:user:41"));
+        let selected = workspace_changes_selected_scope(&items, Some("commit:abc123456789"));
 
-        assert_eq!(selected.stack_key, "turn_0");
-        assert_eq!(selected.menu_label, "Latest turn");
+        assert_eq!(selected.stack_key, "commit_0");
+        assert_eq!(selected.menu_label, "Commit abc1234");
     }
 
     #[test]

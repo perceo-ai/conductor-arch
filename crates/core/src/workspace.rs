@@ -910,6 +910,13 @@ pub struct TurnFileChangeSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFileChangeSummary {
+    pub commit: String,
+    pub subject: String,
+    pub files: Vec<DiffFileSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffHunkSummary {
     pub index: usize,
     pub header: String,
@@ -3124,6 +3131,51 @@ impl WorkspaceStore {
         limit: usize,
     ) -> Result<Vec<TurnFileChangeSummary>> {
         let workspace = self.get_by_name(name)?;
+        self.turn_file_change_summaries_for_workspace(workspace.id, None, None, limit)
+    }
+
+    pub fn last_turn_file_change_summary(
+        &self,
+        name: &str,
+        chat_thread_id: i64,
+    ) -> Result<Option<TurnFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let Some(user_message_id) = self.latest_user_message_id(chat_thread_id)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .turn_file_change_summaries_for_workspace(
+                workspace.id,
+                Some(chat_thread_id),
+                Some(user_message_id),
+                1,
+            )?
+            .into_iter()
+            .next())
+    }
+
+    fn latest_user_message_id(&self, chat_thread_id: i64) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT id
+                 FROM chat_messages
+                 WHERE thread_id = ?1 AND role = 'user'
+                 ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
+                 LIMIT 1",
+                [chat_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn turn_file_change_summaries_for_workspace(
+        &self,
+        workspace_id: i64,
+        chat_thread_id: Option<i64>,
+        user_message_id_filter: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<TurnFileChangeSummary>> {
         let limit = limit.min(TURN_CHECKPOINT_DIFF_LIMIT);
         if limit == 0 {
             return Ok(Vec::new());
@@ -3149,11 +3201,12 @@ impl WorkspaceStore {
                     ) AS user_message_id
              FROM provider_events
              WHERE workspace_id = ?1
+               AND (?2 IS NULL OR chat_thread_id = ?2)
                AND phase = 'completed'
                AND kind IN ('diff_file_change', 'file_system')
              ORDER BY event_timeline_seq DESC, received_sequence DESC, id DESC",
         )?;
-        let rows = stmt.query_map([workspace.id], |row| {
+        let rows = stmt.query_map(params![workspace_id, chat_thread_id], |row| {
             let provider_turn_id: Option<String> = row.get(0)?;
             let chat_thread_id: Option<i64> = row.get(1)?;
             let occurred_at_ms: i64 = row.get(2)?;
@@ -3190,6 +3243,9 @@ impl WorkspaceStore {
                 timeline_seq,
                 user_message_id,
             ) = row?;
+            if user_message_id_filter.is_some() && user_message_id != user_message_id_filter {
+                continue;
+            }
             let summaries = provider_file_change_summaries(
                 &kind,
                 provider_subtype.as_deref(),
@@ -3240,6 +3296,30 @@ impl WorkspaceStore {
             turn.files.sort_by(|left, right| left.path.cmp(&right.path));
         }
         Ok(turns)
+    }
+
+    pub fn commit_file_change_summaries(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<CommitFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let max_count = format!("--max-count={limit}");
+        let range = format!("{}..HEAD", workspace.base_ref);
+        let output = git_output_dynamic(
+            &workspace.path,
+            &[
+                "log",
+                "--numstat",
+                "--format=format:%H%x1f%s",
+                max_count.as_str(),
+                range.as_str(),
+            ],
+        )?;
+        Ok(parse_commit_file_change_summaries(&output))
     }
 
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
@@ -7822,23 +7902,58 @@ fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 }
 
 fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
-            let additions = parse_numstat_count(parts.next()?)?;
-            let deletions = parse_numstat_count(parts.next()?)?;
-            let path = parts.next()?.to_owned();
-            Some(DiffFileSummary {
-                path,
-                additions,
-                deletions,
-                staged: false,
-                unstaged: false,
-                untracked: false,
-            })
-        })
-        .collect()
+    output.lines().filter_map(parse_diff_numstat_line).collect()
+}
+
+fn parse_commit_file_change_summaries(output: &str) -> Vec<CommitFileChangeSummary> {
+    let mut commits = Vec::new();
+    let mut current: Option<CommitFileChangeSummary> = None;
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some((commit, subject)) = line.split_once('\u{1f}') {
+            if let Some(commit_summary) = current.take() {
+                commits.push(commit_summary);
+            }
+            current = Some(CommitFileChangeSummary {
+                commit: commit.to_owned(),
+                subject: subject.to_owned(),
+                files: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(summary) = parse_diff_numstat_line(line) {
+            if let Some(commit_summary) = current.as_mut() {
+                commit_summary.files.push(summary);
+            }
+        }
+    }
+    if let Some(commit_summary) = current {
+        commits.push(commit_summary);
+    }
+    for commit in &mut commits {
+        commit.files = merge_diff_summaries(std::mem::take(&mut commit.files));
+        commit
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    commits
+}
+
+fn parse_diff_numstat_line(line: &str) -> Option<DiffFileSummary> {
+    let mut parts = line.splitn(3, '\t');
+    let additions = parse_numstat_count(parts.next()?)?;
+    let deletions = parse_numstat_count(parts.next()?)?;
+    let path = parts.next()?.to_owned();
+    Some(DiffFileSummary {
+        path,
+        additions,
+        deletions,
+        staged: false,
+        unstaged: false,
+        untracked: false,
+    })
 }
 
 fn provider_file_change_summaries(
@@ -20848,6 +20963,175 @@ spotlight_testing = true
                 .collect::<Vec<_>>(),
             vec!["src/a.rs", "src/b.rs"]
         );
+    }
+
+    #[test]
+    fn last_turn_file_change_summary_tracks_selected_chat_thread() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let first_thread = store
+            .create_chat_thread("berlin", "codex", "First", None)
+            .unwrap();
+        let second_thread = store
+            .create_chat_thread("berlin", "codex", "Second", None)
+            .unwrap();
+        let first_process = process_record_for_thread(&store, first_thread.id);
+        let second_process = process_record_for_thread(&store, second_thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        for (thread, process, event_id, path) in [
+            (first_thread.id, first_process.id, "event-a", "src/first.rs"),
+            (
+                second_thread.id,
+                second_process.id,
+                "event-b",
+                "src/second.rs",
+            ),
+        ] {
+            store
+                .append_chat_message(thread, "user", "change file", "user_send")
+                .unwrap();
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(event_id.to_owned()),
+                    provider_item_id: Some(event_id.to_owned()),
+                    provider_thread_id: Some(format!("thread-{thread}")),
+                    provider_turn_id: Some(event_id.to_owned()),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread),
+                    process_id: Some(process),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: None,
+                    occurred_at_ms: 20,
+                    normalized_payload: serde_json::json!({"title": "File changes"}),
+                    raw_json: serde_json::json!({
+                        "params": {
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [{"path": path, "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+
+        let selected = store
+            .last_turn_file_change_summary("berlin", second_thread.id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.chat_thread_id, Some(second_thread.id));
+        assert_eq!(selected.files[0].path, "src/second.rs");
+    }
+
+    #[test]
+    fn last_turn_file_change_summary_does_not_fall_back_to_older_turn() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .append_chat_message(thread.id, "user", "first request", "user_send")
+            .unwrap();
+        provider_store
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-a".to_owned()),
+                provider_item_id: Some("event-a".to_owned()),
+                provider_thread_id: Some("thread-1".to_owned()),
+                provider_turn_id: Some("event-a".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                provider_subtype: Some("item/fileChange/completed".to_owned()),
+                provider_sequence: None,
+                occurred_at_ms: 10,
+                normalized_payload: serde_json::json!({"title": "File changes"}),
+                raw_json: serde_json::json!({
+                    "params": {
+                        "item": {
+                            "type": "fileChange",
+                            "changes": [{"path": "src/first.rs", "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                        }
+                    }
+                }),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "latest request", "user_send")
+            .unwrap();
+
+        let selected = store
+            .last_turn_file_change_summary("berlin", thread.id)
+            .unwrap();
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn commit_file_change_summaries_list_workspace_commits_only() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nfirst\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "first workspace commit",
+            ],
+        );
+        fs::write(workspace.path.join("src.rs"), "second\n").unwrap();
+        git_output(&workspace.path, ["add", "src.rs"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "second workspace commit",
+            ],
+        );
+
+        let commits = store.commit_file_change_summaries("berlin", 10).unwrap();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "second workspace commit");
+        assert_eq!(commits[0].files[0].path, "src.rs");
+        assert_eq!(commits[1].subject, "first workspace commit");
+        assert_eq!(commits[1].files[0].path, "README.md");
     }
 
     #[test]
