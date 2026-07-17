@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use tracing::{error, info, warn};
@@ -1390,6 +1391,12 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
         if crate::platform::process_alive(snapshot.pid) {
             crate::archcar::session::terminate_process(snapshot.pid);
         }
+        if !wait_for_process_exit(snapshot.pid, Duration::from_secs(2)) {
+            errors.push(format!(
+                "session {} process {} did not exit during shutdown",
+                snapshot.session_id, snapshot.pid
+            ));
+        }
         if let Ok(store) = WorkspaceStore::open(&db_path) {
             if let Err(err) = store.mark_session_process_stopped(snapshot.session_id, None) {
                 errors.push(format!(
@@ -1410,6 +1417,17 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
     } else {
         Err(anyhow!(errors.join("; ")))
     }
+}
+
+fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !crate::platform::process_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    !crate::platform::process_alive(pid)
 }
 
 fn terminate_managed_handle(handle: &SessionHandle) {
@@ -2082,14 +2100,13 @@ mod tests {
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
 
-        let mut exited = wait_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        let exited = wait_rx.recv_timeout(Duration::from_millis(100)).is_ok();
         if !exited {
             let _ = crate::platform::terminate_process_group(child_pid, true);
-            exited = wait_rx.recv_timeout(Duration::from_secs(2)).is_ok();
         }
         waiter.join().unwrap();
 
-        assert!(exited);
+        assert!(exited, "shutdown returned before the owned child exited");
         assert_eq!(
             store.get_process_record(process.id).unwrap().status,
             ProcessStatus::Stopped

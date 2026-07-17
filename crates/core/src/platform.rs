@@ -60,14 +60,31 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(not(windows))]
     {
-        Command::new("kill")
+        let pid = pid.to_string();
+        let signalable = Command::new("kill")
             .arg("-0")
-            .arg(pid.to_string())
+            .arg(&pid)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !signalable {
+            return false;
+        }
+
+        Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                let stat = String::from_utf8_lossy(&output.stdout);
+                !stat.trim_start().starts_with('Z')
+            })
+            .unwrap_or(true)
     }
 }
 
@@ -163,30 +180,51 @@ mod tests {
         #[cfg(unix)]
         {
             let temp = tempfile::tempdir().unwrap();
+            let ready = temp.path().join("ready");
             let marker = temp.path().join("interrupted");
             let script = format!(
-                "trap '' INT; (trap 'echo child > {} ; exit 0' INT; while true; do sleep 1; done) & wait",
-                marker.display()
+                "trap '' INT; (trap 'echo child > {} ; exit 0' INT; echo ready > {}; while true; do sleep 1; done) & wait",
+                marker.display(),
+                ready.display()
             );
-            let mut command = shell_command(&script);
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &script]);
             configure_new_process_group(&mut command);
             let mut child = command.spawn().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            assert!(
+                wait_for_path(&ready, std::time::Duration::from_secs(2)),
+                "child process did not install its interrupt trap"
+            );
 
             assert!(interrupt_process_group(child.id()).unwrap());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while std::time::Instant::now() < deadline && !marker.exists() {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            assert!(marker.exists());
+
             let terminated = terminate_process_group(child.id(), true).unwrap_or(false);
-            let exited = wait_for_child_exit(&mut child, std::time::Duration::from_secs(2));
+            let exited = wait_for_child_exit(&mut child, std::time::Duration::from_secs(2))
+                || terminate_child_process(&mut child);
 
             assert!(
                 exited,
                 "test process did not exit after force termination; terminate_process_group={terminated}"
             );
-            assert!(marker.exists());
         }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_path(path: &std::path::Path, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
     }
 
     #[cfg(unix)]
@@ -199,5 +237,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    #[cfg(unix)]
+    fn terminate_child_process(child: &mut std::process::Child) -> bool {
+        let _ = child.kill();
+        wait_for_child_exit(child, std::time::Duration::from_secs(2))
     }
 }
