@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -32,12 +32,14 @@ use crate::workspace::{SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
     listener: LocalListener,
+    endpoint_path: PathBuf,
     state: Arc<Mutex<ServerState>>,
 }
 
 struct ServerState {
     db_path: PathBuf,
     logs_dir: PathBuf,
+    shutting_down: bool,
     queued_defaults: HashSet<String>,
     queued_threads: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
@@ -85,12 +87,17 @@ impl ArchcarServer {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
-        Ok(Self { listener, state })
+        Ok(Self {
+            listener,
+            endpoint_path,
+            state,
+        })
     }
 
     pub fn serve(self) -> Result<()> {
@@ -101,23 +108,39 @@ impl ArchcarServer {
         })
         .context("install archcar shutdown handler")?;
         self.listener.set_nonblocking(true)?;
+        let mut handlers = Vec::new();
+        let mut serve_error = None;
 
         while !shutdown.load(Ordering::SeqCst) {
-            match self.listener.accept() {
+            match transport::accept(&self.listener, &self.endpoint_path) {
                 Ok((stream, _)) => {
                     let state = self.state.clone();
-                    std::thread::spawn(move || {
+                    handlers.push(std::thread::spawn(move || {
                         let _ = handle_connection(stream, state);
-                    });
+                    }));
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    serve_error = Some(anyhow!(err));
+                    break;
+                }
             }
         }
 
-        shutdown_managed_sessions(&self.state, "Archcar is shutting down.")
+        begin_shutdown(&self.state);
+        for handler in handlers {
+            let _ = handler.join();
+        }
+        let shutdown_result = shutdown_managed_sessions(&self.state, "Archcar is shutting down.");
+        match (serve_error, shutdown_result) {
+            (Some(err), Ok(())) => Err(err),
+            (Some(err), Err(cleanup_err)) => {
+                Err(err.context(format!("archcar cleanup also failed: {cleanup_err:#}")))
+            }
+            (None, result) => result,
+        }
     }
 }
 
@@ -220,6 +243,11 @@ fn archcar_rpc_log_payload_for_flag(raw_payload: &str, enabled: bool) -> Option<
 }
 
 fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
+    if archcar_request_is_mutating(&request) && state.lock().unwrap().shutting_down {
+        return ArchcarResponse::Error {
+            message: "archcar is shutting down".to_owned(),
+        };
+    }
     match request {
         ArchcarRequest::EnsureWorkspaceDefaultSession {
             workspace,
@@ -534,6 +562,22 @@ fn send_session_control(
     }
 }
 
+fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
+    !matches!(
+        request,
+        ArchcarRequest::Subscribe
+            | ArchcarRequest::GetSessionStatus { .. }
+            | ArchcarRequest::GetSessionScreen { .. }
+            | ArchcarRequest::GetSessionMessages { .. }
+    )
+}
+
+fn begin_shutdown(state: &Arc<Mutex<ServerState>>) {
+    let mut guard = state.lock().unwrap();
+    guard.shutting_down = true;
+    guard.subscribers.clear();
+}
+
 fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<ArchcarMessage>> {
     let store = WorkspaceStore::open_app(db_path)?;
     let mut persisted_messages: Vec<_> = store
@@ -718,6 +762,14 @@ fn ensure_default_session(
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                if guard.shutting_down {
+                    guard
+                        .queued_defaults
+                        .remove(&default_queue_key(&workspace_for_spawn, kind));
+                    drop(guard);
+                    terminate_managed_handle(&handle);
+                    return;
+                }
                 guard.sessions.insert(session_id, handle);
                 guard
                     .queued_defaults
@@ -864,6 +916,12 @@ fn ensure_chat_thread_session(
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, thread_id, session_id, ?kind, "archcar spawned chat-thread managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                if guard.shutting_down {
+                    guard.queued_threads.remove(&thread_id);
+                    drop(guard);
+                    terminate_managed_handle(&handle);
+                    return;
+                }
                 guard.sessions.insert(session_id, handle);
                 guard.queued_threads.remove(&thread_id);
                 drop(guard);
@@ -1171,6 +1229,11 @@ fn spawn_session(
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned explicit managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                if guard.shutting_down {
+                    drop(guard);
+                    terminate_managed_handle(&handle);
+                    return;
+                }
                 guard.sessions.insert(session_id, handle);
                 drop(guard);
                 while let Ok(event) = event_rx.recv() {
@@ -1225,6 +1288,10 @@ fn load_or_restore_session_handle(
         let mut guard = state.lock().unwrap();
         if let Some(existing) = guard.sessions.get(&session_id).cloned() {
             return Ok(Some(existing));
+        }
+        if guard.shutting_down {
+            terminate_managed_handle(&handle);
+            return Ok(None);
         }
         guard.sessions.insert(session_id, handle.clone());
         info!(session_id, "archcar restored session into active state");
@@ -1296,16 +1363,27 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
         )
     };
     let provider_events = ProviderEventStore::new(&db_path);
+    let mut errors = Vec::new();
 
     for handle in handles {
         let snapshot = match handle.snapshot.lock() {
             Ok(snapshot) => snapshot.clone(),
-            Err(_) => continue,
+            Err(err) => {
+                errors.push(format!("read session snapshot: {err}"));
+                continue;
+            }
         };
         if snapshot.status != crate::workspace::ProcessStatus::Running {
             continue;
         }
-        provider_events.interrupt_active_turns_for_process(snapshot.session_id, reason)?;
+        if let Err(err) =
+            provider_events.interrupt_active_turns_for_process(snapshot.session_id, reason)
+        {
+            errors.push(format!(
+                "interrupt active turns for session {}: {err:#}",
+                snapshot.session_id
+            ));
+        }
         let _ = handle
             .command_tx
             .send(crate::archcar::session::SessionCommand::Kill);
@@ -1315,7 +1393,27 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
         }
     }
 
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(errors.join("; ")))
+    }
+}
+
+fn terminate_managed_handle(handle: &SessionHandle) {
+    let snapshot = match handle.snapshot.lock() {
+        Ok(snapshot) => snapshot.clone(),
+        Err(_) => return,
+    };
+    let _ = handle
+        .command_tx
+        .send(crate::archcar::session::SessionCommand::Kill);
+    crate::archcar::session::terminate_process(snapshot.pid);
+    if let Ok(mut current) = handle.snapshot.lock() {
+        current.status = crate::workspace::ProcessStatus::Stopped;
+        current.ready = false;
+        current.runtime_state = crate::session_state::AgentSessionState::Interrupted;
+    }
 }
 
 #[cfg(test)]
@@ -1348,6 +1446,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions: HashMap::new(),
@@ -1406,6 +1505,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions: HashMap::new(),
@@ -1445,6 +1545,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
             queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::Codex)]),
             queued_threads: HashSet::new(),
             sessions: HashMap::new(),
@@ -1482,6 +1583,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path,
             logs_dir,
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions: HashMap::new(),
@@ -1704,6 +1806,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions,
@@ -1761,6 +1864,7 @@ mod tests {
         let mut state = ServerState {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions: HashMap::from([
@@ -1812,6 +1916,30 @@ mod tests {
     }
 
     #[test]
+    fn begin_shutdown_blocks_mutations_and_drops_subscribers() {
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        begin_shutdown(&state);
+
+        let guard = state.lock().unwrap();
+        assert!(guard.shutting_down);
+        assert!(guard.subscribers.is_empty());
+        drop(guard);
+        assert!(subscriber_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_err());
+    }
+
+    #[test]
     fn graceful_shutdown_interrupts_active_turn_and_stops_owned_session() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("state.db");
@@ -1853,6 +1981,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: db_path.clone(),
             logs_dir,
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions: HashMap::from([(
@@ -1939,6 +2068,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path,
             logs_dir: temp.path().join("logs"),
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             sessions,
@@ -2001,6 +2131,7 @@ mod tests {
         let state = Arc::new(Mutex::new(ServerState {
             db_path,
             logs_dir: temp.path().join("logs"),
+            shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::from([requested_thread.id]),
             sessions: HashMap::new(),

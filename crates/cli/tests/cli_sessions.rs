@@ -82,6 +82,7 @@ fn cli_starts_and_logs_real_shell_session() {
 fn cli_exports_and_imports_repository_settings() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
     let conductor_dir = repo_path.join(".archductor");
     fs::create_dir(&conductor_dir).unwrap();
     fs::write(
@@ -92,6 +93,12 @@ run = "cargo run"
 
 [customization.view]
 keybindings = "vim"
+colors = {}
+notification_rules = []
+command_palette_presets = []
+
+[prompts]
+general = "Before import"
 "#,
     )
     .unwrap();
@@ -105,6 +112,22 @@ keybindings = "vim"
             "--name",
             "demo",
             "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
             "main",
         ])
         .assert()
@@ -124,6 +147,11 @@ keybindings = "vim"
 
     let exported = fs::read_to_string(&export_path).unwrap();
     assert!(exported.contains("keybindings = \"vim\""));
+    fs::write(
+        &export_path,
+        exported.replace("Before import", "After import"),
+    )
+    .unwrap();
 
     app(temp.path())
         .args([
@@ -140,6 +168,53 @@ keybindings = "vim"
 
     let local_settings = fs::read_to_string(conductor_dir.join("settings.local.toml")).unwrap();
     assert!(local_settings.contains("keybindings = \"vim\""));
+    assert!(local_settings.contains("[customization.view.colors]"));
+    assert!(local_settings.contains("notification_rules = []"));
+    assert!(local_settings.contains("command_palette_presets = []"));
+    assert!(
+        fs::read_to_string(workspace_parent.join("berlin/.context/PROMPTS.md"))
+            .unwrap()
+            .contains("After import")
+    );
+}
+
+#[test]
+fn cli_app_shared_import_export_preserves_explicit_empty_collections() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("shared-input.toml");
+    let output = temp.path().join("shared-output.toml");
+    fs::write(
+        &input,
+        r#"
+file_include_globs = ""
+env_file_refs = ""
+
+[environment_variables]
+
+[customization.view]
+colors = {}
+notification_rules = []
+command_palette_presets = []
+"#,
+    )
+    .unwrap();
+
+    app(temp.path())
+        .args(["settings", "import", input.to_str().unwrap()])
+        .assert()
+        .success();
+    app(temp.path())
+        .args(["settings", "export", "--output", output.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let exported = fs::read_to_string(output).unwrap();
+    assert!(exported.contains("file_include_globs = \"\""));
+    assert!(exported.contains("env_file_refs = \"\""));
+    assert!(exported.contains("[environment_variables]"));
+    assert!(exported.contains("[customization.view.colors]"));
+    assert!(exported.contains("notification_rules = []"));
+    assert!(exported.contains("command_palette_presets = []"));
 }
 
 #[test]
@@ -271,6 +346,168 @@ SHARED_SESSION_VALUE = "from-app-shared"
         .success()
         .stdout(contains("SHARED_SESSION_VALUE=from-app-shared"))
         .stdout(contains("exec /shared/bin/codex"));
+}
+
+#[test]
+fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    fs::write(
+        &fake_codex,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method in ("thread/start", "thread/resume"):
+        print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thread-test"}}}), flush=True)
+    elif method == "turn/start":
+        text = message["params"]["input"][0]["text"]
+        with open(capture, "a", encoding="utf-8") as output:
+            output.write(json.dumps(text) + "\n")
+        turn_id = "turn-test"
+        print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+"#,
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&fake_codex)
+        .status()
+        .unwrap();
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n\n[prompts]\ngeneral = \"Keep changes focused.\"\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    app(temp.path())
+        .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Fix auth",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines(&provider_inputs, 1);
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let thread = store
+        .list_chat_threads("berlin")
+        .unwrap()
+        .into_iter()
+        .find(|thread| thread.provider == "codex")
+        .unwrap();
+    let first_session = store.list_sessions("berlin").unwrap()[0].id;
+    app(temp.path())
+        .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
+        .args(["archcar", "kill", &first_session.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), first_session);
+
+    app(temp.path())
+        .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--thread-id",
+            &thread.id.to_string(),
+            "--timeout-ms",
+            "5000",
+            "Run tests",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines(&provider_inputs, 2);
+
+    let captured = fs::read_to_string(&provider_inputs).unwrap();
+    let captured = captured
+        .lines()
+        .map(|line| serde_json::from_str::<String>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured,
+        vec!["Keep changes focused.\n\nFix auth", "Run tests"]
+    );
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let visible_messages = store.list_chat_messages(thread.id).unwrap();
+    assert_eq!(
+        visible_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Fix auth", "Run tests"]
+    );
+    assert!(visible_messages
+        .iter()
+        .all(|message| !message.content.contains("Keep changes focused.")));
+    let second_session = store
+        .list_sessions("berlin")
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id != first_session)
+        .unwrap()
+        .id;
+    app(temp.path())
+        .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
+        .args(["archcar", "kill", &second_session.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), second_session);
 }
 
 #[test]
@@ -689,4 +926,34 @@ fn wait_for_session_log_contains(root: &Path, workspace: &str, needle: &str) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     panic!("timed out waiting for session log in {}", log_dir.display());
+}
+
+fn wait_for_file_lines(path: &Path, expected: usize) {
+    for _ in 0..100 {
+        if fs::read_to_string(path)
+            .map(|contents| contents.lines().count() >= expected)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for {expected} line(s) in {}",
+        path.display()
+    );
+}
+
+fn wait_for_session_exit(root: &Path, session_id: i64) {
+    for _ in 0..100 {
+        if WorkspaceStore::open(app_database_path(root))
+            .and_then(|store| store.get_process_record(session_id))
+            .map(|process| process.status != archductor_core::workspace::ProcessStatus::Running)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for session {session_id} to exit");
 }

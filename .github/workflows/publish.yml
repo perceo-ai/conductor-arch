@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install build dependencies
         run: |
@@ -188,9 +188,11 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\ucrt64\bin\gcc.exe
       CC_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\gcc.exe
       AR_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\ar.exe
-      PKG_CONFIG: C:\msys64\ucrt64\bin\pkg-config.exe
+      PKG_CONFIG: C:\msys64\ucrt64\bin\pkgconf.exe
       PKG_CONFIG_ALLOW_CROSS: "1"
       PKG_CONFIG_PATH: C:\msys64\ucrt64\lib\pkgconfig
+      PKG_CONFIG_PATH_x86_64_pc_windows_gnu: C:\msys64\ucrt64\lib\pkgconfig
+      PKG_CONFIG_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\pkgconf.exe
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -213,7 +215,7 @@ jobs:
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: x86_64-pc-windows-gnu
 
@@ -221,12 +223,14 @@ jobs:
         id: version
         shell: pwsh
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
           VERSION_INPUT: ${{ inputs.version }}
         run: |
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
             $version = $env:VERSION_INPUT
           } else {
-            $version = '${{ github.ref_name }}' -replace '^v', ''
+            $version = $env:REF_NAME -replace '^v', ''
           }
           if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$') {
             throw "version must look like MAJOR.MINOR.PATCH, got: $version"
@@ -235,9 +239,6 @@ jobs:
 
       - name: Build Windows binaries
         run: cargo build --workspace --release --target x86_64-pc-windows-gnu --locked
-
-      - name: Smoke Windows CLI
-        run: .\target\x86_64-pc-windows-gnu\release\archductor.exe doctor
 
       - name: Assemble portable Windows bundle
         shell: pwsh
@@ -259,6 +260,17 @@ jobs:
           Copy-Item C:\msys64\ucrt64\share\glib-2.0 "$bundle\share" -Recurse
           Copy-Item C:\msys64\ucrt64\share\icons "$bundle\share" -Recurse
           Copy-Item C:\msys64\ucrt64\share\mime "$bundle\share" -Recurse
+          $originalPath = $env:PATH
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and ($_ -notlike 'C:\msys64\ucrt64\bin*')
+          }) -join ';'
+          try {
+            Push-Location $bundle
+            .\archductor.exe doctor
+          } finally {
+            Pop-Location
+            $env:PATH = $originalPath
+          }
           Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip"
           $archive = Get-Item "$bundle.zip"
           $hash = (Get-FileHash -Algorithm SHA256 $archive.FullName).Hash.ToLowerInvariant()

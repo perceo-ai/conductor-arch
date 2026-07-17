@@ -45,11 +45,32 @@ use crate::provider_inputs::ProviderInputInput;
 use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
+use crate::settings::PromptKind;
 use crate::workspace::{
     ChatThreadRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
     WorkspaceStore,
 };
 use serde_json::json;
+
+pub fn compose_first_turn_input(general: Option<&str>, visible: &str, first_turn: bool) -> String {
+    if first_turn {
+        if let Some(general) = general.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+            return format!("{general}\n\n{visible}");
+        }
+    }
+    visible.to_owned()
+}
+
+fn resolved_general_prompt(db_path: &std::path::Path, workspace: &str) -> Result<Option<String>> {
+    WorkspaceStore::open_app(db_path)?.resolved_prompt(workspace, PromptKind::General)
+}
+
+fn durable_thread_is_first_user_turn(db_path: &std::path::Path, thread_id: i64) -> Result<bool> {
+    Ok(!WorkspaceStore::open(db_path)?
+        .list_chat_messages(thread_id)?
+        .iter()
+        .any(|message| message.role == "user"))
+}
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -1314,6 +1335,10 @@ fn user_input_identity_suffix(sequence: u64) -> String {
     format!("input-{sequence}")
 }
 
+fn provider_input_local_id(session_id: i64, sequence: u64) -> String {
+    format!("session-{session_id}-input-{sequence}")
+}
+
 fn session_ready_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
     match kind {
         SessionKind::Codex => codex_screen_ready_for_input(screen),
@@ -1734,7 +1759,18 @@ fn run_codex_app_server_session_loop(
     event_tx: Sender<ArchcarEvent>,
 ) {
     let started = snapshot.lock().unwrap().clone();
-    let runtime_store = RuntimeSessionStore::new(db_path);
+    let general_prompt = match resolved_general_prompt(&db_path, &started.workspace) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: format!("Could not resolve general prompt: {err:#}"),
+            });
+            None
+        }
+    };
+    let runtime_store = RuntimeSessionStore::new(db_path.clone());
     let _ = event_tx.send(ArchcarEvent::SessionStarted {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -1944,6 +1980,7 @@ fn run_codex_app_server_session_loop(
                                             error,
                                         );
                                     }
+                                    mark_snapshot_running_not_ready(&snapshot);
                                     let _ = event_tx.send(ArchcarEvent::SessionError {
                                         session_id: Some(started.session_id),
                                         thread_id: Some(started.thread_id),
@@ -2010,6 +2047,26 @@ fn run_codex_app_server_session_loop(
                     kind,
                     delivery,
                 } => {
+                    let first_turn = if kind == ArchcarInputKind::ControlCommand {
+                        false
+                    } else {
+                        match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
+                            Ok(first_turn) => first_turn,
+                            Err(err) => {
+                                let _ = event_tx.send(ArchcarEvent::SessionError {
+                                    session_id: Some(started.session_id),
+                                    thread_id: Some(started.thread_id),
+                                    message: format!(
+                                        "Could not prepare Codex input history: {err:#}"
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
+                    };
+                    let provider_input =
+                        compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
+                    let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
                     let Some(thread_id) = provider_thread_id.as_deref() else {
                         let _ = event_tx.send(ArchcarEvent::SessionError {
                             session_id: Some(started.session_id),
@@ -2019,7 +2076,8 @@ fn run_codex_app_server_session_loop(
                         continue;
                     };
                     let next_input_sequence = user_input_sequence + 1;
-                    let local_input_id = user_input_identity_suffix(next_input_sequence);
+                    let local_input_id =
+                        provider_input_local_id(started.session_id, next_input_sequence);
                     let request_id = next_turn_request_id(next_input_sequence);
                     let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
                     let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
@@ -2059,14 +2117,15 @@ fn run_codex_app_server_session_loop(
                                 &CodexAppServerTurnSteerParams {
                                     thread_id: thread_id.to_owned(),
                                     input: vec![CodexAppServerUserInput::Text {
-                                        text: input.clone(),
+                                        text: provider_input.clone(),
                                     }],
                                     expected_turn_id: Some(expected_turn_id),
                                 },
                             )
                         }
                         CodexInputRoute::Start => {
-                            let params = codex_turn_start_params(&connection, thread_id, &input);
+                            let params =
+                                codex_turn_start_params(&connection, thread_id, &provider_input);
                             write_turn_start_request_with_id(
                                 &mut connection.stdin,
                                 request_id,
@@ -2102,15 +2161,15 @@ fn run_codex_app_server_session_loop(
                             PendingCodexInputRequest {
                                 kind: request_kind,
                                 local_input_id: local_input_id.clone(),
-                                input: input.clone(),
+                                input: provider_input.clone(),
                             },
                         );
                         user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
                             &started,
-                            &input,
-                            visible_input.as_deref(),
+                            &provider_input,
+                            Some(&persisted_input),
                             &kind,
                             user_input_sequence,
                         );
@@ -2187,7 +2246,18 @@ fn run_claude_stream_session_loop(
     event_tx: Sender<ArchcarEvent>,
 ) {
     let started = snapshot.lock().unwrap().clone();
-    let runtime_store = RuntimeSessionStore::new(db_path);
+    let general_prompt = match resolved_general_prompt(&db_path, &started.workspace) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: format!("Could not resolve general prompt: {err:#}"),
+            });
+            None
+        }
+    };
+    let runtime_store = RuntimeSessionStore::new(db_path.clone());
     let _ = event_tx.send(ArchcarEvent::SessionStarted {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -2233,14 +2303,35 @@ fn run_claude_stream_session_loop(
                     kind,
                     delivery,
                 } => {
+                    let first_turn = if kind == ArchcarInputKind::ControlCommand {
+                        false
+                    } else {
+                        match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
+                            Ok(first_turn) => first_turn,
+                            Err(err) => {
+                                let _ = event_tx.send(ArchcarEvent::SessionError {
+                                    session_id: Some(started.session_id),
+                                    thread_id: Some(started.thread_id),
+                                    message: format!(
+                                        "Could not prepare Claude input history: {err:#}"
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
+                    };
+                    let provider_input =
+                        compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
+                    let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
                     let next_input_sequence = user_input_sequence + 1;
-                    let local_input_id = user_input_identity_suffix(next_input_sequence);
+                    let local_input_id =
+                        provider_input_local_id(started.session_id, next_input_sequence);
                     if let Err(err) = enqueue_provider_input(
                         &runtime_store,
                         &started,
                         &local_input_id,
-                        &input,
-                        visible_input.as_deref(),
+                        &provider_input,
+                        Some(&persisted_input),
                         &kind,
                         delivery,
                         connection.native_thread_id.clone(),
@@ -2256,8 +2347,8 @@ fn run_claude_stream_session_loop(
                     }
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
-                        content: input.clone(),
-                        visible_content: visible_input.clone(),
+                        content: provider_input.clone(),
+                        visible_content: Some(persisted_input.clone()),
                         kind: kind.clone(),
                         delivery,
                     });
@@ -2300,8 +2391,8 @@ fn run_claude_stream_session_loop(
                         persist_runtime_user_input(
                             &runtime_store,
                             &started,
-                            &input,
-                            visible_input.as_deref(),
+                            &provider_input,
+                            Some(&persisted_input),
                             &kind,
                             user_input_sequence,
                         );
@@ -2529,6 +2620,9 @@ fn persist_codex_app_server_message(
     started: &SessionSnapshot,
 ) {
     let event = codex_app_server_provider_event_for_session(message, started);
+    if !should_persist_provider_native_event(event.kind) {
+        return;
+    }
     if let Err(err) = runtime_store.append_provider_event(&event) {
         warn!(
             session_id = started.session_id,
@@ -2537,6 +2631,10 @@ fn persist_codex_app_server_message(
             "failed to persist codex app-server provider event"
         );
     }
+}
+
+fn should_persist_provider_native_event(kind: ProviderEventKind) -> bool {
+    kind != ProviderEventKind::UserInput
 }
 
 fn codex_app_server_provider_event_for_session(
@@ -2766,6 +2864,14 @@ fn input_kind_storage_label(kind: &ArchcarInputKind) -> &'static str {
     }
 }
 
+fn mark_snapshot_running_not_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.status = ProcessStatus::Running;
+        state.ready = false;
+        state.runtime_state = AgentSessionState::Running;
+    }
+}
+
 fn mark_snapshot_exited(snapshot: &Arc<Mutex<SessionSnapshot>>, exit_code: Option<i32>) {
     if let Ok(mut state) = snapshot.lock() {
         state.status = ProcessStatus::Exited;
@@ -2859,6 +2965,28 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn general_prompt_is_hidden_prefix_only_on_first_turn() {
+        assert_eq!(
+            compose_first_turn_input(Some("Keep changes focused."), "Fix auth", true),
+            "Keep changes focused.\n\nFix auth"
+        );
+        assert_eq!(
+            compose_first_turn_input(Some("Keep changes focused."), "Run tests", false),
+            "Run tests"
+        );
+    }
+
+    #[test]
+    fn provider_echoes_do_not_persist_as_visible_user_messages() {
+        assert!(!should_persist_provider_native_event(
+            ProviderEventKind::UserInput
+        ));
+        assert!(should_persist_provider_native_event(
+            ProviderEventKind::AssistantOutput
+        ));
     }
 
     #[test]
@@ -3033,6 +3161,12 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    #[test]
+    fn provider_input_local_ids_are_session_scoped() {
+        assert_eq!(provider_input_local_id(7, 3), "session-7-input-3");
+        assert_ne!(provider_input_local_id(1, 1), provider_input_local_id(2, 1));
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod buttons;
 mod command_palette;
 mod dashboard;
 mod history;
+mod history_data;
 mod logger;
 mod motion;
 mod projects;
@@ -388,6 +389,15 @@ fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPr
         .unwrap_or_default()
 }
 
+fn resolve_workspace_default_tab(db_path: &Path, workspace: &str) -> WorkspaceTab {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.workspace_view_defaults(workspace))
+        .ok()
+        .and_then(|defaults| defaults.default_visible_tab)
+        .and_then(|tab| WorkspaceTab::from_config(&tab))
+        .unwrap_or(WorkspaceTab::Chats)
+}
+
 fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings {
     workspace
         .and_then(|name| {
@@ -575,6 +585,72 @@ window.lc-custom-colors,
 }
 "#;
 
+fn navigate_workspace_from_dashboard(
+    app_state: &AppState,
+    workspace_name: String,
+    default_tab: Option<WorkspaceTab>,
+    refresh_view_preferences: &dyn Fn(),
+    refresh_workspace_detail: &dyn Fn(),
+    show_workspace_stack: &dyn Fn(),
+) {
+    app_state.navigate_to_workspace_with_default_tab(Some(workspace_name), default_tab);
+    refresh_view_preferences();
+    refresh_workspace_detail();
+    show_workspace_stack();
+}
+
+fn with_upgraded_navigation_target<T>(
+    upgrade: impl FnOnce() -> Option<T>,
+    navigate: impl FnOnce(&T),
+) -> bool {
+    let Some(target) = upgrade() else {
+        return false;
+    };
+    navigate(&target);
+    true
+}
+
+fn weak_navigation_callback<C: 'static>(
+    coordinator: &Rc<C>,
+    navigate: fn(&C, String),
+) -> Rc<dyn Fn(String)> {
+    let coordinator = Rc::downgrade(coordinator);
+    Rc::new(move |workspace_name| {
+        if let Some(coordinator) = coordinator.upgrade() {
+            navigate(&coordinator, workspace_name);
+        }
+    })
+}
+
+struct WorkspaceNavigationCoordinator {
+    app_state: AppState,
+    main_stack: gtk::glib::WeakRef<Stack>,
+    refresh_view_preferences: Rc<dyn Fn()>,
+    refresh_workspace_detail: Rc<dyn Fn()>,
+}
+
+impl WorkspaceNavigationCoordinator {
+    fn navigate(&self, workspace_name: String) {
+        with_upgraded_navigation_target(
+            || self.main_stack.upgrade(),
+            |main_stack| {
+                let default_tab = resolve_workspace_default_tab(
+                    &self.app_state.paths.database_path,
+                    &workspace_name,
+                );
+                navigate_workspace_from_dashboard(
+                    &self.app_state,
+                    workspace_name,
+                    Some(default_tab),
+                    self.refresh_view_preferences.as_ref(),
+                    self.refresh_workspace_detail.as_ref(),
+                    &|| main_stack.set_visible_child_name("workspace"),
+                );
+            },
+        );
+    }
+}
+
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
     let paths = AppPaths::from_env();
@@ -664,18 +740,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
     let runtime_error_reporter = Rc::new(RefCell::new(RuntimeErrorReporter::default()));
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building dashboard"
-    );
-    let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
-    dashboard.set_hexpand(true);
-    dashboard.set_vexpand(true);
-    let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: dashboard built"
-    );
+    let main_stack = Stack::new();
+    main_stack.set_hexpand(true);
+    main_stack.set_vexpand(true);
+    let main_stack_weak = main_stack.downgrade();
 
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -698,97 +766,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         &view_colors_css,
         &color_scope_class,
     );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: workspace center built"
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building projects page"
-    );
-    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
-    let navigate_created_workspace: Rc<dyn Fn(String)> = {
-        let app_state = app_state.clone();
-        let main_stack_handle = main_stack_handle.clone();
-        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
-        Rc::new(move |workspace_name| {
-            app_state.navigate_to_workspace_with_default_tab(
-                Some(workspace_name),
-                Some(WorkspaceTab::Chats),
-            );
-            if let Some(refresh_view_preferences) =
-                refresh_view_preferences_handle.borrow().as_ref()
-            {
-                refresh_view_preferences();
-            }
-            if let Some(stack) = main_stack_handle.borrow().as_ref() {
-                stack.set_visible_child_name("workspace");
-            }
-        })
-    };
-    let (projects_page, refresh_projects) = projects::build_projects_page(
-        &app_state.paths,
-        refresh_dashboard.clone(),
-        {
-            let refresh_workspace_detail = refresh_workspace_detail.clone();
-            let refresh_hub = refresh_hub.clone();
-            move || {
-                refresh_workspace_detail();
-                refresh_hub.refresh(RefreshScope::Sidebar);
-            }
-        },
-        navigate_created_workspace,
-        toast_manager.clone(),
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: projects page built"
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building settings page"
-    );
-    let (settings_page, refresh_settings) =
-        settings::build_settings_page(&app_state.paths, toast_manager.clone());
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: settings page built"
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building history page"
-    );
-    let (history_page, refresh_history) =
-        history::build_history_page(app_state.workspace_database_path(), toast_manager.clone());
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: history page built"
-    );
-
-    let main_stack = Stack::new();
-    main_stack.set_hexpand(true);
-    main_stack.set_vexpand(true);
-    *main_stack_handle.borrow_mut() = Some(main_stack.clone());
-    main_stack.add_named(&dashboard, Some("dashboard"));
-    main_stack.add_named(&projects_page, Some("projects"));
-    main_stack.add_named(&settings_page, Some("settings"));
-    main_stack.add_named(&history_page, Some("history"));
-    main_stack.add_named(&workspace_preference_scope, Some("workspace"));
-    if debug_mode {
-        main_stack.add_named(
-            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
-            Some("pty-inspector"),
-        );
-    }
-    main_stack.set_visible_child_name(match app_state.snapshot().active_page {
-        AppPage::Workspace => "workspace",
-        AppPage::Projects => "projects",
-        AppPage::Settings => "settings",
-        AppPage::History => "history",
-        AppPage::PtyInspector if debug_mode => "pty-inspector",
-        _ => "dashboard",
-    });
-
     let refresh_view_preferences: Rc<dyn Fn()> = {
         let state_for_view = app_state.clone();
         let workspace_preference_scope = workspace_preference_scope.clone();
@@ -810,7 +787,95 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
     };
-    *refresh_view_preferences_handle.borrow_mut() = Some(refresh_view_preferences.clone());
+    let navigation_coordinator = Rc::new(WorkspaceNavigationCoordinator {
+        app_state: app_state.clone(),
+        main_stack: main_stack_weak,
+        refresh_view_preferences: refresh_view_preferences.clone(),
+        refresh_workspace_detail: Rc::new(refresh_workspace_detail.clone()),
+    });
+    let navigate_workspace = weak_navigation_callback(
+        &navigation_coordinator,
+        WorkspaceNavigationCoordinator::navigate,
+    );
+    let navigation_coordinator_handle = Rc::new(RefCell::new(Some(navigation_coordinator)));
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: workspace center built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building dashboard"
+    );
+    let (dashboard, refresh_dashboard) =
+        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
+    dashboard.set_hexpand(true);
+    dashboard.set_vexpand(true);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: dashboard built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building projects page"
+    );
+    let (projects_page, refresh_projects) = projects::build_projects_page(
+        &app_state.paths,
+        refresh_dashboard.clone(),
+        {
+            let refresh_workspace_detail = refresh_workspace_detail.clone();
+            let refresh_hub = refresh_hub.clone();
+            move || {
+                refresh_workspace_detail();
+                refresh_hub.refresh(RefreshScope::Sidebar);
+            }
+        },
+        navigate_workspace.clone(),
+        toast_manager.clone(),
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: projects page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building settings page"
+    );
+    let (settings_page, refresh_settings) =
+        settings::build_settings_page(&app_state.paths, toast_manager.clone());
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: settings page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building history page"
+    );
+    let (history_page, refresh_history) =
+        history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: history page built"
+    );
+
+    main_stack.add_named(&dashboard, Some("dashboard"));
+    main_stack.add_named(&projects_page, Some("projects"));
+    main_stack.add_named(&settings_page, Some("settings"));
+    main_stack.add_named(&history_page, Some("history"));
+    main_stack.add_named(&workspace_preference_scope, Some("workspace"));
+    if debug_mode {
+        main_stack.add_named(
+            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
+            Some("pty-inspector"),
+        );
+    }
+    main_stack.set_visible_child_name(match app_state.snapshot().active_page {
+        AppPage::Workspace => "workspace",
+        AppPage::Projects => "projects",
+        AppPage::Settings => "settings",
+        AppPage::History => "history",
+        AppPage::PtyInspector if debug_mode => "pty-inspector",
+        _ => "dashboard",
+    });
 
     let (sidebar, refresh_sidebar) = sidebar::build_app_sidebar(
         &app_state,
@@ -984,7 +1049,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let spotlight_watcher_on_close = spotlight_watcher.clone();
         let runtime_reporter_on_close = runtime_error_reporter.clone();
         let toast_on_close = toast_manager.clone();
+        let navigation_coordinator_on_close = navigation_coordinator_handle.clone();
         window.connect_destroy(move |_| {
+            navigation_coordinator_on_close.borrow_mut().take();
             *spotlight_watcher_on_close.borrow_mut() = None;
             if reconcile_runtime_state_for_ui(
                 &db_path_on_close,
@@ -1721,6 +1788,129 @@ mod tests {
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
         assert_eq!(target.page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn dashboard_navigation_refreshes_selected_workspace_before_showing_it() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            None,
+            WorkspaceTab::Checks,
+            AppPage::Dashboard,
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+
+        navigate_workspace_from_dashboard(
+            &state,
+            "berlin".to_owned(),
+            Some(WorkspaceTab::Checks),
+            &{
+                let state = state.clone();
+                let events = events.clone();
+                move || {
+                    assert_eq!(state.selected_workspace().as_deref(), Some("berlin"));
+                    events.borrow_mut().push("preferences");
+                }
+            },
+            &{
+                let state = state.clone();
+                let events = events.clone();
+                move || {
+                    assert_eq!(state.selected_workspace().as_deref(), Some("berlin"));
+                    events.borrow_mut().push("workspace-detail");
+                }
+            },
+            &{
+                let events = events.clone();
+                move || events.borrow_mut().push("workspace-stack")
+            },
+        );
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.selected_workspace.as_deref(), Some("berlin"));
+        assert_eq!(snapshot.active_page, AppPage::Workspace);
+        assert_eq!(snapshot.active_workspace_tab, WorkspaceTab::Checks);
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["preferences", "workspace-detail", "workspace-stack"]
+        );
+    }
+
+    #[test]
+    fn navigation_callback_does_not_keep_its_target_alive() {
+        let target = Rc::new(RefCell::new(0));
+        let weak_target = Rc::downgrade(&target);
+        let navigate = {
+            let weak_target = weak_target.clone();
+            move || {
+                with_upgraded_navigation_target(
+                    || weak_target.upgrade(),
+                    |target| *target.borrow_mut() += 1,
+                )
+            }
+        };
+
+        assert_eq!(Rc::strong_count(&target), 1);
+        assert!(navigate());
+        assert_eq!(*target.borrow(), 1);
+        drop(target);
+        assert!(!navigate());
+    }
+
+    #[test]
+    fn descendant_navigation_callback_stops_before_state_and_refresh_after_root_drop() {
+        struct TestNavigationCoordinator {
+            root: std::rc::Weak<()>,
+            selected: Rc<RefCell<Option<String>>>,
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl TestNavigationCoordinator {
+            fn navigate(&self, workspace: String) {
+                with_upgraded_navigation_target(
+                    || self.root.upgrade(),
+                    |_| {
+                        *self.selected.borrow_mut() = Some(workspace);
+                        self.events.borrow_mut().extend([
+                            "preferences",
+                            "workspace-detail",
+                            "workspace-stack",
+                        ]);
+                    },
+                );
+            }
+        }
+
+        let root = Rc::new(());
+        let selected = Rc::new(RefCell::new(None));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let coordinator = Rc::new(TestNavigationCoordinator {
+            root: Rc::downgrade(&root),
+            selected: selected.clone(),
+            events: events.clone(),
+        });
+        let weak_coordinator = Rc::downgrade(&coordinator);
+        let navigate = weak_navigation_callback(&coordinator, TestNavigationCoordinator::navigate);
+
+        assert_eq!(Rc::strong_count(&coordinator), 1);
+        navigate("berlin".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["preferences", "workspace-detail", "workspace-stack"]
+        );
+
+        events.borrow_mut().clear();
+        drop(root);
+        navigate("london".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert!(events.borrow().is_empty());
+
+        drop(coordinator);
+        assert!(weak_coordinator.upgrade().is_none());
+        navigate("paris".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert!(events.borrow().is_empty());
     }
 
     #[test]

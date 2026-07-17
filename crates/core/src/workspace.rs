@@ -26,7 +26,7 @@ use crate::session_pipeline::{
 use crate::session_state::AgentSessionState;
 use crate::settings::{
     ensure_repository_config, gitignore_pattern_key, load_effective_repository_settings,
-    load_repository_settings, save_local_default_agent_provider, RepositorySettings,
+    load_repository_settings, save_local_default_agent_provider, PromptKind, RepositorySettings,
 };
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
@@ -41,6 +41,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -904,6 +906,13 @@ pub struct TurnFileChangeSummary {
     pub label: String,
     pub occurred_at_ms: u64,
     pub chat_thread_id: Option<i64>,
+    pub files: Vec<DiffFileSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFileChangeSummary {
+    pub commit: String,
+    pub subject: String,
     pub files: Vec<DiffFileSummary>,
 }
 
@@ -3116,12 +3125,90 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
+    pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = workspace_base_ref(&workspace);
+        let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
+        let mut summaries = merge_diff_summaries(parse_diff_numstat(&diff));
+        let mut known_paths = summaries
+            .iter()
+            .map(|summary| summary.path.clone())
+            .collect::<BTreeSet<_>>();
+        let status = git_output(
+            &workspace.path,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        apply_diff_file_status(&mut summaries, &status);
+        for path in parse_untracked_status_paths(&status) {
+            if known_paths.contains(&path) || is_conductor_context_path(&path) {
+                continue;
+            }
+            let counts = untracked_file_counts(&workspace.path.join(&path))?;
+            known_paths.insert(path.clone());
+            summaries.push(DiffFileSummary {
+                path,
+                additions: Some(counts.0),
+                deletions: Some(0),
+                staged: false,
+                unstaged: false,
+                untracked: true,
+            });
+        }
+        summaries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(summaries)
+    }
+
     pub fn turn_file_change_summaries(
         &self,
         name: &str,
         limit: usize,
     ) -> Result<Vec<TurnFileChangeSummary>> {
         let workspace = self.get_by_name(name)?;
+        self.turn_file_change_summaries_for_workspace(workspace.id, None, None, limit)
+    }
+
+    pub fn last_turn_file_change_summary(
+        &self,
+        name: &str,
+        chat_thread_id: i64,
+    ) -> Result<Option<TurnFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let Some(user_message_id) = self.latest_user_message_id(chat_thread_id)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .turn_file_change_summaries_for_workspace(
+                workspace.id,
+                Some(chat_thread_id),
+                Some(user_message_id),
+                1,
+            )?
+            .into_iter()
+            .next())
+    }
+
+    fn latest_user_message_id(&self, chat_thread_id: i64) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT id
+                 FROM chat_messages
+                 WHERE thread_id = ?1 AND role = 'user'
+                 ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
+                 LIMIT 1",
+                [chat_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn turn_file_change_summaries_for_workspace(
+        &self,
+        workspace_id: i64,
+        chat_thread_id: Option<i64>,
+        user_message_id_filter: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<TurnFileChangeSummary>> {
         let limit = limit.min(TURN_CHECKPOINT_DIFF_LIMIT);
         if limit == 0 {
             return Ok(Vec::new());
@@ -3147,11 +3234,12 @@ impl WorkspaceStore {
                     ) AS user_message_id
              FROM provider_events
              WHERE workspace_id = ?1
+               AND (?2 IS NULL OR chat_thread_id = ?2)
                AND phase = 'completed'
                AND kind IN ('diff_file_change', 'file_system')
              ORDER BY event_timeline_seq DESC, received_sequence DESC, id DESC",
         )?;
-        let rows = stmt.query_map([workspace.id], |row| {
+        let rows = stmt.query_map(params![workspace_id, chat_thread_id], |row| {
             let provider_turn_id: Option<String> = row.get(0)?;
             let chat_thread_id: Option<i64> = row.get(1)?;
             let occurred_at_ms: i64 = row.get(2)?;
@@ -3188,6 +3276,9 @@ impl WorkspaceStore {
                 timeline_seq,
                 user_message_id,
             ) = row?;
+            if user_message_id_filter.is_some() && user_message_id != user_message_id_filter {
+                continue;
+            }
             let summaries = provider_file_change_summaries(
                 &kind,
                 provider_subtype.as_deref(),
@@ -3211,7 +3302,7 @@ impl WorkspaceStore {
                 index
             } else {
                 if turns.len() >= limit {
-                    continue;
+                    break;
                 }
                 let index = turns.len();
                 turn_index.insert(turn_key.clone(), index);
@@ -3238,6 +3329,30 @@ impl WorkspaceStore {
             turn.files.sort_by(|left, right| left.path.cmp(&right.path));
         }
         Ok(turns)
+    }
+
+    pub fn commit_file_change_summaries(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<CommitFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let max_count = format!("--max-count={limit}");
+        let range = format!("{}..HEAD", workspace.base_ref);
+        let output = git_output_dynamic(
+            &workspace.path,
+            &[
+                "log",
+                "--numstat",
+                "--format=format:%H%x1f%s",
+                max_count.as_str(),
+                range.as_str(),
+            ],
+        )?;
+        Ok(parse_commit_file_change_summaries(&output))
     }
 
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
@@ -3780,7 +3895,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_checks_agent_prompt(&self, name: &str) -> Result<String> {
         let checks = self.pull_request_check_runs(name)?;
-        Ok(format_pull_request_checks_agent_prompt(name, &checks))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::TestFixing,
+            format_pull_request_checks_agent_prompt(name, &checks),
+        )
     }
 
     pub fn pull_request_review_state(&self, name: &str) -> Result<String> {
@@ -3791,7 +3910,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_review_agent_prompt(&self, name: &str) -> Result<String> {
         let review_state = self.pull_request_review_state(name)?;
-        Ok(format_pull_request_review_agent_prompt(name, &review_state))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_pull_request_review_agent_prompt(name, &review_state),
+        )
     }
 
     pub fn pull_request_readiness(&self, name: &str) -> Result<PullRequestReadiness> {
@@ -3830,7 +3953,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_readiness_agent_prompt(&self, name: &str) -> Result<String> {
         let readiness = self.pull_request_readiness(name)?;
-        Ok(format_pull_request_readiness_agent_prompt(name, &readiness))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_pull_request_readiness_agent_prompt(name, &readiness),
+        )
     }
 
     fn pull_request_review_threads_by_id(
@@ -4207,7 +4334,24 @@ mutation($threadId: ID!) {{
             .into_iter()
             .filter(|comment| comment.status == "open")
             .collect::<Vec<_>>();
-        Ok(format_review_comments_agent_prompt(name, &comments))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_review_comments_agent_prompt(name, &comments),
+        )
+    }
+
+    fn append_resolved_prompt(
+        &self,
+        workspace: &str,
+        kind: PromptKind,
+        mut prompt: String,
+    ) -> Result<String> {
+        if let Some(instructions) = self.resolved_prompt(workspace, kind)? {
+            prompt.push_str("\n\nRepository instructions:\n");
+            prompt.push_str(&instructions);
+        }
+        Ok(prompt)
     }
 
     pub fn resolve_review_comment(&self, id: i64) -> Result<ReviewComment> {
@@ -5538,6 +5682,38 @@ mutation($threadId: ID!) {{
         let workspace = self.get_by_name(workspace_name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         self.repository_settings(&repository.root_path)
+    }
+
+    pub fn resolved_prompt(&self, workspace: &str, kind: PromptKind) -> Result<Option<String>> {
+        Ok(self
+            .workspace_repo_settings(workspace)?
+            .prompts
+            .as_ref()
+            .and_then(|prompts| prompts.get(kind))
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(ToOwned::to_owned))
+    }
+
+    pub fn refresh_repository_prompt_snapshots(&self, repository_id: i64) -> Result<usize> {
+        let repository = self.load_repository_by_id(repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
+             FROM workspaces WHERE repository_id = ?1 ORDER BY id",
+        )?;
+        let workspaces = stmt
+            .query_map([repository_id], row_to_workspace)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut refreshed = 0;
+        for workspace in &workspaces {
+            let Some(context) = ManagedPromptContext::open(&workspace.path)? else {
+                continue;
+            };
+            write_managed_prompt_snapshot_in_context(&context, &settings)?;
+            refreshed += 1;
+        }
+        Ok(refreshed)
     }
 
     pub fn workspace_changes_scope(&self, workspace_name: &str) -> Result<Option<String>> {
@@ -7785,23 +7961,58 @@ fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 }
 
 fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
-            let additions = parse_numstat_count(parts.next()?)?;
-            let deletions = parse_numstat_count(parts.next()?)?;
-            let path = parts.next()?.to_owned();
-            Some(DiffFileSummary {
-                path,
-                additions,
-                deletions,
-                staged: false,
-                unstaged: false,
-                untracked: false,
-            })
-        })
-        .collect()
+    output.lines().filter_map(parse_diff_numstat_line).collect()
+}
+
+fn parse_commit_file_change_summaries(output: &str) -> Vec<CommitFileChangeSummary> {
+    let mut commits = Vec::new();
+    let mut current: Option<CommitFileChangeSummary> = None;
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some((commit, subject)) = line.split_once('\u{1f}') {
+            if let Some(commit_summary) = current.take() {
+                commits.push(commit_summary);
+            }
+            current = Some(CommitFileChangeSummary {
+                commit: commit.to_owned(),
+                subject: subject.to_owned(),
+                files: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(summary) = parse_diff_numstat_line(line) {
+            if let Some(commit_summary) = current.as_mut() {
+                commit_summary.files.push(summary);
+            }
+        }
+    }
+    if let Some(commit_summary) = current {
+        commits.push(commit_summary);
+    }
+    for commit in &mut commits {
+        commit.files = merge_diff_summaries(std::mem::take(&mut commit.files));
+        commit
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    commits
+}
+
+fn parse_diff_numstat_line(line: &str) -> Option<DiffFileSummary> {
+    let mut parts = line.splitn(3, '\t');
+    let additions = parse_numstat_count(parts.next()?)?;
+    let deletions = parse_numstat_count(parts.next()?)?;
+    let path = parts.next()?.to_owned();
+    Some(DiffFileSummary {
+        path,
+        additions,
+        deletions,
+        staged: false,
+        unstaged: false,
+        untracked: false,
+    })
 }
 
 fn provider_file_change_summaries(
@@ -8485,6 +8696,12 @@ fn initialize_context_files(
         .context("write .context/agent-notes.md")?;
     fs::write(context_dir.join("todos.md"), todos).context("write .context/todos.md")?;
 
+    write_managed_prompt_snapshot(workspace_path, settings)?;
+
+    Ok(())
+}
+
+fn managed_prompt_snapshot(settings: &crate::settings::RepositorySettings) -> Option<String> {
     let mut prompts_lines = Vec::new();
     if let Some(general) = settings.prompts.as_ref().and_then(|p| p.general.as_deref()) {
         prompts_lines.push(format!("## General\n\n{general}\n"));
@@ -8504,11 +8721,178 @@ fn initialize_context_files(
         prompts_lines.push(format!("## Create PR\n\n{create_pr}\n"));
     }
     if !prompts_lines.is_empty() {
-        let content = format!("# Prompts\n\n{}", prompts_lines.join("\n"));
-        fs::write(context_dir.join("PROMPTS.md"), content).context("write .context/PROMPTS.md")?;
+        return Some(format!("# Prompts\n\n{}", prompts_lines.join("\n")));
     }
 
+    None
+}
+
+#[cfg(unix)]
+fn write_managed_prompt_snapshot(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let Some(context) = ManagedPromptContext::open(workspace_path)? else {
+        return Ok(());
+    };
+    write_managed_prompt_snapshot_in_context(&context, settings)
+}
+
+#[cfg(not(unix))]
+fn write_managed_prompt_snapshot(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let _ = (workspace_path, settings);
     Ok(())
+}
+
+fn write_managed_prompt_snapshot_in_context(
+    context: &ManagedPromptContext,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    match managed_prompt_snapshot(settings) {
+        Some(content) => context
+            .replace(content.as_bytes())
+            .context("write .context/PROMPTS.md"),
+        None => context.remove().context("remove .context/PROMPTS.md"),
+    }
+}
+
+#[cfg(unix)]
+struct ManagedPromptContext {
+    directory: rustix::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl ManagedPromptContext {
+    fn open(workspace_path: &Path) -> Result<Option<Self>> {
+        use rustix::fs::{Mode, OFlags};
+
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let workspace = match rustix::fs::open(workspace_path, directory_flags, Mode::empty()) {
+            Ok(workspace) => workspace,
+            Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("{} must be a real directory", workspace_path.display())
+                })
+            }
+        };
+        let context_path = workspace_path.join(".context");
+        let directory =
+            match rustix::fs::openat(&workspace, ".context", directory_flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("{} must be a real directory", context_path.display())
+                    })
+                }
+            };
+        Ok(Some(Self { directory }))
+    }
+
+    fn target_mode(&self) -> Result<Option<rustix::fs::Mode>> {
+        use rustix::fs::{AtFlags, FileType, Mode};
+
+        let stat =
+            match rustix::fs::statat(&self.directory, "PROMPTS.md", AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+                Err(err) => return Err(err).context("inspect .context/PROMPTS.md"),
+            };
+        anyhow::ensure!(
+            FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
+            ".context/PROMPTS.md must be a real file"
+        );
+        Ok(Some(Mode::from_raw_mode(stat.st_mode)))
+    }
+
+    fn replace(&self, contents: &[u8]) -> Result<()> {
+        use rustix::fs::{Mode, OFlags};
+
+        let original_mode = self.target_mode()?;
+        let tmp_name = format!(".PROMPTS.md.{}.tmp", Uuid::new_v4());
+        let write_result = (|| -> Result<()> {
+            let file = rustix::fs::openat(
+                &self.directory,
+                tmp_name.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o666),
+            )
+            .context("create managed prompt temporary file")?;
+            let mut file = fs::File::from(file);
+            file.write_all(contents)
+                .context("write managed prompt temporary file")?;
+            let replacement_mode = self.target_mode()?.or(original_mode);
+            if let Some(mode) = replacement_mode {
+                rustix::fs::fchmod(&file, mode)
+                    .context("preserve .context/PROMPTS.md permissions")?;
+            }
+            file.sync_all()
+                .context("sync managed prompt temporary file")?;
+            rustix::fs::renameat(
+                &self.directory,
+                tmp_name.as_str(),
+                &self.directory,
+                "PROMPTS.md",
+            )
+            .context("replace .context/PROMPTS.md")?;
+            rustix::fs::fsync(&self.directory).context("sync .context directory")?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = rustix::fs::unlinkat(
+                &self.directory,
+                tmp_name.as_str(),
+                rustix::fs::AtFlags::empty(),
+            );
+        }
+        write_result
+    }
+
+    fn remove(&self) -> Result<()> {
+        if self.target_mode()?.is_none() {
+            return Ok(());
+        }
+        match rustix::fs::unlinkat(&self.directory, "PROMPTS.md", rustix::fs::AtFlags::empty()) {
+            Ok(()) => {
+                rustix::fs::fsync(&self.directory).context("sync .context directory")?;
+                Ok(())
+            }
+            Err(err) if err == rustix::io::Errno::NOENT => Ok(()),
+            Err(err) => Err(err).context("unlink .context/PROMPTS.md"),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ManagedPromptContext;
+
+#[cfg(not(unix))]
+impl ManagedPromptContext {
+    fn open(workspace_path: &Path) -> Result<Option<Self>> {
+        let _ = workspace_path;
+        Ok(None)
+    }
+
+    fn replace(&self, _contents: &[u8]) -> Result<()> {
+        unsupported_managed_prompt_mutation()
+    }
+
+    fn remove(&self) -> Result<()> {
+        unsupported_managed_prompt_mutation()
+    }
+}
+
+#[cfg(any(test, not(unix)))]
+fn unsupported_managed_prompt_mutation() -> Result<()> {
+    anyhow::bail!(
+        "managed prompt snapshot mutation requires handle-relative no-follow operations; \
+         refusing to modify .context/PROMPTS.md on this platform"
+    )
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -8535,11 +8919,7 @@ fn resolve_source_base_ref(
         let _ = fetch_remote_source_branch(root_path, remote_name, remote_branch)?;
         return Ok(base_ref.to_owned());
     }
-    if fetch_remote_source_branch(root_path, remote_name, base_ref)? {
-        Ok(format!("{remote_name}/{base_ref}"))
-    } else {
-        Ok(base_ref.to_owned())
-    }
+    Ok(base_ref.to_owned())
 }
 
 fn fetch_remote_source_branch(root_path: &Path, remote_name: &str, branch: &str) -> Result<bool> {
@@ -9323,12 +9703,26 @@ fn stop_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn shell_words(program: &Path, args: &[String]) -> String {
     let mut words = vec![quote_shell_word(&program.to_string_lossy())];
     words.extend(args.iter().map(|arg| quote_shell_word(arg)));
     words.join(" ")
 }
 
+#[cfg(windows)]
+fn shell_words(program: &Path, args: &[String]) -> String {
+    windows_shell_words(program, args)
+}
+
+#[cfg(any(test, windows))]
+fn windows_shell_words(program: &Path, args: &[String]) -> String {
+    let mut words = vec![quote_windows_cmd_word(&program.to_string_lossy())];
+    words.extend(args.iter().map(|arg| quote_windows_cmd_word(arg)));
+    words.join(" ")
+}
+
+#[cfg(not(windows))]
 fn quote_shell_word(value: &str) -> String {
     if value
         .bytes()
@@ -9337,6 +9731,18 @@ fn quote_shell_word(value: &str) -> String {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(any(test, windows))]
+fn quote_windows_cmd_word(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'\\' | b'/' | b'.' | b'_' | b'-' | b':')
+        })
+    {
+        return value.to_owned();
+    }
+    format!("\"{}\"", value.replace('"', r#"\""#))
 }
 
 fn first_pull_request_url_from_json(output: &str) -> Option<String> {
@@ -9694,6 +10100,332 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn create_workspace_with_default_prompts_does_not_fail_on_non_unix() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor/prompt-packs")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "[prompts]\ngeneral = \"Use the project defaults.\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add prompts",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert!(workspace.path.join(".context/brief.md").exists());
+        assert!(workspace.path.join(".context/agent-notes.md").exists());
+        assert!(workspace.path.join(".context/todos.md").exists());
+    }
+
+    #[test]
+    fn refresh_repository_prompt_snapshots_updates_only_managed_prompt_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let repository = RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let first = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let second = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "paris".to_owned(),
+                branch: "lc/paris".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let archived = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "rome".to_owned(),
+                branch: "lc/rome".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store.archive("rome", true).unwrap();
+        assert!(!archived.path.exists());
+        let original_brief = fs::read_to_string(first.path.join(".context/brief.md")).unwrap();
+        let original_notes =
+            fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap();
+        let original_todos = fs::read_to_string(first.path.join(".context/todos.md")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.local.toml"),
+            "[prompts]\ngeneral = \"Updated general\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .refresh_repository_prompt_snapshots(repository.id)
+                .unwrap(),
+            2
+        );
+        for workspace in [&first, &second] {
+            assert!(
+                fs::read_to_string(workspace.path.join(".context/PROMPTS.md"))
+                    .unwrap()
+                    .contains("Updated general")
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/brief.md")).unwrap(),
+            original_brief
+        );
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap(),
+            original_notes
+        );
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/todos.md")).unwrap(),
+            original_todos
+        );
+    }
+
+    fn prompt_snapshot_test_workspace() -> (tempfile::TempDir, i64, WorkspaceStore, Workspace) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let repository = RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        (temp, repository.id, store, workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_managed_prompt_snapshot_skips_missing_context_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        fs::create_dir(&workspace_path).unwrap();
+
+        let result = write_managed_prompt_snapshot(
+            &workspace_path,
+            &crate::settings::RepositorySettings::default(),
+        );
+
+        assert!(result.is_ok());
+        assert!(!workspace_path.join(".context/PROMPTS.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_repository_prompt_snapshots_rejects_symlinked_context_directory() {
+        let (temp, repository_id, store, workspace) = prompt_snapshot_test_workspace();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        fs::remove_dir_all(workspace.path.join(".context")).unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        let result = store.refresh_repository_prompt_snapshots(repository_id);
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("must be a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_repository_prompt_snapshots_rejects_symlinked_prompts_file() {
+        let (temp, repository_id, store, workspace) = prompt_snapshot_test_workspace();
+        let outside_prompts = temp.path().join("outside-prompts.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        let managed_prompts = workspace.path.join(".context/PROMPTS.md");
+        fs::remove_file(&managed_prompts).unwrap();
+        std::os::unix::fs::symlink(&outside_prompts, &managed_prompts).unwrap();
+
+        let result = store.refresh_repository_prompt_snapshots(repository_id);
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("must be a real file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_context_handle_contains_parent_swap_writes() {
+        let (temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        let original_context = workspace.path.join(".context-original");
+        fs::rename(workspace.path.join(".context"), &original_context).unwrap();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        context.replace(b"updated prompts\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        assert_eq!(
+            fs::read_to_string(original_context.join("PROMPTS.md")).unwrap(),
+            "updated prompts\n"
+        );
+        assert!(fs::read_dir(&original_context).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".PROMPTS.md.")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_context_handle_contains_parent_swap_deletion() {
+        let (temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        let original_context = workspace.path.join(".context-original");
+        fs::rename(workspace.path.join(".context"), &original_context).unwrap();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not delete\n").unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        context.remove().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not delete\n"
+        );
+        assert!(!original_context.join("PROMPTS.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_replacement_preserves_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let prompts = workspace.path.join(".context/PROMPTS.md");
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        for mode in [0o600, 0o400] {
+            fs::set_permissions(&prompts, fs::Permissions::from_mode(mode)).unwrap();
+
+            context.replace(b"updated prompts\n").unwrap();
+
+            assert_eq!(
+                fs::metadata(&prompts).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_managed_prompt_mutation_explains_fail_closed_safety() {
+        let err = unsupported_managed_prompt_mutation().unwrap_err();
+
+        assert!(format!("{err:#}").contains("handle-relative no-follow operations"));
+        assert!(format!("{err:#}").contains("refusing to modify"));
+    }
+
+    #[test]
+    fn windows_session_shell_words_quote_paths_for_cmd() {
+        let command = windows_shell_words(
+            Path::new(r"C:\Program Files\Archductor\agent.exe"),
+            &[
+                "--profile".to_owned(),
+                "Codex Fast".to_owned(),
+                r"C:\Users\Ada\project workspace".to_owned(),
+            ],
+        );
+
+        assert_eq!(
+            command,
+            r#""C:\Program Files\Archductor\agent.exe" --profile "Codex Fast" "C:\Users\Ada\project workspace""#
+        );
+        assert!(!command.contains('\''));
     }
 
     #[test]
@@ -10982,6 +11714,71 @@ notes.local
     }
 
     #[test]
+    fn app_store_create_repository_empty_file_globs_clear_shared_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::write(repo_path.join(".gitignore"), "shared.cache\n").unwrap();
+        fs::write(repo_path.join("shared.cache"), "must not copy\n").unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "file_include_globs = \"\"\n",
+        )
+        .unwrap();
+        git(&repo_path, ["add", ".gitignore"]).unwrap();
+        git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore shared cache",
+            ],
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &app_settings_path,
+            "file_include_globs = \"shared.cache\"\n",
+        )
+        .unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap()
+        .create(CreateWorkspace {
+            repository_name: "demo".to_owned(),
+            name: "berlin".to_owned(),
+            branch: "lc/berlin".to_owned(),
+            base_ref: Some("main".to_owned()),
+        })
+        .unwrap();
+
+        assert!(!workspace.path.join("shared.cache").exists());
+    }
+
+    #[test]
     fn app_store_mcp_status_uses_shared_provider_settings() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -11580,7 +12377,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn create_with_explicit_local_base_ref_uses_remote_source_branch() {
+    fn create_with_explicit_local_base_ref_preserves_local_branch() {
         let temp = tempfile::tempdir().unwrap();
         let remote_path = temp.path().join("origin.git");
         Command::new("git")
@@ -11649,8 +12446,11 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        assert_eq!(workspace.base_ref, "origin/main");
-        assert!(!workspace.path.join("local-only.txt").exists());
+        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("local-only.txt")).unwrap(),
+            "local\n"
+        );
         assert_eq!(git_output(&repo_path, ["rev-parse", "main"]), local_head);
     }
 
@@ -11883,9 +12683,7 @@ CUSTOM_VALUE = "from-settings"
             .unwrap();
 
         let run = store.run_workspace("berlin").unwrap();
-        wait_for_path(&workspace.path.join(".context/run-env"));
-
-        let run_env = fs::read_to_string(workspace.path.join(".context/run-env")).unwrap();
+        let run_env = wait_for_file_lines(&workspace.path.join(".context/run-env"), 7);
         let lines = run_env.lines().collect::<Vec<_>>();
         assert_eq!(run.workspace_id, workspace.id);
         assert_eq!(run.kind, ProcessKind::Run);
@@ -20070,6 +20868,50 @@ spotlight_testing = true
     }
 
     #[test]
+    fn all_file_change_summaries_include_committed_worktree_and_untracked_changes() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        fs::write(workspace.path.join("README.md"), "demo\ncommitted\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "update readme",
+            ],
+        );
+        fs::write(workspace.path.join("src.rs"), "working\n").unwrap();
+        fs::write(workspace.path.join("draft.md"), "draft\n").unwrap();
+        git_output(&workspace.path, ["add", "src.rs"]);
+
+        let summaries = store.all_file_change_summaries("berlin").unwrap();
+
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "README.md"
+                && summary.additions == Some(1)
+                && !summary.staged
+                && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "src.rs"
+                && summary.additions == Some(1)
+                && summary.staged
+                && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "draft.md" && summary.additions == Some(1) && summary.untracked
+        }));
+    }
+
+    #[test]
     fn diff_file_summaries_include_deleted_and_renamed_changes() {
         let (_temp, store) = test_workspace_store();
         let workspace = store.get_by_name("berlin").unwrap();
@@ -20306,6 +21148,175 @@ spotlight_testing = true
     }
 
     #[test]
+    fn last_turn_file_change_summary_tracks_selected_chat_thread() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let first_thread = store
+            .create_chat_thread("berlin", "codex", "First", None)
+            .unwrap();
+        let second_thread = store
+            .create_chat_thread("berlin", "codex", "Second", None)
+            .unwrap();
+        let first_process = process_record_for_thread(&store, first_thread.id);
+        let second_process = process_record_for_thread(&store, second_thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        for (thread, process, event_id, path) in [
+            (first_thread.id, first_process.id, "event-a", "src/first.rs"),
+            (
+                second_thread.id,
+                second_process.id,
+                "event-b",
+                "src/second.rs",
+            ),
+        ] {
+            store
+                .append_chat_message(thread, "user", "change file", "user_send")
+                .unwrap();
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(event_id.to_owned()),
+                    provider_item_id: Some(event_id.to_owned()),
+                    provider_thread_id: Some(format!("thread-{thread}")),
+                    provider_turn_id: Some(event_id.to_owned()),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread),
+                    process_id: Some(process),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: None,
+                    occurred_at_ms: 20,
+                    normalized_payload: serde_json::json!({"title": "File changes"}),
+                    raw_json: serde_json::json!({
+                        "params": {
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [{"path": path, "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+
+        let selected = store
+            .last_turn_file_change_summary("berlin", second_thread.id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.chat_thread_id, Some(second_thread.id));
+        assert_eq!(selected.files[0].path, "src/second.rs");
+    }
+
+    #[test]
+    fn last_turn_file_change_summary_does_not_fall_back_to_older_turn() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .append_chat_message(thread.id, "user", "first request", "user_send")
+            .unwrap();
+        provider_store
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-a".to_owned()),
+                provider_item_id: Some("event-a".to_owned()),
+                provider_thread_id: Some("thread-1".to_owned()),
+                provider_turn_id: Some("event-a".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                provider_subtype: Some("item/fileChange/completed".to_owned()),
+                provider_sequence: None,
+                occurred_at_ms: 10,
+                normalized_payload: serde_json::json!({"title": "File changes"}),
+                raw_json: serde_json::json!({
+                    "params": {
+                        "item": {
+                            "type": "fileChange",
+                            "changes": [{"path": "src/first.rs", "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                        }
+                    }
+                }),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "latest request", "user_send")
+            .unwrap();
+
+        let selected = store
+            .last_turn_file_change_summary("berlin", thread.id)
+            .unwrap();
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn commit_file_change_summaries_list_workspace_commits_only() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nfirst\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "first workspace commit",
+            ],
+        );
+        fs::write(workspace.path.join("src.rs"), "second\n").unwrap();
+        git_output(&workspace.path, ["add", "src.rs"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "second workspace commit",
+            ],
+        );
+
+        let commits = store.commit_file_change_summaries("berlin", 10).unwrap();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "second workspace commit");
+        assert_eq!(commits[0].files[0].path, "src.rs");
+        assert_eq!(commits[1].subject, "first workspace commit");
+        assert_eq!(commits[1].files[0].path, "README.md");
+    }
+
+    #[test]
     fn workspace_timeline_records_lifecycle_branch_session_and_pr_events() {
         let (_temp, store) = test_workspace_store();
         let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
@@ -20497,6 +21508,21 @@ spotlight_testing = true
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("timed out waiting for {}", path.display());
+    }
+
+    fn wait_for_file_lines(path: &Path, expected_lines: usize) -> String {
+        for _ in 0..50 {
+            if let Ok(contents) = fs::read_to_string(path) {
+                if contents.lines().count() >= expected_lines {
+                    return contents;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {} to contain {expected_lines} lines",
+            path.display()
+        );
     }
 
     fn wait_for_log(path: &Path, needle: &str) {

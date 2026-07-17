@@ -836,6 +836,7 @@ pub fn agent_session_panel(
     let refresh_queue_overlay_fn: Rc<dyn Fn()> = Rc::new({
         let queue_overlay = queue_overlay.clone();
         let selected_thread = selected_thread.clone();
+        let selected_harness = selected_harness.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let buffer = buffer.clone();
         let send_immediate_after_ready_queue = send_immediate_after_ready_queue.clone();
@@ -844,8 +845,11 @@ pub fn agent_session_panel(
         let last_queue_overlay_signature = last_queue_overlay_signature.clone();
         move || {
             let thread_id = *selected_thread.borrow();
-            let queued_items =
-                queued_composer_overlay_items_for_thread(&queued_chat_inputs, thread_id);
+            let queued_items = queued_composer_overlay_items_for_thread(
+                &queued_chat_inputs,
+                thread_id,
+                *selected_harness.borrow(),
+            );
             let signature = QueueOverlaySignature {
                 thread_id,
                 items: queued_items.clone(),
@@ -1997,22 +2001,16 @@ pub fn agent_session_panel(
                     return false;
                 }
             };
-            let should_request_agent_metadata = !staged_review
-                && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
-                && !has_real_conversation_messages(&thread_messages_for_send)
-                && is_default_chat_thread_title(&thread.title);
-            let mut send_input = if should_request_agent_metadata {
-                archductor_metadata_injected_prompt(&command, &workspace_for_send)
-            } else {
-                command.clone()
-            };
-            if let Some(attachment) =
-                pending_model_switch_context_attachment(&thread_messages_for_send)
-            {
-                send_input =
-                format!("[Attachment: prior chat context]\n{attachment}\n\n[New user message]\n{send_input}");
-            }
-            let visible_input = (send_input != command).then_some(command.clone());
+            let prepared_input = prepare_session_send_input(
+                &command,
+                &workspace_for_send,
+                staged_review,
+                selected_kind,
+                &thread,
+                &thread_messages_for_send,
+            );
+            let send_input = prepared_input.input;
+            let visible_input = prepared_input.visible_input;
             debug!(
                 workspace = %workspace_for_send,
                 harness = ?selected_kind,
@@ -2605,7 +2603,8 @@ pub fn agent_session_panel(
                 queued_count,
                 managed_waiting_for_startup,
             );
-            match composer_action_for_submit_intent(action, intent, has_text) {
+            let selected_kind = *selected_harness.borrow();
+            match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
                 ComposerAction::Queue => {
                     let Some(thread_id) = thread_id else {
                         buffer.set_text("");
@@ -2655,7 +2654,9 @@ pub fn agent_session_panel(
                 ComposerAction::Send => {
                     if has_text {
                         buffer.set_text("");
-                        if intent == ComposerSubmitIntent::Immediate {
+                        if intent == ComposerSubmitIntent::Immediate
+                            && managed_harness_for_kind(selected_kind).is_some()
+                        {
                             if !send_immediate_input(command.clone(), false) {
                                 (send_text)(command, false);
                             }
@@ -2876,23 +2877,36 @@ fn queued_composer_overlay_row(
     actions.add_css_class("chat-queued-actions");
     actions.set_halign(Align::End);
 
-    let edit_btn = icon_button("document-edit-symbolic", "Edit queued message");
-    edit_btn.add_css_class("chat-queued-action-btn");
-    edit_btn.connect_clicked(move |_| on_edit());
-    actions.append(&edit_btn);
+    if queued_composer_item_allows_action(item, QueuedComposerAction::Edit) {
+        let edit_btn = icon_button("document-edit-symbolic", "Edit queued message");
+        edit_btn.add_css_class("chat-queued-action-btn");
+        edit_btn.connect_clicked(move |_| on_edit());
+        actions.append(&edit_btn);
+    }
 
-    let delete_btn = icon_button("user-trash-symbolic", "Delete queued message");
-    delete_btn.add_css_class("chat-queued-action-btn");
-    delete_btn.connect_clicked(move |_| on_delete());
-    actions.append(&delete_btn);
+    if queued_composer_item_allows_action(item, QueuedComposerAction::Delete) {
+        let delete_btn = icon_button("user-trash-symbolic", "Delete queued message");
+        delete_btn.add_css_class("chat-queued-action-btn");
+        delete_btn.connect_clicked(move |_| on_delete());
+        actions.append(&delete_btn);
+    }
 
-    let send_btn = icon_button("send-symbolic", "Send immediately");
-    send_btn.add_css_class("chat-queued-action-btn");
-    send_btn.connect_clicked(move |_| on_send_immediately());
-    actions.append(&send_btn);
+    if queued_composer_item_allows_action(item, QueuedComposerAction::SendImmediately) {
+        let send_btn = icon_button("send-symbolic", "Send immediately");
+        send_btn.add_css_class("chat-queued-action-btn");
+        send_btn.connect_clicked(move |_| on_send_immediately());
+        actions.append(&send_btn);
+    }
 
     row.append(&actions);
     row
+}
+
+fn queued_composer_item_allows_action(
+    item: &QueuedComposerItem,
+    action: QueuedComposerAction,
+) -> bool {
+    item.actions.contains(&action)
 }
 
 fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
@@ -5767,6 +5781,41 @@ Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedSessionSendInput {
+    input: String,
+    visible_input: Option<String>,
+}
+
+fn prepare_session_send_input(
+    command: &str,
+    workspace_name: &str,
+    staged_review: bool,
+    selected_kind: SessionKind,
+    thread: &ChatThreadRecord,
+    thread_messages: &[ChatMessageRecord],
+) -> PreparedSessionSendInput {
+    let should_request_agent_metadata = !staged_review
+        && matches!(selected_kind, SessionKind::Codex | SessionKind::Claude)
+        && !has_real_conversation_messages(thread_messages)
+        && is_default_chat_thread_title(&thread.title);
+    let mut input = if should_request_agent_metadata {
+        archductor_metadata_injected_prompt(command, workspace_name)
+    } else {
+        command.to_owned()
+    };
+    if let Some(attachment) = pending_model_switch_context_attachment(thread_messages) {
+        input = format!(
+            "[Attachment: prior chat context]\n{attachment}\n\n[New user message]\n{input}"
+        );
+    }
+    let visible_input = (input != command).then_some(command.to_owned());
+    PreparedSessionSendInput {
+        input,
+        visible_input,
+    }
+}
+
 fn supported_chat_session_kinds() -> &'static [SessionKind] {
     &[SessionKind::Codex, SessionKind::Claude]
 }
@@ -6320,6 +6369,7 @@ fn queued_chat_inputs_count(
 fn queued_composer_overlay_items_for_thread(
     pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     thread_id: Option<i64>,
+    selected_kind: SessionKind,
 ) -> Vec<QueuedComposerItem> {
     let Some(thread_id) = thread_id else {
         return Vec::new();
@@ -6329,14 +6379,16 @@ fn queued_composer_overlay_items_for_thread(
         .get(&thread_id)
         .into_iter()
         .flat_map(|items| items.iter().enumerate())
-        .map(|(index, input)| QueuedComposerItem {
-            index,
-            preview: truncate_queue_preview(&queued_archcar_input_visible_text(input)),
-            actions: vec![
-                QueuedComposerAction::Delete,
-                QueuedComposerAction::Edit,
-                QueuedComposerAction::SendImmediately,
-            ],
+        .map(|(index, input)| {
+            let mut actions = vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit];
+            if managed_harness_for_kind(selected_kind).is_some() {
+                actions.push(QueuedComposerAction::SendImmediately);
+            }
+            QueuedComposerItem {
+                index,
+                preview: truncate_queue_preview(&queued_archcar_input_visible_text(input)),
+                actions,
+            }
         })
         .collect()
 }
@@ -6501,9 +6553,11 @@ fn composer_action_for_submit_intent(
     action: ComposerAction,
     intent: ComposerSubmitIntent,
     has_text: bool,
+    selected_kind: SessionKind,
 ) -> ComposerAction {
     if has_text
         && intent == ComposerSubmitIntent::Immediate
+        && managed_harness_for_kind(selected_kind).is_some()
         && matches!(action, ComposerAction::Queue | ComposerAction::SendQueued)
     {
         ComposerAction::Send
@@ -10247,6 +10301,7 @@ fix it
                 ComposerAction::Queue,
                 ComposerSubmitIntent::Default,
                 true,
+                SessionKind::Codex,
             ),
             ComposerAction::Queue
         );
@@ -10255,6 +10310,7 @@ fix it
                 ComposerAction::Queue,
                 ComposerSubmitIntent::Immediate,
                 true,
+                SessionKind::Codex,
             ),
             ComposerAction::Send
         );
@@ -10263,6 +10319,7 @@ fix it
                 ComposerAction::SendQueued,
                 ComposerSubmitIntent::Immediate,
                 true,
+                SessionKind::Codex,
             ),
             ComposerAction::Send
         );
@@ -10271,8 +10328,18 @@ fix it
                 ComposerAction::SendQueued,
                 ComposerSubmitIntent::Immediate,
                 false,
+                SessionKind::Codex,
             ),
             ComposerAction::SendQueued
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Claude,
+            ),
+            ComposerAction::Send
         );
     }
 
@@ -10496,7 +10563,7 @@ fix it
             SessionKind::Codex,
         );
 
-        let items = queued_composer_overlay_items_for_thread(&pending, Some(7));
+        let items = queued_composer_overlay_items_for_thread(&pending, Some(7), SessionKind::Codex);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].preview, "first follow-up");
@@ -10505,6 +10572,34 @@ fix it
         assert!(items[0]
             .actions
             .contains(&QueuedComposerAction::SendImmediately));
+
+        let claude_items =
+            queued_composer_overlay_items_for_thread(&pending, Some(7), SessionKind::Claude);
+        assert!(claude_items[0]
+            .actions
+            .contains(&QueuedComposerAction::SendImmediately));
+    }
+
+    #[test]
+    fn queued_composer_item_action_filter_controls_rendered_buttons() {
+        let item = QueuedComposerItem {
+            index: 0,
+            preview: "queued".to_owned(),
+            actions: vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit],
+        };
+
+        assert!(queued_composer_item_allows_action(
+            &item,
+            QueuedComposerAction::Delete
+        ));
+        assert!(queued_composer_item_allows_action(
+            &item,
+            QueuedComposerAction::Edit
+        ));
+        assert!(!queued_composer_item_allows_action(
+            &item,
+            QueuedComposerAction::SendImmediately
+        ));
     }
 
     #[test]
@@ -11335,6 +11430,96 @@ fix it
         assert!(
             inflight.borrow().contains_key(&12),
             "render projection must not remove inflight actions; lifecycle responses own cleanup"
+        );
+    }
+
+    #[test]
+    fn send_preprocessing_preserves_visible_input_for_hidden_context() {
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: DEFAULT_CHAT_TITLE_PREFIX.to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+
+        let prepared = prepare_session_send_input(
+            "fix the failing test",
+            "starter-workspace",
+            false,
+            SessionKind::Codex,
+            &thread,
+            &[],
+        );
+
+        assert_ne!(prepared.input, "fix the failing test");
+        assert!(prepared.input.contains("<archductor_hidden_instruction>"));
+        assert_eq!(
+            prepared.visible_input.as_deref(),
+            Some("fix the failing test")
+        );
+    }
+
+    #[test]
+    fn send_preprocessing_preserves_visible_input_for_model_switch_context() {
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: "Fix Build".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let messages = vec![
+            chat_message_record(1, "user", "original request", "user_send"),
+            chat_message_record(
+                2,
+                "system",
+                "Attached prior transcript",
+                "model_switch_context",
+            ),
+        ];
+
+        let prepared = prepare_session_send_input(
+            "continue with codex",
+            "starter-workspace",
+            false,
+            SessionKind::Codex,
+            &thread,
+            &messages,
+        );
+
+        assert!(prepared
+            .input
+            .starts_with("[Attachment: prior chat context]"));
+        assert!(prepared.input.contains("Attached prior transcript"));
+        assert_eq!(
+            prepared.visible_input.as_deref(),
+            Some("continue with codex")
+        );
+    }
+
+    #[test]
+    fn immediate_ack_does_not_reinsert_user_send_as_inflight() {
+        let source = include_str!("session_surface.rs");
+        let user_send_ack_body = source
+            .split("Ok(ArchcarResponse::Ack) => {")
+            .nth(4)
+            .and_then(|tail| tail.split("Ok(other) =>").next())
+            .expect("user-send ack branch should be present");
+
+        assert!(
+            !user_send_ack_body.contains("inflight_actions.borrow_mut().insert("),
+            "accepted immediate user sends must leave inflight tracking so ready refresh can flush follow-ups"
         );
     }
 

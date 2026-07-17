@@ -581,6 +581,32 @@ checkbutton {
     background-color: #101010;
 }
 
+.dashboard .page-board {
+    padding: 16px 20px;
+}
+
+.dashboard .kanban-column {
+    padding: 8px;
+    border: 1px solid #2b2b2b;
+}
+
+.workspace-card-action {
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.workspace-card-action .workspace-card {
+    border: 1px solid #303030;
+    box-shadow: none;
+}
+
+.workspace-card-action:focus-visible {
+    outline: 2px solid #aaaaaa;
+    outline-offset: 2px;
+}
+
 .kanban-column-header {
     border-bottom: 1px solid #2b2b2b;
     padding-bottom: 8px;
@@ -1127,14 +1153,17 @@ separator {
 }
 
 .settings-content-shell {
-    background-color: #191919;
-    border: 1px solid #2a2a2a;
-    border-radius: 14px;
-    padding: 10px 12px;
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
 }
 
 .settings-content-panel {
-    padding: 2px;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
 }
 
 .settings-group {
@@ -1166,10 +1195,11 @@ separator {
 .settings-field,
 .settings-editor-field,
 .settings-toggle-row {
-    background-color: #191919;
-    border: 1px solid #2a2a2a;
-    border-radius: 10px;
-    padding: 10px;
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid #2a2a2a;
+    border-radius: 0;
+    padding: 10px 0 12px;
 }
 
 .settings-field-title {
@@ -1181,6 +1211,12 @@ separator {
 .settings-field-copy {
     color: #8a8a8a;
     font-size: 12px;
+}
+
+.settings-inherited-label {
+    color: #aaaaaa;
+    font-size: 11px;
+    font-style: italic;
 }
 
 .settings-machine-entry,
@@ -1788,14 +1824,12 @@ button.ws-tab-shell {
     min-height: 32px;
     padding: 5px 8px;
     border-radius: 6px;
+    border: none;
+    box-shadow: none;
+    background: transparent;
 }
 .ws-file-summary-row:hover {
     background-color: #1f1f1f;
-}
-.ws-file-summary-path {
-    color: #dddddd;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 13px;
 }
 .ws-file-summary-state {
     color: #9a9a9a;
@@ -2405,6 +2439,25 @@ button.chat-inline-event-chip:checked {
     border-color: #6b5c2a;
     color: #e2cf8a;
 }
+.settings-page .page-body {
+    padding: 16px 24px;
+}
+
+.settings-page .settings-inspector,
+.settings-page .settings-content-panel {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.settings-page .settings-machine-entry:focus,
+.settings-page .settings-editor:focus,
+.settings-page .settings-editor-shell:focus-within {
+    border-color: #8a8a8a;
+    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
+    outline-offset: 2px;
+}
+
 .chat-context-usage-danger {
     background-color: #2c1f1f;
     border-color: #753838;
@@ -2542,7 +2595,6 @@ window,
 .chat-composer-box,
 .settings-toolbar,
 .settings-rail,
-.settings-content-panel,
 .workspace-card,
 .shell-card,
 .kanban-column,
@@ -2563,8 +2615,6 @@ window,
 .chat-composer-box,
 .workspace-card,
 .shell-card,
-.settings-content-panel,
-.settings-inspector,
 .workspace-modal-preview,
 .chat-menu-popover {
     background-color: #1f1f1f;
@@ -2880,6 +2930,54 @@ textview:focus,
 .ws-check-icon-fail {
     color: #fb7185;
 }
+
+.history-page-body {
+    padding: 14px 20px 20px;
+}
+
+.history-filter-tabs {
+    margin-bottom: 10px;
+}
+
+.history-split-pane {
+    background-color: @lc-bg;
+    border: 1px solid @lc-border;
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+.history-split-pane separator {
+    background-color: @lc-border;
+    min-width: 1px;
+}
+
+.history-list row {
+    margin: 0;
+    border-radius: 0;
+}
+
+.history-list row:selected,
+.history-list row:hover {
+    background-color: @lc-hover-soft;
+}
+
+.history-list .history-row {
+    background-color: transparent;
+    padding: 10px 12px;
+}
+
+.history-detail {
+    padding: 20px;
+}
+
+.history-transcript {
+    background-color: @lc-bg;
+    color: @lc-text;
+    padding: 18px;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}
 "#;
 
 #[cfg(test)]
@@ -3015,6 +3113,39 @@ mod tests {
         assert!(!css.contains(".lc-density-compact .nav-row"));
         assert!(!css.contains(".lc-density-comfortable .nav-button"));
         assert!(!css.contains(".lc-density-comfortable .nav-row"));
+    }
+
+    #[test]
+    fn dashboard_uses_flat_columns_and_actionable_cards() {
+        let css = app_css();
+
+        let board = selector_block(css, ".dashboard .page-board");
+        assert!(board.contains("padding: 16px 20px;"));
+
+        let column = selector_block(css, ".dashboard .kanban-column");
+        assert!(column.contains("padding: 8px;"));
+        assert!(column.contains("border: 1px solid"));
+
+        let action = selector_block(css, ".workspace-card-action");
+        assert!(action.contains("background: transparent;"));
+        assert!(action.contains("border: none;"));
+        assert!(action.contains("box-shadow: none;"));
+
+        let card = selector_block(css, ".workspace-card-action .workspace-card");
+        assert!(card.contains("border: 1px solid"));
+        assert!(card.contains("box-shadow: none;"));
+    }
+
+    #[test]
+    fn history_uses_one_flat_split_pane_border() {
+        let css = app_css();
+
+        let split = selector_block(css, ".history-split-pane");
+        assert!(split.contains("border: 1px solid"));
+        assert!(split.contains("box-shadow: none;"));
+
+        let transcript = selector_block(css, ".history-transcript");
+        assert!(transcript.contains("box-shadow: none;"));
     }
 
     #[test]

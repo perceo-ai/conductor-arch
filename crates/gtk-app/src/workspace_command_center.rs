@@ -3,10 +3,11 @@ use archductor_core::agent_tools::launchable_provider_key;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
+use archductor_core::settings::PromptKind;
 use archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
-    WorkspaceTimelineEvent,
+    PullRequestCheckRun, PullRequestReviewThread, ReviewComment, SessionKind, Workspace,
+    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use gtk::prelude::*;
 use gtk::{
@@ -29,9 +30,10 @@ const WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH: i32 = 1280;
 const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
-const WORKSPACE_TURN_CHANGE_LIMIT: usize = 25;
+const WORKSPACE_COMMIT_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
+type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
     controller: &session_surface::ExternalThreadSelectionController,
@@ -690,6 +692,7 @@ fn ws_center_panel(
         let state = state.clone();
         let external_thread_selection = external_thread_selection.clone();
         let content = content.clone();
+        let refresh_hub = refresh_hub.clone();
         Rc::new(move |threads, selected| {
             *known_threads.borrow_mut() = threads.clone();
             if let Some(selected) = selected {
@@ -727,6 +730,7 @@ fn ws_center_panel(
                 let external_thread_selection = external_thread_selection.clone();
                 let content = content.clone();
                 let reopen_popover = reopen_popover.clone();
+                let refresh_hub = refresh_hub.clone();
                 let thread_id = thread.id;
                 item.connect_clicked(move |_| {
                     let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
@@ -747,6 +751,7 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
+                    refresh_hub.refresh(RefreshScope::Workspace);
                     reopen_popover.popdown();
                 });
                 reopen_menu.append(&item);
@@ -769,6 +774,7 @@ fn ws_center_panel(
                 let chat_tab_buttons_for_click = chat_tab_buttons.clone();
                 let file_tab_buttons_for_click = file_tab_buttons.clone();
                 let state_for_click = state.clone();
+                let refresh_hub_for_click = refresh_hub.clone();
                 let thread_id = thread.id;
                 let select_tab: Rc<dyn Fn()> = Rc::new(move || {
                     closed_chat_tabs_for_click.borrow_mut().remove(&thread_id);
@@ -782,6 +788,7 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
+                    refresh_hub_for_click.refresh(RefreshScope::Workspace);
                 });
                 let close_tab: Rc<dyn Fn()> = Rc::new({
                     let db_path = db_path.clone();
@@ -799,6 +806,7 @@ fn ws_center_panel(
                     let content = content.clone();
                     let add_tab_btn = add_tab_btn.clone();
                     let setup_readiness = setup_readiness.clone();
+                    let refresh_hub = refresh_hub.clone();
                     move || {
                         let workspace_name = current_workspace_name.borrow().clone();
                         close_workspace_chat_thread(
@@ -837,6 +845,7 @@ fn ws_center_panel(
                         {
                             select_thread(next);
                         }
+                        refresh_hub.refresh(RefreshScope::Workspace);
                     }
                 });
                 connect_ws_tab_surface_clicks(&tab_shell, select_tab.clone());
@@ -897,6 +906,7 @@ fn ws_center_panel(
         let content = content.clone();
         let setup_readiness = setup_readiness.clone();
         let add_tab_btn_for_feedback = add_tab_btn.clone();
+        let refresh_hub = refresh_hub.clone();
         add_tab_btn.connect_clicked(move |_| {
             let workspace_name = current_workspace_name.borrow().clone();
             let existing = { known_threads.borrow().clone() };
@@ -948,6 +958,7 @@ fn ws_center_panel(
             {
                 select_thread(Some(thread.id));
             }
+            refresh_hub.refresh(RefreshScope::Workspace);
         });
     }
     // Sync active tab state
@@ -1362,7 +1373,7 @@ fn ws_right_panel(
     run_console_terminals: RunConsoleTerminalStore,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
-    open_file: Rc<dyn Fn(&str)>,
+    open_file: OpenWorkspaceFile,
     collapse_sidebar: Rc<dyn Fn()>,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 0);
@@ -1399,6 +1410,8 @@ fn ws_right_panel(
         db_path,
         store,
         &ws.name,
+        state.selected_chat_thread(),
+        Some(open_file.clone()),
         refresh_hub.clone(),
         toast_overlay.clone(),
     );
@@ -2630,7 +2643,7 @@ fn show_prompt_preview(prompt: &str, launch_cmd: &str) {
     title.set_xalign(0.0);
     body.append(&title);
     let hint = Label::new(Some(
-        "This prompt will be injected when the session starts.",
+        "These instructions are included with the first message in a new chat.",
     ));
     hint.add_css_class("card-meta");
     hint.set_xalign(0.0);
@@ -3620,6 +3633,8 @@ fn changes_checks_review_tabs(
             db_path,
             store,
             name,
+            app_state.selected_chat_thread(),
+            None,
             refresh_hub.clone(),
             toast_overlay.clone(),
         ),
@@ -4047,8 +4062,10 @@ fn workspace_changes_panel(
     db_path: &Path,
     store: &WorkspaceStore,
     name: &str,
-    _refresh_hub: RefreshHub,
-    _toast_overlay: ToastOverlay,
+    selected_chat_thread: Option<i64>,
+    open_file: Option<OpenWorkspaceFile>,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let header_row = GBox::new(Orientation::Horizontal, 8);
@@ -4067,65 +4084,99 @@ fn workspace_changes_panel(
     body_stack.set_vexpand(true);
     body_stack.set_hexpand(true);
 
-    let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
+    let all_summaries = store.all_file_change_summaries(name).unwrap_or_default();
     body_stack.add_named(
-        &workspace_file_summary_scope_view(&uncommitted_summaries, true),
-        Some("uncommitted"),
+        &workspace_file_summary_scope_view(&all_summaries, true, open_file.clone()),
+        Some("all_changes"),
     );
 
     let mut scope_items = vec![WorkspaceChangesScopeItem {
+        label: "All changes".to_owned(),
+        stack_key: "all_changes".to_owned(),
+        menu_label: "All changes".to_owned(),
+        persisted_scope: "all".to_owned(),
+    }];
+
+    let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
+    body_stack.add_named(
+        &workspace_file_summary_scope_view(&uncommitted_summaries, true, open_file.clone()),
+        Some("uncommitted"),
+    );
+
+    scope_items.push(WorkspaceChangesScopeItem {
         label: "Uncommitted changes".to_owned(),
         stack_key: "uncommitted".to_owned(),
         menu_label: "Uncommitted".to_owned(),
         persisted_scope: "uncommitted".to_owned(),
-    }];
+    });
 
-    match store.turn_file_change_summaries(name, WORKSPACE_TURN_CHANGE_LIMIT) {
-        Ok(turns) => {
-            for (index, turn) in turns.iter().enumerate() {
-                let key = format!("turn_{index}");
-                let label = turn_scope_label(index);
+    match store.commit_file_change_summaries(name, WORKSPACE_COMMIT_CHANGE_LIMIT) {
+        Ok(commits) => {
+            for (index, commit) in commits.iter().enumerate() {
+                let key = format!("commit_{index}");
+                let label = commit_scope_label(&commit.commit, &commit.subject);
                 body_stack.add_named(
-                    &workspace_file_summary_scope_view(&turn.files, false),
+                    &workspace_file_summary_scope_view(&commit.files, false, open_file.clone()),
                     Some(&key),
                 );
                 scope_items.push(WorkspaceChangesScopeItem {
                     label: label.clone(),
                     stack_key: key,
                     menu_label: label,
-                    persisted_scope: persisted_turn_changes_scope(&turn.provider_turn_id),
+                    persisted_scope: persisted_commit_changes_scope(&commit.commit),
                 });
             }
-            if turns.is_empty() {
+            if commits.is_empty() {
                 body_stack.add_named(
-                    &workspace_empty_changes_scope_view(
-                        "No file changes recorded for recent agent turns.",
-                    ),
-                    Some("turns_empty"),
+                    &workspace_empty_changes_scope_view("No commits on this workspace branch yet."),
+                    Some("commits_empty"),
                 );
                 scope_items.push(WorkspaceChangesScopeItem {
-                    label: "Latest turn".to_owned(),
-                    stack_key: "turns_empty".to_owned(),
-                    menu_label: "Latest turn".to_owned(),
-                    persisted_scope: "turn:latest".to_owned(),
+                    label: "Commits".to_owned(),
+                    stack_key: "commits_empty".to_owned(),
+                    menu_label: "Commits".to_owned(),
+                    persisted_scope: "commits".to_owned(),
                 });
             }
         }
         Err(err) => {
             body_stack.add_named(
                 &workspace_empty_changes_scope_view(&format!(
-                    "Could not read recent agent-turn file changes: {err:#}"
+                    "Could not read commit file changes: {err:#}"
                 )),
-                Some("turns_error"),
+                Some("commits_error"),
             );
             scope_items.push(WorkspaceChangesScopeItem {
-                label: "Latest turn".to_owned(),
-                stack_key: "turns_error".to_owned(),
-                menu_label: "Latest turn".to_owned(),
-                persisted_scope: "turn:latest".to_owned(),
+                label: "Commits".to_owned(),
+                stack_key: "commits_error".to_owned(),
+                menu_label: "Commits".to_owned(),
+                persisted_scope: "commits".to_owned(),
             });
         }
     }
+
+    let last_turn_key = "last_turn";
+    let last_turn_view = match selected_chat_thread {
+        Some(thread_id) => match store.last_turn_file_change_summary(name, thread_id) {
+            Ok(Some(turn)) => {
+                workspace_file_summary_scope_view(&turn.files, false, open_file.clone())
+            }
+            Ok(None) => workspace_empty_changes_scope_view(
+                "No file changes recorded for the focused chat's last turn.",
+            ),
+            Err(err) => workspace_empty_changes_scope_view(&format!(
+                "Could not read focused chat's last turn changes: {err:#}"
+            )),
+        },
+        None => workspace_empty_changes_scope_view("Select a chat to see its last turn changes."),
+    };
+    body_stack.add_named(&last_turn_view, Some(last_turn_key));
+    scope_items.push(WorkspaceChangesScopeItem {
+        label: "Last turn".to_owned(),
+        stack_key: last_turn_key.to_owned(),
+        menu_label: "Last turn".to_owned(),
+        persisted_scope: "last_turn".to_owned(),
+    });
 
     let saved_scope = store.workspace_changes_scope(name).unwrap_or_default();
     let selected_scope =
@@ -4133,6 +4184,11 @@ fn workspace_changes_panel(
     body_stack.set_visible_child_name(&selected_scope.stack_key);
     menu_btn.set_label(&selected_scope.menu_label);
     panel.append(&body_stack);
+    let scope_feedback = Label::new(None);
+    scope_feedback.add_css_class("status-text");
+    scope_feedback.set_xalign(0.0);
+    scope_feedback.set_wrap(true);
+    panel.append(&scope_feedback);
 
     let popover = gtk::Popover::new();
     popover.add_css_class("context-menu-popover");
@@ -4147,6 +4203,9 @@ fn workspace_changes_panel(
         let popover_for_item = popover.clone();
         let db_path_for_item = db_path.to_path_buf();
         let workspace_name_for_item = name.to_owned();
+        let feedback_for_item = scope_feedback.clone();
+        let toast_for_item = toast_overlay.clone();
+        let refresh_for_item = refresh_hub.clone();
         item.connect_clicked(move |_| {
             body_stack_for_item.set_visible_child_name(&scope_item.stack_key);
             menu_btn_for_item.set_label(&scope_item.menu_label);
@@ -4156,7 +4215,11 @@ fn workspace_changes_panel(
                     Some(&scope_item.persisted_scope),
                 )
             }) {
-                error!("persist workspace changes scope failed: {err:#}");
+                let message = format!("Could not save changes scope: {err:#}");
+                error!("{message}");
+                apply_action_feedback(&feedback_for_item, &toast_for_item, &message, true);
+            } else {
+                refresh_for_item.refresh(RefreshScope::Workspace);
             }
             popover_for_item.popdown();
         });
@@ -4173,6 +4236,7 @@ fn workspace_changes_panel(
 fn workspace_file_summary_scope_view(
     summaries: &[DiffFileSummary],
     show_state: bool,
+    open_file: Option<OpenWorkspaceFile>,
 ) -> ScrolledWindow {
     let panel = GBox::new(Orientation::Vertical, 6);
     panel.add_css_class("ws-file-summary-panel");
@@ -4186,7 +4250,11 @@ fn workspace_file_summary_scope_view(
         panel.append(&empty);
     } else {
         for summary in summaries {
-            panel.append(&workspace_file_summary_row(summary, show_state));
+            panel.append(&workspace_file_summary_row(
+                summary,
+                show_state,
+                open_file.clone(),
+            ));
         }
     }
 
@@ -4214,28 +4282,68 @@ fn workspace_empty_changes_scope_view(message: &str) -> ScrolledWindow {
     scroll
 }
 
-fn workspace_file_summary_row(summary: &DiffFileSummary, show_state: bool) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 8);
-    row.add_css_class("ws-file-summary-row");
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceChangeFileRowModel {
+    icon_name: &'static str,
+    path: String,
+    counts: String,
+    state: Option<&'static str>,
+}
 
-    let path = Label::new(Some(&summary.path));
-    path.add_css_class("ws-file-summary-path");
+fn workspace_change_file_row_model(
+    summary: &DiffFileSummary,
+    show_state: bool,
+) -> WorkspaceChangeFileRowModel {
+    WorkspaceChangeFileRowModel {
+        icon_name: file_tree_icon_name(false, &summary.path),
+        path: summary.path.clone(),
+        counts: diff_counts_text(summary),
+        state: show_state.then_some(diff_state_label(summary)),
+    }
+}
+
+fn workspace_file_summary_row(
+    summary: &DiffFileSummary,
+    show_state: bool,
+    open_file: Option<OpenWorkspaceFile>,
+) -> Button {
+    let model = workspace_change_file_row_model(summary, show_state);
+    let button = Button::new();
+    button.add_css_class("ws-file-summary-row");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(true);
+    if let Some(open_file) = open_file {
+        let path = model.path.clone();
+        button.connect_clicked(move |_| open_file(path.as_str()));
+    }
+
+    let row = GBox::new(Orientation::Horizontal, file_tree_row_spacing());
+    row.add_css_class("ws-file-summary-row-content");
+    row.set_hexpand(true);
+
+    let icon = Image::from_icon_name(model.icon_name);
+    icon.add_css_class("ws-file-icon");
+    row.append(&icon);
+
+    let path = Label::new(Some(&model.path));
+    path.add_css_class("ws-file-name");
     path.set_xalign(0.0);
     path.set_hexpand(true);
     path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     row.append(&path);
 
-    if show_state {
-        let state = Label::new(Some(diff_state_label(summary)));
+    if let Some(state_label) = model.state {
+        let state = Label::new(Some(state_label));
         state.add_css_class("ws-file-summary-state");
         row.append(&state);
     }
 
-    let counts = Label::new(Some(&diff_counts_text(summary)));
+    let counts = Label::new(Some(&model.counts));
     counts.add_css_class("ws-file-summary-counts");
     row.append(&counts);
 
-    row
+    button.set_child(Some(&row));
+    button
 }
 
 fn diff_counts_text(summary: &DiffFileSummary) -> String {
@@ -4245,16 +4353,21 @@ fn diff_counts_text(summary: &DiffFileSummary) -> String {
     }
 }
 
-fn turn_scope_label(index: usize) -> String {
-    match index {
-        0 => "Latest turn".to_owned(),
-        1 => "1 turn before".to_owned(),
-        value => format!("{value} turns before"),
+fn commit_scope_label(commit: &str, subject: &str) -> String {
+    let short = short_commit(commit);
+    if subject.trim().is_empty() {
+        format!("Commit {short}")
+    } else {
+        format!("Commit {short}: {}", subject.trim())
     }
 }
 
-fn persisted_turn_changes_scope(provider_turn_id: &str) -> String {
-    format!("turn:{provider_turn_id}")
+fn persisted_commit_changes_scope(commit: &str) -> String {
+    format!("commit:{commit}")
+}
+
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(7).collect()
 }
 
 fn workspace_changes_selected_scope<'a>(
@@ -4271,7 +4384,7 @@ fn workspace_changes_selected_scope<'a>(
         if saved_scope.starts_with("turn:") {
             if let Some(item) = items
                 .iter()
-                .find(|item| item.persisted_scope.starts_with("turn:"))
+                .find(|item| item.persisted_scope == "last_turn")
             {
                 return item;
             }
@@ -4811,9 +4924,15 @@ fn connect_fix_blocked_prompt_button(
     let feedback_for_fix = feedback.clone();
     let toast_for_fix = toast_overlay.clone();
     button.connect_clicked(move |_| {
-        let prompt = WorkspaceStore::open_app(db_path.clone())
-            .and_then(|store| store.pull_request_checks_agent_prompt(&workspace_name))
-            .unwrap_or_else(|_| workspace_conflict_resolution_prompt(&db_path, &workspace_name));
+        let failed_checks = WorkspaceStore::open_app(db_path.clone())
+            .and_then(|store| store.pull_request_check_runs(&workspace_name))
+            .ok()
+            .and_then(|checks| failed_pull_request_checks_text(&checks));
+        let prompt = workspace_conflict_resolution_prompt(
+            &db_path,
+            &workspace_name,
+            failed_checks.as_deref(),
+        );
         state.queue_pending_chat_prompt(prompt);
         state.set_active_workspace_tab(WorkspaceTab::Chats);
         apply_action_feedback(
@@ -5045,26 +5164,28 @@ fn pull_request_is_ready(
 }
 
 fn workspace_setup_prompt(db_path: &Path, name: &str) -> String {
-    workspace_script_prompt(db_path, name, "setup", "Setup")
+    workspace_script_prompt(db_path, name, "setup", "Setup", PromptKind::SetupScript)
 }
 
 fn workspace_run_prompt(db_path: &Path, name: &str) -> String {
-    workspace_script_prompt(db_path, name, "run", "Run")
+    workspace_script_prompt(db_path, name, "run", "Run", PromptKind::RunScript)
 }
 
 fn workspace_continue_prompt(db_path: &Path, name: &str) -> String {
-    WorkspaceStore::open_app(db_path)
-        .and_then(|store| store.workspace_repo_settings(name))
+    let configured = WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.resolved_prompt(name, PromptKind::ContinueWork))
         .ok()
-        .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr))
-        .filter(|prompt| !prompt.trim().is_empty())
-        .map(|prompt| format!("Continue after the merged PR for workspace {name}.\n\n{prompt}"))
-        .unwrap_or_else(|| {
-            format!(
-                "Continue after the merged PR for workspace {name}.\n\
-                 Check remaining todos, decide the next branch or follow-up PR, and keep going."
-            )
-        })
+        .flatten();
+    workspace_continue_prompt_from_parts(name, configured.as_deref())
+}
+
+fn workspace_continue_prompt_from_parts(name: &str, configured: Option<&str>) -> String {
+    let mut prompt = format!(
+        "Continue after the merged PR for workspace {name}.\n\
+         Check remaining todos, decide the next branch or follow-up PR, and keep going."
+    );
+    append_configured_prompt(&mut prompt, configured);
+    prompt
 }
 
 fn workspace_create_pr_chat_prompt(db_path: &Path, name: &str) -> String {
@@ -5072,9 +5193,9 @@ fn workspace_create_pr_chat_prompt(db_path: &Path, name: &str) -> String {
     let mut context_brief = None;
     if let Ok(store) = WorkspaceStore::open_app(db_path) {
         repo_prompt = store
-            .workspace_repo_settings(name)
+            .resolved_prompt(name, PromptKind::CreatePr)
             .ok()
-            .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr));
+            .flatten();
         context_brief = store.read_context_brief(name).ok().flatten();
     }
     workspace_create_pr_chat_prompt_from_parts(
@@ -5111,35 +5232,88 @@ fn workspace_create_pr_chat_prompt_from_parts(
     prompt
 }
 
-fn workspace_commit_and_push_chat_prompt(_db_path: &Path, name: &str) -> String {
-    format!(
+fn workspace_commit_and_push_chat_prompt(db_path: &Path, name: &str) -> String {
+    let mut prompt = format!(
         "Commit and push workspace {name}.\n\n\
          Review staged, unstaged, and untracked changes. Make the smallest coherent commit for \
          the current work, push the workspace branch, and report the commit plus push result."
-    )
+    );
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, PromptKind::CommitGeneration).as_deref(),
+    );
+    prompt
 }
 
 fn workspace_merge_source_branch_chat_prompt(db_path: &Path, name: &str) -> String {
     let source = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_base_ref(name))
         .unwrap_or_else(|_| "the source branch".to_owned());
-    format!(
+    let mut prompt = format!(
         "Merge {source} into workspace {name} before creating a pull request.\n\n\
          Fetch the latest source branch if needed, merge it into the workspace branch, resolve \
          conflicts carefully, run the relevant verification, then report the merge result and any \
          remaining blockers."
+    );
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, PromptKind::ResolveMergeConflicts).as_deref(),
+    );
+    prompt
+}
+
+fn workspace_conflict_resolution_prompt(
+    db_path: &Path,
+    name: &str,
+    failed_checks: Option<&str>,
+) -> String {
+    workspace_conflict_resolution_prompt_from_parts(
+        name,
+        failed_checks,
+        resolved_workspace_prompt(db_path, name, PromptKind::ResolveMergeConflicts).as_deref(),
+        resolved_workspace_prompt(db_path, name, PromptKind::FixErrors).as_deref(),
     )
 }
 
-fn workspace_conflict_resolution_prompt(_db_path: &Path, name: &str) -> String {
-    format!(
+fn failed_pull_request_checks_text(checks: &[PullRequestCheckRun]) -> Option<String> {
+    let failures = checks
+        .iter()
+        .filter(|check| check.is_failure())
+        .map(|check| match check.detail.as_deref() {
+            Some(detail) => format!("- {}: {} - {detail}", check.name, check.status),
+            None => format!("- {}: {}", check.name, check.status),
+        })
+        .collect::<Vec<_>>();
+    (!failures.is_empty()).then(|| failures.join("\n"))
+}
+
+fn workspace_conflict_resolution_prompt_from_parts(
+    name: &str,
+    failed_checks: Option<&str>,
+    resolve_conflicts_prompt: Option<&str>,
+    fix_errors_prompt: Option<&str>,
+) -> String {
+    let mut prompt = format!(
         "Resolve the blockers for workspace {name} before PR/merge.\n\n\
          Inspect workspace conflicts, failing checks, and branch state. Make the smallest safe \
          fix, rerun the relevant verification, and report what changed."
-    )
+    );
+    append_configured_prompt(&mut prompt, resolve_conflicts_prompt);
+    if let Some(failed_checks) = failed_checks {
+        prompt.push_str("\n\nFailed checks:\n");
+        prompt.push_str(failed_checks);
+        append_configured_prompt(&mut prompt, fix_errors_prompt);
+    }
+    prompt
 }
 
-fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: &str) -> String {
+fn workspace_script_prompt(
+    db_path: &Path,
+    name: &str,
+    script_key: &str,
+    label: &str,
+    prompt_kind: PromptKind,
+) -> String {
     let current = WorkspaceStore::open_app(db_path)
         .and_then(|store| store.workspace_repo_settings(name))
         .ok()
@@ -5148,7 +5322,7 @@ fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: 
             "run" => settings.scripts.run,
             _ => None,
         });
-    match current {
+    let mut prompt = match current {
         Some(script) if !script.trim().is_empty() => format!(
             "Create or update .archductor/settings.toml for workspace {name}.\n\
              Set scripts.{script_key} to this multiline shell block of successive commands:\n\n{script}\n"
@@ -5158,6 +5332,28 @@ fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: 
              Define scripts.{script_key} as a multiline shell block so the {label} tab can run successive commands in order.\n\
              Keep the commands short, reliable, and checked into the repo."
         ),
+    };
+    append_configured_prompt(
+        &mut prompt,
+        resolved_workspace_prompt(db_path, name, prompt_kind).as_deref(),
+    );
+    prompt
+}
+
+fn resolved_workspace_prompt(db_path: &Path, name: &str, kind: PromptKind) -> Option<String> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.resolved_prompt(name, kind))
+        .ok()
+        .flatten()
+}
+
+fn append_configured_prompt(prompt: &mut String, configured: Option<&str>) {
+    if let Some(configured) = configured
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        prompt.push_str("\n\nRepository instructions:\n");
+        prompt.push_str(configured);
     }
 }
 
@@ -7173,7 +7369,7 @@ fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("No local check runs recorded"))?;
     let output = store.read_latest_check_log(name)?;
     let output = bounded_check_prompt_output(&output);
-    Ok(format!(
+    let mut prompt = format!(
         "Address the latest local check output for workspace {name}. If it failed, make the smallest safe fix and rerun the relevant check.\n\nProcess #{}: {}\nStatus: {}\nExit: {}\nStarted: {}\n\nOutput:\n```text\n{}\n```",
         record.id,
         record.command,
@@ -7181,7 +7377,14 @@ fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Resu
         exit_code_label(record.exit_code),
         record.started_at,
         output
-    ))
+    );
+    append_configured_prompt(
+        &mut prompt,
+        store
+            .resolved_prompt(name, PromptKind::TestFixing)?
+            .as_deref(),
+    );
+    Ok(prompt)
 }
 
 fn bounded_check_prompt_output(output: &str) -> String {
@@ -7697,14 +7900,58 @@ mod tests {
     }
 
     #[test]
-    fn turn_scope_labels_match_recent_chat_write_filters() {
-        assert_eq!(turn_scope_label(0), "Latest turn");
-        assert_eq!(turn_scope_label(1), "1 turn before");
-        assert_eq!(turn_scope_label(24), "24 turns before");
+    fn commit_scope_labels_use_short_hash_and_subject() {
+        assert_eq!(
+            commit_scope_label("abcdef1234567890", "fix parser"),
+            "Commit abcdef1: fix parser"
+        );
+        assert_eq!(commit_scope_label("abcdef1234567890", ""), "Commit abcdef1");
     }
 
     #[test]
-    fn workspace_changes_scope_selects_saved_turn_after_restart() {
+    fn workspace_changes_scope_defaults_to_all_changes() {
+        let items = vec![
+            WorkspaceChangesScopeItem {
+                label: "All changes".to_owned(),
+                stack_key: "all_changes".to_owned(),
+                menu_label: "All changes".to_owned(),
+                persisted_scope: "all".to_owned(),
+            },
+            WorkspaceChangesScopeItem {
+                label: "Uncommitted changes".to_owned(),
+                stack_key: "uncommitted".to_owned(),
+                menu_label: "Uncommitted".to_owned(),
+                persisted_scope: "uncommitted".to_owned(),
+            },
+        ];
+
+        let selected = workspace_changes_selected_scope(&items, None);
+
+        assert_eq!(selected.stack_key, "all_changes");
+        assert_eq!(selected.menu_label, "All changes");
+    }
+
+    #[test]
+    fn changed_file_rows_use_file_style_metadata_with_counts() {
+        let summary = archductor_core::workspace::DiffFileSummary {
+            path: "src/ui/panel.rs".to_owned(),
+            additions: Some(12),
+            deletions: Some(3),
+            staged: true,
+            unstaged: false,
+            untracked: false,
+        };
+
+        let row = workspace_change_file_row_model(&summary, true);
+
+        assert_eq!(row.icon_name, "text-x-generic-symbolic");
+        assert_eq!(row.path, "src/ui/panel.rs");
+        assert_eq!(row.counts, "+12 -3");
+        assert_eq!(row.state, Some("[staged]"));
+    }
+
+    #[test]
+    fn workspace_changes_scope_uses_stable_last_turn_scope() {
         let items = vec![
             WorkspaceChangesScopeItem {
                 label: "Uncommitted changes".to_owned(),
@@ -7713,27 +7960,21 @@ mod tests {
                 persisted_scope: "uncommitted".to_owned(),
             },
             WorkspaceChangesScopeItem {
-                label: "Latest turn".to_owned(),
-                stack_key: "turn_0".to_owned(),
-                menu_label: "Latest turn".to_owned(),
-                persisted_scope: persisted_turn_changes_scope("thread:7:user:42"),
-            },
-            WorkspaceChangesScopeItem {
-                label: "1 turn before".to_owned(),
-                stack_key: "turn_1".to_owned(),
-                menu_label: "1 turn before".to_owned(),
-                persisted_scope: persisted_turn_changes_scope("thread:7:user:41"),
+                label: "Last turn".to_owned(),
+                stack_key: "last_turn".to_owned(),
+                menu_label: "Last turn".to_owned(),
+                persisted_scope: "last_turn".to_owned(),
             },
         ];
 
         let selected = workspace_changes_selected_scope(&items, Some("turn:thread:7:user:41"));
 
-        assert_eq!(selected.stack_key, "turn_1");
-        assert_eq!(selected.menu_label, "1 turn before");
+        assert_eq!(selected.stack_key, "last_turn");
+        assert_eq!(selected.menu_label, "Last turn");
     }
 
     #[test]
-    fn workspace_changes_scope_falls_back_to_latest_turn_when_saved_turn_rolls_out() {
+    fn workspace_changes_scope_selects_saved_commit_scope() {
         let items = vec![
             WorkspaceChangesScopeItem {
                 label: "Uncommitted changes".to_owned(),
@@ -7742,17 +7983,17 @@ mod tests {
                 persisted_scope: "uncommitted".to_owned(),
             },
             WorkspaceChangesScopeItem {
-                label: "Latest turn".to_owned(),
-                stack_key: "turn_0".to_owned(),
-                menu_label: "Latest turn".to_owned(),
-                persisted_scope: persisted_turn_changes_scope("thread:7:user:52"),
+                label: "Commit abc1234".to_owned(),
+                stack_key: "commit_0".to_owned(),
+                menu_label: "Commit abc1234".to_owned(),
+                persisted_scope: "commit:abc123456789".to_owned(),
             },
         ];
 
-        let selected = workspace_changes_selected_scope(&items, Some("turn:thread:7:user:41"));
+        let selected = workspace_changes_selected_scope(&items, Some("commit:abc123456789"));
 
-        assert_eq!(selected.stack_key, "turn_0");
-        assert_eq!(selected.menu_label, "Latest turn");
+        assert_eq!(selected.stack_key, "commit_0");
+        assert_eq!(selected.menu_label, "Commit abc1234");
     }
 
     #[test]
@@ -7880,6 +8121,61 @@ mod tests {
         assert!(prompt.contains("summary and testing/verification section"));
         assert!(prompt.contains("Use the repo PR template."));
         assert!(prompt.contains("Changed chat tabs."));
+    }
+
+    #[test]
+    fn continue_prompt_uses_continue_work_not_create_pr() {
+        let prompt = workspace_continue_prompt_from_parts("berlin", Some("Continue carefully."));
+
+        assert!(prompt.contains("Continue carefully."));
+        assert!(!prompt.contains("Write a concise PR."));
+    }
+
+    #[test]
+    fn blocker_prompt_excludes_fix_errors_for_passing_checks() {
+        let checks = [archductor_core::workspace::PullRequestCheckRun {
+            name: "ci".to_owned(),
+            status: "success".to_owned(),
+            detail: Some("https://example.test/ci".to_owned()),
+        }];
+        let failed_checks = failed_pull_request_checks_text(&checks);
+        let prompt = workspace_conflict_resolution_prompt_from_parts(
+            "berlin",
+            failed_checks.as_deref(),
+            Some("Resolve configured conflicts."),
+            Some("Fix configured errors."),
+        );
+
+        assert!(prompt.contains("Resolve configured conflicts."));
+        assert!(!prompt.contains("Failed checks:"));
+        assert_eq!(prompt.matches("Fix configured errors.").count(), 0);
+    }
+
+    #[test]
+    fn blocker_prompt_includes_fix_errors_for_failing_checks() {
+        let checks = [
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "lint".to_owned(),
+                status: "success".to_owned(),
+                detail: None,
+            },
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "ci".to_owned(),
+                status: "failure".to_owned(),
+                detail: Some("https://example.test/ci".to_owned()),
+            },
+        ];
+        let failed_checks = failed_pull_request_checks_text(&checks);
+        let prompt = workspace_conflict_resolution_prompt_from_parts(
+            "berlin",
+            failed_checks.as_deref(),
+            Some("Resolve configured conflicts."),
+            Some("Fix configured errors."),
+        );
+
+        assert!(prompt.contains("Failed checks:\n- ci: failure - https://example.test/ci"));
+        assert!(!prompt.contains("lint: success"));
+        assert_eq!(prompt.matches("Fix configured errors.").count(), 1);
     }
 
     #[test]
