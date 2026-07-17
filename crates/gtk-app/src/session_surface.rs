@@ -2716,7 +2716,7 @@ pub fn agent_session_panel(
     send_btn.connect_clicked({
         let submit_composer_action = submit_composer_action.clone();
         move |_| {
-            submit_composer_action(ComposerSubmitIntent::Default);
+            submit_composer_action(composer_send_button_submit_intent());
         }
     });
     new_chat_btn.connect_clicked({
@@ -3436,6 +3436,7 @@ fn chat_structured_items_for_render(
         .iter()
         .any(|item| item.render_class == ProjectionRenderClass::UserChat)
     {
+        items.append(&mut unsequenced_messages);
         items = chat_timeline_items_anchored_to_provider_user_events(items, provider_items);
     } else {
         items.extend(
@@ -3443,8 +3444,8 @@ fn chat_structured_items_for_render(
                 .into_iter()
                 .map(ChatTimelineItem::ProviderProjection),
         );
+        items.append(&mut unsequenced_messages);
     }
-    items.append(&mut unsequenced_messages);
     items.extend(
         optimistic_immediate_inputs
             .into_iter()
@@ -6547,6 +6548,10 @@ fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> Co
     } else {
         ComposerSubmitIntent::Default
     }
+}
+
+fn composer_send_button_submit_intent() -> ComposerSubmitIntent {
+    ComposerSubmitIntent::Immediate
 }
 
 fn composer_action_for_submit_intent(
@@ -10344,6 +10349,14 @@ fix it
     }
 
     #[test]
+    fn composer_send_button_uses_immediate_submit_intent() {
+        assert_eq!(
+            composer_send_button_submit_intent(),
+            ComposerSubmitIntent::Immediate
+        );
+    }
+
+    #[test]
     fn unchanged_queue_overlay_does_not_rebuild_during_chat_refresh() {
         let signature = QueueOverlaySignature {
             thread_id: Some(7),
@@ -12395,6 +12408,65 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             timeline[3],
             ChatTimelineItem::ProviderProjection(_)
         ));
+    }
+
+    #[test]
+    fn chat_render_anchors_unsequenced_user_messages_before_provider_generation() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "new user message".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_items = vec![
+            ProviderProjectionItem {
+                id: "codex:thread-7:input-1".to_owned(),
+                sequence: 1,
+                category: ProviderProjectionCategory::UserMessage,
+                render_class: ProjectionRenderClass::UserChat,
+                title: "User".to_owned(),
+                body: "new user message".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:assistant-1".to_owned(),
+                sequence: 2,
+                category: ProviderProjectionCategory::AssistantMessage,
+                render_class: ProjectionRenderClass::AssistantChat,
+                title: "Assistant".to_owned(),
+                body: "working on it".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+        ];
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            provider_items,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert_eq!(timeline.len(), 2);
     }
 
     #[test]
