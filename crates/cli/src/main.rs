@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{
-    ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
+    ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
 };
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::doctor;
@@ -9,7 +9,8 @@ use archductor_core::import::{default_conductor_app_database, import_conductor_a
 use archductor_core::paths::AppPaths;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::settings::{
-    repository_settings_from_toml, save_repository_settings, SettingsLayer,
+    app_shared_settings_to_toml, save_app_shared_settings_from_toml,
+    save_repository_settings_from_toml, SettingsLayer,
 };
 use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
@@ -37,6 +38,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
+    Settings {
+        #[command(subcommand)]
+        command: AppSettingsCommand,
+    },
     Repo {
         #[command(subcommand)]
         command: RepoCommand,
@@ -127,6 +132,17 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum AppSettingsCommand {
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Import {
+        input: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ImportCommand {
     Conductor {
         #[arg(long)]
@@ -172,6 +188,11 @@ enum ArchcarCommand {
         kind: CliArchcarInputKind,
         #[arg(long)]
         visible_input: Option<String>,
+        #[arg(
+            long,
+            help = "Deliver now: steer an active Codex turn or start a new turn"
+        )]
+        immediate: bool,
         input: Vec<String>,
     },
     Model {
@@ -411,6 +432,11 @@ enum SessionCommand {
         visible_input: Option<String>,
         #[arg(long, default_value_t = 10_000)]
         timeout_ms: u64,
+        #[arg(
+            long,
+            help = "Deliver now: steer an active Codex turn or start a new turn"
+        )]
+        immediate: bool,
         message: Vec<String>,
     },
     List {
@@ -516,6 +542,24 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
+        Command::Settings { command } => match command {
+            AppSettingsCommand::Export { output } => {
+                let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
+                fs::write(&output, contents)
+                    .with_context(|| format!("write {}", output.display()))?;
+                println!("Exported Shared settings to {}", output.display());
+            }
+            AppSettingsCommand::Import { input } => {
+                let contents = fs::read_to_string(&input)
+                    .with_context(|| format!("read {}", input.display()))?;
+                save_app_shared_settings_from_toml(&paths.shared_settings_path(), &contents)?;
+                let refreshed = refresh_all_repository_prompt_snapshots(&paths)?;
+                println!(
+                    "Imported Shared settings from {} and refreshed {refreshed} prompt snapshot(s)",
+                    input.display()
+                );
+            }
+        },
         Command::Import { command } => match command {
             ImportCommand::Conductor { source } => {
                 let source = source.unwrap_or_else(default_conductor_app_database);
@@ -541,7 +585,7 @@ fn main() -> Result<()> {
             }
         },
         Command::History { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 HistoryCommand::List { workspace } => {
                     let workspace_path = workspace
@@ -596,6 +640,7 @@ fn main() -> Result<()> {
                     session_id,
                     kind,
                     visible_input,
+                    immediate,
                     input,
                 } => {
                     print_archcar_response(client.send(ArchcarRequest::SendInput {
@@ -603,6 +648,7 @@ fn main() -> Result<()> {
                         input: input.join(" "),
                         visible_input,
                         kind: kind.into(),
+                        delivery: cli_input_delivery(immediate),
                     })?);
                 }
                 ArchcarCommand::Model { session_id, model } => {
@@ -633,7 +679,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Repo { command } => {
-            let store = RepositoryStore::open(paths.database_path)?;
+            let store = RepositoryStore::open(&paths.database_path)?;
             match command {
                 RepoCommand::Add {
                     path,
@@ -704,11 +750,15 @@ fn main() -> Result<()> {
                         RepoSettingsCommand::Import { input, local } => {
                             let contents = fs::read_to_string(&input)
                                 .with_context(|| format!("read {}", input.display()))?;
-                            let settings = repository_settings_from_toml(&contents)?;
                             let layer = repo_settings_layer(local);
-                            save_repository_settings(&repo.root_path, layer, &settings)?;
+                            save_repository_settings_from_toml(&repo.root_path, layer, &contents)?;
+                            let refreshed = WorkspaceStore::open_app_with_logs(
+                                &paths.database_path,
+                                &paths.logs_dir,
+                            )?
+                            .refresh_repository_prompt_snapshots(repo.id)?;
                             println!(
-                                "Imported {} settings for {} from {}",
+                                "Imported {} settings for {} from {} and refreshed {refreshed} prompt snapshot(s)",
                                 repo_settings_layer_label(layer),
                                 repo.name,
                                 input.display()
@@ -719,7 +769,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Workspace { command } => {
-            let store = WorkspaceStore::open(paths.database_path)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 WorkspaceCommand::Create {
                     repository,
@@ -918,7 +968,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Run { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let process = store.run_workspace(&workspace)?;
             println!(
                 "Started run for {} as pid {} (log: {})",
@@ -928,7 +978,7 @@ fn main() -> Result<()> {
             );
         }
         Command::Stop { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let process = store.stop_workspace(&workspace)?;
             println!("Stopped run for {} (pid {})", workspace, process.pid);
         }
@@ -942,7 +992,7 @@ fn main() -> Result<()> {
                     "choose exactly one log stream, for example: archductor logs {workspace} --run"
                 );
             }
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             if run {
                 print!("{}", store.read_latest_run_log(&workspace)?);
             } else {
@@ -950,7 +1000,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Runs { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             for run in store.list_runs(&workspace)? {
                 println!(
                     "#{}\t{}\t{}\t{}\t{}",
@@ -967,7 +1017,7 @@ fn main() -> Result<()> {
             name_only,
             file,
         } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             if name_only {
                 for path in store.changed_files(&workspace)? {
                     println!("{path}");
@@ -977,7 +1027,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Pr { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 PrCommand::Create {
                     workspace,
@@ -1055,7 +1105,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Session { command } => {
-            let store = WorkspaceStore::open_with_logs(
+            let store = WorkspaceStore::open_app_with_logs(
                 paths.database_path.clone(),
                 paths.logs_dir.clone(),
             )?;
@@ -1182,6 +1232,7 @@ fn main() -> Result<()> {
                     input_kind,
                     visible_input,
                     timeout_ms,
+                    immediate,
                     message,
                 } => {
                     let kind: SessionKind = kind.into();
@@ -1204,11 +1255,13 @@ fn main() -> Result<()> {
                         input,
                         visible_input,
                         kind: input_kind.into(),
+                        delivery: cli_input_delivery(immediate),
                     })? {
                         ArchcarResponse::Ack => {
                             println!(
-                                "sent {} message to session {} thread {}",
+                                "sent {}{} message to session {} thread {}",
                                 session_kind_label(kind),
+                                if immediate { " immediate" } else { "" },
                                 session_id,
                                 resolved_thread_id
                             );
@@ -1232,7 +1285,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Todo { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 TodoCommand::Add { workspace, text } => {
                     let todo = store.add_todo(&workspace, &text.join(" "))?;
@@ -1254,11 +1307,11 @@ fn main() -> Result<()> {
             }
         }
         Command::Checks { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             print_checks_summary(store.checks_summary(&workspace)?);
         }
         Command::Open { workspace, editor } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let launch = store.editor_launch(&workspace, &editor)?;
             let mut cmd = std::process::Command::new(&launch.program);
             cmd.args(&launch.args)
@@ -1269,7 +1322,7 @@ fn main() -> Result<()> {
             println!("Opened {} in {editor}", launch.cwd.display());
         }
         Command::Mcp { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 McpCommand::Status { workspace } => {
                     print_mcp_status(store.mcp_status(&workspace)?);
@@ -1277,7 +1330,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Review { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 ReviewCommand::Add {
                     workspace,
@@ -1319,7 +1372,7 @@ fn main() -> Result<()> {
             name,
             remove_worktree,
         } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let workspace = store.archive(&name, remove_worktree)?;
             println!(
                 "Archived {} at {}",
@@ -1328,11 +1381,11 @@ fn main() -> Result<()> {
             );
         }
         Command::Status => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             print_status(store.list_status()?);
         }
         Command::Checkpoint { command } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
                 CheckpointCommand::Create {
                     workspace,
@@ -1361,7 +1414,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Conflicts { workspace } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let conflicts = store.find_conflicting_workspaces(&workspace)?;
             if conflicts.is_empty() {
                 println!("No file conflicts with other active workspaces.");
@@ -1375,7 +1428,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Discard { name } => {
-            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             let workspace = store.discard(&name)?;
             println!(
                 "Discarded {} — worktree removed and branch deleted",
@@ -1385,6 +1438,14 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn refresh_all_repository_prompt_snapshots(paths: &AppPaths) -> Result<usize> {
+    let repositories = RepositoryStore::open(&paths.database_path)?.list()?;
+    let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
+    repositories.into_iter().try_fold(0, |total, repository| {
+        Ok(total + store.refresh_repository_prompt_snapshots(repository.id)?)
+    })
 }
 
 fn print_archcar_response(response: ArchcarResponse) {
@@ -1496,6 +1557,12 @@ fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
             state.ahead, state.behind
         ),
         None => {}
+    }
+    if summary.source_branch_ahead > 0 {
+        println!(
+            "Source:    {} commit(s) ahead; merge before creating PR",
+            summary.source_branch_ahead
+        );
     }
     println!("Changed:   {} file(s)", summary.changed_files);
     println!(
@@ -1707,6 +1774,14 @@ impl From<CliArchcarInputKind> for ArchcarInputKind {
     }
 }
 
+fn cli_input_delivery(immediate: bool) -> ArchcarInputDelivery {
+    if immediate {
+        ArchcarInputDelivery::Immediate
+    } else {
+        ArchcarInputDelivery::Auto
+    }
+}
+
 fn open_interactive_session(launch: &SessionLaunch, terminal: Option<&str>) -> Result<()> {
     let terminal = terminal
         .map(str::to_owned)
@@ -1742,6 +1817,14 @@ struct TerminalInvocation {
 fn build_terminal_invocation(terminal: &str, command: &str) -> Option<TerminalInvocation> {
     let terminal_key = terminal_key(terminal)?;
     let args = match terminal_key.as_str() {
+        "wt" | "wt.exe" | "windows-terminal" => vec![
+            "new-tab".to_owned(),
+            "cmd.exe".to_owned(),
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            command.to_owned(),
+        ],
         "gnome-terminal" | "kgx" => vec![
             "--".to_owned(),
             "bash".to_owned(),
@@ -1816,7 +1899,10 @@ fn detect_terminal() -> Option<String> {
             return Some(term);
         }
     }
-    [
+    #[cfg(windows)]
+    let candidates = ["wt.exe"];
+    #[cfg(not(windows))]
+    let candidates = [
         "gnome-terminal",
         "kgx",
         "konsole",
@@ -1826,52 +1912,77 @@ fn detect_terminal() -> Option<String> {
         "tilix",
         "terminator",
         "xfce4-terminal",
-    ]
-    .into_iter()
-    .find(|candidate| command_exists(candidate))
-    .map(str::to_owned)
-    .or_else(|| {
-        if cfg!(target_os = "macos") && command_exists("osascript") {
-            Some("macos-terminal".to_owned())
-        } else {
-            None
-        }
-    })
+    ];
+    candidates
+        .into_iter()
+        .find(|candidate| command_exists(candidate))
+        .map(str::to_owned)
+        .or_else(|| {
+            if cfg!(target_os = "macos") && command_exists("osascript") {
+                Some("macos-terminal".to_owned())
+            } else {
+                None
+            }
+        })
 }
 
 fn command_exists(command: &str) -> bool {
-    ProcessCommand::new("which")
-        .arg(command)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    doctor::command_exists(command)
 }
 
+#[cfg(not(windows))]
 fn interactive_session_command(launch: &SessionLaunch) -> String {
     format!("exec {}", shell_words(&launch.program, &launch.args))
 }
 
+#[cfg(windows)]
+fn interactive_session_command(launch: &SessionLaunch) -> String {
+    shell_words(&launch.program, &launch.args)
+}
+
 fn render_manual_session_command(launch: &SessionLaunch) -> String {
-    let mut env_parts = Vec::new();
-    for (key, value) in &launch.env {
-        if let Some(value) = value.to_str() {
-            env_parts.push(format!("{key}={}", quote_shell_word(value)));
-        }
+    #[cfg(windows)]
+    {
+        let env = launch
+            .env
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .to_str()
+                    .map(|value| format!("set \"{key}={}\"", escape_cmd_set_value(value)))
+            })
+            .collect::<Vec<_>>();
+        let mut parts = env;
+        parts.push(format!(
+            "cd /D {}",
+            quote_shell_word(&launch.cwd.to_string_lossy())
+        ));
+        parts.push(interactive_session_command(launch));
+        parts.join(" && ")
     }
-    let launch_command = if env_parts.is_empty() {
-        interactive_session_command(launch)
-    } else {
-        format!(
-            "{} {}",
-            env_parts.join(" "),
+    #[cfg(not(windows))]
+    {
+        let mut env_parts = Vec::new();
+        for (key, value) in &launch.env {
+            if let Some(value) = value.to_str() {
+                env_parts.push(format!("{key}={}", quote_shell_word(value)));
+            }
+        }
+        let launch_command = if env_parts.is_empty() {
             interactive_session_command(launch)
+        } else {
+            format!(
+                "{} {}",
+                env_parts.join(" "),
+                interactive_session_command(launch)
+            )
+        };
+        format!(
+            "cd {} && {}",
+            quote_shell_word(&launch.cwd.to_string_lossy()),
+            launch_command
         )
-    };
-    format!(
-        "cd {} && {}",
-        quote_shell_word(&launch.cwd.to_string_lossy()),
-        launch_command
-    )
+    }
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
@@ -2210,13 +2321,30 @@ fn shell_words(program: &std::path::Path, args: &[String]) -> String {
 }
 
 fn quote_shell_word(value: &str) -> String {
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    #[cfg(windows)]
     {
-        return value.to_owned();
+        if value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'\\' | b':' | b'.' | b'_' | b'-')
+        }) {
+            return value.to_owned();
+        }
+        format!("\"{}\"", value.replace('"', "\\\""))
     }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+    #[cfg(not(windows))]
+    {
+        if value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+        {
+            return value.to_owned();
+        }
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(windows)]
+fn escape_cmd_set_value(value: &str) -> String {
+    value.replace('"', "^\"")
 }
 
 fn escape_applescript_string(value: &str) -> String {
@@ -2254,6 +2382,19 @@ fn print_doctor(report: doctor::DoctorReport) {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn parses_app_shared_settings_export() {
+        let cli = Cli::try_parse_from([
+            "archductor",
+            "settings",
+            "export",
+            "--output",
+            "shared.toml",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Settings { .. }));
+    }
 
     #[test]
     fn terminal_invocation_wraps_interactive_command() {
@@ -2310,6 +2451,40 @@ mod tests {
             wezterm.args,
             vec!["start", "--", "bash", "-lc", "cd /tmp && exec codex"]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminal_invocation_uses_native_cmd_shell() {
+        let invocation = build_terminal_invocation("wt.exe", "codex --help").unwrap();
+        assert_eq!(invocation.program, "wt.exe");
+        assert_eq!(
+            invocation.args,
+            vec!["new-tab", "cmd.exe", "/D", "/S", "/C", "codex --help"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_manual_session_command_sets_env_and_changes_drive() {
+        let launch = SessionLaunch {
+            kind: SessionKind::Codex,
+            program: PathBuf::from("codex.exe"),
+            args: vec!["--model".to_owned(), "gpt-test".to_owned()],
+            cwd: PathBuf::from(r"C:\work space"),
+            env: vec![(
+                "ARCHDUCTOR_WORKSPACE_NAME".to_owned(),
+                OsString::from("berlin"),
+            )],
+            harness_metadata: None,
+            session_resume_id: None,
+        };
+
+        let command = render_manual_session_command(&launch);
+        assert!(command.contains("set \"ARCHDUCTOR_WORKSPACE_NAME=berlin\""));
+        assert!(command.contains("cd /D \"C:\\work space\""));
+        assert!(command.ends_with("codex.exe --model gpt-test"));
+        assert!(!command.contains("exec "));
     }
 
     #[test]
@@ -2445,6 +2620,7 @@ mod tests {
                     session_id,
                     kind,
                     visible_input,
+                    immediate,
                     input,
                 },
         } = control.command
@@ -2454,6 +2630,7 @@ mod tests {
         assert_eq!(session_id, 7);
         assert_eq!(kind, CliArchcarInputKind::ControlCommand);
         assert_eq!(visible_input, None);
+        assert!(!immediate);
         assert_eq!(input, vec!["/model".to_owned(), "gpt-5.6-sol".to_owned()]);
 
         let review = Cli::try_parse_from([
@@ -2465,6 +2642,7 @@ mod tests {
             "review-prompt",
             "--visible-input",
             "Review selected comments",
+            "--immediate",
             "address",
             "comments",
         ])
@@ -2475,6 +2653,7 @@ mod tests {
                     session_id,
                     kind,
                     visible_input,
+                    immediate,
                     input,
                 },
         } = review.command
@@ -2484,6 +2663,7 @@ mod tests {
         assert_eq!(session_id, 8);
         assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
+        assert!(immediate);
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
     }
 
@@ -2533,6 +2713,7 @@ mod tests {
             "Review selected comments",
             "--timeout-ms",
             "2500",
+            "--immediate",
             "fix",
             "the",
             "bug",
@@ -2548,6 +2729,7 @@ mod tests {
                     input_kind,
                     visible_input,
                     timeout_ms,
+                    immediate,
                     message,
                 },
         } = cli.command
@@ -2561,6 +2743,7 @@ mod tests {
         assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
         assert_eq!(timeout_ms, 2500);
+        assert!(immediate);
         assert_eq!(
             message,
             vec!["fix".to_owned(), "the".to_owned(), "bug".to_owned()]

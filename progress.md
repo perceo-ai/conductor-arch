@@ -1,13 +1,14 @@
 # Progress
 
-Current as of 2026-07-13.
+Current as of 2026-07-15.
 
 ## Current State
 
 Archductor has a usable but rough GUI-first loop for one local repository:
 
 1. Add or clone a repository as a project.
-2. Edit shared and local repository settings.
+2. Edit app Shared defaults, repository-committed settings, and Local project
+   overrides.
 3. Create branch, prompt, GitHub issue, GitHub PR, or Linear workspaces.
 4. Run setup/run scripts, terminal commands, and Shell/Codex/Claude/Cursor
    sessions inside a workspace.
@@ -28,6 +29,9 @@ paths and known rough edges.
 - SQLite-backed project, workspace, process, PR, todo, review, checkpoint,
   timeline, chat, and history state.
 - Repository add/list/update/doctor plus shared/local settings import/export.
+- App Shared settings import/export and effective settings precedence from
+  built-in defaults through app Shared, repository-committed settings
+  (including prompt packs), and Local project overrides.
 - Workspace create/list/archive/restore/discard/delete/rename/duplicate.
 - Workspace creation from branch/base, prompt, GitHub issue, GitHub PR, and
   Linear issue.
@@ -41,6 +45,10 @@ paths and known rough edges.
   provider paths, Git behavior, merge rules, workspace defaults, view defaults,
   terminal preferences, keybindings, notification labels, and advanced TOML.
 - Prompt pack files are bootstrapped under `.archductor/prompt-packs`.
+- Effective prompt routing for first-chat General instructions, continue work,
+  PR creation, commit/push, blocker resolution, setup/run assistants, code
+  review staging, and local/PR check fixing. Shared/Local prompt saves refresh
+  managed prompt snapshots for existing live workspaces.
 - Monorepo working-directory defaults for scripts, terminal commands, editor
   launches, and agent sessions.
 - Linked workspace directories with persisted records, symlinks under
@@ -50,21 +58,34 @@ paths and known rough edges.
 - Shell, Codex, and Claude CLI session commands. Cursor is available from GTK
   launch paths where configured, not from the current CLI `session --kind`
   enum.
+- Immediate Codex delivery from GTK Ctrl+Enter and CLI `session send`/`archcar
+  send --immediate`, using active-turn steer with transparent new-turn fallback.
 - Git status/diff/log, todos, review comments, checkpoints, conflicts, checks,
   PR summary, PR checks, PR thread resolve/reopen, PR merge, and history
   commands.
 - GitHub-backed flows use local `gh` auth. Linear-backed workspace creation
   uses `LINEAR_API_KEY`.
 - Release packaging scaffolding for tarball, AppImage, `.deb`, `.rpm`, AUR, and
-  experimental Flatpak.
+  experimental Flatpak, plus a portable native Windows ZIP.
+- Cross-platform process/path/shell boundaries for Windows, including AppData
+  storage, `cmd.exe` scripts, Windows Terminal launch, `taskkill` process-tree
+  shutdown, and loopback archcar IPC.
+- CI compile gates for native Windows, glibc Linux, musl Linux, and GTK builds
+  on Debian, Fedora, Arch, openSUSE, and Alpine families.
 
 ### GTK App
 
 - GTK/libadwaita app with Dashboard, Projects, History, Workspace, and
-  debug-only PTY Inspector pages.
+  debug-only PTY Inspector pages. Settings, Dashboard filters, and History tabs
+  reuse the standard close-free workspace chat-tab presentation.
 - Project onboarding from local repository path or Git clone URL.
-- Project settings for shared/local settings, prompts, scripts, Git, terminal,
-  shortcuts, notifications, provider paths, and advanced customization TOML.
+- Scope-aware Settings page: Shared applies machine-wide defaults to every
+  project without a project selector; Local selects one project and edits only
+  its project/workspace overrides. Local prompt editors show inherited values
+  without copying them into the override until edited.
+- Repository settings for committed team configuration remain available through
+  the Projects surface and remain between app Shared and Local in effective
+  precedence.
 - Workspace creation from branch/base, prompt, GitHub issue, GitHub PR, and
   Linear issue with source preflight feedback.
 - Workspace command center with status header, agents panel, runtime panel,
@@ -74,6 +95,8 @@ paths and known rough edges.
   paths, transcript persistence, selected-session input, staged review prompts,
   provider/auth/MCP status, harness metadata, prompt preview, profile selector,
   and stop notifications.
+- Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
+  queue-row reconciliation isolated from streaming chat refreshes.
 - Terminal surfaces for one-shot commands, PTY shell tabs, transcript
   persistence/search/reload, basic ANSI/control redraw handling, alternate
   screen restoration, configured terminal font, configured scrollback, and
@@ -84,8 +107,11 @@ paths and known rough edges.
   branch push state, local comments, safe tracked-file revert, PR create/refresh,
   PR checks/comments/reviews, PR readiness summary, review-thread actions,
   merge blockers, merge, and archive-after-merge.
-- History reads saved Linux session history and older macOS Conductor chats when
-  the upstream database exists.
+- Dashboard cards open workspaces and group them as Ready, Running, Review, or
+  Archived, with filters for All projects and every registered project.
+- History defaults to a Workspaces tab with All/Active/Archived filters and also
+  provides a Chats tab for saved Linux sessions and older macOS Conductor chats
+  when the upstream database exists.
 - Command palette, global refresh/sidebar shortcuts, tab/deep-link navigation,
   view defaults, theme/accent/density classes, and terminal presets.
 
@@ -99,14 +125,21 @@ paths and known rough edges.
 - Prompt pack switching/import/export, naming templates, hooks, local check
   runner UI, richer notifications, and deeper layout/theme controls are not
   fully surfaced in the GUI.
+- `new_workspace`, `summarize_session`, `handoff`, `rename_branch`, and
+  `refactor_style` prompts remain editable inherited defaults without dedicated
+  surfaced actions.
 - Runtime ownership is still converging around the archcar/local daemon APIs.
 - Codex unsafe approval/sandbox bypass needs explicit product policy before a
   broad public launch.
 - Live GitHub validation requires authenticated `gh`; live Linear validation
   requires `LINEAR_API_KEY`.
-- Linux is the only release target. WSL can be considered before native
-  Windows. macOS is lower priority while upstream Conductor covers that
-  platform.
+- Native Windows is a preview target. The workspace compiles there and the
+  release workflow assembles a portable ZIP, but real Windows install/launch,
+  GTK runtime, PTY, provider, upgrade, and checksum smoke remain required
+  before calling the package release-ready.
+- Linux remains the manually validated primary product target. CI covers GNU
+  and musl plus representative distro families; individual package channels
+  still require install/launch/upgrade validation.
 - Release packaging still needs full manual validation on target distros before
   public launch.
 

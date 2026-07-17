@@ -2,23 +2,30 @@ use crate::buttons::text_button;
 use archductor_core::paths::AppPaths;
 use archductor_core::repository::RepositoryStore;
 use archductor_core::settings::{
-    customization_settings_from_toml, customization_settings_to_toml,
-    default_repository_settings_toml, ensure_repository_config, inspect_repository_settings,
-    load_repository_settings_for_layer, repository_settings_from_toml, save_repository_settings,
-    AgentProfileSettings, FilePatternSource, GitSettings, PromptSettings, ProviderSettings,
-    RepositorySettings, ScriptSettings, SettingsLayer,
+    app_shared_customization_settings_toml, customization_settings_from_toml,
+    default_repository_settings_toml, ensure_repository_config,
+    explicit_empty_collection_fields_from_toml, inspect_repository_settings,
+    load_app_shared_settings, load_effective_repository_settings,
+    load_repository_settings_for_layer, present_collection_fields_from_toml,
+    repository_customization_settings_toml, repository_settings_from_toml,
+    save_app_shared_settings_with_collection_intent, save_repository_settings_replacing,
+    save_repository_settings_with_collection_intent, AgentProfileSettings, GitSettings, PromptKind,
+    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsCollectionField,
+    SettingsLayer,
 };
+use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
-    ScrolledWindow, Stack, TextView, ToggleButton,
+    ScrolledWindow, Stack, TextView,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::tabs::{set_standard_tab_active, standard_tab, standard_tab_strip};
 use crate::toast::{surface_label_error, ToastManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +35,176 @@ struct SettingsSection {
     description: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsUiScope {
+    Shared,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum GeneralSettingField {
+    EnterprisePrivacy,
+    ClaudeExecutable,
+    CodexExecutable,
+    DefaultAgent,
+    DefaultModel,
+    ClaudeProvider,
+    CodexProvider,
+    BedrockRegion,
+    VertexProject,
+    SpotlightTesting,
+    EnvironmentVariables,
+}
+
+impl GeneralSettingField {
+    fn id(self) -> &'static str {
+        match self {
+            Self::EnterprisePrivacy => "enterprise_privacy",
+            Self::ClaudeExecutable => "claude_executable",
+            Self::CodexExecutable => "codex_executable",
+            Self::DefaultAgent => "default_agent",
+            Self::DefaultModel => "default_model",
+            Self::ClaudeProvider => "claude_provider",
+            Self::CodexProvider => "codex_provider",
+            Self::BedrockRegion => "bedrock_region",
+            Self::VertexProject => "vertex_project",
+            Self::SpotlightTesting => "spotlight_testing",
+            Self::EnvironmentVariables => "environment_variables",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneralGroupSpec {
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    scope: SettingsUiScope,
+    rows: Vec<Vec<GeneralSettingField>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsContentPresentation {
+    Editor,
+    SelectProject,
+}
+
+struct GeneralFieldWidgets<'a> {
+    privacy_check: &'a CheckButton,
+    spotlight_check: &'a CheckButton,
+    claude_path_entry: &'a Entry,
+    codex_path_entry: &'a Entry,
+    default_agent_entry: &'a Entry,
+    default_model_entry: &'a Entry,
+    claude_provider_entry: &'a Entry,
+    codex_provider_entry: &'a Entry,
+    bedrock_region_entry: &'a Entry,
+    vertex_project_entry: &'a Entry,
+    environment_view: &'a ScrolledWindow,
+}
+
+impl GeneralFieldWidgets<'_> {
+    fn render(&self, field: GeneralSettingField) -> GBox {
+        match field {
+            GeneralSettingField::EnterprisePrivacy => settings_toggle_row(
+                self.privacy_check,
+                "Uses privacy-safe behavior for repository and agent operations.",
+            ),
+            GeneralSettingField::ClaudeExecutable => settings_field(
+                "Claude executable",
+                "Absolute path or command name used to start Claude Code.",
+                self.claude_path_entry,
+            ),
+            GeneralSettingField::CodexExecutable => settings_field(
+                "Codex executable",
+                "Absolute path or command name used to start Codex.",
+                self.codex_path_entry,
+            ),
+            GeneralSettingField::DefaultAgent => settings_field(
+                "Default agent",
+                "Saved as `customization.automation.auto_start_agent`.",
+                self.default_agent_entry,
+            ),
+            GeneralSettingField::DefaultModel => settings_field(
+                "Default model",
+                "Saved as `customization.agent_profiles.default.model`.",
+                self.default_model_entry,
+            ),
+            GeneralSettingField::ClaudeProvider => settings_field(
+                "Claude provider",
+                "Provider override used when Claude sessions need a specific backend.",
+                self.claude_provider_entry,
+            ),
+            GeneralSettingField::CodexProvider => settings_field(
+                "Codex provider",
+                "Provider override used when Codex sessions need a specific backend.",
+                self.codex_provider_entry,
+            ),
+            GeneralSettingField::BedrockRegion => settings_field(
+                "Bedrock region",
+                "AWS region used for Bedrock requests when that provider is active.",
+                self.bedrock_region_entry,
+            ),
+            GeneralSettingField::VertexProject => settings_field(
+                "Vertex project id",
+                "Google Cloud project id used for Vertex provider calls.",
+                self.vertex_project_entry,
+            ),
+            GeneralSettingField::SpotlightTesting => settings_toggle_row(
+                self.spotlight_check,
+                "Turns on spotlight state tracking for workspace sync flows.",
+            ),
+            GeneralSettingField::EnvironmentVariables => settings_editor_field(
+                "Environment variables",
+                "One `KEY=value` per line. Leave blank when the project does not need extra environment.",
+                self.environment_view,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SettingsSaveTarget {
+    Shared,
+    Local(String),
+}
+
+fn apply_settings_navigation<T: PartialEq>(
+    current: &mut T,
+    requested: T,
+    flush_pending_autosave: impl FnOnce() -> bool,
+) -> bool {
+    if *current == requested {
+        return true;
+    }
+    if !flush_pending_autosave() {
+        return false;
+    }
+    *current = requested;
+    true
+}
+
+fn flush_autosave_target<T: Clone>(
+    pending_target: &mut Option<T>,
+    save: impl FnOnce(T) -> bool,
+) -> bool {
+    let Some(target) = pending_target.clone() else {
+        return true;
+    };
+    if !save(target) {
+        return false;
+    }
+    *pending_target = None;
+    true
+}
+
+#[derive(Clone)]
+struct PromptEditor {
+    kind: PromptKind,
+    buffer: gtk::TextBuffer,
+    inherited_label: Label,
+}
+
 pub(crate) fn build_settings_page(
     paths: &AppPaths,
     toast_manager: ToastManager,
@@ -35,6 +212,7 @@ pub(crate) fn build_settings_page(
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
+    root.add_css_class("settings-page");
 
     let header = GBox::new(Orientation::Vertical, 8);
     header.add_css_class("dashboard-header");
@@ -43,7 +221,7 @@ pub(crate) fn build_settings_page(
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
     let subtitle = Label::new(Some(
-        "Repository settings live in a panel-style editor, not a loose form page.",
+        "Choose defaults for every project or customize one project.",
     ));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
@@ -60,35 +238,40 @@ pub(crate) fn build_settings_page(
     scroll.set_child(Some(&body));
     root.append(&scroll);
 
-    let settings_tabs_row = GBox::new(Orientation::Horizontal, 10);
+    let (settings_tabs_scroll, settings_tabs_row) = standard_tab_strip();
     settings_tabs_row.add_css_class("settings-tabs-row");
-    let shared_tab = ToggleButton::with_label("Shared");
-    shared_tab.add_css_class("settings-tab");
-    shared_tab.set_active(true);
-    let local_tab = ToggleButton::with_label("Local");
-    local_tab.add_css_class("settings-tab");
-    let settings_result = Label::new(Some(
-        "Shared settings are commit-safe. Use Local for machine secrets and per-machine overrides.",
-    ));
+    let shared_tab = standard_tab("Shared");
+    let local_tab = standard_tab("Local");
+    set_standard_tab_active(&shared_tab, true);
+    let settings_scope = Rc::new(RefCell::new(SettingsUiScope::Shared));
+    let scope_description = Label::new(Some(scope_copy(SettingsUiScope::Shared)));
+    scope_description.add_css_class("card-meta");
+    scope_description.set_xalign(0.0);
+    scope_description.set_wrap(true);
+    let settings_result = Label::new(Some(""));
     settings_result.add_css_class("settings-status");
     settings_result.add_css_class("card-meta");
     settings_result.set_xalign(0.0);
     settings_result.set_hexpand(true);
     settings_result.set_wrap(true);
-    let bool_edits: Rc<RefCell<HashSet<&'static str>>> = Rc::new(RefCell::new(HashSet::new()));
-    let loaded_settings_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+    let field_edits: Rc<RefCell<HashSet<&'static str>>> = Rc::new(RefCell::new(HashSet::new()));
+    let loaded_settings_target: Rc<RefCell<Option<SettingsSaveTarget>>> =
         Rc::new(RefCell::new(None));
-    let forced_save_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
-        Rc::new(RefCell::new(None));
+    let loaded_customization_source = Rc::new(RefCell::new(String::new()));
+    let forced_save_target: Rc<RefCell<Option<SettingsSaveTarget>>> = Rc::new(RefCell::new(None));
     settings_tabs_row.append(&shared_tab);
     settings_tabs_row.append(&local_tab);
-    settings_tabs_row.append(&settings_result);
-    body.append(&settings_tabs_row);
+    body.append(&settings_tabs_scroll);
+    body.append(&scope_description);
 
     let settings_toolbar = GBox::new(Orientation::Vertical, 10);
     settings_toolbar.add_css_class("settings-toolbar");
     let settings_top = GBox::new(Orientation::Horizontal, 8);
     settings_top.add_css_class("settings-toolbar-row");
+    let project_controls = GBox::new(Orientation::Horizontal, 8);
+    project_controls.set_hexpand(true);
+    let project_label = Label::new(Some("Project"));
+    project_label.add_css_class("settings-field-title");
     let settings_repo_select = ComboBoxText::new();
     settings_repo_select.set_hexpand(true);
     let init_settings_btn = text_button("Initialize");
@@ -96,16 +279,37 @@ pub(crate) fn build_settings_page(
     let save_settings_btn = text_button("Save");
     save_settings_btn.add_css_class("suggested-action");
     refresh_repository_select(&settings_repo_select, &paths.database_path, None);
-    settings_top.append(&settings_repo_select);
-    settings_top.append(&init_settings_btn);
-    settings_top.append(&recover_defaults_btn);
+    project_controls.append(&project_label);
+    project_controls.append(&settings_repo_select);
+    project_controls.append(&init_settings_btn);
+    project_controls.append(&recover_defaults_btn);
+    project_controls.set_visible(false);
+    settings_top.append(&project_controls);
     settings_top.append(&save_settings_btn);
     settings_toolbar.append(&settings_top);
+    settings_toolbar.append(&settings_result);
     body.append(&settings_toolbar);
 
     let inspector = GBox::new(Orientation::Horizontal, 16);
     inspector.add_css_class("settings-inspector");
-    body.append(&inspector);
+    let settings_content_area = Stack::new();
+    settings_content_area.set_vexpand(true);
+    settings_content_area.add_named(&inspector, Some("editor"));
+    let select_project_state = GBox::new(Orientation::Vertical, 8);
+    select_project_state.set_valign(Align::Center);
+    select_project_state.set_halign(Align::Center);
+    let select_project_title = Label::new(Some("Select a project"));
+    select_project_title.add_css_class("settings-group-title");
+    let select_project_copy = Label::new(Some(
+        "Choose a project above to view and edit its Local overrides.",
+    ));
+    select_project_copy.add_css_class("settings-field-copy");
+    select_project_copy.set_wrap(true);
+    select_project_state.append(&select_project_title);
+    select_project_state.append(&select_project_copy);
+    settings_content_area.add_named(&select_project_state, Some("select-project"));
+    settings_content_area.set_visible_child_name("editor");
+    body.append(&settings_content_area);
 
     let settings_rail = GBox::new(Orientation::Vertical, 6);
     settings_rail.add_css_class("settings-rail");
@@ -144,6 +348,7 @@ pub(crate) fn build_settings_page(
 
     let rail_buttons: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
     let active_section = Rc::new(RefCell::new(String::from("general")));
+    let flush_pending_autosave_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn() -> bool>>));
     let sync_rail_state: Rc<dyn Fn()> = {
         let rail_buttons = rail_buttons.clone();
         let active_section = active_section.clone();
@@ -160,24 +365,56 @@ pub(crate) fn build_settings_page(
         })
     };
 
-    for section in settings_sections() {
-        let button = settings_rail_button(section);
-        let stack_for_button = content_stack.clone();
-        let active_for_button = active_section.clone();
-        let sync_for_button = sync_rail_state.clone();
-        let id = section.id.to_owned();
-        button.connect_clicked(move |_| {
-            *active_for_button.borrow_mut() = id.clone();
-            stack_for_button.set_visible_child_name(&id);
-            sync_for_button();
-        });
-        settings_rail.append(&button);
-        rail_buttons
-            .borrow_mut()
-            .push((section.id.to_owned(), button.clone()));
-    }
-    content_stack.set_visible_child_name("general");
-    sync_rail_state();
+    let rebuild_settings_rail: Rc<dyn Fn(SettingsUiScope)> = {
+        let settings_rail = settings_rail.clone();
+        let content_stack = content_stack.clone();
+        let rail_buttons = rail_buttons.clone();
+        let active_section = active_section.clone();
+        let sync_rail_state = sync_rail_state.clone();
+        let flush_pending_autosave_handle = flush_pending_autosave_handle.clone();
+        Rc::new(move |scope| {
+            while let Some(child) = settings_rail.first_child() {
+                settings_rail.remove(&child);
+            }
+            rail_buttons.borrow_mut().clear();
+            let sections = settings_sections_for_scope(scope);
+            if !sections
+                .iter()
+                .any(|section| section.id == active_section.borrow().as_str())
+            {
+                *active_section.borrow_mut() = "general".to_owned();
+            }
+            for section in sections {
+                let button = settings_rail_button(section);
+                let stack_for_button = content_stack.clone();
+                let active_for_button = active_section.clone();
+                let sync_for_button = sync_rail_state.clone();
+                let flush_for_button = flush_pending_autosave_handle.clone();
+                let id = section.id.to_owned();
+                button.connect_clicked(move |_| {
+                    let mut active = active_for_button.borrow().clone();
+                    if !apply_settings_navigation(&mut active, id.clone(), || {
+                        flush_for_button
+                            .borrow()
+                            .as_ref()
+                            .is_none_or(|flush| flush())
+                    }) {
+                        return;
+                    }
+                    *active_for_button.borrow_mut() = active;
+                    stack_for_button.set_visible_child_name(&id);
+                    sync_for_button();
+                });
+                settings_rail.append(&button);
+                rail_buttons
+                    .borrow_mut()
+                    .push((section.id.to_owned(), button));
+            }
+            content_stack.set_visible_child_name(active_section.borrow().as_str());
+            sync_rail_state();
+        })
+    };
+    rebuild_settings_rail(SettingsUiScope::Shared);
 
     let setup_entry = machine_entry("setup script");
     let run_entry = machine_entry("run script");
@@ -193,32 +430,7 @@ pub(crate) fn build_settings_page(
     let delete_branch_check = CheckButton::with_label("Delete branch when archiving");
     let auto_upstream_check = CheckButton::with_label("Auto setup upstream remote");
 
-    let general_intro = settings_group(
-        "Repository defaults",
-        "High-level behavior for this repository. Scripts, checks, and Git defaults live in their own sections.",
-    );
-    general_panel.append(&general_intro.0);
-    general_intro.1.append(&settings_toggle_row(
-        &spotlight_check,
-        "Turns on spotlight state tracking for workspace sync flows.",
-    ));
-    general_intro.1.append(&settings_toggle_row(
-        &privacy_check,
-        "Uses privacy-safe behavior for repository and agent operations.",
-    ));
-
     let env_view = settings_editor_view(120);
-    let environment_group = settings_group(
-        "Environment",
-        "Machine-style environment values passed into scripts and sessions as `KEY=value` lines.",
-    );
-    general_panel.append(&environment_group.0);
-    environment_group.1.append(&settings_editor_field(
-        "Environment variables",
-        "One `KEY=value` per line. Leave blank when the repo does not need extra environment.",
-        &env_view.0,
-    ));
-
     let claude_path_entry = machine_entry("Claude executable");
     let codex_path_entry = machine_entry("Codex executable");
     let claude_provider_entry = machine_entry("Claude provider");
@@ -228,65 +440,41 @@ pub(crate) fn build_settings_page(
     let default_agent_entry = machine_entry("codex/claude/opencode");
     let default_model_entry = machine_entry("default model label");
 
-    let provider_paths = settings_group(
-        "Agents and providers",
-        "Executable paths, default agent, and provider routing for local agent launches.",
-    );
-    general_panel.append(&provider_paths.0);
-    provider_paths.1.append(&settings_field_pair(
-        settings_field(
-            "Claude executable",
-            "Absolute path or command name used to start Claude Code.",
-            &claude_path_entry,
-        ),
-        settings_field(
-            "Codex executable",
-            "Absolute path or command name used to start Codex.",
-            &codex_path_entry,
-        ),
-    ));
-    provider_paths.1.append(&settings_field_pair(
-        settings_field(
-            "Default agent",
-            "Saved as `customization.automation.auto_start_agent`.",
-            &default_agent_entry,
-        ),
-        settings_field(
-            "Default model",
-            "Saved as `customization.agent_profiles.default.model`. TODO: pass through once provider launch args land.",
-            &default_model_entry,
-        ),
-    ));
-    provider_paths.1.append(&settings_field_pair(
-        settings_field(
-            "Claude provider",
-            "Provider override used when Claude sessions need a specific backend.",
-            &claude_provider_entry,
-        ),
-        settings_field(
-            "Codex provider",
-            "Provider override used when Codex sessions need a specific backend.",
-            &codex_provider_entry,
-        ),
-    ));
-
-    let provider_platforms = settings_group(
-        "Platform settings",
-        "Provider-specific machine values for Bedrock, Vertex, and SSH-backed setups.",
-    );
-    general_panel.append(&provider_platforms.0);
-    provider_platforms.1.append(&settings_field_pair(
-        settings_field(
-            "Bedrock region",
-            "AWS region used for Bedrock requests when that provider is active.",
-            &bedrock_region_entry,
-        ),
-        settings_field(
-            "Vertex project id",
-            "Google Cloud project id used for Vertex provider calls.",
-            &vertex_project_entry,
-        ),
-    ));
+    let general_field_widgets = GeneralFieldWidgets {
+        privacy_check: &privacy_check,
+        spotlight_check: &spotlight_check,
+        claude_path_entry: &claude_path_entry,
+        codex_path_entry: &codex_path_entry,
+        default_agent_entry: &default_agent_entry,
+        default_model_entry: &default_model_entry,
+        claude_provider_entry: &claude_provider_entry,
+        codex_provider_entry: &codex_provider_entry,
+        bedrock_region_entry: &bedrock_region_entry,
+        vertex_project_entry: &vertex_project_entry,
+        environment_view: &env_view.0,
+    };
+    let mut general_group_widgets = Vec::new();
+    for spec in general_group_specs() {
+        let scope = spec.scope;
+        let group = settings_group(spec.title, spec.description);
+        for row in spec.rows {
+            let mut fields = row
+                .into_iter()
+                .map(|field| general_field_widgets.render(field))
+                .collect::<Vec<_>>();
+            let row = match fields.len() {
+                1 => fields.remove(0),
+                2 => {
+                    let right = fields.remove(1);
+                    settings_field_pair(fields.remove(0), right)
+                }
+                _ => unreachable!("General setting rows contain one or two fields"),
+            };
+            group.1.append(&row);
+        }
+        general_panel.append(&group.0);
+        general_group_widgets.push((scope, group.0));
+    }
 
     let script_group = settings_group(
         "Workspace scripts",
@@ -432,76 +620,91 @@ pub(crate) fn build_settings_page(
 
     let prompt_specs = [
         (
+            PromptKind::NewWorkspace,
             "New workspace",
-            "Prompt guidance for planning a newly created workspace.",
+            "Saved as a default for compatible agent workflows.",
             110,
         ),
         (
+            PromptKind::General,
             "General agent instructions",
-            "The default prompt context used for agent work in this repository.",
+            "Included with the first message in each new agent chat.",
             120,
         ),
         (
+            PromptKind::ContinueWork,
             "Continue work",
             "Prompt guidance for resuming from the current workspace state.",
             110,
         ),
         (
+            PromptKind::SummarizeSession,
             "Summarize session",
-            "Prompt guidance for end-of-session summaries.",
+            "Saved as a default for compatible agent workflows.",
             110,
         ),
         (
+            PromptKind::Handoff,
             "Handoff",
-            "Prompt guidance for handoff notes when work stops before completion.",
+            "Saved as a default for compatible agent workflows.",
             110,
         ),
         (
+            PromptKind::CodeReview,
             "Code review",
             "Prompt guidance used when asking an agent to review code.",
             110,
         ),
         (
+            PromptKind::CreatePr,
             "Create PR",
             "Prompt template used when generating PR content.",
             110,
         ),
         (
+            PromptKind::FixErrors,
             "Fix errors / failing checks",
             "Prompt guidance for CI failures and broken builds.",
             110,
         ),
         (
+            PromptKind::ResolveMergeConflicts,
             "Resolve merge conflicts",
             "Prompt guidance for conflict-resolution flows.",
             110,
         ),
         (
+            PromptKind::RenameBranch,
             "Rename branch",
-            "Prompt used when branch naming needs refinement later in the workflow.",
+            "Saved as a default for compatible agent workflows.",
             110,
         ),
         (
+            PromptKind::CommitGeneration,
             "Commit message generation",
             "Prompt guidance for generating repository-specific commit messages.",
             110,
         ),
         (
+            PromptKind::TestFixing,
             "Test fixing",
             "Prompt guidance for agents fixing failing tests.",
             110,
         ),
         (
+            PromptKind::RefactorStyle,
             "Refactor style",
-            "Prompt guidance for safe structural cleanup and refactors.",
+            "Saved as a default for compatible agent workflows.",
             110,
         ),
         (
+            PromptKind::SetupScript,
             "Setup script",
             "Prompt guidance for inferring or updating setup scripts.",
             110,
         ),
         (
+            PromptKind::RunScript,
             "Run script",
             "Prompt guidance for inferring or updating run scripts.",
             110,
@@ -513,12 +716,20 @@ pub(crate) fn build_settings_page(
     );
     prompts_panel.append(&prompt_group.0);
     let mut prompt_views = Vec::new();
-    for (label, help, height) in prompt_specs {
+    for (kind, label, help, height) in prompt_specs {
         let view = settings_editor_view(height);
-        prompt_group
-            .1
-            .append(&settings_editor_field(label, help, &view.0));
-        prompt_views.push(view);
+        let field = settings_editor_field(label, help, &view.0);
+        let inherited_label = Label::new(Some("Inherited from broader defaults."));
+        inherited_label.add_css_class("settings-inherited-label");
+        inherited_label.set_xalign(0.0);
+        inherited_label.set_visible(false);
+        field.append(&inherited_label);
+        prompt_group.1.append(&field);
+        prompt_views.push(PromptEditor {
+            kind,
+            buffer: view.1,
+            inherited_label,
+        });
     }
 
     let customization_view = settings_editor_view(240);
@@ -587,13 +798,12 @@ pub(crate) fn build_settings_page(
     });
 
     let settings_repo_select_load = settings_repo_select.clone();
-    let shared_tab_load = shared_tab.clone();
-    let local_tab_load = local_tab.clone();
     let settings_result_load = settings_result.clone();
     let loading_settings_load = Rc::new(RefCell::new(false));
     let loading_settings_for_load = loading_settings_load.clone();
-    let bool_edits_load = bool_edits.clone();
+    let field_edits_load = field_edits.clone();
     let loaded_settings_target_load = loaded_settings_target.clone();
+    let loaded_customization_source_load = loaded_customization_source.clone();
     let setup_entry_load = setup_entry.clone();
     let run_entry_load = run_entry.clone();
     let archive_entry_load = archive_entry.clone();
@@ -626,81 +836,96 @@ pub(crate) fn build_settings_page(
     let file_globs_text_load = file_globs_view.2.clone();
     let env_buffer_load = env_view.1.clone();
     let customization_buffer_load = customization_view.1.clone();
-    let prompt_buffers_load = prompt_views
-        .iter()
-        .map(|(_, buffer, _)| buffer.clone())
-        .collect::<Vec<_>>();
+    let prompt_editors_load = prompt_views.clone();
+    let general_group_widgets_load = general_group_widgets.clone();
+    let inspector_load = inspector.clone();
+    let settings_content_area_load = settings_content_area.clone();
+    let save_settings_btn_load = save_settings_btn.clone();
+    let shared_settings_path_load = paths.shared_settings_path();
     let toast_load = toast_manager.clone();
     let load_selected_settings = {
-        let db_path_load_settings = db_path_load_settings.clone();
-        let settings_repo_select_load = settings_repo_select_load.clone();
-        let settings_result_load = settings_result_load.clone();
-        let shared_tab_load = shared_tab_load.clone();
-        let local_tab_load = local_tab_load.clone();
+        let settings_scope = settings_scope.clone();
+        let shared_tab = shared_tab.clone();
+        let local_tab = local_tab.clone();
+        let project_controls = project_controls.clone();
+        let scope_description = scope_description.clone();
         let loading_settings_for_load = loading_settings_for_load.clone();
-        let bool_edits_load = bool_edits_load.clone();
-        let loaded_settings_target_load = loaded_settings_target_load.clone();
-        let setup_entry_load = setup_entry_load.clone();
-        let run_entry_load = run_entry_load.clone();
-        let archive_entry_load = archive_entry_load.clone();
-        let test_entry_load = test_entry_load.clone();
-        let lint_entry_load = lint_entry_load.clone();
-        let typecheck_entry_load = typecheck_entry_load.clone();
-        let build_entry_load = build_entry_load.clone();
-        let run_mode_entry_load = run_mode_entry_load.clone();
-        let spotlight_check_load = spotlight_check_load.clone();
-        let privacy_check_load = privacy_check_load.clone();
-        let archive_on_merge_check_load = archive_on_merge_check_load.clone();
-        let delete_branch_check_load = delete_branch_check_load.clone();
-        let auto_upstream_check_load = auto_upstream_check_load.clone();
-        let claude_path_entry_load = claude_path_entry_load.clone();
-        let codex_path_entry_load = codex_path_entry_load.clone();
-        let claude_provider_entry_load = claude_provider_entry_load.clone();
-        let codex_provider_entry_load = codex_provider_entry_load.clone();
-        let bedrock_region_entry_load = bedrock_region_entry_load.clone();
-        let vertex_project_entry_load = vertex_project_entry_load.clone();
-        let default_agent_entry_load = default_agent_entry_load.clone();
-        let default_model_entry_load = default_model_entry_load.clone();
-        let branch_prefix_type_entry_load = branch_prefix_type_entry_load.clone();
-        let branch_prefix_entry_load = branch_prefix_entry_load.clone();
-        let terminal_font_entry_load = terminal_font_entry_load.clone();
-        let terminal_scrollback_entry_load = terminal_scrollback_entry_load.clone();
-        let keybindings_entry_load = keybindings_entry_load.clone();
-        let command_presets_buffer_load = command_presets_buffer_load.clone();
-        let notifications_buffer_load = notifications_buffer_load.clone();
-        let file_globs_buffer_load = file_globs_buffer_load.clone();
-        let file_globs_text_load = file_globs_text_load.clone();
-        let env_buffer_load = env_buffer_load.clone();
-        let customization_buffer_load = customization_buffer_load.clone();
-        let prompt_buffers_load = prompt_buffers_load.clone();
-        let toast_load = toast_load.clone();
         Rc::new(move || {
+            let scope = *settings_scope.borrow();
+            set_standard_tab_active(&shared_tab, scope == SettingsUiScope::Shared);
+            set_standard_tab_active(&local_tab, scope == SettingsUiScope::Local);
+            project_controls.set_visible(scope_uses_project_selector(scope));
+            scope_description.set_text(scope_copy(scope));
+            *loading_settings_for_load.borrow_mut() = true;
+            field_edits_load.borrow_mut().clear();
             let repo_name = selected_repository_name(&settings_repo_select_load);
-            if repo_name.is_empty() {
-                surface_label_error(&settings_result_load, &toast_load, "Select a repository.");
+            for (group_scope, group) in &general_group_widgets_load {
+                group.set_visible(*group_scope == scope);
+            }
+            let presentation = settings_content_presentation(scope, !repo_name.is_empty());
+            settings_content_area_load.set_visible_child_name(match presentation {
+                SettingsContentPresentation::Editor => "editor",
+                SettingsContentPresentation::SelectProject => "select-project",
+            });
+            let content_enabled = presentation == SettingsContentPresentation::Editor;
+            inspector_load.set_sensitive(content_enabled);
+            save_settings_btn_load.set_sensitive(content_enabled);
+            if !content_enabled {
                 *loaded_settings_target_load.borrow_mut() = None;
+                loaded_customization_source_load.borrow_mut().clear();
+                settings_result_load.set_text("Select a project to edit Local overrides.");
+                *loading_settings_for_load.borrow_mut() = false;
                 return;
             }
-            *loading_settings_for_load.borrow_mut() = true;
-            bool_edits_load.borrow_mut().clear();
-            let layer = if local_tab_load.is_active() {
-                SettingsLayer::LocalOverride
-            } else {
-                SettingsLayer::RepositoryShared
+            let loaded: anyhow::Result<(
+                SettingsSaveTarget,
+                RepositorySettings,
+                RepositorySettings,
+                Option<archductor_core::settings::RepositorySettingsInspection>,
+                String,
+            )> = match scope {
+                SettingsUiScope::Shared => load_app_shared_settings(&shared_settings_path_load)
+                    .and_then(|settings| {
+                        app_shared_customization_settings_toml(&shared_settings_path_load).map(
+                            |source| {
+                                (
+                                    SettingsSaveTarget::Shared,
+                                    settings.clone(),
+                                    settings,
+                                    None,
+                                    source,
+                                )
+                            },
+                        )
+                    }),
+                SettingsUiScope::Local => repository_root(&db_path_load_settings, &repo_name)
+                    .and_then(|repo_path| {
+                        let raw = load_repository_settings_for_layer(
+                            &repo_path,
+                            SettingsLayer::LocalOverride,
+                        )?;
+                        let effective = load_effective_repository_settings(
+                            &repo_path,
+                            &shared_settings_path_load,
+                        )?;
+                        let inspection = inspect_repository_settings(&repo_path)?;
+                        let source = repository_customization_settings_toml(
+                            &repo_path,
+                            SettingsLayer::LocalOverride,
+                        )?;
+                        Ok((
+                            SettingsSaveTarget::Local(repo_name.clone()),
+                            effective,
+                            raw,
+                            Some(inspection),
+                            source,
+                        ))
+                    }),
             };
-            shared_tab_load.set_active(matches!(layer, SettingsLayer::RepositoryShared));
-            local_tab_load.set_active(matches!(layer, SettingsLayer::LocalOverride));
-            match repository_root(&db_path_load_settings, &repo_name)
-                .and_then(|repo_path| {
-                    load_repository_settings_for_layer(&repo_path, layer)
-                        .map(|settings| (repo_path, settings))
-                })
-                .and_then(|(repo_path, settings)| {
-                    inspect_repository_settings(&repo_path)
-                        .map(|inspection| (repo_path, settings, inspection))
-                }) {
-                Ok((repo_path, settings, inspection)) => {
-                    *loaded_settings_target_load.borrow_mut() = Some((repo_name.clone(), layer));
+            match loaded {
+                Ok((target, settings, raw_settings, inspection, customization_source)) => {
+                    *loaded_settings_target_load.borrow_mut() = Some(target.clone());
+                    *loaded_customization_source_load.borrow_mut() = customization_source.clone();
                     setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
                     run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
                     archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
@@ -740,17 +965,8 @@ pub(crate) fn build_settings_page(
                             .or(settings.customization.automation.build_command.as_deref())
                             .unwrap_or(""),
                     );
-                    run_mode_entry_load.set_text(
-                        settings
-                            .scripts
-                            .run_mode
-                            .as_deref()
-                            .or_else(|| {
-                                matches!(layer, SettingsLayer::RepositoryShared)
-                                    .then_some("concurrent")
-                            })
-                            .unwrap_or(""),
-                    );
+                    run_mode_entry_load
+                        .set_text(settings.scripts.run_mode.as_deref().unwrap_or(""));
                     spotlight_check_load.set_active(settings.spotlight_testing.unwrap_or(false));
                     privacy_check_load
                         .set_active(settings.enterprise_data_privacy.unwrap_or(false));
@@ -844,10 +1060,17 @@ pub(crate) fn build_settings_page(
                     );
                     notifications_buffer_load
                         .set_text(&settings.customization.view.notification_rules.join("\n"));
-                    if inspection.worktreeinclude_exists {
+                    if inspection
+                        .as_ref()
+                        .is_some_and(|inspection| inspection.worktreeinclude_exists)
+                    {
                         file_globs_text_load.set_editable(false);
-                        file_globs_buffer_load
-                            .set_text(&inspection.active_file_patterns.join("\n"));
+                        file_globs_buffer_load.set_text(
+                            &inspection
+                                .as_ref()
+                                .map(|inspection| inspection.active_file_patterns.join("\n"))
+                                .unwrap_or_default(),
+                        );
                     } else {
                         file_globs_text_load.set_editable(true);
                         file_globs_buffer_load.set_text(&settings.file_include_globs.join("\n"));
@@ -860,59 +1083,33 @@ pub(crate) fn build_settings_page(
                             .collect::<Vec<_>>()
                             .join("\n"),
                     );
-                    let prompts = settings.prompts.unwrap_or_default();
-                    let prompt_values = [
-                        prompts.new_workspace,
-                        prompts.general,
-                        prompts.continue_work,
-                        prompts.summarize_session,
-                        prompts.handoff,
-                        prompts.code_review,
-                        prompts.create_pr,
-                        prompts.fix_errors,
-                        prompts.resolve_merge_conflicts,
-                        prompts.rename_branch,
-                        prompts.commit_generation,
-                        prompts.test_fixing,
-                        prompts.refactor_style,
-                        prompts.setup_script,
-                        prompts.run_script,
-                    ];
-                    for (buffer, value) in prompt_buffers_load.iter().zip(prompt_values.iter()) {
-                        buffer.set_text(value.as_deref().unwrap_or(""));
+                    let prompts = settings.prompts.as_ref().cloned().unwrap_or_default();
+                    let raw_prompts = raw_settings.prompts.as_ref().cloned().unwrap_or_default();
+                    for editor in &prompt_editors_load {
+                        editor
+                            .buffer
+                            .set_text(prompts.get(editor.kind).unwrap_or(""));
+                        editor.inherited_label.set_visible(
+                            scope == SettingsUiScope::Local
+                                && raw_prompts.get(editor.kind).is_none()
+                                && prompts.get(editor.kind).is_some(),
+                        );
                     }
-                    customization_buffer_load.set_text(
-                        &customization_settings_to_toml(&settings.customization)
-                            .unwrap_or_default(),
-                    );
-                    let source = match inspection.active_file_patterns_source {
-                        FilePatternSource::Worktreeinclude => {
-                            ".worktreeinclude wins; file rules are read-only here."
-                        }
-                        FilePatternSource::RepositorySettings => {
-                            "Repository settings define file copy rules."
-                        }
-                        FilePatternSource::BuiltInDefault => {
-                            "Built-in `.env*` defaults apply until custom rules are saved."
-                        }
-                    };
-                    settings_result_load.set_text(&format!(
-                            "Loaded {} ({:?}). Shared={} Local={} Worktreeinclude={} Active files: {} ({})",
-                            repo_path.display(),
-                            layer,
-                            inspection.shared_settings_exists,
-                            inspection.local_settings_exists,
-                            inspection.worktreeinclude_exists,
-                            inspection.active_file_patterns.join(", "),
-                            source
-                        ));
+                    customization_buffer_load.set_text(&customization_source);
+                    settings_result_load.set_text(match target {
+                        SettingsSaveTarget::Shared => "Shared defaults loaded.",
+                        SettingsSaveTarget::Local(_) => "Local overrides loaded.",
+                    });
                 }
                 Err(err) => {
                     *loaded_settings_target_load.borrow_mut() = None;
+                    loaded_customization_source_load.borrow_mut().clear();
+                    inspector_load.set_sensitive(false);
+                    save_settings_btn_load.set_sensitive(false);
                     surface_label_error(
                         &settings_result_load,
                         &toast_load,
-                        format!("Load failed: {err:#}"),
+                        format!("Could not load settings: {err:#}"),
                     );
                 }
             }
@@ -921,11 +1118,11 @@ pub(crate) fn build_settings_page(
     };
     let load_selected_settings_for_repo = load_selected_settings.clone();
     let pending_autosave: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
-    let pending_autosave_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+    let pending_autosave_target: Rc<RefCell<Option<SettingsSaveTarget>>> =
         Rc::new(RefCell::new(None));
+    let last_save_succeeded = Rc::new(Cell::new(false));
     let db_path_recover_settings = paths.database_path.clone();
     let settings_repo_select_recover = settings_repo_select.clone();
-    let local_tab_recover = local_tab.clone();
     let settings_result_recover = settings_result.clone();
     let toast_recover = toast_manager.clone();
     let load_selected_settings_for_recover = load_selected_settings.clone();
@@ -943,7 +1140,7 @@ pub(crate) fn build_settings_page(
             );
             return;
         }
-        let layer = selected_settings_layer(&local_tab_recover);
+        let layer = SettingsLayer::LocalOverride;
         let target = (repo_name.clone(), layer);
         if recover_confirmation_for_click.borrow().as_ref() != Some(&target) {
             *recover_confirmation_for_click.borrow_mut() = Some(target);
@@ -970,14 +1167,16 @@ pub(crate) fn build_settings_page(
         *pending_autosave_target_recover.borrow_mut() = None;
         *recover_confirmation_for_click.borrow_mut() = None;
         match repository_root(&db_path_recover_settings, &repo_name).and_then(|repo_path| {
-            save_repository_settings(&repo_path, layer, &settings).map(|()| repo_path)
+            save_recovered_settings_for_layer(&repo_path, layer, &settings)?;
+            let refreshed =
+                refresh_repository_prompt_snapshots(&db_path_recover_settings, &repo_name)?;
+            Ok((repo_path, refreshed))
         }) {
-            Ok(repo_path) => {
+            Ok((repo_path, refreshed)) => {
                 load_selected_settings_for_recover();
                 settings_result_recover.set_text(&format!(
-                    "Recovered {:?} settings for {}. Previous file was backed up when present.",
-                    layer,
-                    repo_path.display()
+                    "Local overrides reset for {}. Refreshed {refreshed} prompt snapshot(s).",
+                    repo_path.display(),
                 ));
             }
             Err(err) => surface_label_error(
@@ -988,58 +1187,85 @@ pub(crate) fn build_settings_page(
         }
     });
     let loading_settings_for_repo = loading_settings_for_load.clone();
+    let settings_scope_for_repo = settings_scope.clone();
     let flush_pending_autosave = {
         let pending_autosave = pending_autosave.clone();
         let pending_autosave_target = pending_autosave_target.clone();
         let forced_save_target = forced_save_target.clone();
         let save_settings_btn = save_settings_btn.clone();
-        Rc::new(move || {
+        let last_save_succeeded = last_save_succeeded.clone();
+        Rc::new(move || -> bool {
             if let Some(source_id) = pending_autosave.borrow_mut().take() {
                 source_id.remove();
-                if let Some(target) = pending_autosave_target.borrow_mut().take() {
-                    *forced_save_target.borrow_mut() = Some(target);
-                    save_settings_btn.emit_clicked();
-                }
             }
+            flush_autosave_target(&mut pending_autosave_target.borrow_mut(), |target| {
+                *forced_save_target.borrow_mut() = Some(target);
+                last_save_succeeded.set(false);
+                save_settings_btn.emit_clicked();
+                last_save_succeeded.get()
+            })
         })
     };
+    *flush_pending_autosave_handle.borrow_mut() = Some(flush_pending_autosave.clone());
     let flush_pending_autosave_for_repo = flush_pending_autosave.clone();
+    let settings_repo_select_for_change = settings_repo_select.clone();
+    let loaded_settings_target_for_repo = loaded_settings_target.clone();
     settings_repo_select.connect_changed(move |_| {
-        if !*loading_settings_for_repo.borrow() {
-            flush_pending_autosave_for_repo();
+        if !*loading_settings_for_repo.borrow()
+            && *settings_scope_for_repo.borrow() == SettingsUiScope::Local
+        {
+            let requested = selected_repository_name(&settings_repo_select_for_change);
+            let mut current = loaded_settings_target_for_repo
+                .borrow()
+                .as_ref()
+                .and_then(|target| match target {
+                    SettingsSaveTarget::Local(project) => Some(project.clone()),
+                    SettingsSaveTarget::Shared => None,
+                })
+                .unwrap_or_else(|| requested.clone());
+            if !apply_settings_navigation(&mut current, requested, || {
+                flush_pending_autosave_for_repo()
+            }) {
+                *loading_settings_for_repo.borrow_mut() = true;
+                settings_repo_select_for_change.set_active_id(Some(&current));
+                *loading_settings_for_repo.borrow_mut() = false;
+                return;
+            }
             load_selected_settings_for_repo();
         }
     });
     let load_selected_settings_for_shared = load_selected_settings.clone();
-    let local_tab_for_shared = local_tab.clone();
-    let loading_settings_for_shared = loading_settings_for_load.clone();
+    let settings_scope_for_shared = settings_scope.clone();
+    let rebuild_settings_rail_for_shared = rebuild_settings_rail.clone();
     let flush_pending_autosave_for_shared = flush_pending_autosave.clone();
-    shared_tab.connect_toggled(move |button| {
-        if *loading_settings_for_shared.borrow() {
-            return;
-        }
-        if button.is_active() {
-            flush_pending_autosave_for_shared();
-            local_tab_for_shared.set_active(false);
+    shared_tab.connect_clicked(move |_| {
+        if *settings_scope_for_shared.borrow() != SettingsUiScope::Shared {
+            let mut scope = *settings_scope_for_shared.borrow();
+            if !apply_settings_navigation(&mut scope, SettingsUiScope::Shared, || {
+                flush_pending_autosave_for_shared()
+            }) {
+                return;
+            }
+            *settings_scope_for_shared.borrow_mut() = scope;
+            rebuild_settings_rail_for_shared(SettingsUiScope::Shared);
             load_selected_settings_for_shared();
-        } else if !local_tab_for_shared.is_active() {
-            button.set_active(true);
         }
     });
     let load_selected_settings_for_local = load_selected_settings.clone();
-    let shared_tab_for_local = shared_tab.clone();
-    let loading_settings_for_local = loading_settings_for_load.clone();
+    let settings_scope_for_local = settings_scope.clone();
+    let rebuild_settings_rail_for_local = rebuild_settings_rail.clone();
     let flush_pending_autosave_for_local = flush_pending_autosave.clone();
-    local_tab.connect_toggled(move |button| {
-        if *loading_settings_for_local.borrow() {
-            return;
-        }
-        if button.is_active() {
-            flush_pending_autosave_for_local();
-            shared_tab_for_local.set_active(false);
+    local_tab.connect_clicked(move |_| {
+        if *settings_scope_for_local.borrow() != SettingsUiScope::Local {
+            let mut scope = *settings_scope_for_local.borrow();
+            if !apply_settings_navigation(&mut scope, SettingsUiScope::Local, || {
+                flush_pending_autosave_for_local()
+            }) {
+                return;
+            }
+            *settings_scope_for_local.borrow_mut() = scope;
+            rebuild_settings_rail_for_local(SettingsUiScope::Local);
             load_selected_settings_for_local();
-        } else if !shared_tab_for_local.is_active() {
-            button.set_active(true);
         }
     });
 
@@ -1049,6 +1275,8 @@ pub(crate) fn build_settings_page(
         let pending_autosave = pending_autosave.clone();
         let pending_autosave_target = pending_autosave_target.clone();
         let loaded_settings_target = loaded_settings_target.clone();
+        let forced_save_target = forced_save_target.clone();
+        let last_save_succeeded = last_save_succeeded.clone();
         Rc::new(move || {
             if !*loading_settings.borrow() {
                 if let Some(source_id) = pending_autosave.borrow_mut().take() {
@@ -1058,133 +1286,185 @@ pub(crate) fn build_settings_page(
                 let save_settings_btn = save_settings_btn.clone();
                 let pending_autosave_for_timeout = pending_autosave.clone();
                 let pending_autosave_target_for_timeout = pending_autosave_target.clone();
+                let forced_save_target_for_timeout = forced_save_target.clone();
+                let last_save_succeeded_for_timeout = last_save_succeeded.clone();
                 let source_id =
                     gtk::glib::timeout_add_local_once(Duration::from_millis(600), move || {
                         *pending_autosave_for_timeout.borrow_mut() = None;
-                        *pending_autosave_target_for_timeout.borrow_mut() = None;
-                        save_settings_btn.emit_clicked();
+                        flush_autosave_target(
+                            &mut pending_autosave_target_for_timeout.borrow_mut(),
+                            |target| {
+                                *forced_save_target_for_timeout.borrow_mut() = Some(target);
+                                last_save_succeeded_for_timeout.set(false);
+                                save_settings_btn.emit_clicked();
+                                last_save_succeeded_for_timeout.get()
+                            },
+                        );
                     });
                 *pending_autosave.borrow_mut() = Some(source_id);
             }
         })
     };
-    connect_entry_autosave(&setup_entry, autosave.clone());
-    connect_entry_autosave(&run_entry, autosave.clone());
-    connect_entry_autosave(&archive_entry, autosave.clone());
-    connect_entry_autosave(&test_entry, autosave.clone());
-    connect_entry_autosave(&lint_entry, autosave.clone());
-    connect_entry_autosave(&typecheck_entry, autosave.clone());
-    connect_entry_autosave(&build_entry, autosave.clone());
-    connect_entry_autosave(&run_mode_entry, autosave.clone());
+    for (entry, field) in [
+        (&setup_entry, "script_setup"),
+        (&run_entry, "script_run"),
+        (&archive_entry, "script_archive"),
+        (&test_entry, "script_test"),
+        (&lint_entry, "script_lint"),
+        (&typecheck_entry, "script_typecheck"),
+        (&build_entry, "script_build"),
+        (&run_mode_entry, "script_run_mode"),
+        (&claude_path_entry, "provider_claude_path"),
+        (&codex_path_entry, "provider_codex_path"),
+        (&claude_provider_entry, "provider_claude"),
+        (&codex_provider_entry, "provider_codex"),
+        (&bedrock_region_entry, "provider_bedrock_region"),
+        (&vertex_project_entry, "provider_vertex_project"),
+        (&default_agent_entry, "default_agent"),
+        (&default_model_entry, "default_model"),
+        (&branch_prefix_type_entry, "git_branch_prefix_type"),
+        (&branch_prefix_entry, "git_branch_prefix"),
+        (&terminal_font_entry, "terminal_font"),
+        (&terminal_scrollback_entry, "terminal_scrollback"),
+        (&keybindings_entry, "keybindings"),
+    ] {
+        connect_entry_autosave(
+            entry,
+            field,
+            field_edits.clone(),
+            loading_settings_for_load.clone(),
+            autosave.clone(),
+        );
+    }
     connect_bool_autosave(
         &spotlight_check,
         "spotlight_testing",
-        bool_edits.clone(),
+        field_edits.clone(),
         loading_settings_for_load.clone(),
         autosave.clone(),
     );
     connect_bool_autosave(
         &privacy_check,
         "enterprise_data_privacy",
-        bool_edits.clone(),
+        field_edits.clone(),
         loading_settings_for_load.clone(),
         autosave.clone(),
     );
     connect_bool_autosave(
         &archive_on_merge_check,
         "archive_on_merge",
-        bool_edits.clone(),
+        field_edits.clone(),
         loading_settings_for_load.clone(),
         autosave.clone(),
     );
     connect_bool_autosave(
         &delete_branch_check,
         "delete_branch_on_archive",
-        bool_edits.clone(),
+        field_edits.clone(),
         loading_settings_for_load.clone(),
         autosave.clone(),
     );
     connect_bool_autosave(
         &auto_upstream_check,
         "worktree_push_auto_setup_remote",
-        bool_edits.clone(),
+        field_edits.clone(),
         loading_settings_for_load.clone(),
         autosave.clone(),
     );
-    connect_entry_autosave(&claude_path_entry, autosave.clone());
-    connect_entry_autosave(&codex_path_entry, autosave.clone());
-    connect_entry_autosave(&claude_provider_entry, autosave.clone());
-    connect_entry_autosave(&codex_provider_entry, autosave.clone());
-    connect_entry_autosave(&bedrock_region_entry, autosave.clone());
-    connect_entry_autosave(&vertex_project_entry, autosave.clone());
-    connect_entry_autosave(&default_agent_entry, autosave.clone());
-    connect_entry_autosave(&default_model_entry, autosave.clone());
-    connect_entry_autosave(&branch_prefix_type_entry, autosave.clone());
-    connect_entry_autosave(&branch_prefix_entry, autosave.clone());
-    connect_entry_autosave(&terminal_font_entry, autosave.clone());
-    connect_entry_autosave(&terminal_scrollback_entry, autosave.clone());
-    connect_entry_autosave(&keybindings_entry, autosave.clone());
-    connect_buffer_autosave(&command_presets_view.1, autosave.clone());
-    connect_buffer_autosave(&notifications_view.1, autosave.clone());
-    connect_buffer_autosave(&file_globs_view.1, autosave.clone());
-    connect_buffer_autosave(&env_view.1, autosave.clone());
-    connect_buffer_autosave(&customization_view.1, autosave.clone());
-    for (_, buffer, _) in &prompt_views {
-        connect_buffer_autosave(buffer, autosave.clone());
+    for (buffer, field) in [
+        (&command_presets_view.1, "command_presets"),
+        (&notifications_view.1, "notifications"),
+        (&file_globs_view.1, "file_globs"),
+        (&env_view.1, "environment"),
+        (&customization_view.1, "customization"),
+    ] {
+        connect_buffer_autosave(
+            buffer,
+            field,
+            field_edits.clone(),
+            loading_settings_for_load.clone(),
+            autosave.clone(),
+        );
+    }
+    for editor in &prompt_views {
+        let inherited_label = editor.inherited_label.clone();
+        let settings_scope = settings_scope.clone();
+        connect_buffer_autosave_with_edit(
+            &editor.buffer,
+            editor.kind.as_str(),
+            field_edits.clone(),
+            loading_settings_for_load.clone(),
+            autosave.clone(),
+            move || {
+                if *settings_scope.borrow() == SettingsUiScope::Local {
+                    inherited_label.set_visible(false);
+                }
+            },
+        );
     }
 
-    if !selected_repository_name(&settings_repo_select).is_empty() {
-        load_selected_settings();
-    }
+    load_selected_settings();
 
     let db_path_save_settings = paths.database_path.clone();
+    let shared_settings_path_save = paths.shared_settings_path();
     let forced_save_target_for_save = forced_save_target.clone();
     let loaded_settings_target_for_save = loaded_settings_target.clone();
-    let bool_edits_for_save = bool_edits.clone();
+    let loaded_customization_source_for_save = loaded_customization_source.clone();
+    let field_edits_for_save = field_edits.clone();
     let toast_save = toast_manager.clone();
+    let load_selected_settings_after_save = load_selected_settings.clone();
+    let last_save_succeeded_for_save = last_save_succeeded.clone();
     save_settings_btn.connect_clicked(move |_| {
+        last_save_succeeded_for_save.set(false);
         let save_target = forced_save_target_for_save
             .borrow_mut()
             .take()
             .or_else(|| loaded_settings_target_for_save.borrow().clone());
-        let (repo_name, layer) = save_target.unwrap_or_else(|| {
-            (
-                selected_repository_name(&settings_repo_select),
-                selected_settings_layer(&local_tab),
-            )
-        });
-        if repo_name.is_empty() {
-            surface_label_error(
-                &settings_result,
-                &toast_save,
-                "Repository name is required.",
-            );
+        let Some(save_target) = save_target else {
+            surface_label_error(&settings_result, &toast_save, "Settings are not loaded.");
             return;
-        }
-        let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
-            Ok(path) => path,
-            Err(err) => {
-                surface_label_error(
-                    &settings_result,
-                    &toast_save,
-                    format!("Save failed: {err:#}"),
-                );
-                return;
+        };
+        let (repo_name, repo_path, current_settings) = match &save_target {
+            SettingsSaveTarget::Shared => {
+                match load_app_shared_settings(&shared_settings_path_save) {
+                    Ok(settings) => (None, None, settings),
+                    Err(err) => {
+                        surface_label_error(
+                            &settings_result,
+                            &toast_save,
+                            format!("Save failed: {err:#}"),
+                        );
+                        return;
+                    }
+                }
+            }
+            SettingsSaveTarget::Local(repo_name) => {
+                let repo_path = match repository_root(&db_path_save_settings, repo_name) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        surface_label_error(
+                            &settings_result,
+                            &toast_save,
+                            format!("Save failed: {err:#}"),
+                        );
+                        return;
+                    }
+                };
+                match load_repository_settings_for_layer(&repo_path, SettingsLayer::LocalOverride) {
+                    Ok(settings) => (Some(repo_name.clone()), Some(repo_path), settings),
+                    Err(err) => {
+                        surface_label_error(
+                            &settings_result,
+                            &toast_save,
+                            format!("Save failed: {err:#}"),
+                        );
+                        return;
+                    }
+                }
             }
         };
-        let current_settings = match load_repository_settings_for_layer(&repo_path, layer) {
-            Ok(settings) => settings,
-            Err(err) => {
-                surface_label_error(
-                    &settings_result,
-                    &toast_save,
-                    format!("Save failed: {err:#}"),
-                );
-                return;
-            }
-        };
-        let current_file_globs = current_settings.file_include_globs.clone();
-        let mut customization =
+        let edits = field_edits_for_save.borrow().clone();
+        let mut customization = if edits.contains("customization") {
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
                 Err(err) => {
@@ -1195,164 +1475,282 @@ pub(crate) fn build_settings_page(
                     );
                     return;
                 }
-            };
-        let terminal_scrollback = match optional_entry_text(&terminal_scrollback_entry) {
-            Some(value) => match value.parse::<u32>() {
-                Ok(parsed) => Some(parsed),
+            }
+        } else {
+            current_settings.customization.clone()
+        };
+        if edits.contains("default_agent") {
+            customization.automation.auto_start_agent = optional_entry_text(&default_agent_entry);
+        }
+        if edits.contains("script_test") {
+            customization.automation.test_command = optional_entry_text(&test_entry);
+        }
+        if edits.contains("script_lint") {
+            customization.automation.lint_command = optional_entry_text(&lint_entry);
+        }
+        if edits.contains("script_typecheck") {
+            customization.automation.typecheck_command = optional_entry_text(&typecheck_entry);
+        }
+        if edits.contains("script_build") {
+            customization.automation.build_command = optional_entry_text(&build_entry);
+        }
+        if edits.contains("default_model") {
+            match optional_entry_text(&default_model_entry) {
+                Some(model) => {
+                    customization
+                        .agent_profiles
+                        .entry("default".to_owned())
+                        .or_insert_with(AgentProfileSettings::default)
+                        .model = Some(model);
+                }
+                None => {
+                    if let Some(profile) = customization.agent_profiles.get_mut("default") {
+                        profile.model = None;
+                    }
+                }
+            }
+        }
+        if edits.contains("terminal_font") {
+            customization.view.terminal_font = optional_entry_text(&terminal_font_entry);
+        }
+        if edits.contains("terminal_scrollback") {
+            customization.view.terminal_scrollback =
+                match optional_entry_text(&terminal_scrollback_entry) {
+                    Some(value) => match value.parse::<u32>() {
+                        Ok(parsed) => Some(parsed),
+                        Err(err) => {
+                            surface_label_error(
+                                &settings_result,
+                                &toast_save,
+                                format!("Save failed: terminal scrollback must be a number: {err}"),
+                            );
+                            return;
+                        }
+                    },
+                    None => None,
+                };
+        }
+        if edits.contains("keybindings") {
+            customization.view.keybindings = optional_entry_text(&keybindings_entry);
+        }
+        if edits.contains("command_presets") {
+            customization.view.command_palette_presets =
+                parse_text_lines(&text_buffer_text(&command_presets_view.1));
+        }
+        if edits.contains("notifications") {
+            customization.view.notification_rules =
+                parse_text_lines(&text_buffer_text(&notifications_view.1));
+        }
+
+        let environment_variables = if edits.contains("environment") {
+            match parse_environment_lines(&text_buffer_text(&env_view.1)) {
+                Ok(environment_variables) => environment_variables,
                 Err(err) => {
                     surface_label_error(
                         &settings_result,
                         &toast_save,
-                        format!("Save failed: terminal scrollback must be a number: {err}"),
+                        format!("Save failed: {err:#}"),
                     );
                     return;
                 }
-            },
-            None => None,
-        };
-        let test_command = optional_entry_text(&test_entry);
-        let lint_command = optional_entry_text(&lint_entry);
-        let typecheck_command = optional_entry_text(&typecheck_entry);
-        let build_command = optional_entry_text(&build_entry);
-        customization.automation.auto_start_agent = optional_entry_text(&default_agent_entry);
-        customization.automation.test_command = test_command.clone();
-        customization.automation.lint_command = lint_command.clone();
-        customization.automation.typecheck_command = typecheck_command.clone();
-        customization.automation.build_command = build_command.clone();
-        match optional_entry_text(&default_model_entry) {
-            Some(model) => {
-                customization
-                    .agent_profiles
-                    .entry("default".to_owned())
-                    .or_insert_with(AgentProfileSettings::default)
-                    .model = Some(model);
             }
-            None => {
-                if let Some(profile) = customization.agent_profiles.get_mut("default") {
-                    profile.model = None;
-                }
+        } else {
+            current_settings.environment_variables.clone()
+        };
+        let mut prompt_settings = current_settings.prompts.clone().unwrap_or_default();
+        for editor in &prompt_views {
+            if edits.contains(editor.kind.as_str()) {
+                set_prompt_value(
+                    &mut prompt_settings,
+                    editor.kind,
+                    optional_buffer_text(&editor.buffer),
+                );
             }
         }
-        customization.view.terminal_font = optional_entry_text(&terminal_font_entry);
-        customization.view.terminal_scrollback = terminal_scrollback;
-        customization.view.keybindings = optional_entry_text(&keybindings_entry);
-        customization.view.command_palette_presets =
-            parse_text_lines(&text_buffer_text(&command_presets_view.1));
-        customization.view.notification_rules =
-            parse_text_lines(&text_buffer_text(&notifications_view.1));
-        let prompt_settings = PromptSettings {
-            new_workspace: optional_buffer_text(&prompt_views[0].1),
-            general: optional_buffer_text(&prompt_views[1].1),
-            continue_work: optional_buffer_text(&prompt_views[2].1),
-            summarize_session: optional_buffer_text(&prompt_views[3].1),
-            handoff: optional_buffer_text(&prompt_views[4].1),
-            code_review: optional_buffer_text(&prompt_views[5].1),
-            create_pr: optional_buffer_text(&prompt_views[6].1),
-            fix_errors: optional_buffer_text(&prompt_views[7].1),
-            resolve_merge_conflicts: optional_buffer_text(&prompt_views[8].1),
-            rename_branch: optional_buffer_text(&prompt_views[9].1),
-            commit_generation: optional_buffer_text(&prompt_views[10].1),
-            test_fixing: optional_buffer_text(&prompt_views[11].1),
-            refactor_style: optional_buffer_text(&prompt_views[12].1),
-            setup_script: optional_buffer_text(&prompt_views[13].1),
-            run_script: optional_buffer_text(&prompt_views[14].1),
+        let settings = RepositorySettings {
+            file_include_globs: setting_for_save(
+                edits.contains("file_globs") && file_globs_view.2.is_editable(),
+                current_settings.file_include_globs.clone(),
+                parse_text_lines(&text_buffer_text(&file_globs_view.1)),
+            ),
+            env_file_refs: current_settings.env_file_refs.clone(),
+            spotlight_testing: setting_for_save(
+                edits.contains("spotlight_testing"),
+                current_settings.spotlight_testing,
+                Some(spotlight_check.is_active()),
+            ),
+            enterprise_data_privacy: setting_for_save(
+                edits.contains("enterprise_data_privacy"),
+                current_settings.enterprise_data_privacy,
+                Some(privacy_check.is_active()),
+            ),
+            scripts: ScriptSettings {
+                setup: setting_for_save(
+                    edits.contains("script_setup"),
+                    current_settings.scripts.setup.clone(),
+                    optional_entry_text(&setup_entry),
+                ),
+                run: setting_for_save(
+                    edits.contains("script_run"),
+                    current_settings.scripts.run.clone(),
+                    optional_entry_text(&run_entry),
+                ),
+                archive: setting_for_save(
+                    edits.contains("script_archive"),
+                    current_settings.scripts.archive.clone(),
+                    optional_entry_text(&archive_entry),
+                ),
+                test: setting_for_save(
+                    edits.contains("script_test"),
+                    current_settings.scripts.test.clone(),
+                    optional_entry_text(&test_entry),
+                ),
+                lint: setting_for_save(
+                    edits.contains("script_lint"),
+                    current_settings.scripts.lint.clone(),
+                    optional_entry_text(&lint_entry),
+                ),
+                typecheck: setting_for_save(
+                    edits.contains("script_typecheck"),
+                    current_settings.scripts.typecheck.clone(),
+                    optional_entry_text(&typecheck_entry),
+                ),
+                build: setting_for_save(
+                    edits.contains("script_build"),
+                    current_settings.scripts.build.clone(),
+                    optional_entry_text(&build_entry),
+                ),
+                run_mode: setting_for_save(
+                    edits.contains("script_run_mode"),
+                    current_settings.scripts.run_mode.clone(),
+                    optional_entry_text(&run_mode_entry),
+                ),
+            },
+            environment_variables,
+            prompt_pack: current_settings.prompt_pack.clone(),
+            prompts: (!prompt_settings_is_empty(&prompt_settings)).then_some(prompt_settings),
+            providers: ProviderSettings {
+                claude_code_executable_path: setting_for_save(
+                    edits.contains("provider_claude_path"),
+                    current_settings
+                        .providers
+                        .claude_code_executable_path
+                        .clone(),
+                    optional_entry_text(&claude_path_entry),
+                ),
+                codex_executable_path: setting_for_save(
+                    edits.contains("provider_codex_path"),
+                    current_settings.providers.codex_executable_path.clone(),
+                    optional_entry_text(&codex_path_entry),
+                ),
+                claude_provider: setting_for_save(
+                    edits.contains("provider_claude"),
+                    current_settings.providers.claude_provider.clone(),
+                    optional_entry_text(&claude_provider_entry),
+                ),
+                codex_provider: setting_for_save(
+                    edits.contains("provider_codex"),
+                    current_settings.providers.codex_provider.clone(),
+                    optional_entry_text(&codex_provider_entry),
+                ),
+                bedrock_region: setting_for_save(
+                    edits.contains("provider_bedrock_region"),
+                    current_settings.providers.bedrock_region.clone(),
+                    optional_entry_text(&bedrock_region_entry),
+                ),
+                vertex_project_id: setting_for_save(
+                    edits.contains("provider_vertex_project"),
+                    current_settings.providers.vertex_project_id.clone(),
+                    optional_entry_text(&vertex_project_entry),
+                ),
+            },
+            git: GitSettings {
+                delete_branch_on_archive: setting_for_save(
+                    edits.contains("delete_branch_on_archive"),
+                    current_settings.git.delete_branch_on_archive,
+                    Some(delete_branch_check.is_active()),
+                ),
+                archive_on_merge: setting_for_save(
+                    edits.contains("archive_on_merge"),
+                    current_settings.git.archive_on_merge,
+                    Some(archive_on_merge_check.is_active()),
+                ),
+                worktree_push_auto_setup_remote: setting_for_save(
+                    edits.contains("worktree_push_auto_setup_remote"),
+                    current_settings.git.worktree_push_auto_setup_remote,
+                    Some(auto_upstream_check.is_active()),
+                ),
+                branch_prefix_type: setting_for_save(
+                    edits.contains("git_branch_prefix_type"),
+                    current_settings.git.branch_prefix_type.clone(),
+                    optional_entry_text(&branch_prefix_type_entry),
+                ),
+                branch_prefix: setting_for_save(
+                    edits.contains("git_branch_prefix"),
+                    current_settings.git.branch_prefix.clone(),
+                    optional_entry_text(&branch_prefix_entry),
+                ),
+            },
+            customization,
         };
-        let environment_variables = match parse_environment_lines(&text_buffer_text(&env_view.1)) {
-            Ok(environment_variables) => environment_variables,
+        let collection_intent = match collection_intent_for_settings_save(
+            &edits,
+            &settings,
+            &text_buffer_text(&customization_view.1),
+            &loaded_customization_source_for_save.borrow(),
+        ) {
+            Ok(fields) => fields,
+            Err(err) => {
+                surface_label_error(
+                    &settings_result,
+                    &toast_save,
+                    format!("Save failed: customization TOML invalid: {err:#}"),
+                );
+                return;
+            }
+        };
+        let save_result = match (&save_target, repo_name.as_deref(), repo_path.as_ref()) {
+            (SettingsSaveTarget::Shared, _, _) => save_app_shared_settings_with_collection_intent(
+                &shared_settings_path_save,
+                &settings,
+                &collection_intent.explicit_empty,
+                &collection_intent.unset,
+            )
+            .and_then(|()| refresh_all_prompt_snapshots(&db_path_save_settings)),
+            (SettingsSaveTarget::Local(_), Some(repo_name), Some(repo_path)) => {
+                save_repository_settings_with_collection_intent(
+                    repo_path,
+                    SettingsLayer::LocalOverride,
+                    &settings,
+                    &collection_intent.explicit_empty,
+                    &collection_intent.unset,
+                )
+                .and_then(|()| {
+                    refresh_repository_prompt_snapshots(&db_path_save_settings, repo_name)
+                })
+            }
+            _ => Err(anyhow::anyhow!("invalid settings save target")),
+        };
+        match save_result {
+            Ok(_) => {
+                last_save_succeeded_for_save.set(true);
+                field_edits_for_save.borrow_mut().clear();
+                load_selected_settings_after_save();
+                let status = match save_target {
+                    SettingsSaveTarget::Shared => "Shared defaults saved.".to_owned(),
+                    SettingsSaveTarget::Local(project) => {
+                        format!("Local overrides saved for {project}.")
+                    }
+                };
+                settings_result.set_text(&status);
+            }
             Err(err) => {
                 surface_label_error(
                     &settings_result,
                     &toast_save,
                     format!("Save failed: {err:#}"),
                 );
-                return;
             }
-        };
-        let settings = RepositorySettings {
-            file_include_globs: if file_globs_view.2.is_editable() {
-                text_buffer_text(&file_globs_view.1)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            } else {
-                current_file_globs
-            },
-            env_file_refs: current_settings.env_file_refs,
-            spotlight_testing: bool_setting_for_layer(
-                layer,
-                current_settings.spotlight_testing,
-                spotlight_check.is_active(),
-                bool_edits_for_save.borrow().contains("spotlight_testing"),
-            ),
-            enterprise_data_privacy: bool_setting_for_layer(
-                layer,
-                current_settings.enterprise_data_privacy,
-                privacy_check.is_active(),
-                bool_edits_for_save
-                    .borrow()
-                    .contains("enterprise_data_privacy"),
-            ),
-            scripts: ScriptSettings {
-                setup: optional_entry_text(&setup_entry),
-                run: optional_entry_text(&run_entry),
-                archive: optional_entry_text(&archive_entry),
-                test: test_command,
-                lint: lint_command,
-                typecheck: typecheck_command,
-                build: build_command,
-                run_mode: run_mode_setting_for_layer(layer, optional_entry_text(&run_mode_entry)),
-            },
-            environment_variables,
-            prompt_pack: current_settings.prompt_pack,
-            prompts: (!prompt_settings_is_empty(&prompt_settings)).then_some(prompt_settings),
-            providers: ProviderSettings {
-                claude_code_executable_path: optional_entry_text(&claude_path_entry),
-                codex_executable_path: optional_entry_text(&codex_path_entry),
-                claude_provider: optional_entry_text(&claude_provider_entry),
-                codex_provider: optional_entry_text(&codex_provider_entry),
-                bedrock_region: optional_entry_text(&bedrock_region_entry),
-                vertex_project_id: optional_entry_text(&vertex_project_entry),
-            },
-            git: GitSettings {
-                delete_branch_on_archive: bool_setting_for_layer(
-                    layer,
-                    current_settings.git.delete_branch_on_archive,
-                    delete_branch_check.is_active(),
-                    bool_edits_for_save
-                        .borrow()
-                        .contains("delete_branch_on_archive"),
-                ),
-                archive_on_merge: bool_setting_for_layer(
-                    layer,
-                    current_settings.git.archive_on_merge,
-                    archive_on_merge_check.is_active(),
-                    bool_edits_for_save.borrow().contains("archive_on_merge"),
-                ),
-                worktree_push_auto_setup_remote: bool_setting_for_layer(
-                    layer,
-                    current_settings.git.worktree_push_auto_setup_remote,
-                    auto_upstream_check.is_active(),
-                    bool_edits_for_save
-                        .borrow()
-                        .contains("worktree_push_auto_setup_remote"),
-                ),
-                branch_prefix_type: optional_entry_text(&branch_prefix_type_entry),
-                branch_prefix: optional_entry_text(&branch_prefix_entry),
-            },
-            customization,
-        };
-        match save_repository_settings(&repo_path, layer, &settings) {
-            Ok(()) => {
-                bool_edits_for_save.borrow_mut().clear();
-                settings_result.set_text(&format!("Saved settings for {}", repo_path.display()))
-            }
-            Err(err) => surface_label_error(
-                &settings_result,
-                &toast_save,
-                format!("Save failed: {err:#}"),
-            ),
         }
     });
 
@@ -1402,6 +1800,196 @@ fn settings_sections() -> Vec<SettingsSection> {
             description: "Raw TOML for deeper repository customization.",
         },
     ]
+}
+
+fn scope_uses_project_selector(scope: SettingsUiScope) -> bool {
+    matches!(scope, SettingsUiScope::Local)
+}
+
+fn scope_copy(scope: SettingsUiScope) -> &'static str {
+    match scope {
+        SettingsUiScope::Shared => {
+            "Shared: Defaults used by every Archductor project on this machine."
+        }
+        SettingsUiScope::Local => "Local: Overrides for the selected project and its workspaces.",
+    }
+}
+
+fn setting_for_save<T>(edited: bool, current: T, displayed: T) -> T {
+    if edited {
+        displayed
+    } else {
+        current
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SettingsCollectionSaveIntent {
+    explicit_empty: Vec<SettingsCollectionField>,
+    unset: Vec<SettingsCollectionField>,
+}
+
+fn collection_intent_for_settings_save(
+    edits: &HashSet<&'static str>,
+    settings: &RepositorySettings,
+    customization_toml: &str,
+    original_customization_toml: &str,
+) -> anyhow::Result<SettingsCollectionSaveIntent> {
+    let customization_edited = edits.contains("customization");
+    let mut fields = if customization_edited {
+        explicit_empty_collection_fields_from_toml(customization_toml)?
+    } else {
+        Vec::new()
+    };
+    let mut unset = Vec::new();
+    if customization_edited {
+        let present = present_collection_fields_from_toml(customization_toml)?;
+        let original_present = present_collection_fields_from_toml(original_customization_toml)?;
+        for field in original_present {
+            if is_customization_collection_field(&field) && !present.contains(&field) {
+                unset.push(field);
+            }
+        }
+    }
+    let mut add = |field| {
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    };
+    if edits.contains("file_globs") && settings.file_include_globs.is_empty() {
+        add(SettingsCollectionField::FileIncludeGlobs);
+    }
+    if edits.contains("environment") && settings.environment_variables.is_empty() {
+        add(SettingsCollectionField::EnvironmentVariables);
+    }
+    if edits.contains("command_presets")
+        && settings
+            .customization
+            .view
+            .command_palette_presets
+            .is_empty()
+    {
+        add(SettingsCollectionField::CommandPalettePresets);
+    }
+    if edits.contains("notifications") && settings.customization.view.notification_rules.is_empty()
+    {
+        add(SettingsCollectionField::NotificationRules);
+    }
+    Ok(SettingsCollectionSaveIntent {
+        explicit_empty: fields,
+        unset,
+    })
+}
+
+fn is_customization_collection_field(field: &SettingsCollectionField) -> bool {
+    matches!(
+        field,
+        SettingsCollectionField::AgentProfiles
+            | SettingsCollectionField::AgentProfileMcpServers(_)
+            | SettingsCollectionField::PrBodySections
+            | SettingsCollectionField::RequiredLocalFiles
+            | SettingsCollectionField::ViewColors
+            | SettingsCollectionField::DashboardColumns
+            | SettingsCollectionField::NotificationRules
+            | SettingsCollectionField::CommandPalettePresets
+    )
+}
+
+fn settings_sections_for_scope(scope: SettingsUiScope) -> Vec<SettingsSection> {
+    let visible_ids: &[&str] = match scope {
+        SettingsUiScope::Shared => &[
+            "general",
+            "prompts",
+            "terminal",
+            "shortcuts",
+            "notifications",
+        ],
+        SettingsUiScope::Local => &["general", "prompts", "scripts", "git", "advanced"],
+    };
+    settings_sections()
+        .into_iter()
+        .filter(|section| visible_ids.contains(&section.id))
+        .collect()
+}
+
+fn general_group_specs() -> Vec<GeneralGroupSpec> {
+    use GeneralSettingField::*;
+
+    vec![
+        GeneralGroupSpec {
+            id: "privacy",
+            title: "Privacy",
+            description: "App-wide privacy defaults used across Archductor projects.",
+            scope: SettingsUiScope::Shared,
+            rows: vec![vec![EnterprisePrivacy]],
+        },
+        GeneralGroupSpec {
+            id: "agents",
+            title: "Agents and providers",
+            description:
+                "Executable paths, default agent, and provider routing for local agent launches.",
+            scope: SettingsUiScope::Shared,
+            rows: vec![
+                vec![ClaudeExecutable, CodexExecutable],
+                vec![DefaultAgent, DefaultModel],
+                vec![ClaudeProvider, CodexProvider],
+            ],
+        },
+        GeneralGroupSpec {
+            id: "provider_platforms",
+            title: "Platform settings",
+            description: "Provider-specific machine values for Bedrock and Vertex setups.",
+            scope: SettingsUiScope::Shared,
+            rows: vec![vec![BedrockRegion, VertexProject]],
+        },
+        GeneralGroupSpec {
+            id: "project_behavior",
+            title: "Project behavior",
+            description: "High-level behavior for the selected project and its workspaces.",
+            scope: SettingsUiScope::Local,
+            rows: vec![vec![SpotlightTesting]],
+        },
+        GeneralGroupSpec {
+            id: "environment",
+            title: "Environment",
+            description:
+                "Environment values passed into scripts and sessions for the selected project.",
+            scope: SettingsUiScope::Local,
+            rows: vec![vec![EnvironmentVariables]],
+        },
+    ]
+}
+
+fn general_group_ids_for_scope(scope: SettingsUiScope) -> Vec<&'static str> {
+    general_group_specs()
+        .into_iter()
+        .filter(|spec| spec.scope == scope)
+        .map(|spec| spec.id)
+        .collect()
+}
+
+fn general_field_ids_for_scope(scope: SettingsUiScope) -> Vec<&'static str> {
+    general_group_specs()
+        .into_iter()
+        .filter(|spec| spec.scope == scope)
+        .flat_map(|spec| spec.rows.into_iter().flatten())
+        .map(GeneralSettingField::id)
+        .collect()
+}
+
+fn settings_content_enabled(scope: SettingsUiScope, has_project: bool) -> bool {
+    settings_content_presentation(scope, has_project) == SettingsContentPresentation::Editor
+}
+
+fn settings_content_presentation(
+    scope: SettingsUiScope,
+    has_project: bool,
+) -> SettingsContentPresentation {
+    if scope == SettingsUiScope::Local && !has_project {
+        SettingsContentPresentation::SelectProject
+    } else {
+        SettingsContentPresentation::Editor
+    }
 }
 
 fn settings_rail_button(section: SettingsSection) -> Button {
@@ -1520,20 +2108,27 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
 }
 
+fn refresh_repository_prompt_snapshots(db_path: &PathBuf, name: &str) -> anyhow::Result<usize> {
+    let repository = RepositoryStore::open(db_path)?.get_by_name(name)?;
+    WorkspaceStore::open_app(db_path)?.refresh_repository_prompt_snapshots(repository.id)
+}
+
+fn refresh_all_prompt_snapshots(db_path: &PathBuf) -> anyhow::Result<usize> {
+    let repositories = RepositoryStore::open(db_path)?.list()?;
+    let store = WorkspaceStore::open_app(db_path)?;
+    repositories.into_iter().try_fold(0, |total, repository| {
+        store
+            .refresh_repository_prompt_snapshots(repository.id)
+            .map(|refreshed| total + refreshed)
+    })
+}
+
 fn selected_repository_name(select: &ComboBoxText) -> String {
     select
         .active_id()
         .or_else(|| select.active_text())
         .map(|value| value.to_string())
         .unwrap_or_default()
-}
-
-fn selected_settings_layer(local: &ToggleButton) -> SettingsLayer {
-    if local.is_active() {
-        SettingsLayer::LocalOverride
-    } else {
-        SettingsLayer::RepositoryShared
-    }
 }
 
 fn bool_setting_for_layer(
@@ -1570,8 +2165,36 @@ fn recovered_settings_for_layer(layer: SettingsLayer) -> anyhow::Result<Reposito
     }
 }
 
+fn save_recovered_settings_for_layer(
+    repo_path: &std::path::Path,
+    layer: SettingsLayer,
+    settings: &RepositorySettings,
+) -> anyhow::Result<()> {
+    save_repository_settings_replacing(repo_path, layer, settings)
+}
+
 fn prompt_settings_is_empty(settings: &PromptSettings) -> bool {
     settings == &PromptSettings::default()
+}
+
+fn set_prompt_value(settings: &mut PromptSettings, kind: PromptKind, value: Option<String>) {
+    match kind {
+        PromptKind::NewWorkspace => settings.new_workspace = value,
+        PromptKind::General => settings.general = value,
+        PromptKind::ContinueWork => settings.continue_work = value,
+        PromptKind::SummarizeSession => settings.summarize_session = value,
+        PromptKind::Handoff => settings.handoff = value,
+        PromptKind::CodeReview => settings.code_review = value,
+        PromptKind::CreatePr => settings.create_pr = value,
+        PromptKind::FixErrors => settings.fix_errors = value,
+        PromptKind::ResolveMergeConflicts => settings.resolve_merge_conflicts = value,
+        PromptKind::RenameBranch => settings.rename_branch = value,
+        PromptKind::CommitGeneration => settings.commit_generation = value,
+        PromptKind::TestFixing => settings.test_fixing = value,
+        PromptKind::RefactorStyle => settings.refactor_style = value,
+        PromptKind::SetupScript => settings.setup_script = value,
+        PromptKind::RunScript => settings.run_script = value,
+    }
 }
 
 fn refresh_repository_select(
@@ -1597,27 +2220,68 @@ fn refresh_repository_select(
     }
 }
 
-fn connect_entry_autosave(entry: &Entry, autosave: Rc<dyn Fn()>) {
-    entry.connect_changed(move |_| autosave());
-}
-
-fn connect_bool_autosave(
-    check: &CheckButton,
+fn connect_entry_autosave(
+    entry: &Entry,
     field: &'static str,
-    bool_edits: Rc<RefCell<HashSet<&'static str>>>,
+    field_edits: Rc<RefCell<HashSet<&'static str>>>,
     loading_settings: Rc<RefCell<bool>>,
     autosave: Rc<dyn Fn()>,
 ) {
-    check.connect_toggled(move |_| {
+    entry.connect_changed(move |_| {
         if !*loading_settings.borrow() {
-            bool_edits.borrow_mut().insert(field);
+            field_edits.borrow_mut().insert(field);
         }
         autosave();
     });
 }
 
-fn connect_buffer_autosave(buffer: &gtk::TextBuffer, autosave: Rc<dyn Fn()>) {
-    buffer.connect_changed(move |_| autosave());
+fn connect_bool_autosave(
+    check: &CheckButton,
+    field: &'static str,
+    field_edits: Rc<RefCell<HashSet<&'static str>>>,
+    loading_settings: Rc<RefCell<bool>>,
+    autosave: Rc<dyn Fn()>,
+) {
+    check.connect_toggled(move |_| {
+        if !*loading_settings.borrow() {
+            field_edits.borrow_mut().insert(field);
+        }
+        autosave();
+    });
+}
+
+fn connect_buffer_autosave(
+    buffer: &gtk::TextBuffer,
+    field: &'static str,
+    field_edits: Rc<RefCell<HashSet<&'static str>>>,
+    loading_settings: Rc<RefCell<bool>>,
+    autosave: Rc<dyn Fn()>,
+) {
+    connect_buffer_autosave_with_edit(
+        buffer,
+        field,
+        field_edits,
+        loading_settings,
+        autosave,
+        || {},
+    );
+}
+
+fn connect_buffer_autosave_with_edit(
+    buffer: &gtk::TextBuffer,
+    field: &'static str,
+    field_edits: Rc<RefCell<HashSet<&'static str>>>,
+    loading_settings: Rc<RefCell<bool>>,
+    autosave: Rc<dyn Fn()>,
+    edited: impl Fn() + 'static,
+) {
+    buffer.connect_changed(move |_| {
+        if !*loading_settings.borrow() {
+            field_edits.borrow_mut().insert(field);
+            edited();
+        }
+        autosave();
+    });
 }
 
 fn optional_entry_text(entry: &Entry) -> Option<String> {
@@ -1676,6 +2340,499 @@ fn parse_text_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_scope_hides_project_selector_and_project_sections() {
+        assert!(!scope_uses_project_selector(SettingsUiScope::Shared));
+        let ids = settings_sections_for_scope(SettingsUiScope::Shared)
+            .into_iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "general",
+                "prompts",
+                "terminal",
+                "shortcuts",
+                "notifications"
+            ]
+        );
+    }
+
+    #[test]
+    fn local_scope_shows_only_project_dependent_sections() {
+        assert!(scope_uses_project_selector(SettingsUiScope::Local));
+        let ids = settings_sections_for_scope(SettingsUiScope::Local)
+            .into_iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["general", "prompts", "scripts", "git", "advanced"]
+        );
+    }
+
+    #[test]
+    fn shared_scope_general_groups_are_cross_project_defaults_only() {
+        assert_eq!(
+            general_group_ids_for_scope(SettingsUiScope::Shared),
+            vec!["privacy", "agents", "provider_platforms"]
+        );
+    }
+
+    #[test]
+    fn local_scope_general_groups_are_project_dependent_only() {
+        assert_eq!(
+            general_group_ids_for_scope(SettingsUiScope::Local),
+            vec!["project_behavior", "environment"]
+        );
+    }
+
+    #[test]
+    fn shared_scope_general_fields_exclude_project_values() {
+        assert_eq!(
+            general_field_ids_for_scope(SettingsUiScope::Shared),
+            vec![
+                "enterprise_privacy",
+                "claude_executable",
+                "codex_executable",
+                "default_agent",
+                "default_model",
+                "claude_provider",
+                "codex_provider",
+                "bedrock_region",
+                "vertex_project",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_scope_general_fields_exclude_app_wide_defaults() {
+        assert_eq!(
+            general_field_ids_for_scope(SettingsUiScope::Local),
+            vec!["spotlight_testing", "environment_variables"]
+        );
+    }
+
+    #[test]
+    fn local_settings_content_requires_a_selected_project() {
+        assert!(settings_content_enabled(SettingsUiScope::Shared, false));
+        assert!(!settings_content_enabled(SettingsUiScope::Local, false));
+        assert!(settings_content_enabled(SettingsUiScope::Local, true));
+    }
+
+    #[test]
+    fn local_without_project_replaces_editor_with_selection_state() {
+        assert_eq!(
+            settings_content_presentation(SettingsUiScope::Local, false),
+            SettingsContentPresentation::SelectProject
+        );
+        assert_eq!(
+            settings_content_presentation(SettingsUiScope::Local, true),
+            SettingsContentPresentation::Editor
+        );
+        assert_eq!(
+            settings_content_presentation(SettingsUiScope::Shared, false),
+            SettingsContentPresentation::Editor
+        );
+    }
+
+    #[test]
+    fn general_layout_specs_own_every_rendered_field_once() {
+        let specs = general_group_specs();
+        let fields = specs
+            .iter()
+            .flat_map(|spec| spec.rows.iter().flatten().copied())
+            .collect::<Vec<_>>();
+        let unique = fields.iter().copied().collect::<HashSet<_>>();
+
+        assert_eq!(fields.len(), 11);
+        assert_eq!(unique.len(), fields.len());
+        assert_eq!(
+            fields
+                .into_iter()
+                .map(GeneralSettingField::id)
+                .collect::<Vec<_>>(),
+            vec![
+                "enterprise_privacy",
+                "claude_executable",
+                "codex_executable",
+                "default_agent",
+                "default_model",
+                "claude_provider",
+                "codex_provider",
+                "bedrock_region",
+                "vertex_project",
+                "spotlight_testing",
+                "environment_variables",
+            ]
+        );
+    }
+
+    #[test]
+    fn scope_copy_describes_the_active_target() {
+        assert_eq!(
+            scope_copy(SettingsUiScope::Shared),
+            "Shared: Defaults used by every Archductor project on this machine."
+        );
+        assert_eq!(
+            scope_copy(SettingsUiScope::Local),
+            "Local: Overrides for the selected project and its workspaces."
+        );
+    }
+
+    #[test]
+    fn local_inherited_prompt_is_not_copied_into_overrides_until_edited() {
+        assert_eq!(
+            setting_for_save(false, None::<String>, Some("Inherited".to_owned())),
+            None
+        );
+        assert_eq!(
+            setting_for_save(true, None::<String>, Some("Override".to_owned())),
+            Some("Override".to_owned())
+        );
+        assert_eq!(
+            setting_for_save(true, Some("Override".to_owned()), None::<String>),
+            None
+        );
+    }
+
+    #[test]
+    fn local_unedited_effective_values_are_not_copied_into_overrides() {
+        assert_eq!(
+            setting_for_save(false, None::<String>, Some("pnpm dev".to_owned())),
+            None,
+            "unedited inherited script values must stay absent from Local overrides"
+        );
+        assert_eq!(
+            setting_for_save(false, None::<u32>, Some(5000)),
+            None,
+            "unedited inherited view values must stay absent from Local overrides"
+        );
+        assert_eq!(
+            setting_for_save(true, None::<String>, Some("codex".to_owned())),
+            Some("codex".to_owned()),
+            "edited Local-only values should still write overrides"
+        );
+    }
+
+    #[test]
+    fn dirty_empty_collection_fields_are_forwarded_to_settings_save() {
+        let edits = HashSet::from([
+            "file_globs",
+            "environment",
+            "command_presets",
+            "notifications",
+            "customization",
+        ]);
+        let intent = collection_intent_for_settings_save(
+            &edits,
+            &RepositorySettings::default(),
+            r#"
+[customization.naming]
+pr_body_sections = []
+
+[customization.view]
+colors = {}
+"#,
+            r#"
+[customization.naming]
+pr_body_sections = []
+
+[customization.view]
+colors = {}
+"#,
+        )
+        .unwrap();
+
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::FileIncludeGlobs));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::EnvironmentVariables));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::CommandPalettePresets));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::NotificationRules));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::PrBodySections));
+        assert!(intent
+            .explicit_empty
+            .contains(&SettingsCollectionField::ViewColors));
+        assert!(collection_intent_for_settings_save(
+            &HashSet::new(),
+            &RepositorySettings::default(),
+            "",
+            "",
+        )
+        .unwrap()
+        .explicit_empty
+        .is_empty());
+    }
+
+    #[test]
+    fn unrelated_advanced_scalar_edit_preserves_existing_empty_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".archductor")).unwrap();
+        std::fs::write(
+            temp.path().join(".archductor/settings.toml"),
+            r#"
+[customization.view]
+notification_rules = ["checks_failed"]
+"#,
+        )
+        .unwrap();
+        archductor_core::settings::save_repository_settings_from_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            r#"
+[customization.view]
+theme = "dark"
+notification_rules = []
+"#,
+        )
+        .unwrap();
+        let original = archductor_core::settings::repository_customization_settings_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+        )
+        .unwrap();
+        assert!(original.contains("notification_rules = []"));
+        let edited = original.replace("theme = \"dark\"", "theme = \"light\"");
+        let mut settings = archductor_core::settings::load_repository_settings_for_layer(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+        )
+        .unwrap();
+        settings.customization = customization_settings_from_toml(&edited).unwrap();
+        let intent = collection_intent_for_settings_save(
+            &HashSet::from(["customization"]),
+            &settings,
+            &edited,
+            &original,
+        )
+        .unwrap();
+
+        save_repository_settings_with_collection_intent(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            &settings,
+            &intent.explicit_empty,
+            &intent.unset,
+        )
+        .unwrap();
+
+        let saved =
+            std::fs::read_to_string(temp.path().join(".archductor/settings.local.toml")).unwrap();
+        assert!(saved.contains("notification_rules = []"));
+        let effective = archductor_core::settings::load_repository_settings(temp.path()).unwrap();
+        assert!(effective.customization.view.notification_rules.is_empty());
+        assert_eq!(effective.customization.view.theme.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn advanced_toml_removal_unsets_prior_collection_markers() {
+        let settings = RepositorySettings::default();
+        let original = r#"
+[customization]
+agent_profiles = {}
+
+[customization.naming]
+pr_body_sections = []
+
+[customization.automation]
+required_local_files = []
+
+[customization.view]
+colors = {}
+dashboard_columns = []
+notification_rules = []
+command_palette_presets = []
+"#;
+        let intent = collection_intent_for_settings_save(
+            &HashSet::from(["customization"]),
+            &settings,
+            "",
+            original,
+        )
+        .unwrap();
+
+        assert!(intent.explicit_empty.is_empty());
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::AgentProfiles));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::PrBodySections));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::RequiredLocalFiles));
+        assert!(intent.unset.contains(&SettingsCollectionField::ViewColors));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::DashboardColumns));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::NotificationRules));
+        assert!(intent
+            .unset
+            .contains(&SettingsCollectionField::CommandPalettePresets));
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".archductor")).unwrap();
+        std::fs::write(
+            temp.path().join(".archductor/settings.toml"),
+            r##"
+[customization]
+agent_profiles = { default = { mcp_servers = ["github"] } }
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.view]
+colors = { accent = "#5b9dff" }
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+"##,
+        )
+        .unwrap();
+        archductor_core::settings::save_repository_settings_from_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            original,
+        )
+        .unwrap();
+        save_repository_settings_with_collection_intent(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            &settings,
+            &intent.explicit_empty,
+            &intent.unset,
+        )
+        .unwrap();
+
+        let saved =
+            std::fs::read_to_string(temp.path().join(".archductor/settings.local.toml")).unwrap();
+        for removed in [
+            "agent_profiles",
+            "pr_body_sections",
+            "required_local_files",
+            "colors =",
+            "dashboard_columns",
+            "notification_rules",
+            "command_palette_presets",
+        ] {
+            assert!(!saved.contains(removed), "{removed} remained in:\n{saved}");
+        }
+        let effective = archductor_core::settings::load_repository_settings(temp.path()).unwrap();
+        assert_eq!(
+            effective.customization.view.notification_rules,
+            ["checks_failed"]
+        );
+        assert_eq!(effective.customization.view.colors["accent"], "#5b9dff");
+        assert_eq!(effective.customization.naming.pr_body_sections, ["Summary"]);
+    }
+
+    #[test]
+    fn invalid_advanced_toml_blocks_scope_change_and_preserves_dirty_edit() {
+        let dirty_toml = String::from("[view\ntheme = \"dark\"");
+        let mut scope = SettingsUiScope::Shared;
+
+        let changed = apply_settings_navigation(&mut scope, SettingsUiScope::Local, || {
+            customization_settings_from_toml(&dirty_toml).is_ok()
+        });
+
+        assert!(!changed);
+        assert_eq!(scope, SettingsUiScope::Shared);
+        assert_eq!(dirty_toml, "[view\ntheme = \"dark\"");
+    }
+
+    #[test]
+    fn invalid_environment_blocks_section_change_and_preserves_dirty_edit() {
+        let dirty_environment = String::from("NOT KEY=value");
+        let mut section = String::from("general");
+
+        let changed = apply_settings_navigation(&mut section, "advanced".to_owned(), || {
+            parse_environment_lines(&dirty_environment).is_ok()
+        });
+
+        assert!(!changed);
+        assert_eq!(section, "general");
+        assert_eq!(dirty_environment, "NOT KEY=value");
+    }
+
+    #[test]
+    fn persistence_failure_blocks_project_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "file").unwrap();
+        let settings_path = blocked_parent.join("settings.toml");
+        let mut project = String::from("alpha");
+
+        let changed = apply_settings_navigation(&mut project, "bravo".to_owned(), || {
+            archductor_core::settings::save_app_shared_settings(
+                &settings_path,
+                &RepositorySettings::default(),
+            )
+            .is_ok()
+        });
+
+        assert!(!changed);
+        assert_eq!(project, "alpha");
+    }
+
+    #[test]
+    fn recover_defaults_removes_prior_empty_collection_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        archductor_core::settings::save_repository_settings_from_toml(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            r#"
+file_include_globs = ""
+environment_variables = {}
+
+[customization.view]
+colors = {}
+notification_rules = []
+"#,
+        )
+        .unwrap();
+
+        save_recovered_settings_for_layer(
+            temp.path(),
+            SettingsLayer::LocalOverride,
+            &RepositorySettings::default(),
+        )
+        .unwrap();
+
+        let saved =
+            std::fs::read_to_string(temp.path().join(".archductor/settings.local.toml")).unwrap();
+        assert!(!saved.contains("file_include_globs"));
+        assert!(!saved.contains("environment_variables"));
+        assert!(!saved.contains("colors ="));
+        assert!(!saved.contains("notification_rules"));
+    }
+
+    #[test]
+    fn failed_forced_autosave_keeps_its_original_target_for_retry() {
+        let mut pending = Some(SettingsSaveTarget::Local("alpha".to_owned()));
+
+        assert!(!flush_autosave_target(&mut pending, |_| false));
+        assert_eq!(pending, Some(SettingsSaveTarget::Local("alpha".to_owned())));
+        assert!(flush_autosave_target(&mut pending, |target| {
+            target == SettingsSaveTarget::Local("alpha".to_owned())
+        }));
+        assert_eq!(pending, None);
+    }
 
     #[test]
     fn settings_sections_keep_expected_order() {

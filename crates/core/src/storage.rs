@@ -195,6 +195,7 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           provider_subtype TEXT,
           provider_sequence INTEGER,
           received_sequence INTEGER NOT NULL,
+          timeline_seq INTEGER,
           occurred_at_ms INTEGER NOT NULL,
           normalized_payload_json TEXT NOT NULL,
           raw_json TEXT NOT NULL,
@@ -242,6 +243,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           summary TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS workspace_ui_state (
+          workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+          changes_scope TEXT,
+          updated_at TEXT NOT NULL
+        );
         ",
     )?;
     remove_chat_events_exact_unique_constraint(conn)?;
@@ -280,6 +287,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "workspaces",
         "agent_metadata_applied_at",
         "ALTER TABLE workspaces ADD COLUMN agent_metadata_applied_at TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "provider_events",
+        "timeline_seq",
+        "ALTER TABLE provider_events ADD COLUMN timeline_seq INTEGER",
     )?;
     Ok(())
 }

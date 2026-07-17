@@ -18,6 +18,27 @@ pub enum ArchcarInputKind {
     ControlCommand,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchcarInputDelivery {
+    #[default]
+    Auto,
+    Immediate,
+}
+
+impl ArchcarInputDelivery {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Immediate => "immediate",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArchcarRequest {
@@ -43,6 +64,11 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         visible_input: Option<String>,
         kind: ArchcarInputKind,
+        #[serde(default, skip_serializing_if = "ArchcarInputDelivery::is_auto")]
+        delivery: ArchcarInputDelivery,
+    },
+    InterruptTurn {
+        session_id: i64,
     },
     SetSessionModel {
         session_id: i64,
@@ -149,11 +175,16 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             input,
             visible_input: _,
             kind,
+            delivery,
         } => format!(
-            "send_input session_id={session_id} kind={} chars={}",
+            "send_input session_id={session_id} kind={} delivery={} chars={}",
             input_kind_label(kind),
+            delivery.as_str(),
             input.chars().count()
         ),
+        ArchcarRequest::InterruptTurn { session_id } => {
+            format!("interrupt_turn session_id={session_id}")
+        }
         ArchcarRequest::SetSessionModel { session_id, model } => format!(
             "set_session_model session_id={session_id} model={}",
             if model
@@ -246,6 +277,14 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             session_id,
             thread_id,
         } => format!("session_ready session_id={session_id} thread_id={thread_id}"),
+        ArchcarEvent::TurnCompleted {
+            session_id,
+            thread_id,
+            status,
+        } => format!(
+            "turn_completed session_id={session_id} thread_id={thread_id} status={}",
+            status.as_deref().unwrap_or("unknown")
+        ),
         ArchcarEvent::SessionScreenUpdated { session_id } => {
             format!("session_screen_updated session_id={session_id}")
         }
@@ -301,6 +340,12 @@ pub enum ArchcarEvent {
         session_id: i64,
         thread_id: i64,
     },
+    TurnCompleted {
+        session_id: i64,
+        thread_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
     SessionScreenUpdated {
         session_id: i64,
     },
@@ -348,11 +393,36 @@ mod tests {
             input: "run tests".to_owned(),
             visible_input: None,
             kind: ArchcarInputKind::User,
+            delivery: ArchcarInputDelivery::Immediate,
         };
 
         assert_eq!(
             archcar_request_summary(&request),
-            "send_input session_id=9 kind=user chars=9"
+            "send_input session_id=9 kind=user delivery=immediate chars=9"
+        );
+    }
+
+    #[test]
+    fn send_input_delivery_defaults_to_auto_and_round_trips_immediate() {
+        let legacy = r#"{"type":"send_input","session_id":9,"input":"run tests","kind":"user"}"#;
+        let decoded: ArchcarRequest = serde_json::from_str(legacy).unwrap();
+        let ArchcarRequest::SendInput { delivery, .. } = decoded else {
+            panic!("expected send input");
+        };
+        assert_eq!(delivery, ArchcarInputDelivery::Auto);
+
+        let immediate = ArchcarRequest::SendInput {
+            session_id: 9,
+            input: "adjust course".to_owned(),
+            visible_input: None,
+            kind: ArchcarInputKind::User,
+            delivery: ArchcarInputDelivery::Immediate,
+        };
+        let json = serde_json::to_string(&immediate).unwrap();
+        assert!(json.contains("\"delivery\":\"immediate\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+            immediate
         );
     }
 
@@ -398,6 +468,20 @@ mod tests {
             archcar_request_summary(&request),
             "resize_session session_id=9 rows=33 cols=111"
         );
+    }
+
+    #[test]
+    fn request_summary_describes_and_round_trips_interrupt_turn() {
+        let request = ArchcarRequest::InterruptTurn { session_id: 9 };
+
+        assert_eq!(
+            archcar_request_summary(&request),
+            "interrupt_turn session_id=9"
+        );
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"interrupt_turn\""));
+        let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
     }
 
     #[test]
@@ -489,6 +573,20 @@ mod tests {
         assert_eq!(
             archcar_event_summary(&event),
             "session_ready session_id=11 thread_id=5"
+        );
+    }
+
+    #[test]
+    fn event_summary_describes_completed_turn_boundary() {
+        let event = ArchcarEvent::TurnCompleted {
+            session_id: 11,
+            thread_id: 5,
+            status: Some("cancelled".to_owned()),
+        };
+
+        assert_eq!(
+            archcar_event_summary(&event),
+            "turn_completed session_id=11 thread_id=5 status=cancelled"
         );
     }
 

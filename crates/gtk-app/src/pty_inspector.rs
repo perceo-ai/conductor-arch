@@ -126,7 +126,7 @@ pub(crate) fn build_pty_inspector_page(db_path: PathBuf) -> GBox {
 }
 
 fn load_session_inputs(db_path: PathBuf) -> anyhow::Result<Vec<InspectorSessionInput>> {
-    let store = WorkspaceStore::open(&db_path)?;
+    let store = WorkspaceStore::open_app(&db_path)?;
     let mut sessions = Vec::new();
     for status in store.list_status()? {
         for process in store.list_sessions(&status.workspace.name)? {

@@ -1,6 +1,7 @@
 # Archductor MVP Scope
 
-Archductor V1 is Linux-first and GUI-first. The MVP is the smallest product that
+Archductor V1 is desktop-first and GUI-first, with Linux as the primary target
+and native Windows as a preview target. The MVP is the smallest product that
 lets one developer coordinate parallel local coding-agent work without juggling
 many terminals.
 
@@ -28,6 +29,8 @@ many terminals.
 - Persist provider events, parsed session events, chat threads/messages,
   process records, and diagnostic logs.
 - Keep multiple sessions in one workspace separate from multiple workspaces.
+- Treat a chat turn as the agent work between one user message and the next;
+  one tool call or file write is only part of a turn.
 - Reconcile stale processes on restart.
 
 ### Review And PR Flow
@@ -54,12 +57,14 @@ many terminals.
   Linux build/package gates that match the announced channel.
 - Complete the manual GTK checklist on a real Linux desktop before public
   release.
+- Keep native Windows, glibc Linux, musl Linux, and representative distro GTK
+  compile gates green. Complete the Windows manual/package checklist before
+  promoting the Windows ZIP beyond preview.
 
 ## Out Of Scope For V1
 
 - Cloud sync, teams, hosted remote execution, or account model.
 - Remote/mobile control plane.
-- Native Windows packaging or process model.
 - Full terminal emulator replacement.
 - Full visual parity with upstream Conductor.
 - Unvalidated package channels.

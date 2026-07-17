@@ -255,7 +255,7 @@ pub(crate) fn build_app_sidebar(
 
             if let (Ok(repo_store), Ok(workspace_store)) = (
                 RepositoryStore::open(db_path_populate.clone()),
-                WorkspaceStore::open(db_path_populate.clone()),
+                WorkspaceStore::open_app(db_path_populate.clone()),
             ) {
                 let repositories = repo_store.list().unwrap_or_default();
                 let statuses = workspace_store.list_status().unwrap_or_default();
@@ -323,7 +323,7 @@ pub(crate) fn build_app_sidebar(
                                     let repo_name = repo_name.clone();
                                     let inserted_workspace_name = inserted_workspace_name.clone();
                                     move |progress| {
-                                        WorkspaceStore::open(db_path).and_then(|store| {
+                                        WorkspaceStore::open_app(db_path).and_then(|store| {
                                             store.create_with_progress(
                                                 CreateWorkspace {
                                                     repository_name: repo_name,
@@ -487,7 +487,7 @@ pub(crate) fn build_app_sidebar(
                     harness: None,
                 },
             );
-            let default_tab = WorkspaceStore::open(db_path_select.clone())
+            let default_tab = WorkspaceStore::open_app(db_path_select.clone())
                 .and_then(|store| store.workspace_view_defaults(&name))
                 .ok()
                 .and_then(|defaults| defaults.default_visible_tab)
@@ -820,7 +820,7 @@ fn attach_workspace_row_context_menu(
                         if new_name.is_empty() || new_name == workspace_name {
                             return Ok(());
                         }
-                        let workspace = WorkspaceStore::open(state.workspace_database_path())
+                        let workspace = WorkspaceStore::open_app(state.workspace_database_path())
                             .and_then(|store| store.rename(&workspace_name, &new_name))
                             .map_err(|err| format!("{err:#}"))?;
                         state.rename_workspace_in_navigation(&workspace_name, &workspace.name);
@@ -888,7 +888,7 @@ fn attach_workspace_row_context_menu(
                                 let workspace_name = workspace_name.clone();
                                 let new_name = new_name.clone();
                                 move || {
-                                    WorkspaceStore::open(db_path)
+                                    WorkspaceStore::open_app(db_path)
                                         .and_then(|store| {
                                             store.duplicate(&workspace_name, &new_name, None)
                                         })
@@ -1001,7 +1001,7 @@ fn attach_workspace_row_context_menu(
                                     let db_path = state.workspace_database_path().to_path_buf();
                                     let workspace_name = workspace_name.clone();
                                     move || {
-	                                        WorkspaceStore::open(db_path).and_then(|store| {
+	                                        WorkspaceStore::open_app(db_path).and_then(|store| {
 	                                            store.delete(
 	                                                &workspace_name,
 	                                                force_delete_workspace,
@@ -1038,7 +1038,7 @@ fn attach_workspace_row_context_menu(
                                             state.workspace_database_path().to_path_buf();
                                         std::thread::spawn(move || {
                                             if let Err(err) =
-                                                WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                                WorkspaceStore::open_app(db_cleanup).and_then(|store| {
                                                     store.cleanup_deleted_workspace_artifacts(
                                                         &deleted,
                                                         true,
@@ -1075,7 +1075,7 @@ fn attach_workspace_row_context_menu(
                                 let db_path = state.workspace_database_path().to_path_buf();
                                 let workspace_name = workspace_name.clone();
                                 move || {
-                                    WorkspaceStore::open(db_path).and_then(|store| match action {
+                                    WorkspaceStore::open_app(db_path).and_then(|store| match action {
                                         "archive" => {
                                             store.archive(&workspace_name, false).map(|_| ())
                                         }

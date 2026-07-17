@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::settings::RepositorySettings;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
     pub name: String,
@@ -26,37 +28,51 @@ pub struct McpStatus {
 }
 
 pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/root"));
     let settings = crate::settings::load_repository_settings(workspace_path).ok();
-    let codex_provider = settings
-        .as_ref()
-        .and_then(|settings| settings.providers.codex_provider.clone());
-    let claude_provider = settings
-        .as_ref()
-        .and_then(|settings| settings.providers.claude_provider.clone());
+    workspace_mcp_status_with_settings(workspace_path, settings.as_ref())
+}
+
+pub fn workspace_mcp_status_with_settings(
+    workspace_path: &Path,
+    settings: Option<&RepositorySettings>,
+) -> McpStatus {
+    let home = crate::platform::home_dir();
+    let codex_provider = settings.and_then(|settings| settings.providers.codex_provider.clone());
+    let claude_provider = settings.and_then(|settings| settings.providers.claude_provider.clone());
     let codex_executable = settings
-        .as_ref()
         .and_then(|settings| settings.providers.codex_executable_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("codex");
     let claude_executable = settings
-        .as_ref()
         .and_then(|settings| settings.providers.claude_code_executable_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("claude");
-    let codex_authenticated = is_codex_auth_present(codex_provider.as_deref());
-    let claude_authenticated = is_claude_auth_present(claude_provider.as_deref());
-    let cursor_authenticated = is_file_non_empty(home.join(".cursor/mcp.json").as_path());
+    let codex_authenticated = home
+        .as_ref()
+        .is_some_and(|_| is_codex_auth_present(codex_provider.as_deref()));
+    let claude_authenticated = home
+        .as_ref()
+        .is_some_and(|_| is_claude_auth_present(claude_provider.as_deref()));
+    let cursor_authenticated = home
+        .as_ref()
+        .is_some_and(|home| is_file_non_empty(home.join(".cursor/mcp.json").as_path()));
 
     McpStatus {
         workspace_path: workspace_path.to_path_buf(),
-        claude_user: read_claude_mcp(&home.join(".claude.json")),
+        claude_user: home
+            .as_ref()
+            .map(|home| read_claude_mcp(&home.join(".claude.json")))
+            .unwrap_or_default(),
         claude_project: read_json_mcp_servers(&workspace_path.join(".mcp.json")),
-        codex_user: read_codex_mcp(&home.join(".codex/config.toml")),
+        codex_user: home
+            .as_ref()
+            .map(|home| read_codex_mcp(&home.join(".codex/config.toml")))
+            .unwrap_or_default(),
         codex_project: read_codex_mcp(&workspace_path.join(".codex/config.toml")),
-        cursor_user: read_cursor_mcp(&home.join(".cursor/mcp.json")),
+        cursor_user: home
+            .as_ref()
+            .map(|home| read_cursor_mcp(&home.join(".cursor/mcp.json")))
+            .unwrap_or_default(),
         cursor_project: read_cursor_mcp(&workspace_path.join(".cursor/mcp.json")),
         codex_provider,
         claude_provider,
@@ -113,11 +129,7 @@ fn is_claude_auth_present(provider: Option<&str>) -> bool {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(command)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    crate::doctor::command_exists(command)
 }
 
 fn read_claude_mcp(path: &Path) -> Vec<McpServer> {

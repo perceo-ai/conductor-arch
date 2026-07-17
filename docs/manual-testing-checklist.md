@@ -22,8 +22,21 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Clone a Git repository from the Projects page.
 - [ ] Confirm the repository row shows path, remote/default branch metadata, and
   workspace parent.
-- [ ] Edit shared `.archductor/settings.toml` from Projects.
-- [ ] Edit local `.archductor/settings.local.toml` from Projects.
+- [ ] Open Settings on Shared and confirm it describes defaults used by every
+  Archductor project on this machine, works with no registered projects, and
+  hides the project selector.
+- [ ] Open Settings on Local and confirm it shows the project selector, limits
+  edits to the selected project and its workspaces, and replaces the editor
+  with a project-selection state when no project is selected.
+- [ ] Confirm effective settings resolve in this order: built-in defaults, app
+  Shared defaults, repository-committed settings (including prompt-pack
+  values), then Local project overrides. Confirm a repository or Local value
+  can explicitly clear an inherited Shared value where empty values are valid.
+- [ ] Export and import app Shared defaults with
+  `archductor settings export --output <file>` and
+  `archductor settings import <file>`.
+- [ ] Edit repository-committed `.archductor/settings.toml` from Projects.
+- [ ] Edit machine-local `.archductor/settings.local.toml` from Projects.
 - [ ] Export shared settings with
   `archductor repo settings <name> export --output <file>`.
 - [ ] Import that file back into shared and local settings with
@@ -36,6 +49,23 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   new workspace, general, continue work, summarize session, handoff, code
   review, create PR, fix errors, resolve conflicts, rename branch, commit
   generation, test fixing, refactor style, setup script, and run script.
+- [ ] In Local, confirm inherited prompt values remain visible with an
+  inheritance label, editing creates only the selected Local override, and
+  clearing an override restores the inherited effective value.
+- [ ] Confirm General agent instructions are included only with the first user
+  message in a new chat and remain hidden from the visible/audited user text.
+- [ ] Confirm configured prompts are appended to their surfaced actions:
+  Continue after merge (`continue_work`), Create PR (`create_pr`), Commit and
+  push (`commit_generation`), conflict/blocker resolution
+  (`resolve_merge_conflicts`, plus `fix_errors` only for failed checks), setup
+  and run assistants (`setup_script`, `run_script`), review staging
+  (`code_review`), and local/PR check fixing (`test_fixing`).
+- [ ] Treat `new_workspace`, `summarize_session`, `handoff`, `rename_branch`,
+  and `refactor_style` as editable inherited defaults without dedicated
+  surfaced actions; do not claim those action routes are implemented.
+- [ ] After saving Shared or Local prompt changes, confirm existing live
+  workspace `.context/PROMPTS.md` snapshots refresh without rewriting
+  `brief.md`, `agent-notes.md`, or `todos.md`.
 - [ ] Confirm prompt pack active/version/path fields save to
   `.archductor/settings.toml` and that bootstrap creates
   `.archductor/prompt-packs/default.toml` when missing.
@@ -134,6 +164,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   state is available only from the previous GTK process memory.
 - [ ] Send input while Codex is still starting; confirm the composer defers the
   queued input and flushes it only after the selected session reports ready.
+- [ ] During active Codex generation, press Enter and confirm the message
+  remains queued until turn completion.
+- [ ] During active Codex generation, press Ctrl+Enter and confirm the user
+  message appears immediately and steers the active turn; if the turn finishes
+  concurrently, confirm a new turn starts without an error.
+- [ ] Hover queued-message actions while provider output streams and confirm
+  the queue row is not rebuilt and its hover state does not reset.
 - [ ] Select a saved or running agent session and confirm the session surface
   shows kind, status, runtime state, attachment state, harness metadata,
   command, event counts, and labeled transcript events for user input, review
@@ -270,8 +307,22 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 ## History And Navigation
 
 - [ ] Sidebar search finds repositories and workspaces.
-- [ ] Dashboard groups active and archived workspaces.
-- [ ] History shows archived workspaces.
+- [ ] Dashboard uses Ready, Running, Review, and Archived columns; confirm an
+  archived workspace wins Archived, an active open-PR workspace uses Review, a
+  live run/session uses Running, and other workspaces use Ready.
+- [ ] Dashboard includes All projects plus every registered project, including
+  projects with no workspaces, and preserves a still-valid project filter.
+- [ ] Activate a Dashboard workspace card by pointer and keyboard and confirm it
+  opens that workspace on Chats after refreshing its preferences and detail.
+- [ ] History opens on Workspaces, provides All/Active/Archived workspace
+  filters, shows labeled workspace details, and offers Open Workspace only for
+  non-archived workspaces.
+- [ ] Switch History to Chats and confirm saved Archductor sessions and
+  available imported Conductor chats can be selected to show provenance and a
+  transcript with customer-facing role labels.
+- [ ] Confirm Settings Shared/Local tabs, Dashboard project tabs, History
+  Workspaces/Chats tabs, and History workspace filters reuse the same close-free,
+  horizontally scrollable tab UI as workspace chat tabs.
 - [ ] Workspace Timeline tab shows creation, branch changes, session
   start/stop, PR creation, archive/restore/delete, push, and check refresh
   events in timestamp order.
@@ -304,7 +355,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Set `customization.workspace_defaults.default_visible_tab = "checks"` and
   confirm opening/selecting that workspace lands on Checks when no explicit tab
   is passed.
-- [ ] Set `customization.view.theme = "light"`, `accent_color = "green"`, and
+- [ ] Set `customization.view.theme = "light"`, `accent_color = "blue"`, and
   `density = "compact"` and confirm selecting the workspace changes the GTK
   stylesheet.
 - [ ] Set `customization.view.keybindings = "vim"` and confirm Ctrl+P opens the
@@ -355,3 +406,23 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Website build for the Linux product subset of `perceo.ai` succeeds and
   publishes matching release downloads, install instructions, supported targets,
   known limits, and GitHub release links.
+
+## Windows Preview Smoke
+
+- [ ] Windows CI builds all workspace targets with MSYS2 UCRT64 GTK4 and
+  libadwaita.
+- [ ] Extract `archductor-<version>-windows-x86_64.zip` on a clean Windows
+  machine and launch `archductor-gtk.exe` without MSYS2 on `PATH`.
+- [ ] Run `archductor.exe doctor`; confirm native Windows/AppData paths and
+  Git, GitHub CLI, SSH, and provider detection.
+- [ ] Add and clone a repository, create a Git worktree workspace, and confirm
+  Windows paths with spaces work.
+- [ ] Run a one-shot command and setup/run scripts through `cmd.exe`; start a
+  Shell, Codex, and Claude PTY session and send input.
+- [ ] Stop runtime/session process trees and confirm no child processes remain.
+- [ ] Quit and relaunch the GTK app; confirm archcar reconnects through its
+  per-user loopback endpoint and persisted state reloads.
+- [ ] Open a workspace folder, external URL, and Windows Terminal session from
+  GTK/CLI controls.
+- [ ] Verify `SHA256SUMS-windows.txt`, replace an older extracted preview with
+  the new bundle, and repeat GUI/CLI launch smoke.

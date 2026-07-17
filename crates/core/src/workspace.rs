@@ -25,8 +25,8 @@ use crate::session_pipeline::{
 };
 use crate::session_state::AgentSessionState;
 use crate::settings::{
-    ensure_repository_config, gitignore_pattern_key, load_repository_settings,
-    save_local_default_agent_provider, RepositorySettings,
+    ensure_repository_config, gitignore_pattern_key, load_effective_repository_settings,
+    load_repository_settings, save_local_default_agent_provider, PromptKind, RepositorySettings,
 };
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
@@ -41,6 +41,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -70,206 +72,206 @@ const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
 const WORKSPACE_PORT_START: u16 = 42000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
-    "berlin",
-    "tokyo",
-    "helsinki",
-    "lisbon",
-    "nairobi",
-    "seoul",
-    "oslo",
-    "kyoto",
-    "zurich",
-    "sydney",
-    "dublin",
-    "vancouver",
-    "london",
-    "paris",
-    "rome",
-    "madrid",
-    "barcelona",
-    "amsterdam",
-    "vienna",
-    "prague",
-    "budapest",
-    "athens",
-    "istanbul",
-    "copenhagen",
-    "stockholm",
-    "edinburgh",
-    "glasgow",
-    "manchester",
-    "liverpool",
-    "birmingham",
-    "brussels",
-    "antwerp",
-    "rotterdam",
-    "hamburg",
-    "munich",
-    "frankfurt",
-    "cologne",
-    "milan",
-    "naples",
-    "florence",
-    "venice",
-    "turin",
-    "bologna",
-    "palermo",
-    "valencia",
-    "seville",
-    "granada",
-    "malaga",
-    "porto",
-    "warsaw",
-    "krakow",
-    "wroclaw",
-    "gdansk",
-    "bergen",
-    "reykjavik",
-    "tallinn",
-    "riga",
-    "vilnius",
-    "ljubljana",
-    "zagreb",
-    "dubrovnik",
-    "split",
-    "belgrade",
-    "sarajevo",
-    "skopje",
-    "sofia",
-    "bucharest",
-    "cluj-napoca",
-    "chisinau",
-    "tirana",
-    "ankara",
-    "izmir",
-    "antalya",
-    "tbilisi",
-    "yerevan",
-    "baku",
-    "jerusalem",
-    "tel-aviv",
-    "haifa",
-    "beirut",
-    "amman",
-    "cairo",
-    "alexandria",
-    "casablanca",
-    "marrakesh",
-    "rabat",
-    "fes",
-    "tunis",
-    "algiers",
-    "lagos",
-    "accra",
-    "dakar",
-    "abidjan",
-    "addis-ababa",
-    "kampala",
-    "kigali",
-    "dar-es-salaam",
-    "zanzibar",
-    "johannesburg",
-    "cape-town",
-    "durban",
-    "pretoria",
-    "gaborone",
-    "windhoek",
-    "lusaka",
-    "harare",
-    "maputo",
-    "luanda",
-    "dubai",
-    "abu-dhabi",
-    "doha",
-    "riyadh",
-    "jeddah",
-    "muscat",
-    "manama",
-    "kuwait-city",
-    "tehran",
-    "shiraz",
-    "isfahan",
-    "karachi",
-    "lahore",
-    "islamabad",
-    "delhi",
-    "mumbai",
-    "bangalore",
-    "kolkata",
-    "chennai",
-    "hyderabad",
-    "pune",
-    "jaipur",
-    "udaipur",
-    "varanasi",
-    "agra",
-    "kochi",
-    "goa",
-    "colombo",
-    "kathmandu",
-    "thimphu",
-    "dhaka",
-    "yangon",
-    "bangkok",
-    "chiang-mai",
-    "phuket",
-    "hanoi",
-    "ho-chi-minh-city",
-    "hoi-an",
-    "da-nang",
-    "singapore",
-    "kuala-lumpur",
-    "penang",
-    "jakarta",
-    "bandung",
-    "yogyakarta",
-    "bali",
-    "surabaya",
-    "manila",
-    "cebu",
-    "davao",
-    "taipei",
-    "kaohsiung",
-    "hong-kong",
-    "macau",
-    "shanghai",
-    "beijing",
-    "guangzhou",
-    "shenzhen",
-    "chengdu",
-    "chongqing",
-    "xian",
-    "hangzhou",
-    "suzhou",
-    "nanjing",
-    "wuhan",
-    "qingdao",
-    "tianjin",
-    "osaka",
-    "nara",
-    "kobe",
-    "fukuoka",
-    "sapporo",
-    "hiroshima",
-    "nagoya",
-    "busan",
-    "incheon",
-    "jeju",
-    "ulaanbaatar",
-    "perth",
-    "melbourne",
-    "brisbane",
-    "adelaide",
-    "auckland",
-    "wellington",
-    "queenstown",
-    "christchurch",
-    "suva",
-    "honolulu",
-    "seattle",
-    "portland",
-    "san-francisco",
-    "los-angeles",
+    "arch",
+    "debian",
+    "ubuntu",
+    "fedora",
+    "nixos",
+    "gentoo",
+    "alpine",
+    "void",
+    "opensuse",
+    "mageia",
+    "slackware",
+    "endeavouros",
+    "manjaro",
+    "pop-os",
+    "mint",
+    "kali",
+    "parrot",
+    "qubes",
+    "guix",
+    "solus",
+    "zorin",
+    "elementary",
+    "raspbian",
+    "rocky",
+    "alma",
+    "centos",
+    "redhat",
+    "artix",
+    "devuan",
+    "puppy",
+    "tails",
+    "bedrock",
+    "clearlinux",
+    "postmarketos",
+    "asahi",
+    "steamos",
+    "chimera",
+    "serpent",
+    "vanilla-os",
+    "blendos",
+    "garuda",
+    "kaos",
+    "antix",
+    "bunsenlabs",
+    "crux",
+    "porteus",
+    "tinycore",
+    "knoppix",
+    "calculate",
+    "sabayon",
+    "tux",
+    "gnu",
+    "beastie",
+    "puffy",
+    "ferris",
+    "konqi",
+    "geeko",
+    "wilber",
+    "xue",
+    "glenda",
+    "duke",
+    "mozilla",
+    "octocat",
+    "gitlab-tanuki",
+    "docker-whale",
+    "postgres-elephant",
+    "python-snake",
+    "rust-crab",
+    "go-gopher",
+    "php-elephant",
+    "vim",
+    "neovim",
+    "emacs",
+    "nano",
+    "helix",
+    "kakoune",
+    "zellij",
+    "tmux",
+    "screen",
+    "bash",
+    "zsh",
+    "fish",
+    "nushell",
+    "elvish",
+    "starship",
+    "git",
+    "mercurial",
+    "fossil",
+    "subversion",
+    "curl",
+    "wget",
+    "rsync",
+    "ssh",
+    "gpg",
+    "jq",
+    "sed",
+    "awk",
+    "grep",
+    "ripgrep",
+    "fd",
+    "bat",
+    "exa",
+    "eza",
+    "fzf",
+    "make",
+    "cmake",
+    "ninja",
+    "meson",
+    "gcc",
+    "clang",
+    "gdb",
+    "lldb",
+    "valgrind",
+    "strace",
+    "ltrace",
+    "htop",
+    "btop",
+    "tree",
+    "less",
+    "manpage",
+    "wayland",
+    "xorg",
+    "gnome",
+    "kde",
+    "plasma",
+    "xfce",
+    "mate",
+    "cinnamon",
+    "sway",
+    "hyprland",
+    "i3",
+    "awesome",
+    "river",
+    "labwc",
+    "weston",
+    "wlroots",
+    "picom",
+    "rofi",
+    "wofi",
+    "dunst",
+    "foot",
+    "kitty",
+    "alacritty",
+    "wezterm",
+    "konsole",
+    "nautilus",
+    "dolphin",
+    "thunar",
+    "nemo",
+    "cosmic",
+    "postgres",
+    "sqlite",
+    "mariadb",
+    "redis",
+    "valkey",
+    "nginx",
+    "apache",
+    "caddy",
+    "traefik",
+    "podman",
+    "docker",
+    "kubernetes",
+    "k3s",
+    "nomad",
+    "consul",
+    "ansible",
+    "terraform",
+    "opentofu",
+    "vagrant",
+    "flatpak",
+    "snap",
+    "appimage",
+    "systemd",
+    "openrc",
+    "pipewire",
+    "pulseaudio",
+    "dbus",
+    "mesa",
+    "vulkan",
+    "ffmpeg",
+    "kernel-panic",
+    "segfault",
+    "core-dump",
+    "permission-denied",
+    "bus-error",
+    "broken-pipe",
+    "null-pointer",
+    "magic-smoke",
+    "dependency-hell",
+    "merge-conflict",
+    "dangling-symlink",
+    "zombie-process",
+    "fork-bomb",
+    "cache-miss",
+    "bit-flip",
+    "race-condition",
+    "off-by-one",
+    "works-on-my-machine",
+    "read-the-manpage",
+    "sudo-make-me-a-sandwich",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,6 +901,22 @@ pub struct DiffFileSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFileChangeSummary {
+    pub provider_turn_id: String,
+    pub label: String,
+    pub occurred_at_ms: u64,
+    pub chat_thread_id: Option<i64>,
+    pub files: Vec<DiffFileSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFileChangeSummary {
+    pub commit: String,
+    pub subject: String,
+    pub files: Vec<DiffFileSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffHunkSummary {
     pub index: usize,
     pub header: String,
@@ -1012,6 +1030,7 @@ pub struct ChecksSummary {
     pub open_todos: usize,
     pub total_todos: usize,
     pub branch_push_state: Option<BranchPushState>,
+    pub source_branch_ahead: usize,
     pub open_review_comments: usize,
     pub conflicting_workspaces: Vec<(String, Vec<String>)>,
 }
@@ -1106,6 +1125,7 @@ pub struct WorkspaceStore {
     conn: Connection,
     db_path: PathBuf,
     logs_dir: PathBuf,
+    app_settings_path: Option<PathBuf>,
 }
 
 impl WorkspaceStore {
@@ -1119,6 +1139,31 @@ impl WorkspaceStore {
     }
 
     pub fn open_with_logs(path: impl AsRef<Path>, logs_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_logs_and_app_settings(path, logs_dir, None)
+    }
+
+    pub fn open_app(path: impl AsRef<Path>) -> Result<Self> {
+        let logs_dir = path
+            .as_ref()
+            .parent()
+            .map(|parent| parent.join("logs"))
+            .unwrap_or_else(|| PathBuf::from("logs"));
+        Self::open_app_with_logs(path, logs_dir)
+    }
+
+    pub fn open_app_with_logs(path: impl AsRef<Path>, logs_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_logs_and_app_settings(
+            path,
+            logs_dir,
+            Some(crate::paths::AppPaths::from_env().shared_settings_path()),
+        )
+    }
+
+    fn open_with_logs_and_app_settings(
+        path: impl AsRef<Path>,
+        logs_dir: impl AsRef<Path>,
+        app_settings_path: Option<PathBuf>,
+    ) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create data directory {}", parent.display()))?;
@@ -1131,9 +1176,17 @@ impl WorkspaceStore {
             conn,
             db_path,
             logs_dir: logs_dir.as_ref().to_path_buf(),
+            app_settings_path,
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    fn repository_settings(&self, root: &Path) -> Result<RepositorySettings> {
+        match self.app_settings_path.as_deref() {
+            Some(path) => load_effective_repository_settings(root, path),
+            None => load_repository_settings(root),
+        }
     }
 
     pub(crate) fn owns_process_log_path(&self, log_path: &Path) -> bool {
@@ -1151,7 +1204,7 @@ impl WorkspaceStore {
     ) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
         ensure_repository_config(&repository.root_path)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
@@ -1165,7 +1218,12 @@ impl WorkspaceStore {
             .unwrap_or(&repository.default_branch)
             .to_owned();
         let base_ref = if let Some(base_ref) = input.base_ref {
-            base_ref
+            resolve_source_base_ref(
+                &repository.root_path,
+                &repository.remote_name,
+                &base_ref,
+                remote_available,
+            )?
         } else if remote_available {
             sync_repository_default_branch(
                 &repository.root_path,
@@ -1231,7 +1289,7 @@ impl WorkspaceStore {
                 )
             })?;
             initialize_context_files(&workspace.path, &settings)?;
-            copy_included_ignored_files(&repository.root_path, &workspace.path)?;
+            copy_included_ignored_files(&repository.root_path, &workspace.path, &settings)?;
 
             let auto_setup = settings
                 .customization
@@ -1288,7 +1346,7 @@ impl WorkspaceStore {
 
     pub fn project_model(&self, name: &str) -> Result<ProjectModel> {
         let repository = self.load_repository(name)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let mut stmt = self
             .conn
             .prepare("SELECT id FROM workspaces WHERE repository_id = ?1 ORDER BY id")?;
@@ -1394,7 +1452,7 @@ impl WorkspaceStore {
                 None
             };
             let (diff_additions, diff_deletions) = if workspace.status == "active" {
-                workspace_diff_stats_against_base(&workspace).unwrap_or_default()
+                workspace_diff_stats_against_head(&workspace).unwrap_or_default()
             } else {
                 (0, 0)
             };
@@ -1466,7 +1524,7 @@ impl WorkspaceStore {
         }
 
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let base = slugify(message);
         let workspace_name =
             self.unique_message_workspace_name(&repository, workspace.id, &base)?;
@@ -1569,7 +1627,7 @@ impl WorkspaceStore {
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
 
         self.stop_workspace_processes(workspace.id)?;
 
@@ -1704,6 +1762,10 @@ impl WorkspaceStore {
             [workspace_id],
         )?;
         self.conn.execute(
+            "DELETE FROM workspace_ui_state WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
             "DELETE FROM pull_requests WHERE workspace_id = ?1",
             [workspace_id],
         )?;
@@ -1749,8 +1811,8 @@ impl WorkspaceStore {
                     workspace.path.display()
                 )
             })?;
-            let settings = load_repository_settings(&repository.root_path)?;
-            copy_included_ignored_files(&repository.root_path, &workspace.path)?;
+            let settings = self.repository_settings(&repository.root_path)?;
+            copy_included_ignored_files(&repository.root_path, &workspace.path, &settings)?;
             initialize_context_files(&workspace.path, &settings)?;
         }
 
@@ -1802,7 +1864,7 @@ impl WorkspaceStore {
     pub fn run_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let Some(run) = &settings.scripts.run else {
             anyhow::bail!("workspace {name} has no scripts.run configured");
         };
@@ -1837,7 +1899,7 @@ impl WorkspaceStore {
     pub fn setup_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let Some(setup) = &settings.scripts.setup else {
             anyhow::bail!("workspace {name} has no scripts.setup configured");
         };
@@ -1860,14 +1922,14 @@ impl WorkspaceStore {
     pub fn configured_check_commands(&self, name: &str) -> Result<Vec<ConfiguredCheckCommand>> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         Ok(configured_check_commands_from_settings(&settings))
     }
 
     pub fn run_workspace_check(&self, name: &str, key: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let check = configured_check_commands_from_settings(&settings)
             .into_iter()
             .find(|check| check.key == key)
@@ -2456,14 +2518,12 @@ impl WorkspaceStore {
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let started_at = timestamp();
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        let output = crate::platform::shell_command(command)
             .current_dir(&cwd)
             .envs(env)
             .stdin(Stdio::null())
@@ -2485,7 +2545,7 @@ impl WorkspaceStore {
     pub fn spotlight_start(&self, name: &str) -> Result<SpotlightSession> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         anyhow::ensure!(
             settings.spotlight_testing.unwrap_or(false),
             "spotlight_testing must be enabled for this repository"
@@ -2866,6 +2926,13 @@ impl WorkspaceStore {
 
     pub fn set_workspace_base_ref(&self, name: &str, base_ref: &str) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let base_ref = resolve_source_base_ref(
+            &repository.root_path,
+            &repository.remote_name,
+            base_ref,
+            remote_exists(&repository.root_path, &repository.remote_name),
+        )?;
         let base_ref = base_ref.trim();
         validate_branch_name(base_ref)?;
         let commit_ref = format!("{base_ref}^{{commit}}");
@@ -3058,9 +3125,239 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
+    pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = workspace_base_ref(&workspace);
+        let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
+        let mut summaries = merge_diff_summaries(parse_diff_numstat(&diff));
+        let mut known_paths = summaries
+            .iter()
+            .map(|summary| summary.path.clone())
+            .collect::<BTreeSet<_>>();
+        let status = git_output(
+            &workspace.path,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        apply_diff_file_status(&mut summaries, &status);
+        for path in parse_untracked_status_paths(&status) {
+            if known_paths.contains(&path) || is_conductor_context_path(&path) {
+                continue;
+            }
+            let counts = untracked_file_counts(&workspace.path.join(&path))?;
+            known_paths.insert(path.clone());
+            summaries.push(DiffFileSummary {
+                path,
+                additions: Some(counts.0),
+                deletions: Some(0),
+                staged: false,
+                unstaged: false,
+                untracked: true,
+            });
+        }
+        summaries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(summaries)
+    }
+
+    pub fn turn_file_change_summaries(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<TurnFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        self.turn_file_change_summaries_for_workspace(workspace.id, None, None, limit)
+    }
+
+    pub fn last_turn_file_change_summary(
+        &self,
+        name: &str,
+        chat_thread_id: i64,
+    ) -> Result<Option<TurnFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let Some(user_message_id) = self.latest_user_message_id(chat_thread_id)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .turn_file_change_summaries_for_workspace(
+                workspace.id,
+                Some(chat_thread_id),
+                Some(user_message_id),
+                1,
+            )?
+            .into_iter()
+            .next())
+    }
+
+    fn latest_user_message_id(&self, chat_thread_id: i64) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT id
+                 FROM chat_messages
+                 WHERE thread_id = ?1 AND role = 'user'
+                 ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
+                 LIMIT 1",
+                [chat_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn turn_file_change_summaries_for_workspace(
+        &self,
+        workspace_id: i64,
+        chat_thread_id: Option<i64>,
+        user_message_id_filter: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<TurnFileChangeSummary>> {
+        let limit = limit.min(TURN_CHECKPOINT_DIFF_LIMIT);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT provider_turn_id,
+                    chat_thread_id,
+                    occurred_at_ms,
+                    kind,
+                    provider_subtype,
+                    normalized_payload_json,
+                    raw_json,
+                    COALESCE(timeline_seq, received_sequence) AS event_timeline_seq,
+                    (
+                        SELECT m.id
+                        FROM chat_messages m
+                        WHERE m.thread_id = provider_events.chat_thread_id
+                          AND m.role = 'user'
+                          AND COALESCE(m.timeline_seq, m.id) <= COALESCE(provider_events.timeline_seq, provider_events.received_sequence)
+                        ORDER BY COALESCE(m.timeline_seq, m.id) DESC, m.id DESC
+                        LIMIT 1
+                    ) AS user_message_id
+             FROM provider_events
+             WHERE workspace_id = ?1
+               AND (?2 IS NULL OR chat_thread_id = ?2)
+               AND phase = 'completed'
+               AND kind IN ('diff_file_change', 'file_system')
+             ORDER BY event_timeline_seq DESC, received_sequence DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![workspace_id, chat_thread_id], |row| {
+            let provider_turn_id: Option<String> = row.get(0)?;
+            let chat_thread_id: Option<i64> = row.get(1)?;
+            let occurred_at_ms: i64 = row.get(2)?;
+            let kind: String = row.get(3)?;
+            let provider_subtype: Option<String> = row.get(4)?;
+            let normalized_payload_json: String = row.get(5)?;
+            let raw_json: String = row.get(6)?;
+            let timeline_seq: i64 = row.get(7)?;
+            let user_message_id: Option<i64> = row.get(8)?;
+            Ok((
+                provider_turn_id,
+                chat_thread_id,
+                occurred_at_ms.max(0) as u64,
+                kind,
+                provider_subtype,
+                serde_json::from_str::<Value>(&normalized_payload_json).unwrap_or(Value::Null),
+                serde_json::from_str::<Value>(&raw_json).unwrap_or(Value::Null),
+                timeline_seq,
+                user_message_id,
+            ))
+        })?;
+
+        let mut turns = Vec::<TurnFileChangeSummary>::new();
+        let mut turn_index = BTreeMap::<String, usize>::new();
+        for row in rows {
+            let (
+                provider_turn_id,
+                chat_thread_id,
+                occurred_at_ms,
+                kind,
+                provider_subtype,
+                normalized_payload,
+                raw_json,
+                timeline_seq,
+                user_message_id,
+            ) = row?;
+            if user_message_id_filter.is_some() && user_message_id != user_message_id_filter {
+                continue;
+            }
+            let summaries = provider_file_change_summaries(
+                &kind,
+                provider_subtype.as_deref(),
+                &normalized_payload,
+                &raw_json,
+            );
+            if summaries.is_empty() {
+                continue;
+            }
+
+            let turn_key = match (chat_thread_id, user_message_id) {
+                (Some(thread_id), Some(message_id)) => {
+                    format!("thread:{thread_id}:user:{message_id}")
+                }
+                _ => provider_turn_id
+                    .clone()
+                    .unwrap_or_else(|| format!("event:{timeline_seq}")),
+            };
+
+            let index = if let Some(index) = turn_index.get(&turn_key).copied() {
+                index
+            } else {
+                if turns.len() >= limit {
+                    break;
+                }
+                let index = turns.len();
+                turn_index.insert(turn_key.clone(), index);
+                turns.push(TurnFileChangeSummary {
+                    label: format!("Turn {}", index + 1),
+                    provider_turn_id: turn_key,
+                    occurred_at_ms,
+                    chat_thread_id,
+                    files: Vec::new(),
+                });
+                index
+            };
+
+            let turn = &mut turns[index];
+            turn.occurred_at_ms = turn.occurred_at_ms.max(occurred_at_ms);
+            if turn.chat_thread_id.is_none() {
+                turn.chat_thread_id = chat_thread_id;
+            }
+            turn.files.extend(summaries);
+        }
+
+        for turn in &mut turns {
+            turn.files = merge_diff_summaries(std::mem::take(&mut turn.files));
+            turn.files.sort_by(|left, right| left.path.cmp(&right.path));
+        }
+        Ok(turns)
+    }
+
+    pub fn commit_file_change_summaries(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<CommitFileChangeSummary>> {
+        let workspace = self.get_by_name(name)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let max_count = format!("--max-count={limit}");
+        let range = format!("{}..HEAD", workspace.base_ref);
+        let output = git_output_dynamic(
+            &workspace.path,
+            &[
+                "log",
+                "--numstat",
+                "--format=format:%H%x1f%s",
+                max_count.as_str(),
+                range.as_str(),
+            ],
+        )?;
+        Ok(parse_commit_file_change_summaries(&output))
+    }
+
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
         let workspace = self.get_by_name(name)?;
-        workspace_diff_stats_against_base(&workspace)
+        workspace_diff_stats_against_head(&workspace)
     }
 
     pub fn workspace_base_ref(&self, name: &str) -> Result<String> {
@@ -3160,7 +3457,7 @@ impl WorkspaceStore {
     pub fn render_pull_request_template(&self, name: &str) -> Result<PullRequestTemplate> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let changed_files = self
             .changed_files(name)?
             .into_iter()
@@ -3280,7 +3577,7 @@ impl WorkspaceStore {
         )?;
         let title = extract_json_string_field(&output, "title")
             .unwrap_or_else(|| format!("issue-{issue_number}"));
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
 
         // Slugify title for branch name
         let slug = slugify(&title);
@@ -3360,7 +3657,7 @@ impl WorkspaceStore {
         let url = extract_json_string_field(&output, "url");
         let state =
             extract_json_string_field(&output, "state").unwrap_or_else(|| "open".to_owned());
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -3447,7 +3744,7 @@ impl WorkspaceStore {
         let prompt = prompt.trim();
         anyhow::ensure!(!prompt.is_empty(), "prompt is required");
         let repository = self.load_repository(repository_name)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -3512,7 +3809,7 @@ impl WorkspaceStore {
         anyhow::ensure!(!issue_id.is_empty(), "Linear issue id is required");
         let issue = fetch_linear_issue(issue_id)?;
         let repository = self.load_repository(repository_name)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -3598,7 +3895,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_checks_agent_prompt(&self, name: &str) -> Result<String> {
         let checks = self.pull_request_check_runs(name)?;
-        Ok(format_pull_request_checks_agent_prompt(name, &checks))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::TestFixing,
+            format_pull_request_checks_agent_prompt(name, &checks),
+        )
     }
 
     pub fn pull_request_review_state(&self, name: &str) -> Result<String> {
@@ -3609,7 +3910,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_review_agent_prompt(&self, name: &str) -> Result<String> {
         let review_state = self.pull_request_review_state(name)?;
-        Ok(format_pull_request_review_agent_prompt(name, &review_state))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_pull_request_review_agent_prompt(name, &review_state),
+        )
     }
 
     pub fn pull_request_readiness(&self, name: &str) -> Result<PullRequestReadiness> {
@@ -3648,7 +3953,11 @@ impl WorkspaceStore {
 
     pub fn pull_request_readiness_agent_prompt(&self, name: &str) -> Result<String> {
         let readiness = self.pull_request_readiness(name)?;
-        Ok(format_pull_request_readiness_agent_prompt(name, &readiness))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_pull_request_readiness_agent_prompt(name, &readiness),
+        )
     }
 
     fn pull_request_review_threads_by_id(
@@ -4025,7 +4334,24 @@ mutation($threadId: ID!) {{
             .into_iter()
             .filter(|comment| comment.status == "open")
             .collect::<Vec<_>>();
-        Ok(format_review_comments_agent_prompt(name, &comments))
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CodeReview,
+            format_review_comments_agent_prompt(name, &comments),
+        )
+    }
+
+    fn append_resolved_prompt(
+        &self,
+        workspace: &str,
+        kind: PromptKind,
+        mut prompt: String,
+    ) -> Result<String> {
+        if let Some(instructions) = self.resolved_prompt(workspace, kind)? {
+            prompt.push_str("\n\nRepository instructions:\n");
+            prompt.push_str(&instructions);
+        }
+        Ok(prompt)
     }
 
     pub fn resolve_review_comment(&self, id: i64) -> Result<ReviewComment> {
@@ -4469,7 +4795,12 @@ mutation($threadId: ID!) {{
 
     pub fn mcp_status(&self, name: &str) -> Result<crate::mcp::McpStatus> {
         let workspace = self.get_by_name(name)?;
-        Ok(crate::mcp::workspace_mcp_status(&workspace.path))
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        Ok(crate::mcp::workspace_mcp_status_with_settings(
+            &workspace.path,
+            Some(&settings),
+        ))
     }
 
     /// Returns other active workspaces in the same repository that have overlapping changed files.
@@ -4529,6 +4860,11 @@ mutation($threadId: ID!) {{
         } else {
             None
         };
+        let source_branch_ahead = if path_exists {
+            workspace_source_branch_ahead(&workspace)
+        } else {
+            0
+        };
         let comments = self.list_review_comments(name)?;
         let open_review_comments = comments.iter().filter(|c| c.status == "open").count();
         let conflicting_workspaces = if path_exists {
@@ -4547,6 +4883,7 @@ mutation($threadId: ID!) {{
             open_todos,
             total_todos: todos.len(),
             branch_push_state,
+            source_branch_ahead,
             open_review_comments,
             conflicting_workspaces,
         })
@@ -4627,7 +4964,7 @@ mutation($threadId: ID!) {{
     pub fn merge_pull_request(&self, name: &str, method: Option<&str>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let pr = self
             .pull_request_by_workspace_id(workspace.id)?
             .with_context(|| format!("no pull request recorded for workspace {name}"))?;
@@ -4718,7 +5055,7 @@ mutation($threadId: ID!) {{
         let merge_output = self.merge_pull_request(name, method)?;
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let archived_workspace = if settings.git.archive_on_merge.unwrap_or(false) {
             Some(self.archive(name, false)?)
         } else {
@@ -4733,7 +5070,7 @@ mutation($threadId: ID!) {{
     pub fn editor_launch(&self, name: &str, editor: &str) -> Result<SessionLaunch> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
@@ -4781,18 +5118,12 @@ mutation($threadId: ID!) {{
     ) -> Result<SessionLaunch> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         let (program, mut args) = match kind {
-            SessionKind::Shell => (
-                std::env::var_os("SHELL")
-                    .filter(|shell| !shell.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/bin/sh")),
-                Vec::new(),
-            ),
+            SessionKind::Shell => (crate::platform::shell_program(), Vec::new()),
             SessionKind::Codex => (
                 settings
                     .providers
@@ -5237,7 +5568,7 @@ mutation($threadId: ID!) {{
         let launch = self.session_launch_with_options(name, kind, harness)?;
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let command = shell_words(&launch.program, &launch.args);
         self.start_process(StartProcessInput {
             kind: ProcessKind::Session,
@@ -5318,7 +5649,7 @@ mutation($threadId: ID!) {{
     pub fn workspace_view_defaults(&self, name: &str) -> Result<WorkspaceViewDefaults> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         Ok(WorkspaceViewDefaults {
             default_visible_tab: settings
                 .customization
@@ -5349,7 +5680,71 @@ mutation($threadId: ID!) {{
     ) -> Result<crate::settings::RepositorySettings> {
         let workspace = self.get_by_name(workspace_name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        load_repository_settings(&repository.root_path)
+        self.repository_settings(&repository.root_path)
+    }
+
+    pub fn resolved_prompt(&self, workspace: &str, kind: PromptKind) -> Result<Option<String>> {
+        Ok(self
+            .workspace_repo_settings(workspace)?
+            .prompts
+            .as_ref()
+            .and_then(|prompts| prompts.get(kind))
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(ToOwned::to_owned))
+    }
+
+    pub fn refresh_repository_prompt_snapshots(&self, repository_id: i64) -> Result<usize> {
+        let repository = self.load_repository_by_id(repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
+             FROM workspaces WHERE repository_id = ?1 ORDER BY id",
+        )?;
+        let workspaces = stmt
+            .query_map([repository_id], row_to_workspace)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut refreshed = 0;
+        for workspace in &workspaces {
+            let Some(context) = ManagedPromptContext::open(&workspace.path)? else {
+                continue;
+            };
+            write_managed_prompt_snapshot_in_context(&context, &settings)?;
+            refreshed += 1;
+        }
+        Ok(refreshed)
+    }
+
+    pub fn workspace_changes_scope(&self, workspace_name: &str) -> Result<Option<String>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        self.conn
+            .query_row(
+                "SELECT changes_scope FROM workspace_ui_state WHERE workspace_id = ?1",
+                [workspace.id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .context("load workspace changes scope")
+    }
+
+    pub fn set_workspace_changes_scope(
+        &self,
+        workspace_name: &str,
+        scope: Option<&str>,
+    ) -> Result<()> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let scope = scope.map(str::trim).filter(|value| !value.is_empty());
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO workspace_ui_state (workspace_id, changes_scope, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace_id) DO UPDATE SET
+               changes_scope = excluded.changes_scope,
+               updated_at = excluded.updated_at",
+            params![workspace.id, scope, now],
+        )?;
+        Ok(())
     }
 
     pub fn create_chat_thread(
@@ -5605,7 +6000,7 @@ mutation($threadId: ID!) {{
 
     fn metadata_branch_name(&self, workspace: &Workspace, raw: &str) -> Result<String> {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = load_repository_settings(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
         let prefix = settings
             .customization
             .workspace_defaults
@@ -6641,10 +7036,8 @@ mutation($threadId: ID!) {{
         env.extend(self.linked_directory_env(workspace)?);
         env.extend(extra_env.iter().cloned());
 
-        let mut command = Command::new("sh");
+        let mut command = crate::platform::shell_command(script);
         command
-            .arg("-c")
-            .arg(script)
             .current_dir(&cwd)
             .envs(env)
             .stdin(Stdio::null())
@@ -7056,10 +7449,10 @@ fn chat_event_fields(event: &CodexTranscriptEvent) -> Result<ChatEventFields> {
 }
 
 fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<String>> {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = crate::platform::home_dir() else {
         return Ok(None);
     };
-    let root = PathBuf::from(home).join(".codex/sessions");
+    let root = home.join(".codex/sessions");
     if !root.exists() {
         return Ok(None);
     }
@@ -7542,23 +7935,179 @@ fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 }
 
 fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
-            let additions = parse_numstat_count(parts.next()?)?;
-            let deletions = parse_numstat_count(parts.next()?)?;
-            let path = parts.next()?.to_owned();
-            Some(DiffFileSummary {
+    output.lines().filter_map(parse_diff_numstat_line).collect()
+}
+
+fn parse_commit_file_change_summaries(output: &str) -> Vec<CommitFileChangeSummary> {
+    let mut commits = Vec::new();
+    let mut current: Option<CommitFileChangeSummary> = None;
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some((commit, subject)) = line.split_once('\u{1f}') {
+            if let Some(commit_summary) = current.take() {
+                commits.push(commit_summary);
+            }
+            current = Some(CommitFileChangeSummary {
+                commit: commit.to_owned(),
+                subject: subject.to_owned(),
+                files: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(summary) = parse_diff_numstat_line(line) {
+            if let Some(commit_summary) = current.as_mut() {
+                commit_summary.files.push(summary);
+            }
+        }
+    }
+    if let Some(commit_summary) = current {
+        commits.push(commit_summary);
+    }
+    for commit in &mut commits {
+        commit.files = merge_diff_summaries(std::mem::take(&mut commit.files));
+        commit
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    commits
+}
+
+fn parse_diff_numstat_line(line: &str) -> Option<DiffFileSummary> {
+    let mut parts = line.splitn(3, '\t');
+    let additions = parse_numstat_count(parts.next()?)?;
+    let deletions = parse_numstat_count(parts.next()?)?;
+    let path = parts.next()?.to_owned();
+    Some(DiffFileSummary {
+        path,
+        additions,
+        deletions,
+        staged: false,
+        unstaged: false,
+        untracked: false,
+    })
+}
+
+fn provider_file_change_summaries(
+    kind: &str,
+    provider_subtype: Option<&str>,
+    normalized_payload: &Value,
+    raw_json: &Value,
+) -> Vec<DiffFileSummary> {
+    let mut summaries = provider_raw_file_change_summaries(raw_json);
+    if summaries.is_empty() {
+        summaries = provider_normalized_file_change_summaries(normalized_payload);
+    }
+    if summaries.is_empty() && provider_event_is_file_write(kind, provider_subtype) {
+        if let Some(path) =
+            provider_event_path(normalized_payload).or_else(|| provider_event_path(raw_json))
+        {
+            summaries.push(DiffFileSummary {
                 path,
-                additions,
-                deletions,
+                additions: None,
+                deletions: None,
                 staged: false,
                 unstaged: false,
                 untracked: false,
-            })
+            });
+        }
+    }
+    summaries
+}
+
+fn provider_event_is_file_write(kind: &str, provider_subtype: Option<&str>) -> bool {
+    if kind == "diff_file_change" {
+        return true;
+    }
+    let subtype = provider_subtype.unwrap_or_default().to_ascii_lowercase();
+    kind == "file_system"
+        && ["write", "create", "patch", "edit"]
+            .iter()
+            .any(|needle| subtype.contains(needle))
+}
+
+fn provider_raw_file_change_summaries(raw_json: &Value) -> Vec<DiffFileSummary> {
+    raw_json
+        .pointer("/params/item/changes")
+        .or_else(|| raw_json.pointer("/item/changes"))
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .filter_map(|change| {
+                    let path = change.get("path").and_then(Value::as_str)?;
+                    let (additions, deletions) = change
+                        .get("diff")
+                        .and_then(Value::as_str)
+                        .map(count_patch_lines)
+                        .map(|(additions, deletions)| (Some(additions), Some(deletions)))
+                        .unwrap_or((None, None));
+                    Some(DiffFileSummary {
+                        path: path.to_owned(),
+                        additions,
+                        deletions,
+                        staged: false,
+                        unstaged: false,
+                        untracked: false,
+                    })
+                })
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
+}
+
+fn provider_normalized_file_change_summaries(normalized_payload: &Value) -> Vec<DiffFileSummary> {
+    normalized_payload
+        .get("body")
+        .and_then(Value::as_str)
+        .map(|body| {
+            body.lines()
+                .filter_map(|line| {
+                    let path = line.split_whitespace().last()?.trim();
+                    (!path.is_empty()).then(|| DiffFileSummary {
+                        path: path.to_owned(),
+                        additions: None,
+                        deletions: None,
+                        staged: false,
+                        unstaged: false,
+                        untracked: false,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn provider_event_path(value: &Value) -> Option<String> {
+    for pointer in [
+        "/path",
+        "/title",
+        "/params/item/path",
+        "/params/path",
+        "/item/path",
+    ] {
+        let Some(path) = value.pointer(pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        if path.contains('/') || path.contains('.') {
+            return Some(path.to_owned());
+        }
+    }
+    None
+}
+
+fn count_patch_lines(diff: &str) -> (usize, usize) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            additions += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
 }
 
 fn diff_hunk_summaries(diff: &str, staged: bool) -> Vec<DiffHunkSummary> {
@@ -7660,16 +8209,8 @@ fn hunk_unsupported_reason(diff: &str) -> Option<String> {
     None
 }
 
-fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, usize)> {
-    let base_ref = workspace_base_ref(workspace);
-    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])
-        .or_else(|err| {
-            if base_ref == "main" {
-                Err(err)
-            } else {
-                git_output(&workspace.path, ["diff", "--numstat", "main", "--"])
-            }
-        })?;
+fn workspace_diff_stats_against_head(workspace: &Workspace) -> Result<(usize, usize)> {
+    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", "HEAD", "--"])?;
     let mut additions = 0;
     let mut deletions = 0;
     for summary in parse_diff_numstat(&diff) {
@@ -7690,6 +8231,29 @@ fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, us
     }
 
     Ok((additions, deletions))
+}
+
+fn workspace_source_branch_ahead(workspace: &Workspace) -> usize {
+    let base_ref = workspace_base_ref(workspace);
+    if git_ref_exists(&workspace.path, base_ref) {
+        let range = format!("HEAD..{base_ref}");
+        return count_git_rev_list(&workspace.path, &range);
+    }
+    if base_ref != "main" && git_ref_exists(&workspace.path, "main") {
+        return count_git_rev_list(&workspace.path, "HEAD..main");
+    }
+    0
+}
+
+fn git_ref_exists(cwd: &Path, ref_name: &str) -> bool {
+    let commit_ref = format!("{ref_name}^{{commit}}");
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--verify", &commit_ref])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn workspace_base_ref(workspace: &Workspace) -> &str {
@@ -7884,11 +8448,11 @@ fn extract_archductor_metadata_directive(
     content: &str,
 ) -> (String, Option<ArchductorMetadataDirective>) {
     let Some(start) = content.find(ARCHDUCTOR_METADATA_OPEN) else {
-        return (content.to_owned(), None);
+        return (strip_archductor_control_lines(content), None);
     };
     let json_start = start + ARCHDUCTOR_METADATA_OPEN.len();
     let Some(relative_end) = content[json_start..].find(ARCHDUCTOR_METADATA_CLOSE) else {
-        return (content.to_owned(), None);
+        return (strip_archductor_control_lines(content), None);
     };
     let end = json_start + relative_end;
     let json_text = content[json_start..end].trim();
@@ -7896,11 +8460,37 @@ fn extract_archductor_metadata_directive(
     let mut cleaned = String::new();
     cleaned.push_str(&content[..start]);
     cleaned.push_str(&content[end + ARCHDUCTOR_METADATA_CLOSE.len()..]);
-    (trim_metadata_blank_edges(&cleaned), directive)
+    (
+        trim_metadata_blank_edges(&strip_archductor_control_lines(&cleaned)),
+        directive,
+    )
 }
 
 pub fn strip_archductor_metadata_block(content: &str) -> String {
     extract_archductor_metadata_directive(content).0
+}
+
+fn strip_archductor_control_lines(content: &str) -> String {
+    let mut removed = false;
+    let mut cleaned = String::with_capacity(content.len());
+    for line in content.split_inclusive('\n') {
+        let visible_line = line.trim_end_matches(['\r', '\n']);
+        if is_archductor_control_line(visible_line) {
+            removed = true;
+        } else {
+            cleaned.push_str(line);
+        }
+    }
+    if removed {
+        trim_metadata_blank_edges(&cleaned)
+    } else {
+        content.to_owned()
+    }
+}
+
+fn is_archductor_control_line(line: &str) -> bool {
+    let line = line.trim_start();
+    !line.is_empty() && (line.starts_with("<archductor") || "<archductor".starts_with(line))
 }
 
 fn parse_archductor_metadata_directive(json_text: &str) -> Option<ArchductorMetadataDirective> {
@@ -8075,6 +8665,12 @@ fn initialize_context_files(
         .context("write .context/agent-notes.md")?;
     fs::write(context_dir.join("todos.md"), todos).context("write .context/todos.md")?;
 
+    write_managed_prompt_snapshot(workspace_path, settings)?;
+
+    Ok(())
+}
+
+fn managed_prompt_snapshot(settings: &crate::settings::RepositorySettings) -> Option<String> {
     let mut prompts_lines = Vec::new();
     if let Some(general) = settings.prompts.as_ref().and_then(|p| p.general.as_deref()) {
         prompts_lines.push(format!("## General\n\n{general}\n"));
@@ -8094,11 +8690,178 @@ fn initialize_context_files(
         prompts_lines.push(format!("## Create PR\n\n{create_pr}\n"));
     }
     if !prompts_lines.is_empty() {
-        let content = format!("# Prompts\n\n{}", prompts_lines.join("\n"));
-        fs::write(context_dir.join("PROMPTS.md"), content).context("write .context/PROMPTS.md")?;
+        return Some(format!("# Prompts\n\n{}", prompts_lines.join("\n")));
     }
 
+    None
+}
+
+#[cfg(unix)]
+fn write_managed_prompt_snapshot(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let Some(context) = ManagedPromptContext::open(workspace_path)? else {
+        return Ok(());
+    };
+    write_managed_prompt_snapshot_in_context(&context, settings)
+}
+
+#[cfg(not(unix))]
+fn write_managed_prompt_snapshot(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let _ = (workspace_path, settings);
     Ok(())
+}
+
+fn write_managed_prompt_snapshot_in_context(
+    context: &ManagedPromptContext,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    match managed_prompt_snapshot(settings) {
+        Some(content) => context
+            .replace(content.as_bytes())
+            .context("write .context/PROMPTS.md"),
+        None => context.remove().context("remove .context/PROMPTS.md"),
+    }
+}
+
+#[cfg(unix)]
+struct ManagedPromptContext {
+    directory: rustix::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl ManagedPromptContext {
+    fn open(workspace_path: &Path) -> Result<Option<Self>> {
+        use rustix::fs::{Mode, OFlags};
+
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let workspace = match rustix::fs::open(workspace_path, directory_flags, Mode::empty()) {
+            Ok(workspace) => workspace,
+            Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("{} must be a real directory", workspace_path.display())
+                })
+            }
+        };
+        let context_path = workspace_path.join(".context");
+        let directory =
+            match rustix::fs::openat(&workspace, ".context", directory_flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("{} must be a real directory", context_path.display())
+                    })
+                }
+            };
+        Ok(Some(Self { directory }))
+    }
+
+    fn target_mode(&self) -> Result<Option<rustix::fs::Mode>> {
+        use rustix::fs::{AtFlags, FileType, Mode};
+
+        let stat =
+            match rustix::fs::statat(&self.directory, "PROMPTS.md", AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+                Err(err) => return Err(err).context("inspect .context/PROMPTS.md"),
+            };
+        anyhow::ensure!(
+            FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
+            ".context/PROMPTS.md must be a real file"
+        );
+        Ok(Some(Mode::from_raw_mode(stat.st_mode)))
+    }
+
+    fn replace(&self, contents: &[u8]) -> Result<()> {
+        use rustix::fs::{Mode, OFlags};
+
+        let original_mode = self.target_mode()?;
+        let tmp_name = format!(".PROMPTS.md.{}.tmp", Uuid::new_v4());
+        let write_result = (|| -> Result<()> {
+            let file = rustix::fs::openat(
+                &self.directory,
+                tmp_name.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o666),
+            )
+            .context("create managed prompt temporary file")?;
+            let mut file = fs::File::from(file);
+            file.write_all(contents)
+                .context("write managed prompt temporary file")?;
+            let replacement_mode = self.target_mode()?.or(original_mode);
+            if let Some(mode) = replacement_mode {
+                rustix::fs::fchmod(&file, mode)
+                    .context("preserve .context/PROMPTS.md permissions")?;
+            }
+            file.sync_all()
+                .context("sync managed prompt temporary file")?;
+            rustix::fs::renameat(
+                &self.directory,
+                tmp_name.as_str(),
+                &self.directory,
+                "PROMPTS.md",
+            )
+            .context("replace .context/PROMPTS.md")?;
+            rustix::fs::fsync(&self.directory).context("sync .context directory")?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = rustix::fs::unlinkat(
+                &self.directory,
+                tmp_name.as_str(),
+                rustix::fs::AtFlags::empty(),
+            );
+        }
+        write_result
+    }
+
+    fn remove(&self) -> Result<()> {
+        if self.target_mode()?.is_none() {
+            return Ok(());
+        }
+        match rustix::fs::unlinkat(&self.directory, "PROMPTS.md", rustix::fs::AtFlags::empty()) {
+            Ok(()) => {
+                rustix::fs::fsync(&self.directory).context("sync .context directory")?;
+                Ok(())
+            }
+            Err(err) if err == rustix::io::Errno::NOENT => Ok(()),
+            Err(err) => Err(err).context("unlink .context/PROMPTS.md"),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ManagedPromptContext;
+
+#[cfg(not(unix))]
+impl ManagedPromptContext {
+    fn open(workspace_path: &Path) -> Result<Option<Self>> {
+        let _ = workspace_path;
+        Ok(None)
+    }
+
+    fn replace(&self, _contents: &[u8]) -> Result<()> {
+        unsupported_managed_prompt_mutation()
+    }
+
+    fn remove(&self) -> Result<()> {
+        unsupported_managed_prompt_mutation()
+    }
+}
+
+#[cfg(any(test, not(unix)))]
+fn unsupported_managed_prompt_mutation() -> Result<()> {
+    anyhow::bail!(
+        "managed prompt snapshot mutation requires handle-relative no-follow operations; \
+         refusing to modify .context/PROMPTS.md on this platform"
+    )
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -8109,6 +8872,32 @@ fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn resolve_source_base_ref(
+    root_path: &Path,
+    remote_name: &str,
+    base_ref: &str,
+    remote_available: bool,
+) -> Result<String> {
+    let base_ref = base_ref.trim();
+    if !remote_available || base_ref.starts_with("refs/") {
+        return Ok(base_ref.to_owned());
+    }
+    if let Some(remote_branch) = base_ref.strip_prefix(&format!("{remote_name}/")) {
+        let _ = fetch_remote_source_branch(root_path, remote_name, remote_branch)?;
+        return Ok(base_ref.to_owned());
+    }
+    Ok(base_ref.to_owned())
+}
+
+fn fetch_remote_source_branch(root_path: &Path, remote_name: &str, branch: &str) -> Result<bool> {
+    if branch.trim().is_empty() {
+        return Ok(false);
+    }
+    let _ = git_dynamic(root_path, &["fetch", remote_name, branch, "--prune"]);
+    let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
+    Ok(git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref]).is_ok())
 }
 
 fn sync_repository_default_branch(
@@ -8122,44 +8911,7 @@ fn sync_repository_default_branch(
     )?;
     let remote_ref = format!("refs/remotes/{remote_name}/{default_branch}");
     git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref])?;
-    let local_ref = format!("refs/heads/{default_branch}");
-    if git_dynamic(root_path, &["rev-parse", "--verify", &local_ref]).is_ok()
-        && git_dynamic(
-            root_path,
-            &["merge-base", "--is-ancestor", &local_ref, &remote_ref],
-        )
-        .is_err()
-    {
-        warn!(
-            repository = %root_path.display(),
-            branch = default_branch,
-            "local default branch is ahead or diverged; using remote branch as workspace base"
-        );
-        return Ok(format!("{remote_name}/{default_branch}"));
-    }
-    let current_branch = git_output_dynamic(root_path, &["branch", "--show-current"])
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    if current_branch == default_branch {
-        git_dynamic(
-            root_path,
-            &["pull", "--ff-only", remote_name, default_branch],
-        )?;
-        return Ok(default_branch.to_owned());
-    }
-    match git_dynamic(root_path, &["update-ref", &local_ref, &remote_ref]) {
-        Ok(()) => Ok(default_branch.to_owned()),
-        Err(err) => {
-            warn!(
-                repository = %root_path.display(),
-                branch = default_branch,
-                error = %err,
-                "failed to fast-forward local default branch; using remote branch as workspace base"
-            );
-            Ok(format!("{remote_name}/{default_branch}"))
-        }
-    }
+    Ok(format!("{remote_name}/{default_branch}"))
 }
 
 #[cfg(test)]
@@ -8703,8 +9455,12 @@ fn timestamp_nanos() -> String {
         .unwrap_or_else(|_| "0".to_owned())
 }
 
-fn copy_included_ignored_files(repo_path: &Path, workspace_path: &Path) -> Result<()> {
-    let patterns = included_file_patterns(repo_path)?;
+fn copy_included_ignored_files(
+    repo_path: &Path,
+    workspace_path: &Path,
+    settings: &RepositorySettings,
+) -> Result<()> {
+    let patterns = included_file_patterns(repo_path, settings)?;
     if patterns.is_empty() {
         return Ok(());
     }
@@ -8744,7 +9500,7 @@ fn copy_included_ignored_files(repo_path: &Path, workspace_path: &Path) -> Resul
     Ok(())
 }
 
-fn included_file_patterns(repo_path: &Path) -> Result<Vec<String>> {
+fn included_file_patterns(repo_path: &Path, settings: &RepositorySettings) -> Result<Vec<String>> {
     let mut patterns = Vec::new();
     let worktreeinclude_path = repo_path.join(".worktreeinclude");
     if worktreeinclude_path.exists() {
@@ -8753,7 +9509,7 @@ fn included_file_patterns(repo_path: &Path) -> Result<Vec<String>> {
                 .with_context(|| format!("read {}", worktreeinclude_path.display()))?,
         ));
     }
-    patterns.extend(load_repository_settings(repo_path)?.file_include_globs);
+    patterns.extend(settings.file_include_globs.iter().cloned());
     Ok(patterns)
 }
 
@@ -8794,14 +9550,7 @@ fn git_ignored(repo_path: &Path, relative_path: &Path) -> bool {
 }
 
 fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::platform::process_alive(pid)
 }
 
 fn workspace_port_block_available(
@@ -8850,11 +9599,7 @@ fn process_group_matches_pid(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
-fn process_group_matches_pid(_pid: u32) -> bool {
-    false
-}
-
+#[cfg(unix)]
 fn stop_process(pid: u32) -> Result<()> {
     // Try SIGTERM to the process group only when the child owns a distinct group.
     let group_ok = if process_group_matches_pid(pid) {
@@ -8909,12 +9654,44 @@ fn stop_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn stop_process(pid: u32) -> Result<()> {
+    let _ = crate::platform::terminate_process_tree(pid, false)
+        .with_context(|| format!("stop process tree {pid}"))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if !process_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if process_alive(pid) {
+        let _ = crate::platform::terminate_process_tree(pid, true)
+            .with_context(|| format!("force stop process tree {pid}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn shell_words(program: &Path, args: &[String]) -> String {
     let mut words = vec![quote_shell_word(&program.to_string_lossy())];
     words.extend(args.iter().map(|arg| quote_shell_word(arg)));
     words.join(" ")
 }
 
+#[cfg(windows)]
+fn shell_words(program: &Path, args: &[String]) -> String {
+    windows_shell_words(program, args)
+}
+
+#[cfg(any(test, windows))]
+fn windows_shell_words(program: &Path, args: &[String]) -> String {
+    let mut words = vec![quote_windows_cmd_word(&program.to_string_lossy())];
+    words.extend(args.iter().map(|arg| quote_windows_cmd_word(arg)));
+    words.join(" ")
+}
+
+#[cfg(not(windows))]
 fn quote_shell_word(value: &str) -> String {
     if value
         .bytes()
@@ -8923,6 +9700,18 @@ fn quote_shell_word(value: &str) -> String {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(any(test, windows))]
+fn quote_windows_cmd_word(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'\\' | b'/' | b'.' | b'_' | b'-' | b':')
+        })
+    {
+        return value.to_owned();
+    }
+    format!("\"{}\"", value.replace('"', r#"\""#))
 }
 
 fn first_pull_request_url_from_json(output: &str) -> Option<String> {
@@ -8980,8 +9769,8 @@ fn run_shell_script(
     let cwd = workspace_working_directory(settings, workspace)?;
     let mut env = conductor_environment(settings, repository, workspace)?;
     env.extend(extra_env.iter().cloned());
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(script).current_dir(&cwd).envs(env);
+    let mut command = crate::platform::shell_command(script);
+    command.current_dir(&cwd).envs(env);
 
     let output = command
         .output()
@@ -9282,6 +10071,332 @@ mod tests {
         assert_eq!(workspaces, vec![workspace]);
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn create_workspace_with_default_prompts_does_not_fail_on_non_unix() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor/prompt-packs")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "[prompts]\ngeneral = \"Use the project defaults.\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add prompts",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert!(workspace.path.join(".context/brief.md").exists());
+        assert!(workspace.path.join(".context/agent-notes.md").exists());
+        assert!(workspace.path.join(".context/todos.md").exists());
+    }
+
+    #[test]
+    fn refresh_repository_prompt_snapshots_updates_only_managed_prompt_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let repository = RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let first = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let second = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "paris".to_owned(),
+                branch: "lc/paris".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let archived = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "rome".to_owned(),
+                branch: "lc/rome".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store.archive("rome", true).unwrap();
+        assert!(!archived.path.exists());
+        let original_brief = fs::read_to_string(first.path.join(".context/brief.md")).unwrap();
+        let original_notes =
+            fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap();
+        let original_todos = fs::read_to_string(first.path.join(".context/todos.md")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.local.toml"),
+            "[prompts]\ngeneral = \"Updated general\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .refresh_repository_prompt_snapshots(repository.id)
+                .unwrap(),
+            2
+        );
+        for workspace in [&first, &second] {
+            assert!(
+                fs::read_to_string(workspace.path.join(".context/PROMPTS.md"))
+                    .unwrap()
+                    .contains("Updated general")
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/brief.md")).unwrap(),
+            original_brief
+        );
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/agent-notes.md")).unwrap(),
+            original_notes
+        );
+        assert_eq!(
+            fs::read_to_string(first.path.join(".context/todos.md")).unwrap(),
+            original_todos
+        );
+    }
+
+    fn prompt_snapshot_test_workspace() -> (tempfile::TempDir, i64, WorkspaceStore, Workspace) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let repository = RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        (temp, repository.id, store, workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_managed_prompt_snapshot_skips_missing_context_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        fs::create_dir(&workspace_path).unwrap();
+
+        let result = write_managed_prompt_snapshot(
+            &workspace_path,
+            &crate::settings::RepositorySettings::default(),
+        );
+
+        assert!(result.is_ok());
+        assert!(!workspace_path.join(".context/PROMPTS.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_repository_prompt_snapshots_rejects_symlinked_context_directory() {
+        let (temp, repository_id, store, workspace) = prompt_snapshot_test_workspace();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        fs::remove_dir_all(workspace.path.join(".context")).unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        let result = store.refresh_repository_prompt_snapshots(repository_id);
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("must be a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_repository_prompt_snapshots_rejects_symlinked_prompts_file() {
+        let (temp, repository_id, store, workspace) = prompt_snapshot_test_workspace();
+        let outside_prompts = temp.path().join("outside-prompts.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        let managed_prompts = workspace.path.join(".context/PROMPTS.md");
+        fs::remove_file(&managed_prompts).unwrap();
+        std::os::unix::fs::symlink(&outside_prompts, &managed_prompts).unwrap();
+
+        let result = store.refresh_repository_prompt_snapshots(repository_id);
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("must be a real file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_context_handle_contains_parent_swap_writes() {
+        let (temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        let original_context = workspace.path.join(".context-original");
+        fs::rename(workspace.path.join(".context"), &original_context).unwrap();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not overwrite\n").unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        context.replace(b"updated prompts\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not overwrite\n"
+        );
+        assert_eq!(
+            fs::read_to_string(original_context.join("PROMPTS.md")).unwrap(),
+            "updated prompts\n"
+        );
+        assert!(fs::read_dir(&original_context).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".PROMPTS.md.")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_context_handle_contains_parent_swap_deletion() {
+        let (temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        let original_context = workspace.path.join(".context-original");
+        fs::rename(workspace.path.join(".context"), &original_context).unwrap();
+        let outside_context = temp.path().join("outside-context");
+        fs::create_dir(&outside_context).unwrap();
+        let outside_prompts = outside_context.join("PROMPTS.md");
+        fs::write(&outside_prompts, "do not delete\n").unwrap();
+        std::os::unix::fs::symlink(&outside_context, workspace.path.join(".context")).unwrap();
+
+        context.remove().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside_prompts).unwrap(),
+            "do not delete\n"
+        );
+        assert!(!original_context.join("PROMPTS.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_prompt_replacement_preserves_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, _repository_id, _store, workspace) = prompt_snapshot_test_workspace();
+        let prompts = workspace.path.join(".context/PROMPTS.md");
+        let context = ManagedPromptContext::open(&workspace.path)
+            .unwrap()
+            .unwrap();
+        for mode in [0o600, 0o400] {
+            fs::set_permissions(&prompts, fs::Permissions::from_mode(mode)).unwrap();
+
+            context.replace(b"updated prompts\n").unwrap();
+
+            assert_eq!(
+                fs::metadata(&prompts).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_managed_prompt_mutation_explains_fail_closed_safety() {
+        let err = unsupported_managed_prompt_mutation().unwrap_err();
+
+        assert!(format!("{err:#}").contains("handle-relative no-follow operations"));
+        assert!(format!("{err:#}").contains("refusing to modify"));
+    }
+
+    #[test]
+    fn windows_session_shell_words_quote_paths_for_cmd() {
+        let command = windows_shell_words(
+            Path::new(r"C:\Program Files\Archductor\agent.exe"),
+            &[
+                "--profile".to_owned(),
+                "Codex Fast".to_owned(),
+                r"C:\Users\Ada\project workspace".to_owned(),
+            ],
+        );
+
+        assert_eq!(
+            command,
+            r#""C:\Program Files\Archductor\agent.exe" --profile "Codex Fast" "C:\Users\Ada\project workspace""#
+        );
+        assert!(!command.contains('\''));
+    }
+
     #[test]
     fn create_workspace_versions_branch_and_workspace_when_requested_branch_exists() {
         let temp = tempfile::tempdir().unwrap();
@@ -9476,10 +10591,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(workspace.status, "active");
-        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(workspace.base_ref, "origin/main");
         assert!(workspace.path.join("REMOTE.md").exists());
         assert_eq!(
-            git_output(&repo_path, ["rev-parse", "main"]),
+            git_output(&repo_path, ["rev-parse", "origin/main"]),
             git_output(&seed_path, ["rev-parse", "main"])
         );
     }
@@ -10190,6 +11305,45 @@ base_branch = "develop"
     }
 
     #[test]
+    fn workspace_city_name_pool_is_curated_open_source_chaos() {
+        for expected in [
+            "arch",
+            "debian",
+            "nixos",
+            "tux",
+            "kernel-panic",
+            "wayland",
+            "postgres",
+            "vim",
+        ] {
+            assert!(
+                WORKSPACE_CITY_NAMES.contains(&expected),
+                "missing open-source name {expected}"
+            );
+        }
+        for old_city in ["berlin", "tokyo", "paris"] {
+            assert!(
+                !WORKSPACE_CITY_NAMES.contains(&old_city),
+                "old city name {old_city} remains"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_city_name_pool_is_unique_and_slug_safe() {
+        let unique = WORKSPACE_CITY_NAMES.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), WORKSPACE_CITY_NAMES.len());
+        for name in WORKSPACE_CITY_NAMES {
+            assert!(!name.is_empty());
+            assert!(!name.starts_with('-'));
+            assert!(!name.ends_with('-'));
+            assert!(name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'));
+        }
+    }
+
+    #[test]
     fn create_workspace_generates_city_name_and_branch_when_empty() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -10322,18 +11476,21 @@ branch_prefix = "team"
     #[test]
     fn create_workspace_does_not_treat_repository_name_as_selected_city() {
         let temp = tempfile::tempdir().unwrap();
-        let repo_one_path = init_repo(temp.path().join("repo-berlin"));
+        let selected_city = WORKSPACE_CITY_NAMES[0];
+        let repo_one_path = init_repo(temp.path().join(format!("repo-{selected_city}")));
         let repo_two_path = init_repo(temp.path().join("repo-two"));
         let db_path = temp.path().join("state.db");
 
         let repo_store = RepositoryStore::open(&db_path).unwrap();
         repo_store
             .add(AddRepository {
-                name: Some("berlin".to_owned()),
+                name: Some(selected_city.to_owned()),
                 root_path: repo_one_path,
                 default_branch: Some("main".to_owned()),
                 remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/berlin")),
+                workspace_parent_path: Some(
+                    temp.path().join(format!("workspaces/{selected_city}")),
+                ),
             })
             .unwrap();
         repo_store
@@ -10360,15 +11517,15 @@ branch_prefix = "team"
 
         let workspace = store
             .create(CreateWorkspace {
-                repository_name: "berlin".to_owned(),
+                repository_name: selected_city.to_owned(),
                 name: String::new(),
                 branch: String::new(),
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
 
-        assert_eq!(workspace.name, "berlin");
-        assert_eq!(workspace.branch, "lc/berlin");
+        assert_eq!(workspace.name, selected_city);
+        assert_eq!(workspace.branch, format!("lc/{selected_city}"));
     }
 
     #[test]
@@ -10455,6 +11612,182 @@ notes.local
             "{}\n"
         );
         assert!(!workspace.path.join("notes.local").exists());
+    }
+
+    #[test]
+    fn app_store_create_uses_shared_file_copy_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::write(repo_path.join(".gitignore"), "shared.cache\n").unwrap();
+        fs::write(repo_path.join("shared.cache"), "shared copy\n").unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "[scripts]\nrun_mode = \"concurrent\"\n",
+        )
+        .unwrap();
+        git(&repo_path, ["add", ".gitignore"]).unwrap();
+        git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore shared cache",
+            ],
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &app_settings_path,
+            "file_include_globs = \"shared.cache\"\n",
+        )
+        .unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap()
+        .create(CreateWorkspace {
+            repository_name: "demo".to_owned(),
+            name: "berlin".to_owned(),
+            branch: "lc/berlin".to_owned(),
+            base_ref: Some("main".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("shared.cache")).unwrap(),
+            "shared copy\n"
+        );
+    }
+
+    #[test]
+    fn app_store_create_repository_empty_file_globs_clear_shared_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::write(repo_path.join(".gitignore"), "shared.cache\n").unwrap();
+        fs::write(repo_path.join("shared.cache"), "must not copy\n").unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "file_include_globs = \"\"\n",
+        )
+        .unwrap();
+        git(&repo_path, ["add", ".gitignore"]).unwrap();
+        git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore shared cache",
+            ],
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &app_settings_path,
+            "file_include_globs = \"shared.cache\"\n",
+        )
+        .unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap()
+        .create(CreateWorkspace {
+            repository_name: "demo".to_owned(),
+            name: "berlin".to_owned(),
+            branch: "lc/berlin".to_owned(),
+            base_ref: Some("main".to_owned()),
+        })
+        .unwrap();
+
+        assert!(!workspace.path.join("shared.cache").exists());
+    }
+
+    #[test]
+    fn app_store_mcp_status_uses_shared_provider_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(&app_settings_path, "codex_provider = \"shared-provider\"\n").unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .mcp_status("berlin")
+                .unwrap()
+                .codex_provider
+                .as_deref(),
+            Some("shared-provider")
+        );
     }
 
     #[test]
@@ -11013,6 +12346,84 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn create_with_explicit_local_base_ref_preserves_local_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("local-only.txt"), "local\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "local-only.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local only",
+            ])
+            .status()
+            .unwrap();
+        let local_head = git_output(&repo_path, ["rev-parse", "main"]);
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("local-only.txt")).unwrap(),
+            "local\n"
+        );
+        assert_eq!(git_output(&repo_path, ["rev-parse", "main"]), local_head);
+    }
+
+    #[test]
     fn delete_workspace_can_remove_worktree_and_branch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -11241,9 +12652,7 @@ CUSTOM_VALUE = "from-settings"
             .unwrap();
 
         let run = store.run_workspace("berlin").unwrap();
-        wait_for_path(&workspace.path.join(".context/run-env"));
-
-        let run_env = fs::read_to_string(workspace.path.join(".context/run-env")).unwrap();
+        let run_env = wait_for_file_lines(&workspace.path.join(".context/run-env"), 7);
         let lines = run_env.lines().collect::<Vec<_>>();
         assert_eq!(run.workspace_id, workspace.id);
         assert_eq!(run.kind, ProcessKind::Run);
@@ -12793,7 +14202,7 @@ typecheck = "cargo check --workspace"
 
 [customization.view]
 theme = "dark"
-accent_color = "green"
+accent_color = "blue"
 density = "compact"
 keybindings = "vim"
 terminal_font = "JetBrains Mono 13"
@@ -12847,7 +14256,7 @@ accent = "#0ea5e9"
 
         assert_eq!(defaults.default_visible_tab.as_deref(), Some("checks"));
         assert_eq!(defaults.theme.as_deref(), Some("dark"));
-        assert_eq!(defaults.accent_color.as_deref(), Some("green"));
+        assert_eq!(defaults.accent_color.as_deref(), Some("blue"));
         assert_eq!(defaults.colors.get("accent"), Some(&"#0ea5e9".to_owned()));
         assert_eq!(defaults.density.as_deref(), Some("compact"));
         assert_eq!(defaults.keybindings.as_deref(), Some("vim"));
@@ -12864,6 +14273,46 @@ accent = "#0ea5e9"
         );
         assert!(defaults.agent_profile_names.is_empty());
         assert!(defaults.notification_rules.is_empty());
+    }
+
+    #[test]
+    fn workspace_changes_scope_persists_across_store_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        WorkspaceStore::open(&db_path)
+            .unwrap()
+            .set_workspace_changes_scope("berlin", Some("turn:thread:7:user:42"))
+            .unwrap();
+
+        assert_eq!(
+            WorkspaceStore::open(&db_path)
+                .unwrap()
+                .workspace_changes_scope("berlin")
+                .unwrap()
+                .as_deref(),
+            Some("turn:thread:7:user:42")
+        );
     }
 
     #[test]
@@ -15044,7 +16493,7 @@ general = "Keep changes focused."
     }
 
     #[test]
-    fn diff_stats_against_base_include_committed_and_untracked_changes() {
+    fn diff_stats_against_base_counts_worktree_changes_against_branch_head() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -15094,14 +16543,73 @@ general = "Keep changes focused."
             .unwrap();
         fs::write(workspace.path.join("notes.txt"), "new\nnotes\n").unwrap();
 
-        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (3, 1));
+        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (2, 0));
         let line = store
             .list_status()
             .unwrap()
             .into_iter()
             .find(|line| line.workspace.name == "berlin")
             .unwrap();
-        assert_eq!((line.diff_additions, line.diff_deletions), (3, 1));
+        assert_eq!((line.diff_additions, line.diff_deletions), (2, 0));
+    }
+
+    #[test]
+    fn checks_summary_reports_source_branch_ahead_without_counting_it_as_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let baseline_changed_files = store.checks_summary("berlin").unwrap().changed_files;
+
+        fs::write(repo_path.join("CHANGELOG.md"), "main moved\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "CHANGELOG.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "main moved",
+            ])
+            .status()
+            .unwrap();
+
+        let summary = store.checks_summary("berlin").unwrap();
+
+        assert_eq!(summary.changed_files, baseline_changed_files);
+        assert_eq!(summary.source_branch_ahead, 1);
+        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (0, 0));
     }
 
     #[test]
@@ -18550,7 +20058,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn incomplete_agent_metadata_marker_preserves_original_content() {
+    fn incomplete_agent_metadata_marker_is_never_persisted_as_chat_content() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "New Chat", None)
@@ -18569,9 +20077,14 @@ spotlight_testing = true
 
         assert!(store.get_by_name("billing-webhook-fix").is_err());
         let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages[1].content, "I'll inspect the webhook.");
+    }
+
+    #[test]
+    fn streaming_prefix_of_agent_metadata_marker_is_hidden() {
         assert_eq!(
-            messages[1].content,
-            "<archductor_metadata>{\"workspace_name\":\"billing webhook fix\"}\nI'll inspect the webhook."
+            strip_archductor_metadata_block("<arch\nI'll inspect the webhook."),
+            "I'll inspect the webhook."
         );
     }
 
@@ -19250,6 +20763,50 @@ spotlight_testing = true
     }
 
     #[test]
+    fn all_file_change_summaries_include_committed_worktree_and_untracked_changes() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        fs::write(workspace.path.join("README.md"), "demo\ncommitted\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "update readme",
+            ],
+        );
+        fs::write(workspace.path.join("src.rs"), "working\n").unwrap();
+        fs::write(workspace.path.join("draft.md"), "draft\n").unwrap();
+        git_output(&workspace.path, ["add", "src.rs"]);
+
+        let summaries = store.all_file_change_summaries("berlin").unwrap();
+
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "README.md"
+                && summary.additions == Some(1)
+                && !summary.staged
+                && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "src.rs"
+                && summary.additions == Some(1)
+                && summary.staged
+                && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "draft.md" && summary.additions == Some(1) && summary.untracked
+        }));
+    }
+
+    #[test]
     fn diff_file_summaries_include_deleted_and_renamed_changes() {
         let (_temp, store) = test_workspace_store();
         let workspace = store.get_by_name("berlin").unwrap();
@@ -19310,6 +20867,348 @@ spotlight_testing = true
         assert!(changed
             .iter()
             .any(|path| path.contains("rename-me.txt") && path.contains("renamed.txt")));
+    }
+
+    #[test]
+    fn turn_file_change_summaries_come_from_provider_write_events_not_checkpoints() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .checkpoint_create("berlin", "unrelated checkpoint", None)
+            .unwrap();
+
+        for turn in 1..=27 {
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(format!("event-{turn}")),
+                    provider_item_id: Some(format!("file-{turn}")),
+                    provider_thread_id: Some("thread-1".to_owned()),
+                    provider_turn_id: Some(format!("turn-{turn}")),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread.id),
+                    process_id: Some(process.id),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: Some(turn),
+                    occurred_at_ms: turn as u64,
+                    normalized_payload: serde_json::json!({
+                        "title": "File changes",
+                        "body": format!("modified src/file-{turn}.rs")
+                    }),
+                    raw_json: serde_json::json!({
+                        "method": "item/completed",
+                        "params": {
+                            "turnId": format!("turn-{turn}"),
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [
+                                    {
+                                        "path": format!("src/file-{turn}.rs"),
+                                        "kind": "modified",
+                                        "diff": "@@ -1 +1 @@\n-old\n+new\n"
+                                    }
+                                ]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+
+        let turns = store.turn_file_change_summaries("berlin", 99).unwrap();
+
+        assert_eq!(turns.len(), 25);
+        assert_eq!(turns[0].provider_turn_id, "turn-27");
+        assert_eq!(turns[0].files[0].path, "src/file-27.rs");
+        assert_eq!(turns[0].files[0].additions, Some(1));
+        assert_eq!(turns[0].files[0].deletions, Some(1));
+        assert_eq!(turns[24].provider_turn_id, "turn-3");
+        assert!(!turns
+            .iter()
+            .any(|turn| turn.provider_turn_id == "unrelated checkpoint"));
+    }
+
+    #[test]
+    fn turn_file_change_summaries_group_writes_between_user_messages() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .append_chat_message(thread.id, "user", "first request", "user_send")
+            .unwrap();
+        for (event_id, path) in [("event-a", "src/a.rs"), ("event-b", "src/b.rs")] {
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(event_id.to_owned()),
+                    provider_item_id: Some(event_id.to_owned()),
+                    provider_thread_id: Some("thread-1".to_owned()),
+                    provider_turn_id: Some(event_id.to_owned()),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread.id),
+                    process_id: Some(process.id),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: None,
+                    occurred_at_ms: 10,
+                    normalized_payload: serde_json::json!({"title": "File changes"}),
+                    raw_json: serde_json::json!({
+                        "params": {
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [{"path": path, "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+        store
+            .append_chat_message(thread.id, "user", "second request", "user_send")
+            .unwrap();
+        provider_store
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-c".to_owned()),
+                provider_item_id: Some("event-c".to_owned()),
+                provider_thread_id: Some("thread-1".to_owned()),
+                provider_turn_id: Some("event-c".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                provider_subtype: Some("item/fileChange/completed".to_owned()),
+                provider_sequence: None,
+                occurred_at_ms: 20,
+                normalized_payload: serde_json::json!({"title": "File changes"}),
+                raw_json: serde_json::json!({
+                    "params": {
+                        "item": {
+                            "type": "fileChange",
+                            "changes": [{"path": "src/c.rs", "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                        }
+                    }
+                }),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+
+        let turns = store.turn_file_change_summaries("berlin", 25).unwrap();
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/c.rs"]
+        );
+        assert_eq!(
+            turns[1]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/b.rs"]
+        );
+    }
+
+    #[test]
+    fn last_turn_file_change_summary_tracks_selected_chat_thread() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let first_thread = store
+            .create_chat_thread("berlin", "codex", "First", None)
+            .unwrap();
+        let second_thread = store
+            .create_chat_thread("berlin", "codex", "Second", None)
+            .unwrap();
+        let first_process = process_record_for_thread(&store, first_thread.id);
+        let second_process = process_record_for_thread(&store, second_thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        for (thread, process, event_id, path) in [
+            (first_thread.id, first_process.id, "event-a", "src/first.rs"),
+            (
+                second_thread.id,
+                second_process.id,
+                "event-b",
+                "src/second.rs",
+            ),
+        ] {
+            store
+                .append_chat_message(thread, "user", "change file", "user_send")
+                .unwrap();
+            provider_store
+                .upsert_event(&crate::provider_events::ProviderEventDraft {
+                    provider: "codex".to_owned(),
+                    provider_event_id: Some(event_id.to_owned()),
+                    provider_item_id: Some(event_id.to_owned()),
+                    provider_thread_id: Some(format!("thread-{thread}")),
+                    provider_turn_id: Some(event_id.to_owned()),
+                    parent_provider_item_id: None,
+                    parent_provider_thread_id: None,
+                    workspace_id: Some(workspace.id),
+                    chat_thread_id: Some(thread),
+                    process_id: Some(process),
+                    phase: crate::provider_events::ProviderEventPhase::Completed,
+                    kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                    provider_subtype: Some("item/fileChange/completed".to_owned()),
+                    provider_sequence: None,
+                    occurred_at_ms: 20,
+                    normalized_payload: serde_json::json!({"title": "File changes"}),
+                    raw_json: serde_json::json!({
+                        "params": {
+                            "item": {
+                                "type": "fileChange",
+                                "changes": [{"path": path, "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                            }
+                        }
+                    }),
+                    schema_version: 1,
+                    adapter_version: "test".to_owned(),
+                })
+                .unwrap();
+        }
+
+        let selected = store
+            .last_turn_file_change_summary("berlin", second_thread.id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.chat_thread_id, Some(second_thread.id));
+        assert_eq!(selected.files[0].path, "src/second.rs");
+    }
+
+    #[test]
+    fn last_turn_file_change_summary_does_not_fall_back_to_older_turn() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let provider_store =
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+
+        store
+            .append_chat_message(thread.id, "user", "first request", "user_send")
+            .unwrap();
+        provider_store
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-a".to_owned()),
+                provider_item_id: Some("event-a".to_owned()),
+                provider_thread_id: Some("thread-1".to_owned()),
+                provider_turn_id: Some("event-a".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::DiffFileChange,
+                provider_subtype: Some("item/fileChange/completed".to_owned()),
+                provider_sequence: None,
+                occurred_at_ms: 10,
+                normalized_payload: serde_json::json!({"title": "File changes"}),
+                raw_json: serde_json::json!({
+                    "params": {
+                        "item": {
+                            "type": "fileChange",
+                            "changes": [{"path": "src/first.rs", "kind": "modified", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]
+                        }
+                    }
+                }),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "latest request", "user_send")
+            .unwrap();
+
+        let selected = store
+            .last_turn_file_change_summary("berlin", thread.id)
+            .unwrap();
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn commit_file_change_summaries_list_workspace_commits_only() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nfirst\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "first workspace commit",
+            ],
+        );
+        fs::write(workspace.path.join("src.rs"), "second\n").unwrap();
+        git_output(&workspace.path, ["add", "src.rs"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "second workspace commit",
+            ],
+        );
+
+        let commits = store.commit_file_change_summaries("berlin", 10).unwrap();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "second workspace commit");
+        assert_eq!(commits[0].files[0].path, "src.rs");
+        assert_eq!(commits[1].subject, "first workspace commit");
+        assert_eq!(commits[1].files[0].path, "README.md");
     }
 
     #[test]
@@ -19504,6 +21403,21 @@ spotlight_testing = true
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("timed out waiting for {}", path.display());
+    }
+
+    fn wait_for_file_lines(path: &Path, expected_lines: usize) -> String {
+        for _ in 0..50 {
+            if let Ok(contents) = fs::read_to_string(path) {
+                if contents.lines().count() >= expected_lines {
+                    return contents;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {} to contain {expected_lines} lines",
+            path.display()
+        );
     }
 
     fn wait_for_log(path: &Path, needle: &str) {

@@ -466,6 +466,9 @@ impl ProviderEventStore {
         let tx = conn.transaction()?;
         let received_sequence = next_received_sequence(&tx)?;
         let raw_sequence = next_raw_sequence(&tx)?;
+        let timeline_seq = existing_timeline_sequence(&tx, &identity_key)?
+            .map(Ok)
+            .unwrap_or_else(|| next_timeline_sequence(&tx))?;
         let normalized_payload = merge_existing_streaming_payload(&tx, &identity_key, draft)?;
         let normalized_payload_json = serde_json::to_string(&normalized_payload)?;
         tx.execute(
@@ -474,11 +477,11 @@ impl ProviderEventStore {
                 provider_thread_id, provider_turn_id, parent_provider_item_id,
                 parent_provider_thread_id, workspace_id, chat_thread_id, process_id,
                 phase, kind, provider_subtype, provider_sequence, received_sequence,
-                occurred_at_ms, normalized_payload_json, raw_json, schema_version,
+                timeline_seq, occurred_at_ms, normalized_payload_json, raw_json, schema_version,
                 adapter_version, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23
              )
              ON CONFLICT(identity_key) DO UPDATE SET
                 provider_event_id = excluded.provider_event_id,
@@ -494,6 +497,7 @@ impl ProviderEventStore {
                 kind = excluded.kind,
                 provider_subtype = excluded.provider_subtype,
                 provider_sequence = excluded.provider_sequence,
+                timeline_seq = COALESCE(provider_events.timeline_seq, excluded.timeline_seq),
                 occurred_at_ms = excluded.occurred_at_ms,
                 normalized_payload_json = excluded.normalized_payload_json,
                 raw_json = excluded.raw_json,
@@ -517,6 +521,7 @@ impl ProviderEventStore {
                 draft.provider_subtype,
                 draft.provider_sequence,
                 received_sequence,
+                timeline_seq,
                 draft.occurred_at_ms as i64,
                 normalized_payload_json,
                 raw_json,
@@ -588,6 +593,80 @@ impl ProviderEventStore {
         Ok(rows)
     }
 
+    pub fn interrupt_active_turns_for_process(
+        &self,
+        process_id: i64,
+        reason: &str,
+    ) -> Result<usize> {
+        let events = self.list_for_process(process_id)?;
+        let terminal_turns = events
+            .iter()
+            .filter(|event| {
+                event.kind == ProviderEventKind::Turn
+                    && matches!(
+                        event.phase,
+                        ProviderEventPhase::Completed
+                            | ProviderEventPhase::Failed
+                            | ProviderEventPhase::Declined
+                            | ProviderEventPhase::Interrupted
+                    )
+            })
+            .map(provider_turn_recovery_key)
+            .collect::<std::collections::HashSet<_>>();
+        let mut active_turns_by_key =
+            std::collections::HashMap::<String, ProviderEventRecord>::new();
+        for event in events.into_iter().filter(|event| {
+            event.kind == ProviderEventKind::Turn
+                && matches!(
+                    event.phase,
+                    ProviderEventPhase::Started
+                        | ProviderEventPhase::Delta
+                        | ProviderEventPhase::Progress
+                        | ProviderEventPhase::Unknown
+                )
+                && !terminal_turns.contains(&provider_turn_recovery_key(event))
+        }) {
+            active_turns_by_key
+                .entry(provider_turn_recovery_key(&event))
+                .or_insert(event);
+        }
+        let active_turns = active_turns_by_key.into_values().collect::<Vec<_>>();
+
+        for event in &active_turns {
+            let mut normalized_payload = event.normalized_payload.clone();
+            if let Some(payload) = normalized_payload.as_object_mut() {
+                payload.insert("status".to_owned(), Value::String("interrupted".to_owned()));
+                payload.insert("body".to_owned(), Value::String(reason.to_owned()));
+            }
+            self.upsert_event(&ProviderEventDraft {
+                provider: event.provider.clone(),
+                provider_event_id: event.provider_event_id.clone(),
+                provider_item_id: event.provider_item_id.clone(),
+                provider_thread_id: event.provider_thread_id.clone(),
+                provider_turn_id: event.provider_turn_id.clone(),
+                parent_provider_item_id: event.parent_provider_item_id.clone(),
+                parent_provider_thread_id: event.parent_provider_thread_id.clone(),
+                workspace_id: event.workspace_id,
+                chat_thread_id: event.chat_thread_id,
+                process_id: event.process_id,
+                phase: ProviderEventPhase::Interrupted,
+                kind: ProviderEventKind::Turn,
+                provider_subtype: Some("archcar/session-interrupted".to_owned()),
+                provider_sequence: event.provider_sequence,
+                occurred_at_ms: unix_millis(),
+                normalized_payload,
+                raw_json: serde_json::json!({
+                    "type": "archcar_session_interrupted",
+                    "reason": reason,
+                }),
+                schema_version: event.schema_version,
+                adapter_version: "archcar-recovery-v1".to_owned(),
+            })?;
+        }
+
+        Ok(active_turns.len())
+    }
+
     pub fn list_raw_payloads_for_identity(
         &self,
         identity_key: &str,
@@ -643,6 +722,21 @@ impl ProviderEventStore {
     fn open(&self) -> Result<Connection> {
         open_migrated_connection(&self.db_path)
     }
+}
+
+fn provider_turn_recovery_key(event: &ProviderEventRecord) -> String {
+    let provider = event.provider.as_str();
+    let thread = event.provider_thread_id.as_deref().unwrap_or("-");
+    if let Some(item_id) = event.provider_item_id.as_deref() {
+        return format!("{provider}:thread:{thread}:item:{item_id}");
+    }
+    if let Some(turn_id) = event.provider_turn_id.as_deref() {
+        return format!("{provider}:thread:{thread}:turn:{turn_id}");
+    }
+    if let Some(event_id) = event.provider_event_id.as_deref() {
+        return format!("{provider}:thread:{thread}:event:{event_id}");
+    }
+    format!("{provider}:identity:{}", event.identity_key)
 }
 
 pub fn project_timeline(events: Vec<ProviderEventRecord>) -> Vec<ProviderTimelineItem> {
@@ -816,6 +910,22 @@ fn open_migrated_connection(path: &Path) -> Result<Connection> {
           ON provider_event_raw_payloads(chat_thread_id, raw_sequence, id);",
     )?;
     Ok(conn)
+}
+
+fn existing_timeline_sequence(conn: &Connection, identity_key: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT timeline_seq FROM provider_events WHERE identity_key = ?1",
+            [identity_key],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+fn next_timeline_sequence(conn: &Connection) -> Result<i64> {
+    conn.execute("INSERT INTO chat_timeline_seq DEFAULT VALUES", [])?;
+    Ok(conn.last_insert_rowid())
 }
 
 fn next_received_sequence(conn: &Connection) -> Result<i64> {

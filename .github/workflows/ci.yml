@@ -2,12 +2,18 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   push:
-    branches:
-      - main
+    branches: [main]
   schedule:
     - cron: "23 9 * * 1"
   workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Optional branch, tag, or full commit SHA to validate instead of the workflow ref
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -15,88 +21,130 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || (github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.ref)) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  lint-build:
-    name: Lint & Build
+  preflight:
+    name: Preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
+    outputs:
+      checkout_ref: ${{ steps.checkout-ref.outputs.ref }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+      docs_changed: ${{ steps.scope.outputs.docs_changed }}
+      run_rust: ${{ steps.scope.outputs.run_rust }}
+    steps:
+      - name: Resolve checkout ref
+        id: checkout-ref
+        env:
+          TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || '' }}
+        run: |
+          set -euo pipefail
+          ref="${TARGET_REF:-$GITHUB_SHA}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect changed scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
+          PR_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        run: |
+          set -euo pipefail
+
+          docs_only=false
+          docs_changed=true
+
+          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            base="$PR_BASE"
+            if [ "$EVENT_NAME" = "push" ]; then
+              base="$PUSH_BASE"
+            fi
+
+            if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ]; then
+              if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth=1 origin "$base"
+              fi
+              mapfile -t changed < <(git diff --name-only "$base" HEAD)
+              docs_changed=false
+              docs_only=true
+              if [ "${#changed[@]}" -eq 0 ]; then
+                docs_only=false
+              fi
+              for path in "${changed[@]}"; do
+                case "$path" in
+                  *.md|docs/*)
+                    docs_changed=true
+                    ;;
+                  *)
+                    docs_only=false
+                    ;;
+                esac
+              done
+            else
+              docs_only=false
+              docs_changed=true
+            fi
+          fi
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
+          if [ "$docs_only" = "true" ]; then
+            echo "run_rust=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_rust=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  workflow-audit:
+    name: Workflow Audit
+    needs: [preflight]
+    if: needs.preflight.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Run actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
         with:
-          components: rustfmt, clippy
-
-      - name: Cache Cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config \
-            git sqlite3 openssh-client xvfb
-
-      - name: Show toolchain
-        run: |
-          rustc --version
-          cargo --version
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test workspace
-        run: xvfb-run -a cargo test --workspace --locked -- --test-threads=1
-
-      - name: Build workspace
-        run: cargo build --workspace --locked
-
-      - name: Package debug binaries
-        run: |
-          mkdir -p ci-artifacts/bin
-          cp target/debug/archductor ci-artifacts/bin/
-          cp target/debug/archductor-gtk ci-artifacts/bin/
-          cp target/debug/archcar ci-artifacts/bin/
-
-      - name: Upload debug binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ci-debug-binaries
-          path: ci-artifacts/bin/
-          if-no-files-found: error
-          retention-days: 7
+          persona: pedantic
+          min-severity: high
+          advanced-security: false
+          annotations: true
 
   dependency-scan:
     name: Dependency Scan
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: lint-build
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -125,8 +173,8 @@ jobs:
           timeout: 10m
 
       - name: Generate Trivy SARIF
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -139,45 +187,25 @@ jobs:
           timeout: 10m
 
       - name: Upload Trivy SARIF
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: trivy-filesystem-sarif
           path: trivy-filesystem.sarif
           if-no-files-found: error
           retention-days: 14
 
-  workflow-audit:
-    name: Workflow Audit
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    needs: lint-build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Run actionlint
-        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
-
-      - name: Run zizmor
-        uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
-        with:
-          persona: pedantic
-          min-severity: high
-          advanced-security: false
-          annotations: true
-
   codeql:
     name: CodeQL
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    needs: lint-build
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
 
       - name: Initialize CodeQL
@@ -210,22 +238,420 @@ jobs:
           ' codeql-results/rust.sarif
 
       - name: Upload CodeQL SARIF
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codeql-rust-sarif
           path: codeql-results/rust.sarif
           if-no-files-found: error
           retention-days: 14
 
-  ci-complete:
-    name: CI Complete
+  linux-format:
+    name: Linux format
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  linux-clippy:
+    name: Linux clippy
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-clippy-cargo-
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  linux-tests:
+    name: Linux tests (${{ matrix.suite }})
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: core-cli-archcar
+            command: cargo test -p archductor-core -p archductor -p archcar --locked -- --test-threads=1
+          - suite: gtk
+            command: xvfb-run -a cargo test -p archductor-gtk --locked -- --test-threads=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client xvfb
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-tests-${{ matrix.suite }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tests-${{ matrix.suite }}-cargo-
+
+      - name: Run ${{ matrix.suite }} tests
+        run: ${{ matrix.command }}
+
+  linux-smoke:
+    name: Linux build and smoke
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client xvfb
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-smoke-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-smoke-cargo-
+
+      - name: Build debug workspace
+        run: cargo build --workspace --locked
+
+      - name: Smoke CLI doctor
+        run: cargo run -p archductor --locked -- doctor
+
+      - name: Smoke GTK launch
+        run: |
+          set +e
+          xvfb-run -a timeout 15s target/debug/archductor-gtk --page dashboard
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            exit "$status"
+          fi
+
+      - name: Package debug binaries
+        run: |
+          mkdir -p ci-artifacts/bin
+          cp target/debug/archductor ci-artifacts/bin/
+          cp target/debug/archductor-gtk ci-artifacts/bin/
+          cp target/debug/archcar ci-artifacts/bin/
+
+      - name: Upload debug binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-debug-binaries
+          path: ci-artifacts/bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-release-build:
+    name: Linux release build
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Build release workspace
+        run: cargo build --workspace --release --locked
+
+      - name: Smoke release CLI doctor
+        run: target/release/archductor doctor
+
+  windows-port:
+    name: Windows core CLI build and smoke
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-cargo-
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Check Windows workspace
+        run: cargo check -p archductor-core -p archductor -p archcar --all-targets --locked
+
+      - name: Build Windows CLI binaries
+        run: cargo build -p archductor -p archcar --locked
+
+      - name: Smoke Windows local transport
+        run: cargo test -p archductor-core --locked archcar::transport::tests::local_transport_round_trips
+
+      - name: Smoke Windows platform helpers
+        run: cargo test -p archductor-core --locked platform::tests
+
+      - name: Smoke Windows workspace creation
+        run: cargo test -p archductor-core --locked create_workspace_with_default_prompts_does_not_fail_on_non_unix
+
+      - name: Smoke Windows CLI adapters
+        run: cargo test -p archductor --locked windows_
+
+      - name: Smoke Windows CLI
+        run: .\target\debug\archductor.exe doctor
+
+  linux-musl:
+    name: Linux musl build
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build portable musl binaries
+        run: cargo build -p archductor-core -p archductor -p archcar --target x86_64-unknown-linux-musl --locked
+
+  linux-distros:
+    name: Linux GTK (${{ matrix.family }})
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: debian
+            image: docker.io/library/debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4
+          - family: fedora
+            image: docker.io/library/fedora@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898
+          - family: arch
+            image: docker.io/library/archlinux@sha256:fe6972d4dc1f660c0c10f4c41b2de8986bab89e7e2955378f8beadb8ebcd7433
+          - family: opensuse
+            image: docker.io/opensuse/tumbleweed@sha256:c42607d066cb63d2d3fbc36614deb14acced3568838b3d5d5663e2298f65a8ce
+          - family: alpine
+            image: docker.io/library/alpine@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install Debian dependencies
+        if: matrix.family == 'debian'
+        run: |
+          apt-get update -q
+          apt-get install -y --no-install-recommends ca-certificates curl git gcc libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - name: Install Fedora dependencies
+        if: matrix.family == 'fedora'
+        run: dnf install -y ca-certificates curl git gcc gtk4-devel libadwaita-devel pkgconf-pkg-config
+
+      - name: Install Arch dependencies
+        if: matrix.family == 'arch'
+        run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc gtk4 libadwaita pkgconf
+
+      - name: Install openSUSE dependencies
+        if: matrix.family == 'opensuse'
+        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc gtk4-devel libadwaita-devel pkg-config rust
+
+      - name: Install Alpine dependencies
+        if: matrix.family == 'alpine'
+        run: apk add --no-cache bash ca-certificates curl gcompat git gcc musl-dev rustup gtk4.0-dev libadwaita-dev pkgconf
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        if: matrix.family != 'alpine' && matrix.family != 'opensuse'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Install Alpine Rust toolchain
+        if: matrix.family == 'alpine'
+        run: |
+          rustup-init -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Show openSUSE Rust toolchain
+        if: matrix.family == 'opensuse'
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+  ci-gate:
+    name: archductor/ci-gate
+    needs:
+      - preflight
+      - workflow-audit
+      - dependency-scan
+      - codeql
+      - linux-format
+      - linux-clippy
+      - linux-tests
+      - linux-smoke
+      - linux-release-build
+      - windows-port
+      - linux-musl
+      - linux-distros
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs:
-      - dependency-scan
-      - workflow-audit
-      - codeql
     steps:
-      - name: Confirm all gates passed
-        run: echo "All CI gates passed."
+      - name: Verify selected CI lanes
+        env:
+          REQUIRED_RESULTS: |
+            preflight=${{ needs.preflight.result }}
+            workflow-audit=${{ needs.workflow-audit.result }}
+          SELECTED_RESULTS: |
+            dependency-scan=${{ needs.dependency-scan.result }}
+            codeql=${{ needs.codeql.result }}
+            linux-format=${{ needs.linux-format.result }}
+            linux-clippy=${{ needs.linux-clippy.result }}
+            linux-tests=${{ needs.linux-tests.result }}
+            linux-smoke=${{ needs.linux-smoke.result }}
+            linux-release-build=${{ needs.linux-release-build.result }}
+            windows-port=${{ needs.windows-port.result }}
+            linux-musl=${{ needs.linux-musl.result }}
+            linux-distros=${{ needs.linux-distros.result }}
+        run: |
+          set -euo pipefail
+
+          failures=0
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            echo "${name}: ${result}"
+            if [ "$result" != "success" ]; then
+              echo "::error title=Required CI job did not succeed::${name} finished with ${result}"
+              failures=1
+            fi
+          done <<< "$REQUIRED_RESULTS"
+
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            echo "${name}: ${result}"
+            case "$result" in
+              success | skipped) ;;
+              *)
+                echo "::error title=Selected CI job did not succeed::${name} finished with ${result}"
+                failures=1
+                ;;
+            esac
+          done <<< "$SELECTED_RESULTS"
+
+          exit "$failures"

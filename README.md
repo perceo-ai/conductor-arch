@@ -9,7 +9,8 @@ pull request, archive the workspace, then start the next task without leaving
 the app.
 
 Inspired by [Conductor](https://conductor.build). This project targets Linux
-desktops with GTK4/libadwaita.
+desktops and native Windows with GTK4/libadwaita. Linux is the primary validated
+target; Windows is currently a preview target.
 
 ## Product Structure
 
@@ -24,6 +25,7 @@ should use these terms consistently:
 | `Branch` | The Git branch checked out inside a workspace. This is usually the review and PR unit. | `1 branch has 1 working tree` |
 | `Working tree` | The files on disk for one workspace. Archductor creates these separate checkouts with Git worktrees. | `1 working tree belongs to 1 workspace` |
 | `Running environment` | The app, server, watchers, tests, terminals, and agent processes running inside a workspace. | `1 workspace can run many processes` |
+| `Turn` | The actions a coding agent takes after one user message and before the next user message in the same chat thread. One tool call or file write is not a turn. | `1 turn can contain many tool calls and file writes` |
 
 Practical rule:
 
@@ -157,6 +159,17 @@ sudo install -Dm755 target/release/archductor /usr/local/bin/archductor
 sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 ```
 
+### Windows Preview
+
+Tagged releases build `archductor-<version>-windows-x86_64.zip`. Extract the
+whole directory so the GTK DLLs and data directories remain beside
+`archductor-gtk.exe`, then launch that executable. Install Git and GitHub CLI
+with `winget install --id Git.Git --id GitHub.cli`; agent CLIs remain optional.
+
+For source builds, install the MSYS2 UCRT64 GCC, pkgconf, GTK4, and libadwaita
+packages, then build the `x86_64-pc-windows-gnu` target. The CI workflow is the
+canonical build recipe.
+
 ## Requirements
 
 | Tool | Required For |
@@ -269,7 +282,7 @@ default_visible_tab = "changes"
 
 [customization.view]
 theme = "system"
-accent_color = "green"
+accent_color = "blue"
 density = "compact"
 keybindings = "vim"
 diff_preference = "unified"
@@ -369,8 +382,10 @@ Teams should be able to encode their Git conventions once:
 
 - Branch name templates, such as `lc/{workspace}`, `{type}/{slug}`,
   `{issue_key}-{slug}`, or `{github_issue}-{slug}`.
-- Workspace name style: generated city names, prompt slug, issue key, branch
-  slug, or custom templates.
+- Workspace name style: generated open-source names, prompt slug, issue key,
+  branch slug, or custom templates. The backward-compatible `city` style uses
+  a curated mix of distros, tools, mascots, protocols, and tasteful Unix jokes.
+  Generated values stay unique, lowercase, and safe for Git branches and paths.
 - Commit message style: conventional commits, terse lowercase, team template, or
   "include tests run" format.
 - PR title source: branch, first commit, issue title, prompt summary, or custom
@@ -491,17 +506,15 @@ surfaces that consume them.
 
 ## Platform Stance
 
-Linux is the primary target. The code should keep a portable core where
-practical, but product decisions should optimize for Linux desktop quality
-first.
-
-- Linux: primary supported platform.
-- WSL: likely the best first Windows-adjacent target after Linux.
+- Linux: primary supported platform. CI covers glibc, musl, Debian, Fedora,
+  Arch, openSUSE, and Alpine families.
+- Native Windows: preview target with native path, shell, process, IPC, GTK
+  compile, and portable ZIP support. Real package/runtime validation is still
+  required before a stable support claim.
+- WSL: supported as a Linux environment, but it is not a substitute for the
+  native Windows port.
 - macOS: technically possible, but lower priority because the original
   the upstream Conductor app already serves macOS and GTK packaging is less native there.
-- Native Windows: possible later, but process groups, PTYs, paths, shells,
-  signals, and packaging need deliberate platform abstraction before it is a
-  realistic support target.
 
 ## CLI Reference
 
@@ -572,6 +585,9 @@ archductor checkpoint restore <workspace> <id>
 ~/.cache/archductor/
 ~/archductor/workspaces/<repo>/<workspace>/
 ```
+
+On Windows, configuration is stored under `%APPDATA%\Archductor`; database,
+state, logs, and cache data are stored under `%LOCALAPPDATA%\Archductor`.
 
 ## Documentation
 

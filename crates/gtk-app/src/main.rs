@@ -6,6 +6,7 @@ mod buttons;
 mod command_palette;
 mod dashboard;
 mod history;
+mod history_data;
 mod logger;
 mod motion;
 mod projects;
@@ -16,6 +17,7 @@ mod settings;
 mod setup;
 mod sidebar;
 mod state;
+mod tabs;
 mod terminal;
 mod theme;
 mod toast;
@@ -205,7 +207,7 @@ fn main() {
 
     let app = Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| build_ui(app, launch_target.clone(), debug_mode));
-    app.run();
+    app.run_with_args(&["archductor-gtk"]);
 }
 
 fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
@@ -379,7 +381,7 @@ fn percent_decode(value: &str) -> String {
 fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPreferences {
     workspace
         .and_then(|name| {
-            WorkspaceStore::open(db_path)
+            WorkspaceStore::open_app(db_path)
                 .and_then(|store| store.workspace_view_defaults(name))
                 .ok()
         })
@@ -387,10 +389,19 @@ fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPr
         .unwrap_or_default()
 }
 
+fn resolve_workspace_default_tab(db_path: &Path, workspace: &str) -> WorkspaceTab {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.workspace_view_defaults(workspace))
+        .ok()
+        .and_then(|defaults| defaults.default_visible_tab)
+        .and_then(|tab| WorkspaceTab::from_config(&tab))
+        .unwrap_or(WorkspaceTab::Chats)
+}
+
 fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings {
     workspace
         .and_then(|name| {
-            WorkspaceStore::open(db_path)
+            WorkspaceStore::open_app(db_path)
                 .and_then(|store| store.workspace_view_defaults(name))
                 .ok()
         })
@@ -472,7 +483,7 @@ const VIEW_COLOR_TOKENS: &[(&str, &str, &str)] = &[
     ("text_muted", "lc-text-muted", "#8a8a8a"),
     ("accent", "lc-accent", "#8a8a8a"),
     ("accent_fg", "lc-accent-fg", "#f5f5f5"),
-    ("success", "lc-success", "#84e0a0"),
+    ("success", "lc-success", "#d0d0d0"),
     ("warning", "lc-warning", "#f59e0b"),
     ("danger", "lc-danger", "#ff8a8a"),
 ];
@@ -545,14 +556,14 @@ window.lc-custom-colors,
 .lc-custom-colors .project-tab-active,
 .lc-custom-colors .card-activity,
 .lc-custom-colors .workspace-title {
-    color: @lc-accent;
-    border-color: @lc-accent;
+    color: @lc-text;
+    border-color: @lc-border;
 }
 
 .lc-custom-colors .suggested-action,
 .lc-custom-colors .suggested-action:hover {
-    background-color: @lc-accent;
-    color: @lc-accent-fg;
+    background-color: @lc-hover;
+    color: @lc-text;
 }
 
 .lc-custom-colors .diff-added,
@@ -574,6 +585,72 @@ window.lc-custom-colors,
 }
 "#;
 
+fn navigate_workspace_from_dashboard(
+    app_state: &AppState,
+    workspace_name: String,
+    default_tab: Option<WorkspaceTab>,
+    refresh_view_preferences: &dyn Fn(),
+    refresh_workspace_detail: &dyn Fn(),
+    show_workspace_stack: &dyn Fn(),
+) {
+    app_state.navigate_to_workspace_with_default_tab(Some(workspace_name), default_tab);
+    refresh_view_preferences();
+    refresh_workspace_detail();
+    show_workspace_stack();
+}
+
+fn with_upgraded_navigation_target<T>(
+    upgrade: impl FnOnce() -> Option<T>,
+    navigate: impl FnOnce(&T),
+) -> bool {
+    let Some(target) = upgrade() else {
+        return false;
+    };
+    navigate(&target);
+    true
+}
+
+fn weak_navigation_callback<C: 'static>(
+    coordinator: &Rc<C>,
+    navigate: fn(&C, String),
+) -> Rc<dyn Fn(String)> {
+    let coordinator = Rc::downgrade(coordinator);
+    Rc::new(move |workspace_name| {
+        if let Some(coordinator) = coordinator.upgrade() {
+            navigate(&coordinator, workspace_name);
+        }
+    })
+}
+
+struct WorkspaceNavigationCoordinator {
+    app_state: AppState,
+    main_stack: gtk::glib::WeakRef<Stack>,
+    refresh_view_preferences: Rc<dyn Fn()>,
+    refresh_workspace_detail: Rc<dyn Fn()>,
+}
+
+impl WorkspaceNavigationCoordinator {
+    fn navigate(&self, workspace_name: String) {
+        with_upgraded_navigation_target(
+            || self.main_stack.upgrade(),
+            |main_stack| {
+                let default_tab = resolve_workspace_default_tab(
+                    &self.app_state.paths.database_path,
+                    &workspace_name,
+                );
+                navigate_workspace_from_dashboard(
+                    &self.app_state,
+                    workspace_name,
+                    Some(default_tab),
+                    self.refresh_view_preferences.as_ref(),
+                    self.refresh_workspace_detail.as_ref(),
+                    &|| main_stack.set_visible_child_name("workspace"),
+                );
+            },
+        );
+    }
+}
+
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
     let paths = AppPaths::from_env();
@@ -593,7 +670,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             .workspace
             .as_deref()
             .and_then(|workspace| {
-                WorkspaceStore::open(paths.database_path.clone())
+                WorkspaceStore::open_app(paths.database_path.clone())
                     .and_then(|store| store.workspace_view_defaults(workspace))
                     .ok()
             })
@@ -663,18 +740,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
     let runtime_error_reporter = Rc::new(RefCell::new(RuntimeErrorReporter::default()));
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building dashboard"
-    );
-    let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
-    dashboard.set_hexpand(true);
-    dashboard.set_vexpand(true);
-    let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: dashboard built"
-    );
+    let main_stack = Stack::new();
+    main_stack.set_hexpand(true);
+    main_stack.set_vexpand(true);
+    let main_stack_weak = main_stack.downgrade();
 
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -697,97 +766,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         &view_colors_css,
         &color_scope_class,
     );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: workspace center built"
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building projects page"
-    );
-    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
-    let navigate_created_workspace: Rc<dyn Fn(String)> = {
-        let app_state = app_state.clone();
-        let main_stack_handle = main_stack_handle.clone();
-        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
-        Rc::new(move |workspace_name| {
-            app_state.navigate_to_workspace_with_default_tab(
-                Some(workspace_name),
-                Some(WorkspaceTab::Chats),
-            );
-            if let Some(refresh_view_preferences) =
-                refresh_view_preferences_handle.borrow().as_ref()
-            {
-                refresh_view_preferences();
-            }
-            if let Some(stack) = main_stack_handle.borrow().as_ref() {
-                stack.set_visible_child_name("workspace");
-            }
-        })
-    };
-    let (projects_page, refresh_projects) = projects::build_projects_page(
-        &app_state.paths,
-        refresh_dashboard.clone(),
-        {
-            let refresh_workspace_detail = refresh_workspace_detail.clone();
-            let refresh_hub = refresh_hub.clone();
-            move || {
-                refresh_workspace_detail();
-                refresh_hub.refresh(RefreshScope::Sidebar);
-            }
-        },
-        navigate_created_workspace,
-        toast_manager.clone(),
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: projects page built"
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building settings page"
-    );
-    let (settings_page, refresh_settings) =
-        settings::build_settings_page(&app_state.paths, toast_manager.clone());
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: settings page built"
-    );
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: building history page"
-    );
-    let (history_page, refresh_history) =
-        history::build_history_page(app_state.workspace_database_path(), toast_manager.clone());
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: history page built"
-    );
-
-    let main_stack = Stack::new();
-    main_stack.set_hexpand(true);
-    main_stack.set_vexpand(true);
-    *main_stack_handle.borrow_mut() = Some(main_stack.clone());
-    main_stack.add_named(&dashboard, Some("dashboard"));
-    main_stack.add_named(&projects_page, Some("projects"));
-    main_stack.add_named(&settings_page, Some("settings"));
-    main_stack.add_named(&history_page, Some("history"));
-    main_stack.add_named(&workspace_preference_scope, Some("workspace"));
-    if debug_mode {
-        main_stack.add_named(
-            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
-            Some("pty-inspector"),
-        );
-    }
-    main_stack.set_visible_child_name(match app_state.snapshot().active_page {
-        AppPage::Workspace => "workspace",
-        AppPage::Projects => "projects",
-        AppPage::Settings => "settings",
-        AppPage::History => "history",
-        AppPage::PtyInspector if debug_mode => "pty-inspector",
-        _ => "dashboard",
-    });
-
     let refresh_view_preferences: Rc<dyn Fn()> = {
         let state_for_view = app_state.clone();
         let workspace_preference_scope = workspace_preference_scope.clone();
@@ -809,7 +787,95 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
     };
-    *refresh_view_preferences_handle.borrow_mut() = Some(refresh_view_preferences.clone());
+    let navigation_coordinator = Rc::new(WorkspaceNavigationCoordinator {
+        app_state: app_state.clone(),
+        main_stack: main_stack_weak,
+        refresh_view_preferences: refresh_view_preferences.clone(),
+        refresh_workspace_detail: Rc::new(refresh_workspace_detail.clone()),
+    });
+    let navigate_workspace = weak_navigation_callback(
+        &navigation_coordinator,
+        WorkspaceNavigationCoordinator::navigate,
+    );
+    let navigation_coordinator_handle = Rc::new(RefCell::new(Some(navigation_coordinator)));
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: workspace center built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building dashboard"
+    );
+    let (dashboard, refresh_dashboard) =
+        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
+    dashboard.set_hexpand(true);
+    dashboard.set_vexpand(true);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: dashboard built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building projects page"
+    );
+    let (projects_page, refresh_projects) = projects::build_projects_page(
+        &app_state.paths,
+        refresh_dashboard.clone(),
+        {
+            let refresh_workspace_detail = refresh_workspace_detail.clone();
+            let refresh_hub = refresh_hub.clone();
+            move || {
+                refresh_workspace_detail();
+                refresh_hub.refresh(RefreshScope::Sidebar);
+            }
+        },
+        navigate_workspace.clone(),
+        toast_manager.clone(),
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: projects page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building settings page"
+    );
+    let (settings_page, refresh_settings) =
+        settings::build_settings_page(&app_state.paths, toast_manager.clone());
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: settings page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building history page"
+    );
+    let (history_page, refresh_history) =
+        history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: history page built"
+    );
+
+    main_stack.add_named(&dashboard, Some("dashboard"));
+    main_stack.add_named(&projects_page, Some("projects"));
+    main_stack.add_named(&settings_page, Some("settings"));
+    main_stack.add_named(&history_page, Some("history"));
+    main_stack.add_named(&workspace_preference_scope, Some("workspace"));
+    if debug_mode {
+        main_stack.add_named(
+            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
+            Some("pty-inspector"),
+        );
+    }
+    main_stack.set_visible_child_name(match app_state.snapshot().active_page {
+        AppPage::Workspace => "workspace",
+        AppPage::Projects => "projects",
+        AppPage::Settings => "settings",
+        AppPage::History => "history",
+        AppPage::PtyInspector if debug_mode => "pty-inspector",
+        _ => "dashboard",
+    });
 
     let (sidebar, refresh_sidebar) = sidebar::build_app_sidebar(
         &app_state,
@@ -889,7 +955,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let custom_commands = state_for_palette
                 .selected_workspace()
                 .and_then(|workspace| {
-                    WorkspaceStore::open(state_for_palette.workspace_database_path())
+                    WorkspaceStore::open_app(state_for_palette.workspace_database_path())
                         .and_then(|store| store.workspace_view_defaults(&workspace))
                         .ok()
                 })
@@ -983,7 +1049,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let spotlight_watcher_on_close = spotlight_watcher.clone();
         let runtime_reporter_on_close = runtime_error_reporter.clone();
         let toast_on_close = toast_manager.clone();
+        let navigation_coordinator_on_close = navigation_coordinator_handle.clone();
         window.connect_destroy(move |_| {
+            navigation_coordinator_on_close.borrow_mut().take();
             *spotlight_watcher_on_close.borrow_mut() = None;
             if reconcile_runtime_state_for_ui(
                 &db_path_on_close,
@@ -1095,7 +1163,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 *prev_notif.borrow_mut() = None;
                 return glib::ControlFlow::Continue;
             };
-            let rules = WorkspaceStore::open(db_path_notif.clone())
+            let rules = WorkspaceStore::open_app(db_path_notif.clone())
                 .and_then(|store| store.workspace_view_defaults(&workspace))
                 .map(|defaults| defaults.notification_rules)
                 .unwrap_or_default();
@@ -1114,7 +1182,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             if !notify_session_stop && !notify_check_fail {
                 return glib::ControlFlow::Continue;
             }
-            let Ok(summary) = WorkspaceStore::open(db_path_notif.clone())
+            let Ok(summary) = WorkspaceStore::open_app(db_path_notif.clone())
                 .and_then(|store| store.checks_summary(&workspace))
             else {
                 return glib::ControlFlow::Continue;
@@ -1292,7 +1360,7 @@ fn apply_palette_target(
         PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
         PaletteTarget::RunCommand(cmd) => {
             if let Some(workspace) = state.selected_workspace() {
-                let _ = WorkspaceStore::open(state.workspace_database_path())
+                let _ = WorkspaceStore::open_app(state.workspace_database_path())
                     .and_then(|store| store.terminal_command(&workspace, &cmd));
                 refresh_hub.refresh(RefreshScope::Workspace);
             }
@@ -1376,7 +1444,7 @@ fn reconcile_runtime_state_for_ui(
 }
 
 fn reconcile_runtime_state(db_path: &Path) -> anyhow::Result<RuntimeReconciliationReport> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let synced = store.spotlight_sync_active_sessions()?;
     let reconciled = store.reconcile_terminal_processes()?;
     Ok(RuntimeReconciliationReport {
@@ -1401,7 +1469,7 @@ fn refresh_spotlight_file_watcher(
     event_tx: &Sender<()>,
     current: &Rc<RefCell<Option<SpotlightFileWatcher>>>,
 ) -> anyhow::Result<()> {
-    let store = WorkspaceStore::open(db_path)?;
+    let store = WorkspaceStore::open_app(db_path)?;
     let targets = store.spotlight_watch_targets()?;
     let target_keys = targets
         .iter()
@@ -1489,8 +1557,7 @@ pub(crate) fn shell_quote(value: &str) -> String {
 }
 
 pub(crate) fn default_clone_parent() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    archductor_core::platform::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("archductor")
         .join("repos")
@@ -1506,63 +1573,88 @@ pub(crate) fn repo_name_from_url(url: &str) -> String {
 }
 
 pub(crate) fn spawn_terminal_command(cmd: &str) {
+    #[cfg(windows)]
+    let full_cmd = format!("{cmd} & echo. & pause");
+    #[cfg(not(windows))]
     let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
 
-    #[cfg(target_os = "macos")]
+    #[cfg(windows)]
     {
-        let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
-        if std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "tell application \"Terminal\" to do script \"{}\"",
-                escaped
-            ))
-            .arg("-e")
-            .arg("tell application \"Terminal\" to activate")
+        if std::process::Command::new("wt.exe")
+            .args(["new-tab", "cmd.exe", "/D", "/S", "/C", &full_cmd])
             .spawn()
             .is_ok()
         {
             return;
         }
-    }
-
-    // Respect $TERMINAL env var if set
-    if let Ok(term) = std::env::var("TERMINAL") {
-        if std::process::Command::new(&term)
-            .args(["-e", "bash", "-c", &full_cmd])
+        if std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", "start", "cmd.exe", "/K", &full_cmd])
             .spawn()
             .is_ok()
         {
             return;
         }
+        eprintln!("Windows Terminal was not found. Run manually:\n  {cmd}");
     }
 
-    let terminals: &[(&str, &[&str])] = &[
-        ("gnome-terminal", &["--", "bash", "-c"]),
-        ("xterm", &["-e", "bash", "-c"]),
-        ("konsole", &["-e", "bash", "-c"]),
-        ("xfce4-terminal", &["-e", "bash", "-c"]),
-        ("tilix", &["-e", "bash", "-c"]),
-        ("terminator", &["-e", "bash", "-c"]),
-        ("alacritty", &["-e", "bash", "-c"]),
-        ("kitty", &["bash", "-c"]),
-        ("foot", &["bash", "-c"]),
-        ("wezterm", &["start", "--", "bash", "-c"]),
-        ("xterm", &["-e", "bash", "-c"]),
-    ];
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        {
+            let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+            if std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "tell application \"Terminal\" to do script \"{}\"",
+                    escaped
+                ))
+                .arg("-e")
+                .arg("tell application \"Terminal\" to activate")
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
+        }
 
-    for (term, prefix_args) in terminals {
-        let mut command = std::process::Command::new(term);
-        for arg in *prefix_args {
-            command.arg(arg);
+        // Respect $TERMINAL env var if set
+        if let Ok(term) = std::env::var("TERMINAL") {
+            if std::process::Command::new(&term)
+                .args(["-e", "bash", "-c", &full_cmd])
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
         }
-        command.arg(&full_cmd);
-        if command.spawn().is_ok() {
-            return;
+
+        let terminals: &[(&str, &[&str])] = &[
+            ("gnome-terminal", &["--", "bash", "-c"]),
+            ("xterm", &["-e", "bash", "-c"]),
+            ("konsole", &["-e", "bash", "-c"]),
+            ("xfce4-terminal", &["-e", "bash", "-c"]),
+            ("tilix", &["-e", "bash", "-c"]),
+            ("terminator", &["-e", "bash", "-c"]),
+            ("alacritty", &["-e", "bash", "-c"]),
+            ("kitty", &["bash", "-c"]),
+            ("foot", &["bash", "-c"]),
+            ("wezterm", &["start", "--", "bash", "-c"]),
+            ("xterm", &["-e", "bash", "-c"]),
+        ];
+
+        for (term, prefix_args) in terminals {
+            let mut command = std::process::Command::new(term);
+            for arg in *prefix_args {
+                command.arg(arg);
+            }
+            command.arg(&full_cmd);
+            if command.spawn().is_ok() {
+                return;
+            }
         }
+
+        eprintln!("No terminal emulator found. Run manually:\n  {cmd}");
     }
-
-    eprintln!("No terminal emulator found. Run manually:\n  {cmd}");
 }
 
 // ── STYLES ────────────────────────────────────────────────────────────────
@@ -1575,6 +1667,12 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn startup_runtime_reconciliation_marks_stale_terminal_rows_exited() {
@@ -1619,6 +1717,50 @@ mod tests {
     }
 
     #[test]
+    fn gtk_view_preferences_use_app_shared_settings() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::remove_file(repo_path.join(".archductor/settings.toml")).unwrap();
+
+        let config_home = temp.path().join("xdg/config");
+        let settings_path = config_home.join("archductor/settings.toml");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(settings_path, "[customization.view]\ntheme = \"light\"\n").unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let preferences = resolve_view_preferences(db_path, Some("berlin"));
+
+        if let Some(previous) = previous_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", previous);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        assert_eq!(preferences.theme, Some(ViewTheme::Light));
+    }
+
+    #[test]
     fn launch_target_parses_workspace_and_tab_args() {
         let target =
             parse_launch_target(["archductor-gtk", "--workspace", "berlin", "--tab", "checks"])
@@ -1627,6 +1769,129 @@ mod tests {
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
         assert_eq!(target.page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn dashboard_navigation_refreshes_selected_workspace_before_showing_it() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            None,
+            WorkspaceTab::Checks,
+            AppPage::Dashboard,
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+
+        navigate_workspace_from_dashboard(
+            &state,
+            "berlin".to_owned(),
+            Some(WorkspaceTab::Checks),
+            &{
+                let state = state.clone();
+                let events = events.clone();
+                move || {
+                    assert_eq!(state.selected_workspace().as_deref(), Some("berlin"));
+                    events.borrow_mut().push("preferences");
+                }
+            },
+            &{
+                let state = state.clone();
+                let events = events.clone();
+                move || {
+                    assert_eq!(state.selected_workspace().as_deref(), Some("berlin"));
+                    events.borrow_mut().push("workspace-detail");
+                }
+            },
+            &{
+                let events = events.clone();
+                move || events.borrow_mut().push("workspace-stack")
+            },
+        );
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.selected_workspace.as_deref(), Some("berlin"));
+        assert_eq!(snapshot.active_page, AppPage::Workspace);
+        assert_eq!(snapshot.active_workspace_tab, WorkspaceTab::Checks);
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["preferences", "workspace-detail", "workspace-stack"]
+        );
+    }
+
+    #[test]
+    fn navigation_callback_does_not_keep_its_target_alive() {
+        let target = Rc::new(RefCell::new(0));
+        let weak_target = Rc::downgrade(&target);
+        let navigate = {
+            let weak_target = weak_target.clone();
+            move || {
+                with_upgraded_navigation_target(
+                    || weak_target.upgrade(),
+                    |target| *target.borrow_mut() += 1,
+                )
+            }
+        };
+
+        assert_eq!(Rc::strong_count(&target), 1);
+        assert!(navigate());
+        assert_eq!(*target.borrow(), 1);
+        drop(target);
+        assert!(!navigate());
+    }
+
+    #[test]
+    fn descendant_navigation_callback_stops_before_state_and_refresh_after_root_drop() {
+        struct TestNavigationCoordinator {
+            root: std::rc::Weak<()>,
+            selected: Rc<RefCell<Option<String>>>,
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl TestNavigationCoordinator {
+            fn navigate(&self, workspace: String) {
+                with_upgraded_navigation_target(
+                    || self.root.upgrade(),
+                    |_| {
+                        *self.selected.borrow_mut() = Some(workspace);
+                        self.events.borrow_mut().extend([
+                            "preferences",
+                            "workspace-detail",
+                            "workspace-stack",
+                        ]);
+                    },
+                );
+            }
+        }
+
+        let root = Rc::new(());
+        let selected = Rc::new(RefCell::new(None));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let coordinator = Rc::new(TestNavigationCoordinator {
+            root: Rc::downgrade(&root),
+            selected: selected.clone(),
+            events: events.clone(),
+        });
+        let weak_coordinator = Rc::downgrade(&coordinator);
+        let navigate = weak_navigation_callback(&coordinator, TestNavigationCoordinator::navigate);
+
+        assert_eq!(Rc::strong_count(&coordinator), 1);
+        navigate("berlin".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["preferences", "workspace-detail", "workspace-stack"]
+        );
+
+        events.borrow_mut().clear();
+        drop(root);
+        navigate("london".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert!(events.borrow().is_empty());
+
+        drop(coordinator);
+        assert!(weak_coordinator.upgrade().is_none());
+        navigate("paris".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert!(events.borrow().is_empty());
     }
 
     #[test]

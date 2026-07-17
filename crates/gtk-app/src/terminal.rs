@@ -225,7 +225,7 @@ pub fn embedded_terminal_panel(
             &buffer_for_start,
             "\n[terminal] shell start requested through archcar runtime\n",
         );
-        if let Err(err) = WorkspaceStore::open(db_for_start.clone())
+        if let Err(err) = WorkspaceStore::open_app(db_for_start.clone())
             .and_then(|store| store.reconcile_session_processes())
             .map(|_| ())
         {
@@ -372,7 +372,7 @@ fn latest_running_runtime_shell(
     database_path: &Path,
     workspace_name: &str,
 ) -> Option<ProcessRecord> {
-    WorkspaceStore::open(database_path)
+    WorkspaceStore::open_app(database_path)
         .and_then(|store| store.list_sessions(workspace_name))
         .ok()
         .and_then(|records| {
@@ -400,7 +400,7 @@ fn load_terminal_tab_transcript(
     buffer: TextBuffer,
     toast_manager: ToastManager,
 ) {
-    match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+    match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
         store
             .list_terminals(&workspace_name)?
             .into_iter()
@@ -446,6 +446,7 @@ fn run_terminal_command(
             input: command.clone(),
             visible_input: None,
             kind: ArchcarInputKind::ControlCommand,
+            delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
         },
     );
     append_text(
@@ -479,7 +480,7 @@ fn run_terminal_log_search(
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
-            WorkspaceStore::open(database_path)
+            WorkspaceStore::open_app(database_path)
                 .and_then(|store| store.search_terminal_logs(&workspace_name, &query_for_thread))
         },
         move |result| match result {
@@ -532,7 +533,7 @@ fn run_terminal_match_transcript(
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
-            WorkspaceStore::open(database_path)
+            WorkspaceStore::open_app(database_path)
                 .and_then(|store| {
                     let record = store
                         .list_terminals(&workspace_name)?
@@ -590,7 +591,7 @@ fn run_terminal_line_transcript(
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
-            WorkspaceStore::open(database_path)
+            WorkspaceStore::open_app(database_path)
                 .and_then(|store| {
                     let record = store
                         .list_terminals(&workspace_name)?
@@ -665,7 +666,7 @@ fn run_terminal_tail_transcript(
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
-            WorkspaceStore::open(database_path_for_thread.clone())
+            WorkspaceStore::open_app(database_path_for_thread.clone())
             .and_then(|store| {
                 let record = store
                     .list_terminals(&workspace_name_for_thread)?
@@ -717,7 +718,7 @@ fn run_terminal_head_transcript(
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
-            WorkspaceStore::open(database_path_for_thread.clone())
+            WorkspaceStore::open_app(database_path_for_thread.clone())
             .and_then(|store| {
                 let record = store
                     .list_terminals(&workspace_name_for_thread)?
@@ -900,7 +901,7 @@ fn run_terminal_history(
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
-            WorkspaceStore::open(database_path)
+            WorkspaceStore::open_app(database_path)
                 .and_then(|store| store.list_terminal_summaries(&workspace_name))
         },
         move |result| match result {
@@ -959,7 +960,7 @@ fn run_terminal_transcript_load(
     let toast_for_message = toast_manager.clone();
     let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
-        move || match WorkspaceStore::open(database_path)
+        move || match WorkspaceStore::open_app(database_path)
             .and_then(|store| store.read_terminal_log(&workspace_name, record.id))
         {
             Ok(transcript) => format_selected_terminal_transcript(&record, &transcript),
@@ -1894,7 +1895,7 @@ fn initial_terminal_text(
     workspace_path: &Path,
     preferences: &TerminalPreferences,
 ) -> String {
-    let restored = WorkspaceStore::open(database_path)
+    let restored = WorkspaceStore::open_app(database_path)
         .and_then(|store| store.read_latest_terminal_log(workspace_name))
         .ok()
         .filter(|log| !log.trim().is_empty());

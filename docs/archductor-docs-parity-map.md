@@ -17,6 +17,9 @@ instructions:
 - `Working tree`: the files on disk for that workspace.
 - `Running environment`: terminals, agents, setup/run scripts, servers, tests,
   and watchers inside the workspace.
+- `Turn`: the actions a coding agent takes after one user message and before
+  the next user message in the same chat thread. One tool call or file write is
+  not a turn.
 
 Relationship model:
 
@@ -26,6 +29,7 @@ Relationship model:
 - `1 branch has 1 working tree`
 - `1 working tree belongs to 1 workspace`
 - `1 workspace can run many processes in its running environment`
+- `1 turn can contain many tool calls and file writes`
 
 ## Core Product Loop
 
@@ -82,11 +86,11 @@ agent profiles, approval/reasoning defaults, merge blockers, definition of done,
 checkpoint timing, notification rules, keybindings, command palette presets,
 terminal presets, dashboard columns, and import/export for team settings.
 
-Platform expectation: optimize the product for Linux first. Keep core process,
-path, PTY, and packaging boundaries portable where practical, but do not let
-native Windows/macOS parity slow Linux desktop quality. WSL can be the first
-Windows-adjacent target; native Windows needs deliberate shell/process
-abstraction before it is realistic.
+Platform expectation: keep Linux quality primary while maintaining the native
+Windows port. Core process, path, PTY, IPC, shell, and packaging boundaries must
+compile on both platforms. CI covers glibc, musl, representative Linux distro
+families, and native Windows; real package/runtime smoke is still platform
+specific.
 
 ## Agents And Tools
 
