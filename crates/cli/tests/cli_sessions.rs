@@ -1,7 +1,9 @@
+use archductor_core::archcar::harness::managed_harness_for_kind;
+use archductor_core::archcar::harness_contract::{HarnessCapability, SupportMode};
 use archductor_core::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
 };
-use archductor_core::workspace::WorkspaceStore;
+use archductor_core::workspace::{SessionKind, WorkspaceStore};
 use assert_cmd::Command as AssertCommand;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
@@ -351,38 +353,9 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
-    let fake_codex = temp.path().join("fake-codex");
+    let fake_codex = fake_codex_path(temp.path());
     let provider_inputs = temp.path().join("provider-inputs.txt");
-    fs::write(
-        &fake_codex,
-        r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-
-capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
-for raw in sys.stdin:
-    message = json.loads(raw)
-    method = message.get("method")
-    if method == "initialize":
-        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
-    elif method in ("thread/start", "thread/resume"):
-        print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thread-test"}}}), flush=True)
-    elif method == "turn/start":
-        text = message["params"]["input"][0]["text"]
-        with open(capture, "a", encoding="utf-8") as output:
-            output.write(json.dumps(text) + "\n")
-        turn_id = "turn-test"
-        print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
-        print(json.dumps({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}}), flush=True)
-"#,
-    )
-    .unwrap();
-    Command::new("chmod")
-        .arg("+x")
-        .arg(&fake_codex)
-        .status()
-        .unwrap();
+    write_fake_codex(&fake_codex).unwrap();
 
     app(temp.path())
         .args([
@@ -480,16 +453,8 @@ for raw in sys.stdin:
         vec!["Keep changes focused.\n\nFix auth", "Run tests"]
     );
 
-    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
-    let visible_messages = store.list_chat_messages(thread.id).unwrap();
-    assert_eq!(
-        visible_messages
-            .iter()
-            .filter(|message| message.role == "user")
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Fix auth", "Run tests"]
-    );
+    let visible_messages =
+        wait_for_visible_user_messages(temp.path(), thread.id, &["Fix auth", "Run tests"]);
     assert!(visible_messages
         .iter()
         .all(|message| !message.content.contains("Keep changes focused.")));
@@ -506,6 +471,81 @@ for raw in sys.stdin:
         .assert()
         .success();
     wait_for_session_exit(temp.path(), second_session);
+}
+
+#[cfg(unix)]
+fn fake_codex_path(root: &Path) -> PathBuf {
+    root.join("fake-codex")
+}
+
+#[cfg(windows)]
+fn fake_codex_path(root: &Path) -> PathBuf {
+    root.join("fake-codex.cmd")
+}
+
+#[cfg(unix)]
+fn write_fake_codex(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method in ("thread/start", "thread/resume"):
+        print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thread-test"}}}), flush=True)
+    elif method == "turn/start":
+        text = message["params"]["input"][0]["text"]
+        with open(capture, "a", encoding="utf-8") as output:
+            output.write(json.dumps(text) + "\n")
+        turn_id = "turn-test"
+        print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(windows)]
+fn write_fake_codex(path: &Path) -> std::io::Result<()> {
+    let script = path.with_extension("ps1");
+    fs::write(
+        path,
+        format!(
+            "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\n",
+            script.display()
+        ),
+    )?;
+    fs::write(
+        script,
+        r#"
+$capture = $env:ARCHDUCTOR_CAPTURE_PATH
+while (($raw = [Console]::In.ReadLine()) -ne $null) {
+  $message = $raw | ConvertFrom-Json
+  $method = $message.method
+  if ($method -eq "initialize") {
+    Write-Output (@{ id = $message.id; result = @{} } | ConvertTo-Json -Compress -Depth 8)
+  } elseif ($method -eq "thread/start" -or $method -eq "thread/resume") {
+    Write-Output (@{ id = $message.id; result = @{ thread = @{ id = "thread-test" } } } | ConvertTo-Json -Compress -Depth 8)
+  } elseif ($method -eq "turn/start") {
+    $text = $message.params.input[0].text
+    Add-Content -Path $capture -Encoding UTF8 -Value ($text | ConvertTo-Json -Compress)
+    $turnId = "turn-test"
+    Write-Output (@{ id = $message.id; result = @{ turn = @{ id = $turnId } } } | ConvertTo-Json -Compress -Depth 8)
+    Write-Output (@{ method = "turn/completed"; params = @{ turn = @{ id = $turnId; status = "completed" } } } | ConvertTo-Json -Compress -Depth 8)
+  }
+  [Console]::Out.Flush()
+}
+"#,
+    )
 }
 
 #[test]
@@ -744,6 +784,85 @@ fn cli_archcar_messages_renders_claude_projected_provider_events() {
         .stdout(predicates::str::contains("\"method\"").not());
 }
 
+#[test]
+fn claude_thread_session_send_help_exposes_thread_targeting() {
+    let temp = tempfile::tempdir().unwrap();
+    app(temp.path())
+        .args(["session", "send", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--thread-id"))
+        .stdout(contains("claude"));
+}
+
+#[test]
+fn claude_hook_hidden_command_prints_single_json_object() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = app(temp.path())
+        .args(["--archcar-claude-hook", "42"])
+        .write_stdin(
+            json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo test"}
+            })
+            .to_string(),
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+
+    assert_eq!(
+        parsed,
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "defer"
+            }
+        })
+    );
+    assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
+}
+
+#[test]
+fn provider_interactions_help_lists_cli_actions() {
+    let temp = tempfile::tempdir().unwrap();
+    app(temp.path())
+        .args(["archcar", "interactions", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("list"))
+        .stdout(contains("allow"))
+        .stdout(contains("deny"))
+        .stdout(contains("answer"));
+}
+
+#[test]
+fn harness_capabilities_gate_goals_to_codex_descriptor() {
+    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+
+    assert_eq!(
+        codex.descriptor().optional(HarnessCapability::Goals),
+        SupportMode::Native
+    );
+    assert!(matches!(
+        claude.descriptor().optional(HarnessCapability::Goals),
+        SupportMode::Unsupported { reason } if !reason.is_empty()
+    ));
+    for harness in [codex, claude] {
+        assert!(harness
+            .descriptor()
+            .required_features
+            .iter()
+            .any(|feature| feature.as_str() == "session_controls"));
+    }
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command
@@ -861,6 +980,28 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
         "timed out waiting for {expected} line(s) in {}",
         path.display()
     );
+}
+
+fn wait_for_visible_user_messages(
+    root: &Path,
+    thread_id: i64,
+    expected: &[&str],
+) -> Vec<archductor_core::workspace::ChatMessageRecord> {
+    for _ in 0..100 {
+        let visible_messages = WorkspaceStore::open(app_database_path(root))
+            .and_then(|store| store.list_chat_messages(thread_id))
+            .unwrap_or_default();
+        let visible_user_messages = visible_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        if visible_user_messages == expected {
+            return visible_messages;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for visible user messages {expected:?}");
 }
 
 fn wait_for_session_exit(root: &Path, session_id: i64) {

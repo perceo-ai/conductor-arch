@@ -60,15 +60,88 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(not(windows))]
     {
-        Command::new("kill")
+        let pid = pid.to_string();
+        let signalable = Command::new("kill")
             .arg("-0")
-            .arg(pid.to_string())
+            .arg(&pid)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !signalable {
+            return false;
+        }
+
+        Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                let stat = String::from_utf8_lossy(&output.stdout);
+                !stat.trim_start().starts_with('Z')
+            })
+            .unwrap_or(true)
     }
+}
+
+#[cfg(unix)]
+pub fn configure_new_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+pub fn configure_new_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+/// Sends SIGINT to the process group rooted at `pid`.
+pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
+    Command::new("kill")
+        .arg("-INT")
+        .arg(format!("-{pid}"))
+        .status()
+        .map(|status| status.success())
+}
+
+#[cfg(windows)]
+/// Best-effort interruption for a Windows process tree.
+///
+/// Archductor does not currently attach managed providers to a Windows console
+/// control group that can receive CTRL_C_EVENT, so this falls back to the same
+/// non-forced tree termination used elsewhere.
+pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
+    terminate_process_tree(pid, false)
+}
+
+#[cfg(not(any(unix, windows)))]
+/// Best-effort interruption for platforms without process-group support.
+pub fn interrupt_process_group(_pid: u32) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+pub fn terminate_process_group(pid: u32, force: bool) -> std::io::Result<bool> {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    Command::new("kill")
+        .arg(signal)
+        .arg(format!("-{pid}"))
+        .status()
+        .map(|status| status.success())
+}
+
+#[cfg(windows)]
+pub fn terminate_process_group(pid: u32, force: bool) -> std::io::Result<bool> {
+    terminate_process_tree(pid, force)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn terminate_process_group(_pid: u32, _force: bool) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 #[cfg(windows)]

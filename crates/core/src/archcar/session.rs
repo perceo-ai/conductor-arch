@@ -14,22 +14,34 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::archcar::harness::{
-    controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
+    controller_for_kind, ensure_thread_for_kind, managed_harness_for_kind, provider_name,
+    HarnessController,
 };
-use crate::archcar::protocol::{ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind};
+use crate::archcar::harness_contract::{
+    DesiredHarnessControls, HarnessAdapterContext, HarnessControl, HarnessControlPlan,
+    HarnessEffect, HarnessInput, HarnessSignal, HarnessTurnStatus, ManagedHarnessAdapter,
+    NativeRecord,
+};
+use crate::archcar::protocol::{
+    session_harness_capabilities_for_descriptor, ArchcarEvent, ArchcarInputDelivery,
+    ArchcarInputKind, SessionHarnessCapabilities,
+};
 use crate::codex_tui::codex_screen_ready_for_input;
-use crate::provider_adapters::claude_stream::{build_claude_stream_args, ClaudeStreamLaunchConfig};
+use crate::provider_adapters::claude_hooks::build_claude_hook_settings;
+use crate::provider_adapters::claude_stream::{
+    build_claude_stream_args, ClaudeManagedAdapter, ClaudeStreamLaunchConfig,
+};
 use crate::provider_adapters::codex_app_server::{
     parse_jsonl_message, write_initialize_request_with_id, write_initialized_notification,
-    write_thread_start_request_with_id, write_turn_interrupt_request_with_id,
-    write_turn_start_request_with_id, write_turn_steer_request_with_id,
-    CodexAppServerInitializeParams, CodexAppServerMessage, CodexAppServerThreadStartParams,
-    CodexAppServerTurnInterruptParams, CodexAppServerTurnStartParams,
-    CodexAppServerTurnSteerParams, CodexAppServerUserInput, CODEX_APP_SERVER_DEFAULT_ARGS,
+    write_thread_start_request_with_id, write_turn_start_request_with_id,
+    write_turn_steer_request_with_id, CodexAppServerInitializeParams, CodexAppServerMessage,
+    CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
+    CodexAppServerUserInput, CodexManagedAdapter, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
+use crate::provider_inputs::ProviderInputInput;
 use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
@@ -40,6 +52,11 @@ use crate::workspace::{
 };
 use serde_json::json;
 
+/// Builds the provider-facing first-turn text while keeping visible chat text separate.
+///
+/// General instructions are prepended only for the first visible user turn in a
+/// durable chat thread. Follow-up turns keep the user's text unchanged so the
+/// prompt snapshot does not leak into every provider input.
 pub fn compose_first_turn_input(general: Option<&str>, visible: &str, first_turn: bool) -> String {
     if first_turn {
         if let Some(general) = general.map(str::trim).filter(|prompt| !prompt.is_empty()) {
@@ -68,9 +85,7 @@ pub enum SessionCommand {
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
     },
-    SetModel {
-        model: Option<String>,
-    },
+    ApplyControl(HarnessControl),
     Resize {
         rows: u16,
         cols: u16,
@@ -89,6 +104,7 @@ pub struct SessionSnapshot {
     pub status: ProcessStatus,
     pub runtime_state: AgentSessionState,
     pub ready: bool,
+    pub capabilities: Option<SessionHarnessCapabilities>,
     pub screen: String,
 }
 
@@ -356,6 +372,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
     for (key, value) in &start.launch.env {
         command.env(key, value);
     }
+    crate::platform::configure_new_process_group(&mut command);
 
     let mut child = command
         .spawn()
@@ -526,6 +543,109 @@ fn append_runtime_provider_event(
     }
 }
 
+fn apply_harness_effect(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    native_thread_id: &mut Option<String>,
+    effect: HarnessEffect,
+) {
+    match effect {
+        HarnessEffect::Initialized {
+            native_session_id, ..
+        } => {
+            *native_thread_id = Some(native_session_id.clone());
+            let _ =
+                runtime_store.update_chat_thread_native_id(started.thread_id, &native_session_id);
+        }
+        HarnessEffect::Ready => {
+            mark_snapshot_ready(snapshot);
+            let _ = event_tx.send(ArchcarEvent::SessionReady {
+                session_id: started.session_id,
+                thread_id: started.thread_id,
+            });
+        }
+        HarnessEffect::InputAcknowledged { local_input_id } => {
+            if let Err(err) = runtime_store.mark_provider_input_acknowledged(&local_input_id, None)
+            {
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: format!("Provider input acknowledgement persistence failed: {err:#}"),
+                });
+            }
+        }
+        HarnessEffect::TurnCompleted {
+            local_input_id,
+            status,
+        } => {
+            if let Err(err) = runtime_store.mark_provider_input_terminal(&local_input_id) {
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: format!("Provider input terminal persistence failed: {err:#}"),
+                });
+                return;
+            }
+            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
+                session_id: started.session_id,
+                thread_id: started.thread_id,
+                status: Some(harness_turn_status_label(status).to_owned()),
+            });
+        }
+        HarnessEffect::ProviderEvent(draft) => {
+            append_runtime_provider_event(runtime_store, draft, "provider_native_event");
+            let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
+                thread_id: started.thread_id,
+            });
+        }
+        HarnessEffect::InteractionRequested(draft) => {
+            match runtime_store.register_provider_interaction(draft) {
+                Ok(interaction) => {
+                    let _ =
+                        event_tx.send(ArchcarEvent::ProviderInteractionRequested { interaction });
+                }
+                Err(err) => {
+                    let _ = event_tx.send(ArchcarEvent::SessionError {
+                        session_id: Some(started.session_id),
+                        thread_id: Some(started.thread_id),
+                        message: format!("Provider interaction registration failed: {err:#}"),
+                    });
+                }
+            }
+        }
+        HarnessEffect::Warning(message) => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message,
+            });
+        }
+        HarnessEffect::Fatal(message) => {
+            mark_provider_session_failed(runtime_store, snapshot, event_tx, started, message);
+        }
+        HarnessEffect::CapabilitiesObserved(observed_native) => {
+            let capabilities = capabilities_for_kind(started.kind, observed_native);
+            if let Some(capabilities) = capabilities {
+                if let Ok(mut guard) = snapshot.lock() {
+                    guard.capabilities = Some(capabilities.clone());
+                }
+                let _ = event_tx.send(ArchcarEvent::SessionCapabilitiesChanged {
+                    session_id: started.session_id,
+                    thread_id: started.thread_id,
+                    capabilities,
+                });
+            }
+        }
+        HarnessEffect::TurnStarted { .. }
+        | HarnessEffect::InteractionResolved { .. }
+        | HarnessEffect::Retry { .. }
+        | HarnessEffect::RateLimited { .. }
+        | HarnessEffect::ResumeRequired => {}
+    }
+}
+
 fn start_session_handle(
     db_path: PathBuf,
     logs_dir: PathBuf,
@@ -571,8 +691,18 @@ fn running_session_snapshot(
         status: ProcessStatus::Running,
         runtime_state: AgentSessionState::Running,
         ready,
+        capabilities: capabilities_for_kind(kind, Vec::new()),
         screen: String::new(),
     }
+}
+
+fn capabilities_for_kind(
+    kind: SessionKind,
+    observed_native: Vec<String>,
+) -> Option<SessionHarnessCapabilities> {
+    managed_harness_for_kind(kind).map(|harness| {
+        session_harness_capabilities_for_descriptor(harness.descriptor(), observed_native)
+    })
 }
 
 pub fn spawn_managed_session_for_thread(
@@ -684,13 +814,18 @@ fn claude_stream_session_launch(
         SessionKind::Claude,
         SessionHarnessOptions::default(),
     )?;
+    let hook_settings = std::env::current_exe().ok().and_then(|executable| {
+        serde_json::to_string(&build_claude_hook_settings(&executable, thread_record.id)).ok()
+    });
     launch.args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
         persistent_input: true,
+        replay_user_messages: true,
         resume: thread_record.native_thread_id.clone(),
         permission_mode: claude_stream_permission_mode(&harness),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         append_system_prompt: None,
+        settings_json: hook_settings,
     });
     launch.harness_metadata = non_interactive_harness_metadata("claude-stream-json", &harness);
     launch.session_resume_id = thread_record.native_thread_id.clone();
@@ -878,6 +1013,93 @@ fn set_provider_connection_model(
     model: Option<String>,
 ) {
     connection.model = sanitize_harness_text(model.as_deref());
+}
+
+fn set_provider_connection_effort(
+    connection: &mut ProviderProcessConnection,
+    effort: Option<String>,
+) {
+    connection.effort_mode = sanitize_harness_text(effort.as_deref());
+}
+
+fn set_provider_connection_permission_mode(
+    connection: &mut ProviderProcessConnection,
+    permission_mode: Option<String>,
+) {
+    connection.approval_policy = sanitize_harness_text(permission_mode.as_deref());
+}
+
+fn apply_provider_connection_controls(
+    connection: &mut ProviderProcessConnection,
+    controls: DesiredHarnessControls,
+) {
+    set_provider_connection_model(connection, controls.model);
+    set_provider_connection_effort(connection, controls.effort);
+    set_provider_connection_permission_mode(connection, controls.permission_mode);
+}
+
+fn apply_provider_control_plan(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    connection: &mut ProviderProcessConnection,
+    plan: HarnessControlPlan,
+) {
+    match plan {
+        HarnessControlPlan::NativeWrite(native_write) => {
+            if let Err(err) = connection
+                .stdin
+                .write_all(&native_write.payload)
+                .and_then(|_| connection.stdin.flush())
+            {
+                let _ = connection.child.kill();
+                mark_provider_session_failed(
+                    runtime_store,
+                    snapshot,
+                    event_tx,
+                    started,
+                    format!("Provider control write failed: {err:#}"),
+                );
+            }
+        }
+        HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup) => {
+            let _ = crate::platform::terminate_process_group(connection.child.id(), false);
+        }
+        HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup) => {
+            let _ = crate::platform::interrupt_process_group(connection.child.id());
+        }
+        HarnessControlPlan::RestartRequired(controls) => {
+            if started.kind == SessionKind::Claude && connection.native_thread_id.is_none() {
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: "Claude session has no native session id to resume".to_owned(),
+                });
+                return;
+            }
+            apply_provider_connection_controls(connection, controls);
+        }
+        HarnessControlPlan::Emulated(effect) => {
+            let mut native_thread_id = connection.native_thread_id.clone();
+            apply_harness_effect(
+                runtime_store,
+                snapshot,
+                event_tx,
+                started,
+                &mut native_thread_id,
+                effect,
+            );
+            connection.native_thread_id = native_thread_id;
+        }
+        HarnessControlPlan::Unsupported { reason } => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: reason,
+            });
+        }
+    }
 }
 
 fn sanitize_metadata_value(value: &str) -> String {
@@ -1119,6 +1341,10 @@ fn normalize_codex_working_status_for_fingerprint(line: &str) -> String {
 
 fn user_input_identity_suffix(sequence: u64) -> String {
     format!("input-{sequence}")
+}
+
+fn provider_input_local_id(session_id: i64, sequence: u64) -> String {
+    format!("session-{session_id}-input-{sequence}")
 }
 
 fn session_ready_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
@@ -1398,7 +1624,7 @@ fn run_session_loop(
                         );
                     }
                 }
-                SessionCommand::SetModel { .. } => {}
+                SessionCommand::ApplyControl(_) => {}
             }
         }
 
@@ -1592,10 +1818,21 @@ fn run_codex_app_server_session_loop(
     let mut user_input_sequence = runtime_store
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
-    let mut control_request_sequence = 0_u64;
     let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
+    let mut active_input_ids = Vec::<String>::new();
     let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
+    let mut control_adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        workspace: started.workspace.clone(),
+        native_session_id: connection.native_thread_id.clone(),
+        controls: DesiredHarnessControls {
+            model: connection.model.clone(),
+            effort: connection.effort_mode.clone(),
+            permission_mode: connection.approval_policy.clone(),
+        },
+    });
 
     loop {
         while let Ok(line) = connection.stdout_rx.try_recv() {
@@ -1665,17 +1902,39 @@ fn run_codex_app_server_session_loop(
                         connection.native_thread_id = Some(native_id.clone());
                         let _ = runtime_store
                             .update_chat_thread_native_id(started.thread_id, &native_id);
-                        mark_snapshot_ready(&snapshot);
-                        let _ = event_tx.send(ArchcarEvent::SessionReady {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                        });
+                        apply_harness_effect(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            &mut connection.native_thread_id,
+                            HarnessEffect::Ready,
+                        );
                     }
                     if let Some(request_id) = codex_response_id(&message) {
                         if let Some(pending) = pending_input_requests.remove(&request_id) {
                             let response_error = codex_response_error(&message);
                             match codex_input_response_action(&pending, response_error.is_some()) {
-                                CodexInputResponseAction::Complete => {}
+                                CodexInputResponseAction::Complete => {
+                                    if let Err(err) = runtime_store
+                                        .mark_provider_input_acknowledged(
+                                            &pending.local_input_id,
+                                            Some(&request_id.to_string()),
+                                        )
+                                    {
+                                        mark_provider_session_failed(
+                                            &runtime_store,
+                                            &snapshot,
+                                            &event_tx,
+                                            &started,
+                                            format!(
+                                                "Codex input acknowledgement persistence failed: {err:#}"
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                    active_input_ids.push(pending.local_input_id);
+                                }
                                 CodexInputResponseAction::RetryStart => {
                                     let Some(thread_id) = provider_thread_id.as_deref() else {
                                         let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -1717,11 +1976,18 @@ fn run_codex_app_server_session_loop(
                                         fallback_request_id,
                                         PendingCodexInputRequest {
                                             kind: CodexInputRequestKind::ImmediateFallbackStart,
+                                            local_input_id: pending.local_input_id,
                                             input: pending.input,
                                         },
                                     );
                                 }
                                 CodexInputResponseAction::ReportError => {
+                                    if let Some(error) = response_error.as_deref() {
+                                        let _ = runtime_store.mark_provider_input_failed(
+                                            &pending.local_input_id,
+                                            error,
+                                        );
+                                    }
                                     mark_snapshot_running_not_ready(&snapshot);
                                     let _ = event_tx.send(ArchcarEvent::SessionError {
                                         session_id: Some(started.session_id),
@@ -1736,19 +2002,38 @@ fn run_codex_app_server_session_loop(
                     }
                     if let Some(turn_id) = codex_turn_id_from_message(&message) {
                         active_turn_id = Some(turn_id);
+                        control_adapter.set_active_turn_id(active_turn_id.clone());
                     }
                     if message.method.as_deref() == Some("turn/completed") {
                         active_turn_id = None;
-                        mark_snapshot_ready(&snapshot);
+                        control_adapter.set_active_turn_id(None);
+                        for local_input_id in active_input_ids.drain(..) {
+                            if let Err(err) =
+                                runtime_store.mark_provider_input_terminal(&local_input_id)
+                            {
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Codex input terminal persistence failed: {err:#}"),
+                                );
+                                return;
+                            }
+                        }
                         let _ = event_tx.send(ArchcarEvent::TurnCompleted {
                             session_id: started.session_id,
                             thread_id: started.thread_id,
                             status: codex_turn_completed_status(&message),
                         });
-                        let _ = event_tx.send(ArchcarEvent::SessionReady {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                        });
+                        apply_harness_effect(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            &mut connection.native_thread_id,
+                            HarnessEffect::Ready,
+                        );
                     }
                     let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                         thread_id: started.thread_id,
@@ -1799,6 +2084,8 @@ fn run_codex_app_server_session_loop(
                         continue;
                     };
                     let next_input_sequence = user_input_sequence + 1;
+                    let local_input_id =
+                        provider_input_local_id(started.session_id, next_input_sequence);
                     let request_id = next_turn_request_id(next_input_sequence);
                     let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
                     let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
@@ -1811,6 +2098,25 @@ fn run_codex_app_server_session_loop(
                             CodexInputRequestKind::AutoSteer
                         }
                     };
+                    if let Err(err) = enqueue_provider_input(
+                        &runtime_store,
+                        &started,
+                        &local_input_id,
+                        &input,
+                        visible_input.as_deref(),
+                        &kind,
+                        delivery,
+                        connection.native_thread_id.clone(),
+                    ) {
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Codex input persistence failed: {err:#}"),
+                        );
+                        continue;
+                    }
                     let write_result = match route {
                         CodexInputRoute::Steer { expected_turn_id } => {
                             write_turn_steer_request_with_id(
@@ -1836,6 +2142,8 @@ fn run_codex_app_server_session_loop(
                         }
                     };
                     if let Err(err) = write_result {
+                        let _ = runtime_store
+                            .mark_provider_input_failed(&local_input_id, &err.to_string());
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
                             &runtime_store,
@@ -1844,11 +2152,23 @@ fn run_codex_app_server_session_loop(
                             &started,
                             format!("Codex turn input failed: {err:#}"),
                         );
+                    } else if let Err(err) =
+                        runtime_store.mark_provider_input_written(&local_input_id)
+                    {
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Codex input written-state persistence failed: {err:#}"),
+                        );
                     } else {
                         pending_input_requests.insert(
                             request_id,
                             PendingCodexInputRequest {
                                 kind: request_kind,
+                                local_input_id: local_input_id.clone(),
                                 input: provider_input.clone(),
                             },
                         );
@@ -1874,47 +2194,31 @@ fn run_codex_app_server_session_loop(
                     let _ = connection.child.kill();
                 }
                 SessionCommand::InterruptTurn => {
-                    let Some(thread_id) = provider_thread_id.as_deref() else {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: "Codex app-server thread is not initialized yet".to_owned(),
-                        });
-                        continue;
-                    };
-                    let Some(turn_id) = active_turn_id.as_deref() else {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: "No active Codex turn id is available to interrupt".to_owned(),
-                        });
-                        continue;
-                    };
-                    control_request_sequence = control_request_sequence.saturating_add(1);
-                    let request_id = next_control_request_id(control_request_sequence);
-                    if let Err(err) = write_turn_interrupt_request_with_id(
-                        &mut connection.stdin,
-                        request_id,
-                        &CodexAppServerTurnInterruptParams {
-                            thread_id: thread_id.to_owned(),
-                            turn_id: turn_id.to_owned(),
-                        },
-                    ) {
-                        let _ = connection.child.kill();
-                        mark_provider_session_failed(
-                            &runtime_store,
-                            &snapshot,
-                            &event_tx,
-                            &started,
-                            format!("Codex turn interrupt failed: {err:#}"),
-                        );
-                    } else if let Ok(mut state) = snapshot.lock() {
+                    control_adapter.set_native_session_id(provider_thread_id.clone());
+                    let plan = control_adapter.plan_control(HarnessControl::Interrupt);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
+                    if let Ok(mut state) = snapshot.lock() {
                         state.ready = false;
                         state.runtime_state = AgentSessionState::Running;
                     }
                 }
-                SessionCommand::SetModel { model } => {
-                    set_provider_connection_model(&mut connection, model);
+                SessionCommand::ApplyControl(control) => {
+                    let plan = control_adapter.plan_control(control);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
                 }
                 SessionCommand::Resize { .. } => {}
             }
@@ -1969,11 +2273,6 @@ fn run_claude_stream_session_loop(
         kind: started.kind,
         pid: started.pid,
     });
-    mark_snapshot_ready(&snapshot);
-    let _ = event_tx.send(ArchcarEvent::SessionReady {
-        session_id: started.session_id,
-        thread_id: started.thread_id,
-    });
     let _ = runtime_store.append_provider_native_output(
         started.session_id,
         "claude-stream-json",
@@ -1982,52 +2281,27 @@ fn run_claude_stream_session_loop(
     let mut user_input_sequence = runtime_store
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
-    let mut parser = crate::provider_adapters::claude_stream::ClaudeStreamParser::default();
+    let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        workspace: started.workspace.clone(),
+        native_session_id: connection.native_thread_id.clone(),
+        controls: DesiredHarnessControls {
+            model: connection.model.clone(),
+            effort: connection.effort_mode.clone(),
+            permission_mode: connection.approval_policy.clone(),
+        },
+    });
 
     loop {
-        while let Ok(line) = connection.stdout_rx.try_recv() {
-            let _ = runtime_store.append_provider_native_output(
-                started.session_id,
-                "claude-stream-json",
-                &line,
-            );
-            match parser.parse_line(&line) {
-                Ok(Some(event)) => {
-                    if let Some(session_id) = event.session_id.as_deref() {
-                        connection.native_thread_id = Some(session_id.to_owned());
-                        let _ = runtime_store
-                            .update_chat_thread_native_id(started.thread_id, session_id);
-                    }
-                    let draft = event.into_provider_event_draft(ProviderEventContext::runtime(
-                        None,
-                        Some(started.thread_id),
-                        Some(started.session_id),
-                        "claude-stream-json",
-                    ));
-                    if should_persist_provider_native_event(draft.kind) {
-                        let _ = runtime_store.append_provider_event(&draft);
-                    }
-                    let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
-                        thread_id: started.thread_id,
-                    });
-                    if draft.phase == ProviderEventPhase::Completed
-                        && draft.kind == ProviderEventKind::Turn
-                    {
-                        mark_snapshot_ready(&snapshot);
-                        let _ = event_tx.send(ArchcarEvent::SessionReady {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                        });
-                    }
-                }
-                Ok(None) => {}
-                Err(err) => warn!(
-                    session_id = started.session_id,
-                    error = %format!("{err:#}"),
-                    "failed to parse claude stream-json message"
-                ),
-            }
-        }
+        drain_claude_stdout(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut connection,
+            &mut adapter,
+        );
 
         while let Ok(command) = command_rx.try_recv() {
             match command {
@@ -2035,7 +2309,7 @@ fn run_claude_stream_session_loop(
                     input,
                     visible_input,
                     kind,
-                    delivery: _,
+                    delivery,
                 } => {
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
@@ -2057,14 +2331,49 @@ fn run_claude_stream_session_loop(
                     let provider_input =
                         compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
                     let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
-                    let payload = json!({
-                        "type": "user",
-                        "message": {
-                            "role": "user",
-                            "content": [{"type": "text", "text": provider_input.clone()}],
-                        },
+                    let next_input_sequence = user_input_sequence + 1;
+                    let local_input_id =
+                        provider_input_local_id(started.session_id, next_input_sequence);
+                    if let Err(err) = enqueue_provider_input(
+                        &runtime_store,
+                        &started,
+                        &local_input_id,
+                        &provider_input,
+                        Some(&persisted_input),
+                        &kind,
+                        delivery,
+                        connection.native_thread_id.clone(),
+                    ) {
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Claude input persistence failed: {err:#}"),
+                        );
+                        continue;
+                    }
+                    let native_write = adapter.encode_input(HarnessInput {
+                        local_input_id: local_input_id.clone(),
+                        content: provider_input.clone(),
+                        visible_content: Some(persisted_input.clone()),
+                        kind: kind.clone(),
+                        delivery,
                     });
-                    if let Err(err) = write_provider_json_line(&mut connection.stdin, &payload) {
+                    let write_result = native_write.and_then(|native_write| {
+                        anyhow::ensure!(
+                            native_write.provider_key == "claude",
+                            "Claude adapter encoded input for {}",
+                            native_write.provider_key,
+                        );
+                        connection.stdin.write_all(&native_write.payload)?;
+                        connection.stdin.flush()?;
+                        Ok(())
+                    });
+                    if let Err(err) = write_result {
+                        let _ = runtime_store
+                            .mark_provider_input_failed(&local_input_id, &err.to_string());
+                        adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
                             &runtime_store,
@@ -2073,8 +2382,20 @@ fn run_claude_stream_session_loop(
                             &started,
                             format!("Claude stream input failed: {err:#}"),
                         );
+                    } else if let Err(err) =
+                        runtime_store.mark_provider_input_written(&local_input_id)
+                    {
+                        adapter.settle_failed_input_write(&local_input_id);
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Claude input written-state persistence failed: {err:#}"),
+                        );
                     } else {
-                        user_input_sequence += 1;
+                        user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
                             &started,
@@ -2092,9 +2413,27 @@ fn run_claude_stream_session_loop(
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
                 }
-                SessionCommand::InterruptTurn => {}
-                SessionCommand::SetModel { model } => {
-                    set_provider_connection_model(&mut connection, model);
+                SessionCommand::InterruptTurn => {
+                    let plan = adapter.plan_control(HarnessControl::Interrupt);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
+                }
+                SessionCommand::ApplyControl(control) => {
+                    let plan = adapter.plan_control(control);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
                 }
                 SessionCommand::Resize { .. } => {}
             }
@@ -2102,6 +2441,14 @@ fn run_claude_stream_session_loop(
 
         match connection.child.try_wait() {
             Ok(Some(status)) => {
+                drain_claude_stdout(
+                    &runtime_store,
+                    &snapshot,
+                    &event_tx,
+                    &started,
+                    &mut connection,
+                    &mut adapter,
+                );
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
                 mark_snapshot_exited(&snapshot, code);
@@ -2119,6 +2466,45 @@ fn run_claude_stream_session_loop(
         }
 
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn drain_claude_stdout(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    connection: &mut ProviderProcessConnection,
+    adapter: &mut ClaudeManagedAdapter,
+) {
+    while let Ok(line) = connection.stdout_rx.try_recv() {
+        let _ = runtime_store.append_provider_native_output(
+            started.session_id,
+            "claude-stream-json",
+            &line,
+        );
+        match adapter.observe_native(NativeRecord {
+            provider_key: "claude",
+            payload: line.into_bytes(),
+        }) {
+            Ok(effects) => {
+                for effect in effects {
+                    apply_harness_effect(
+                        runtime_store,
+                        snapshot,
+                        event_tx,
+                        started,
+                        &mut connection.native_thread_id,
+                        effect,
+                    );
+                }
+            }
+            Err(err) => warn!(
+                session_id = started.session_id,
+                error = %format!("{err:#}"),
+                "failed to parse claude stream-json message"
+            ),
+        }
     }
 }
 
@@ -2162,6 +2548,7 @@ enum CodexInputRequestKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingCodexInputRequest {
     kind: CodexInputRequestKind,
+    local_input_id: String,
     input: String,
 }
 
@@ -2313,6 +2700,15 @@ fn codex_turn_completed_status(message: &CodexAppServerMessage) -> Option<String
     None
 }
 
+fn harness_turn_status_label(status: HarnessTurnStatus) -> &'static str {
+    match status {
+        HarnessTurnStatus::Success => "success",
+        HarnessTurnStatus::Failed => "failed",
+        HarnessTurnStatus::Interrupted => "interrupted",
+        HarnessTurnStatus::Deferred => "deferred",
+    }
+}
+
 fn codex_turn_id_from_message(message: &CodexAppServerMessage) -> Option<String> {
     for pointer in [
         "/params/turn/id",
@@ -2435,6 +2831,47 @@ fn mark_snapshot_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn enqueue_provider_input(
+    runtime_store: &RuntimeSessionStore,
+    started: &SessionSnapshot,
+    local_input_id: &str,
+    input: &str,
+    visible_input: Option<&str>,
+    kind: &ArchcarInputKind,
+    delivery: ArchcarInputDelivery,
+    native_session_id: Option<String>,
+) -> Result<()> {
+    runtime_store.enqueue_provider_input(ProviderInputInput {
+        id: local_input_id.to_owned(),
+        provider: session_kind_provider_key(started.kind).to_owned(),
+        thread_id: started.thread_id,
+        process_id: started.session_id,
+        native_session_id,
+        input_kind: input_kind_storage_label(kind).to_owned(),
+        delivery: delivery.as_str().to_owned(),
+        provider_input: input.to_owned(),
+        visible_input: visible_input.map(str::to_owned),
+    })?;
+    Ok(())
+}
+
+fn session_kind_provider_key(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Codex => "codex",
+        SessionKind::Claude => "claude",
+        SessionKind::Shell => "shell",
+    }
+}
+
+fn input_kind_storage_label(kind: &ArchcarInputKind) -> &'static str {
+    match kind {
+        ArchcarInputKind::User => "user",
+        ArchcarInputKind::ReviewPrompt => "review_prompt",
+        ArchcarInputKind::ControlCommand => "control_command",
+    }
+}
+
 fn mark_snapshot_running_not_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
     if let Ok(mut state) = snapshot.lock() {
         state.status = ProcessStatus::Running;
@@ -2491,10 +2928,6 @@ fn next_turn_request_id(sequence: u64) -> u64 {
     sequence.saturating_add(10)
 }
 
-fn next_control_request_id(sequence: u64) -> u64 {
-    sequence.saturating_add(1_000_000)
-}
-
 fn next_fallback_request_id(sequence: u64) -> u64 {
     sequence.saturating_add(2_000_000)
 }
@@ -2511,15 +2944,16 @@ fn terminal_process_alive(process_id: u32) -> bool {
 }
 
 pub(crate) fn terminate_process(process_id: u32) {
+    if crate::platform::terminate_process_group(process_id, true).unwrap_or(false) {
+        return;
+    }
     #[cfg(unix)]
-    let _ = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(process_id.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    #[cfg(windows)]
-    let _ = crate::platform::terminate_process_tree(process_id, true);
+    {
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(process_id.to_string())
+            .status();
+    }
 }
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
@@ -2747,6 +3181,71 @@ mod tests {
     }
 
     #[test]
+    fn provider_input_local_ids_are_session_scoped() {
+        assert_eq!(provider_input_local_id(7, 3), "session-7-input-3");
+        assert_ne!(provider_input_local_id(1, 1), provider_input_local_id(2, 1));
+    }
+
+    #[test]
+    fn fatal_harness_effect_persists_chat_visible_session_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43991);
+        let db_path = temp.path().join("state.db");
+        let runtime_store = RuntimeSessionStore::new(db_path.clone());
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Claude,
+            process.pid,
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut native_thread_id = None;
+
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut native_thread_id,
+            HarnessEffect::Fatal(
+                "Claude authentication failed. You are not logged in. Run `claude auth login`."
+                    .to_owned(),
+            ),
+        );
+
+        let event = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            event,
+            ArchcarEvent::SessionError { message, .. }
+                if message.contains("not logged in")
+        ));
+        let records = crate::provider_events::ProviderEventStore::new(&db_path)
+            .list_for_process(process.id)
+            .unwrap();
+        assert!(records.iter().any(|event| {
+            event.kind == ProviderEventKind::ThreadSession
+                && event.phase == ProviderEventPhase::Failed
+                && event.provider_subtype.as_deref() == Some("session_error")
+                && event
+                    .normalized_payload
+                    .get("body")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|body| body.contains("not logged in"))
+        }));
+        assert_eq!(
+            snapshot.lock().unwrap().runtime_state,
+            AgentSessionState::Failed
+        );
+    }
+
+    #[test]
     fn archcar_loop_keeps_pty_screens_out_of_normal_semantic_pipeline() {
         let source = include_str!("session.rs");
         let old_pipeline = concat!("persist_codex", "_pipeline_update");
@@ -2770,6 +3269,264 @@ mod tests {
             source.contains("append_provider_event"),
             "archcar runtime loop should write canonical provider events instead"
         );
+    }
+
+    #[test]
+    fn managed_claude_runtime_uses_one_adapter_for_input_and_output_state() {
+        let source = include_str!("session.rs");
+        let loop_source = source
+            .split_once("fn run_claude_stream_session_loop")
+            .unwrap()
+            .1
+            .split_once("fn start_codex_app_server_lifecycle")
+            .unwrap()
+            .0;
+
+        assert!(loop_source.contains("adapter.encode_input(HarnessInput"));
+        assert!(loop_source.contains("adapter.observe_native(NativeRecord"));
+        assert!(loop_source.contains("adapter.settle_failed_input_write"));
+        assert!(!loop_source.contains("ClaudeStreamParser"));
+    }
+
+    #[test]
+    fn managed_claude_init_after_first_input_does_not_restore_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43991, pid);
+        let (native_tx, native_rx) = mpsc::channel();
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: native_rx,
+            next_read_line: 0,
+            native_thread_id: None,
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("claude-sonnet-fixture".to_owned()),
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Claude,
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_thread = thread::spawn(move || {
+            run_claude_stream_session_loop(
+                db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+        assert!(!snapshot.lock().unwrap().ready);
+
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "fixture input".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        wait_for_snapshot_readiness(&snapshot, false);
+
+        let fixture = include_str!("../../tests/fixtures/claude_stream/basic_turn.jsonl");
+        let init = fixture
+            .lines()
+            .find(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|record| record["subtype"] == "init")
+            })
+            .unwrap();
+        native_tx.send(init.to_owned()).unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionMessagesUpdated { thread_id } if *thread_id == thread.id),
+        );
+        let ready_after_init = snapshot.lock().unwrap().ready;
+
+        let result = fixture
+            .lines()
+            .find(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|record| record["type"] == "result")
+            })
+            .unwrap();
+        native_tx.send(result.to_owned()).unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionMessagesUpdated { thread_id } if *thread_id == thread.id),
+        );
+        wait_for_snapshot_readiness(&snapshot, true);
+
+        command_tx.send(SessionCommand::Kill).unwrap();
+        loop_thread.join().unwrap();
+
+        assert!(
+            !ready_after_init,
+            "startup init must not restore readiness after the first input"
+        );
+    }
+
+    #[test]
+    fn managed_claude_lifecycle_waits_for_init_and_completes_turn_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_claude = temp.path().join("claude");
+        fs::write(
+            &fake_claude,
+            r#"#!/usr/bin/env bash
+printf '%s\n' '{"type":"system","subtype":"hook_started","session_id":"fake-session","hook":"startup"}'
+sleep 0.35
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session","model":"claude-sonnet-fixture","capabilities":["streaming"]}'
+IFS= read -r _line
+printf '%s\n' '{"type":"user","session_id":"fake-session","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"hello lifecycle"}]}}'
+printf '%s\n' '{"type":"assistant","session_id":"fake-session","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"done"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session","result":"ok","duration_ms":1}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_claude).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_claude, perms).unwrap();
+        }
+
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let mut child = ProcessCommand::new(&fake_claude)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43992, pid);
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: spawn_stdout_line_reader(stdout),
+            next_read_line: 0,
+            native_thread_id: None,
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("claude-sonnet-fixture".to_owned()),
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Claude,
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_thread = thread::spawn(move || {
+            run_claude_stream_session_loop(
+                db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+        let no_ready_deadline = std::time::Instant::now() + Duration::from_millis(180);
+        while std::time::Instant::now() < no_ready_deadline {
+            if let Ok(event) = event_rx.recv_timeout(Duration::from_millis(20)) {
+                assert!(
+                    !matches!(event, ArchcarEvent::SessionReady { session_id, .. } if session_id == process.id),
+                    "managed Claude must not become ready before system/init: {event:?}"
+                );
+            }
+        }
+        assert!(!snapshot.lock().unwrap().ready);
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
+        );
+        assert!(snapshot.lock().unwrap().ready);
+
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "hello lifecycle".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        wait_for_snapshot_readiness(&snapshot, false);
+
+        let mut completed_count = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = event_rx
+                .recv_timeout(remaining)
+                .expect("timed out waiting for managed Claude result");
+            match event {
+                ArchcarEvent::TurnCompleted {
+                    session_id,
+                    thread_id,
+                    status,
+                } if session_id == process.id && thread_id == thread.id => {
+                    completed_count += 1;
+                    assert_eq!(status.as_deref(), Some("success"));
+                }
+                ArchcarEvent::SessionExited { session_id, .. } if session_id == process.id => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        loop_thread.join().unwrap();
+
+        assert_eq!(
+            completed_count, 1,
+            "managed Claude must emit exactly one turn_completed for one delivered local input"
+        );
+        assert!(snapshot.lock().unwrap().ready);
     }
 
     #[test]
@@ -3017,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_app_server_model_update_changes_future_turn_model() {
+    fn codex_model_update_changes_future_turn_model() {
         let mut child = ProcessCommand::new("bash")
             .args(["-lc", "cat"])
             .stdin(Stdio::piped())
@@ -3041,11 +3798,23 @@ mod tests {
             personality: None,
         };
 
-        set_provider_connection_model(&mut connection, Some(" gpt-5.6-terra ".to_owned()));
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some(" gpt-5.6-terra ".to_owned()),
+                ..DesiredHarnessControls::default()
+            },
+        );
 
         assert_eq!(connection.model.as_deref(), Some("gpt-5.6-terra"));
 
-        set_provider_connection_model(&mut connection, Some("   ".to_owned()));
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some("   ".to_owned()),
+                ..DesiredHarnessControls::default()
+            },
+        );
 
         assert_eq!(connection.model, None);
 
@@ -3091,26 +3860,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(launch.program, PathBuf::from("claude"));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--resume", "claude-session-1"]));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--permission-mode", "bypassPermissions"]));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "claude-sonnet-5"]));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--effort", "low"]));
+        let settings = launch
+            .args
+            .windows(2)
+            .find_map(|args| (args[0] == "--settings").then_some(args[1].as_str()))
+            .unwrap();
         assert_eq!(
-            launch.args,
-            vec![
-                "-p",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-                "--input-format",
-                "stream-json",
-                "--resume",
-                "claude-session-1",
-                "--permission-mode",
-                "bypassPermissions",
-                "--model",
-                "claude-sonnet-5",
-                "--effort",
-                "low",
-            ]
+            serde_json::from_str::<serde_json::Value>(settings).unwrap()["hooks"]
+                ["PermissionRequest"][0]["matcher"],
+            ".*"
         );
+        assert!(!launch.args.iter().any(|arg| arg == "--bare"));
         assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));
         let port = launch.env_value(PROVIDER_NATIVE_PORT_ENV).unwrap();
         let expected_metadata = format!(
@@ -3200,7 +3976,9 @@ mod tests {
         let second_reservation =
             reserve_provider_native_thread_port(&store, "berlin", second.id).unwrap();
 
-        assert_eq!(second_reservation.local_addr().unwrap().port(), 43001);
+        let second_port = second_reservation.local_addr().unwrap().port();
+        assert_ne!(second_port, reservation.local_addr().unwrap().port());
+        assert!(second_port >= 43001);
     }
 
     #[test]
@@ -3664,6 +4442,36 @@ mod tests {
         seeded_workspace_store_with_logs(root, &root.join("logs"))
     }
 
+    fn recv_archcar_event_until(
+        receiver: &Receiver<ArchcarEvent>,
+        predicate: impl Fn(&ArchcarEvent) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = receiver
+                .recv_timeout(remaining)
+                .expect("timed out waiting for archcar event");
+            if predicate(&event) {
+                return;
+            }
+        }
+    }
+
+    fn wait_for_snapshot_readiness(snapshot: &Arc<Mutex<SessionSnapshot>>, expected: bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if snapshot.lock().unwrap().ready == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for snapshot readiness={expected}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn record_running_thread_session_with_port(
         store: &WorkspaceStore,
         thread: &ChatThreadRecord,
@@ -3787,6 +4595,7 @@ mod tests {
     fn codex_immediate_steer_error_retries_once_as_start() {
         let immediate = PendingCodexInputRequest {
             kind: CodexInputRequestKind::ImmediateSteer,
+            local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
         };
         assert_eq!(
@@ -3796,6 +4605,7 @@ mod tests {
 
         let fallback = PendingCodexInputRequest {
             kind: CodexInputRequestKind::ImmediateFallbackStart,
+            local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
         };
         assert_eq!(

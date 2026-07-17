@@ -1,16 +1,25 @@
+//! Data projections for the GTK History page.
+//!
+//! This module keeps database reads and legacy Conductor imports separate from
+//! widget construction so the History UI can be tested without a GTK display.
+
 use archductor_core::import::default_conductor_app_database;
 use archductor_core::workspace::{WorkspaceStatusLine, WorkspaceStore};
 use rusqlite::Connection;
 use std::path::Path;
 
+/// Top-level History page tab.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistoryTab {
+    /// Workspace lifecycle history.
     #[default]
     Workspaces,
+    /// Saved chat/session transcript history.
     Chats,
 }
 
 impl HistoryTab {
+    /// Returns the GTK stack page name for the tab.
     pub(crate) fn stack_name(self) -> &'static str {
         match self {
             Self::Workspaces => "workspaces",
@@ -19,16 +28,22 @@ impl HistoryTab {
     }
 }
 
+/// Workspace archive/activity filter used by the History page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceHistoryFilter {
+    /// Show every workspace.
     All,
+    /// Show workspaces that are not archived.
     Active,
+    /// Show archived workspaces only.
     Archived,
 }
 
 impl WorkspaceHistoryFilter {
+    /// Ordered list of filters shown in the segmented control.
     pub(crate) const ALL: [Self; 3] = [Self::All, Self::Active, Self::Archived];
 
+    /// Customer-facing filter label.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::All => "All",
@@ -37,6 +52,7 @@ impl WorkspaceHistoryFilter {
         }
     }
 
+    /// Returns whether a workspace state belongs in this filter.
     pub(crate) fn matches(self, state: &str) -> bool {
         match self {
             Self::All => true,
@@ -46,26 +62,44 @@ impl WorkspaceHistoryFilter {
     }
 }
 
+/// Render-ready workspace row for the History page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceHistoryEntry {
+    /// Workspace name.
     pub(crate) name: String,
+    /// Owning project/repository display name.
     pub(crate) repository_name: String,
+    /// Current branch name.
     pub(crate) branch: String,
+    /// Base branch or ref used for comparisons.
     pub(crate) base_ref: String,
+    /// Workspace path shown in detail rows.
     pub(crate) path: String,
+    /// Stored workspace status.
     pub(crate) status: String,
+    /// Derived state bucket shown in History.
     pub(crate) state: String,
+    /// Last update timestamp.
     pub(crate) updated_at: String,
+    /// Creation timestamp.
     pub(crate) created_at: String,
+    /// Archive timestamp when archived.
     pub(crate) archived_at: Option<String>,
+    /// Number of open todos in the workspace.
     pub(crate) open_todos: usize,
+    /// Number of active agent or terminal sessions.
     pub(crate) active_sessions: usize,
+    /// Whether the run script is currently running.
     pub(crate) run_running: bool,
+    /// Open pull-request number when present.
     pub(crate) pull_request: Option<i64>,
+    /// Current diff additions.
     pub(crate) diff_additions: usize,
+    /// Current diff deletions.
     pub(crate) diff_deletions: usize,
 }
 
+/// Loads and sorts recent workspaces for the History page.
 pub(crate) fn history_recent_workspaces(
     database_path: &Path,
 ) -> anyhow::Result<Vec<WorkspaceHistoryEntry>> {
@@ -105,6 +139,7 @@ fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry 
     }
 }
 
+/// Returns whether the workspace has an open pull request.
 pub(crate) fn workspace_has_open_pull_request(line: &WorkspaceStatusLine) -> bool {
     line.pull_request
         .as_ref()
@@ -133,14 +168,19 @@ fn workspace_history_sort_key(workspace: &WorkspaceHistoryEntry) -> u8 {
     }
 }
 
+/// Source database for a chat history row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChatSource {
+    /// Native Archductor thread-first chat history.
     Archductor,
+    /// Older Archductor process transcript history.
     Legacy,
+    /// Imported upstream Conductor app history.
     ImportedConductor,
 }
 
 impl ChatSource {
+    /// Customer-facing source label.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Archductor => "Archductor",
@@ -150,20 +190,32 @@ impl ChatSource {
     }
 }
 
+/// Render-ready chat/session row for the History page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatSummary {
+    /// Stable source-qualified row identifier.
     pub(crate) id: String,
+    /// Database family that produced the row.
     pub(crate) source: ChatSource,
+    /// Chat or session title.
     pub(crate) title: String,
+    /// Agent/provider label.
     pub(crate) agent_type: String,
+    /// Stored session or thread status.
     pub(crate) status: String,
+    /// Owning project/repository display name.
     pub(crate) repository_name: String,
+    /// Workspace display name.
     pub(crate) workspace_name: String,
+    /// Workspace path used for filtering and details.
     pub(crate) workspace_path: String,
+    /// Last update timestamp.
     pub(crate) updated_at: String,
+    /// Number of visible messages.
     pub(crate) message_count: i64,
 }
 
+/// Loads recent native and imported chat history rows.
 pub(crate) fn history_recent_sessions(database_path: &Path) -> anyhow::Result<Vec<ChatSummary>> {
     let mut sessions = local_recent_sessions(database_path)?;
     sessions.extend(conductor_recent_sessions());
@@ -182,6 +234,7 @@ fn conductor_recent_sessions() -> Vec<ChatSummary> {
     query_conductor_sessions(None).unwrap_or_default()
 }
 
+/// Loads history rows for one workspace path.
 pub(crate) fn sessions_for_workspace_path(database_path: &Path, path: &Path) -> Vec<ChatSummary> {
     let mut sessions = query_local_sessions(database_path, Some(path)).unwrap_or_default();
     sessions.extend(query_conductor_sessions(Some(path)).unwrap_or_default());

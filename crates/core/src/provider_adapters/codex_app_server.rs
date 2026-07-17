@@ -1,9 +1,19 @@
+use crate::archcar::harness::CodexHarnessController;
+use crate::archcar::harness_contract::{
+    HarnessAdapterContext, HarnessCapability, HarnessControl, HarnessControlPlan,
+    HarnessDescriptor, HarnessEffect, HarnessInput, HarnessPreflightSpec, HarnessRecoveryCause,
+    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, ManagedHarness, ManagedHarnessAdapter,
+    NativeRecord, NativeWrite, SupportMode, MANAGED_HARNESS_CONTRACT_VERSION,
+    REQUIRED_HARNESS_FEATURES,
+};
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
+use crate::workspace::SessionKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +22,328 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 pub const CODEX_APP_SERVER_PROVIDER: &str = "codex";
 pub const CODEX_APP_SERVER_DEFAULT_EXECUTABLE: &str = "codex";
 pub const CODEX_APP_SERVER_DEFAULT_ARGS: &[&str] = &["app-server"];
+
+const CODEX_OPTIONAL_CAPABILITIES: &[(HarnessCapability, SupportMode)] = &[
+    (HarnessCapability::Goals, SupportMode::Native),
+    (HarnessCapability::NativeSlashCommands, SupportMode::Native),
+];
+
+pub static CODEX_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
+    contract_version: MANAGED_HARNESS_CONTRACT_VERSION,
+    kind: SessionKind::Codex,
+    provider_key: CODEX_APP_SERVER_PROVIDER,
+    display_name: "Codex",
+    default_executable: CODEX_APP_SERVER_DEFAULT_EXECUTABLE,
+    preflight: HarnessPreflightSpec {
+        command: &["codex", "login", "status"],
+        auth_guidance: "Run `codex login`.",
+    },
+    required_features: REQUIRED_HARNESS_FEATURES,
+    optional_capabilities: CODEX_OPTIONAL_CAPABILITIES,
+};
+
+impl ManagedHarness for CodexHarnessController {
+    fn descriptor(&self) -> &'static HarnessDescriptor {
+        &CODEX_MANAGED_HARNESS_DESCRIPTOR
+    }
+
+    fn create_adapter(
+        &self,
+        context: HarnessAdapterContext,
+    ) -> Result<Box<dyn ManagedHarnessAdapter>> {
+        Ok(Box::new(CodexManagedAdapter::new(context)))
+    }
+}
+
+pub(crate) struct CodexManagedAdapter {
+    context: HarnessAdapterContext,
+    next_request_id: u64,
+    pending_inputs: HashMap<u64, String>,
+    active_input_id: Option<String>,
+    active_turn_id: Option<String>,
+    completed_turns: HashSet<String>,
+}
+
+impl CodexManagedAdapter {
+    pub(crate) fn new(context: HarnessAdapterContext) -> Self {
+        Self {
+            context,
+            next_request_id: 1,
+            pending_inputs: HashMap::new(),
+            active_input_id: None,
+            active_turn_id: None,
+            completed_turns: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn set_active_turn_id(&mut self, turn_id: Option<String>) {
+        self.active_turn_id = turn_id;
+    }
+
+    pub(crate) fn set_native_session_id(&mut self, native_session_id: Option<String>) {
+        self.context.native_session_id = native_session_id;
+    }
+
+    fn take_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        request_id
+    }
+
+    fn provider_context(&self) -> ProviderEventContext {
+        ProviderEventContext::runtime(
+            None,
+            Some(self.context.thread_id),
+            Some(self.context.session_id),
+            "codex-app-server",
+        )
+    }
+}
+
+impl ManagedHarnessAdapter for CodexManagedAdapter {
+    fn encode_input(&mut self, input: HarnessInput) -> Result<NativeWrite> {
+        let thread_id = self
+            .context
+            .native_session_id
+            .clone()
+            .context("Codex app-server thread is not initialized yet")?;
+        let request_id = self.take_request_id();
+        let mut payload = Vec::new();
+        let native_input = vec![CodexAppServerUserInput::Text {
+            text: input.content,
+        }];
+        let steering_active_turn = self.active_turn_id.is_some();
+        if !steering_active_turn && self.active_input_id.is_some() {
+            anyhow::bail!("Codex turn start is still pending");
+        }
+
+        if let Some(active_turn_id) = self.active_turn_id.clone() {
+            write_turn_steer_request_with_id(
+                &mut payload,
+                request_id,
+                &CodexAppServerTurnSteerParams {
+                    thread_id,
+                    input: native_input,
+                    expected_turn_id: Some(active_turn_id),
+                },
+            )?;
+        } else {
+            write_turn_start_request_with_id(
+                &mut payload,
+                request_id,
+                &CodexAppServerTurnStartParams {
+                    thread_id,
+                    input: native_input,
+                    cwd: None,
+                    approval_policy: self.context.controls.permission_mode.clone(),
+                    sandbox_policy: None,
+                    model: self.context.controls.model.clone(),
+                    effort: self.context.controls.effort.clone(),
+                    summary: None,
+                    personality: None,
+                },
+            )?;
+        }
+
+        self.pending_inputs
+            .insert(request_id, input.local_input_id.clone());
+        if !steering_active_turn {
+            self.active_input_id = Some(input.local_input_id.clone());
+        }
+        Ok(NativeWrite {
+            provider_key: CODEX_APP_SERVER_PROVIDER,
+            local_input_id: Some(input.local_input_id),
+            payload,
+        })
+    }
+
+    fn observe_native(&mut self, record: NativeRecord) -> Result<Vec<HarnessEffect>> {
+        anyhow::ensure!(
+            record.provider_key == CODEX_APP_SERVER_PROVIDER,
+            "Codex adapter received native record for {}",
+            record.provider_key,
+        );
+        let input =
+            std::str::from_utf8(&record.payload).context("decode Codex app-server JSONL")?;
+        let mut effects = Vec::new();
+
+        for (index, line) in input
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .enumerate()
+        {
+            let message = parse_jsonl_message(line, index + 1)?;
+            if let Some(request_id) = message.id.as_ref().and_then(Value::as_u64) {
+                if let Some(local_input_id) = self.pending_inputs.remove(&request_id) {
+                    if message.value.get("error").is_some() {
+                        let failed_pending_start = self.active_turn_id.is_none()
+                            && self.active_input_id.as_deref() == Some(local_input_id.as_str());
+                        effects.push(HarnessEffect::TurnCompleted {
+                            local_input_id: local_input_id.clone(),
+                            status: HarnessTurnStatus::Failed,
+                        });
+                        if failed_pending_start {
+                            self.active_input_id = None;
+                            effects.push(HarnessEffect::Ready);
+                        }
+                    } else {
+                        effects.push(HarnessEffect::InputAcknowledged { local_input_id });
+                    }
+                }
+            }
+
+            if let Some(native_session_id) = managed_codex_thread_id(&message.value) {
+                if self.context.native_session_id.as_deref() != Some(native_session_id.as_str()) {
+                    self.context.native_session_id = Some(native_session_id.clone());
+                    effects.push(HarnessEffect::Initialized {
+                        native_session_id,
+                        model: self.context.controls.model.clone(),
+                    });
+                    effects.push(HarnessEffect::Ready);
+                }
+            }
+
+            if let Some(turn_id) = managed_codex_turn_id(&message.value) {
+                self.active_turn_id = Some(turn_id);
+            }
+            if message.method.as_deref() == Some("turn/started") {
+                if let Some(local_input_id) = self.active_input_id.clone() {
+                    effects.push(HarnessEffect::TurnStarted { local_input_id });
+                }
+            }
+            if message.method.as_deref() == Some("turn/completed") {
+                let completion_key = managed_codex_turn_id(&message.value)
+                    .or_else(|| self.active_turn_id.clone())
+                    .unwrap_or_else(|| message.raw_json.clone());
+                if self.completed_turns.insert(completion_key) {
+                    if let Some(local_input_id) = self.active_input_id.take() {
+                        effects.push(HarnessEffect::TurnCompleted {
+                            local_input_id,
+                            status: managed_codex_turn_status(&message.value),
+                        });
+                    }
+                    effects.push(HarnessEffect::Ready);
+                }
+                self.active_turn_id = None;
+            }
+
+            effects.push(HarnessEffect::ProviderEvent(
+                message
+                    .to_provider_event_draft()
+                    .into_provider_event_draft(self.provider_context()),
+            ));
+        }
+
+        Ok(effects)
+    }
+
+    fn plan_control(&mut self, control: HarnessControl) -> HarnessControlPlan {
+        match control {
+            HarnessControl::Interrupt => {
+                let (Some(thread_id), Some(turn_id)) = (
+                    self.context.native_session_id.clone(),
+                    self.active_turn_id.clone(),
+                ) else {
+                    return HarnessControlPlan::Unsupported {
+                        reason: "no active Codex turn is available to interrupt".to_owned(),
+                    };
+                };
+                let request_id = self.take_request_id();
+                let mut payload = Vec::new();
+                if let Err(error) = write_turn_interrupt_request_with_id(
+                    &mut payload,
+                    request_id,
+                    &CodexAppServerTurnInterruptParams { thread_id, turn_id },
+                ) {
+                    return HarnessControlPlan::Unsupported {
+                        reason: format!("failed to encode Codex interrupt: {error:#}"),
+                    };
+                }
+                HarnessControlPlan::NativeWrite(NativeWrite {
+                    provider_key: CODEX_APP_SERVER_PROVIDER,
+                    local_input_id: None,
+                    payload,
+                })
+            }
+            HarnessControl::Kill => {
+                HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup)
+            }
+            HarnessControl::SetModel(model) => {
+                self.context.controls.model = model;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::SetEffort(effort) => {
+                self.context.controls.effort = effort;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::SetPermissionMode(permission_mode) => {
+                self.context.controls.permission_mode = permission_mode;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::ResolveInteraction(_) => HarnessControlPlan::Unsupported {
+                reason: "Codex interaction resolution is not projected by contract v1 yet"
+                    .to_owned(),
+            },
+        }
+    }
+
+    fn recovery_plan(&self, _cause: HarnessRecoveryCause) -> HarnessRecoveryPlan {
+        managed_recovery_plan(&self.context)
+    }
+}
+
+fn managed_recovery_plan(context: &HarnessAdapterContext) -> HarnessRecoveryPlan {
+    match context.native_session_id.clone() {
+        Some(native_session_id) => HarnessRecoveryPlan::RestartAndResume {
+            native_session_id,
+            controls: context.controls.clone(),
+        },
+        None => HarnessRecoveryPlan::Fail {
+            message: "Codex session has no native thread id to resume".to_owned(),
+        },
+    }
+}
+
+fn managed_codex_thread_id(value: &Value) -> Option<String> {
+    [
+        "/result/thread/id",
+        "/result/threadId",
+        "/params/thread/id",
+        "/params/threadId",
+    ]
+    .into_iter()
+    .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+    .map(ToOwned::to_owned)
+}
+
+fn managed_codex_turn_id(value: &Value) -> Option<String> {
+    [
+        "/params/turn/id",
+        "/params/turnId",
+        "/result/turn/id",
+        "/result/turnId",
+    ]
+    .into_iter()
+    .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+    .map(ToOwned::to_owned)
+}
+
+fn managed_codex_turn_status(value: &Value) -> HarnessTurnStatus {
+    let status = [
+        "/params/status",
+        "/params/turn/status",
+        "/result/status",
+        "/result/turn/status",
+    ]
+    .into_iter()
+    .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str));
+    match status {
+        Some("failed" | "error") => HarnessTurnStatus::Failed,
+        Some("interrupted" | "cancelled" | "canceled") => HarnessTurnStatus::Interrupted,
+        Some("deferred") => HarnessTurnStatus::Deferred,
+        _ => HarnessTurnStatus::Success,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -809,6 +1141,7 @@ impl CodexProviderEventDraft {
         } else {
             body
         };
+        let stream_delta = (phase == ProviderEventPhase::Delta).then(|| body.clone());
 
         ProviderEventDraft {
             provider: self.provider,
@@ -838,6 +1171,7 @@ impl CodexProviderEventDraft {
             normalized_payload: json!({
                 "title": title,
                 "body": body,
+                "stream_delta": stream_delta,
                 "message_kind": self.message_kind,
             }),
             raw_json,
@@ -1408,6 +1742,136 @@ mod tests {
     use serde_json::json;
     use std::io::Cursor;
     use std::path::Path;
+
+    #[test]
+    fn codex_error_response_fails_and_settles_steer_input() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(managed_input("turn-input", "run tests", false))
+            .unwrap();
+        adapter
+            .observe_native(managed_record(
+                r#"{"method":"turn/started","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"}}}"#,
+            ))
+            .unwrap();
+        adapter
+            .encode_input(managed_input("steer-input", "also run clippy", true))
+            .unwrap();
+        assert_eq!(adapter.active_input_id.as_deref(), Some("turn-input"));
+        assert_eq!(
+            adapter.pending_inputs.get(&2).map(String::as_str),
+            Some("steer-input")
+        );
+
+        let effects = adapter
+            .observe_native(managed_record(
+                r#"{"id":2,"error":{"code":-32000,"message":"turn already completed"}}"#,
+            ))
+            .unwrap();
+
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "steer-input"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "steer-input"
+        )));
+        assert!(!adapter.pending_inputs.contains_key(&2));
+        assert_eq!(adapter.active_input_id.as_deref(), Some("turn-input"));
+    }
+
+    #[test]
+    fn codex_rejects_new_start_while_start_request_is_pending() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+
+        adapter
+            .encode_input(managed_input("first-input", "run tests", false))
+            .unwrap();
+        let err = adapter
+            .encode_input(managed_input("second-input", "run clippy", false))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("pending"));
+        assert_eq!(adapter.active_input_id.as_deref(), Some("first-input"));
+        assert_eq!(
+            adapter.pending_inputs.get(&1).map(String::as_str),
+            Some("first-input")
+        );
+        assert!(!adapter
+            .pending_inputs
+            .values()
+            .any(|id| id == "second-input"));
+    }
+
+    #[test]
+    fn codex_start_failure_clears_pending_start_and_reports_ready() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(managed_input("first-input", "run tests", false))
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(managed_record(
+                r#"{"id":1,"error":{"code":-32000,"message":"failed to start turn"}}"#,
+            ))
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "first-input"
+        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert!(adapter.active_input_id.is_none());
+        assert!(adapter.pending_inputs.is_empty());
+    }
+
+    fn managed_input(local_input_id: &str, content: &str, immediate: bool) -> HarnessInput {
+        HarnessInput {
+            local_input_id: local_input_id.to_owned(),
+            content: content.to_owned(),
+            visible_content: None,
+            kind: crate::archcar::protocol::ArchcarInputKind::User,
+            delivery: if immediate {
+                crate::archcar::protocol::ArchcarInputDelivery::Immediate
+            } else {
+                crate::archcar::protocol::ArchcarInputDelivery::Auto
+            },
+        }
+    }
+
+    fn managed_record(payload: &str) -> NativeRecord {
+        NativeRecord {
+            provider_key: CODEX_APP_SERVER_PROVIDER,
+            payload: format!("{payload}\n").into_bytes(),
+        }
+    }
 
     #[test]
     fn capability_coverage_names_all_required_codex_categories() {

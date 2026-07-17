@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::archcar::harness::managed_harness_for_kind;
+use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
     ArchcarMessage, ArchcarRequest, ArchcarResponse, RpcEnvelope,
@@ -21,6 +24,7 @@ use crate::archcar::session::{
 use crate::archcar::transport::{self, LocalListener, LocalStream};
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
+use crate::provider_interactions::ProviderInteractionStore;
 use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
@@ -301,10 +305,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             match load_or_restore_session_handle(state, session_id) {
                 Ok(Some(handle)) => {
                     let kind = handle.snapshot.lock().ok().map(|snapshot| snapshot.kind);
-                    if kind != Some(crate::workspace::SessionKind::Codex) {
+                    let interrupt_supported =
+                        kind.and_then(managed_harness_for_kind)
+                            .is_some_and(|harness| {
+                                harness
+                                    .descriptor()
+                                    .required_features
+                                    .contains(&RequiredHarnessFeature::Interrupt)
+                            });
+                    if !interrupt_supported {
                         return ArchcarResponse::Error {
                             message: format!(
-                                "interrupt_turn is only supported for codex sessions; got {kind:?}"
+                                "interrupt_turn is not supported for session kind {kind:?}"
                             ),
                         };
                     }
@@ -327,34 +339,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             }
         }
         ArchcarRequest::SetSessionModel { session_id, model } => {
-            match load_or_restore_session_handle(state, session_id) {
-                Ok(Some(handle)) => {
-                    let kind = handle.snapshot.lock().ok().map(|snapshot| snapshot.kind);
-                    if kind != Some(crate::workspace::SessionKind::Codex) {
-                        return ArchcarResponse::Error {
-                            message: format!(
-                                "set_session_model is only supported for codex sessions; got {kind:?}"
-                            ),
-                        };
-                    }
-                    match handle
-                        .command_tx
-                        .send(crate::archcar::session::SessionCommand::SetModel { model })
-                    {
-                        Ok(_) => ArchcarResponse::Ack,
-                        Err(err) => ArchcarResponse::Error {
-                            message: err.to_string(),
-                        },
-                    }
-                }
-                Ok(None) => ArchcarResponse::Error {
-                    message: format!("unknown session {session_id}"),
-                },
-                Err(err) => ArchcarResponse::Error {
-                    message: err.to_string(),
-                },
-            }
+            send_session_control(state, session_id, HarnessControl::SetModel(model))
         }
+        ArchcarRequest::SetSessionEffort { session_id, effort } => {
+            send_session_control(state, session_id, HarnessControl::SetEffort(effort))
+        }
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => send_session_control(
+            state,
+            session_id,
+            HarnessControl::SetPermissionMode(Some(mode)),
+        ),
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -387,6 +381,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         status: snapshot.status.as_str().to_owned(),
                         runtime_state: snapshot.runtime_state,
                         ready: snapshot.ready,
+                        capabilities: snapshot.capabilities,
                     }
                 }
                 Ok(None) => ArchcarResponse::Error {
@@ -447,8 +442,123 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::RegisterProviderInteraction { interaction } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.register(interaction) {
+                Ok(interaction) => {
+                    broadcast(
+                        &mut state.lock().unwrap(),
+                        ArchcarEvent::ProviderInteractionRequested {
+                            interaction: interaction.clone(),
+                        },
+                    );
+                    ArchcarResponse::ProviderInteraction { interaction }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetProviderInteraction { interaction_id } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.get(&interaction_id) {
+                Ok(Some(interaction)) => ArchcarResponse::ProviderInteraction { interaction },
+                Ok(None) => ArchcarResponse::Error {
+                    message: format!("unknown provider interaction {interaction_id}"),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.list(thread_id, pending_only) {
+                Ok(interactions) => ArchcarResponse::ProviderInteractions { interactions },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ResolveProviderInteraction {
+            interaction_id,
+            resolution,
+        } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.resolve(&interaction_id, resolution) {
+                Ok(interaction) => {
+                    broadcast(
+                        &mut state.lock().unwrap(),
+                        ArchcarEvent::ProviderInteractionResolved {
+                            interaction: interaction.clone(),
+                        },
+                    );
+                    ArchcarResponse::ProviderInteraction { interaction }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ConsumeProviderInteraction {
+            interaction_id,
+            native_response,
+        } => {
+            let store = {
+                let guard = state.lock().unwrap();
+                ProviderInteractionStore::new(guard.db_path.clone())
+            };
+            match store.consume_resolution(&interaction_id, native_response) {
+                Ok(interaction) => ArchcarResponse::ProviderInteraction { interaction },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
+        },
+    }
+}
+
+fn send_session_control(
+    state: &Arc<Mutex<ServerState>>,
+    session_id: i64,
+    control: HarnessControl,
+) -> ArchcarResponse {
+    match load_or_restore_session_handle(state, session_id) {
+        Ok(Some(handle)) => {
+            match handle
+                .command_tx
+                .send(crate::archcar::session::SessionCommand::ApplyControl(
+                    control,
+                )) {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        Ok(None) => ArchcarResponse::Error {
+            message: format!("unknown session {session_id}"),
+        },
+        Err(err) => ArchcarResponse::Error {
+            message: err.to_string(),
         },
     }
 }
@@ -1235,6 +1345,13 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
                 thread_id: snapshot.thread_id,
             });
         }
+        if let Some(capabilities) = snapshot.capabilities {
+            let _ = subscriber.send(ArchcarEvent::SessionCapabilitiesChanged {
+                session_id: snapshot.session_id,
+                thread_id: snapshot.thread_id,
+                capabilities,
+            });
+        }
     }
 }
 
@@ -1246,7 +1363,6 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
             guard.sessions.values().cloned().collect::<Vec<_>>(),
         )
     };
-    let store = WorkspaceStore::open_app(&db_path);
     let provider_events = ProviderEventStore::new(&db_path);
     let mut errors = Vec::new();
 
@@ -1269,17 +1385,30 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
                 snapshot.session_id
             ));
         }
-        terminate_managed_handle(&handle);
-        match &store {
-            Ok(store) => {
-                if let Err(err) = store.mark_session_process_stopped(snapshot.session_id, None) {
-                    errors.push(format!(
-                        "mark session {} stopped: {err:#}",
-                        snapshot.session_id
-                    ));
-                }
+        let _ = handle
+            .command_tx
+            .send(crate::archcar::session::SessionCommand::Kill);
+        if crate::platform::process_alive(snapshot.pid) {
+            crate::archcar::session::terminate_process(snapshot.pid);
+        }
+        if !wait_for_process_exit(snapshot.pid, Duration::from_secs(2)) {
+            errors.push(format!(
+                "session {} process {} did not exit during shutdown",
+                snapshot.session_id, snapshot.pid
+            ));
+        }
+        if let Ok(store) = WorkspaceStore::open(&db_path) {
+            if let Err(err) = store.mark_session_process_stopped(snapshot.session_id, None) {
+                errors.push(format!(
+                    "mark session {} stopped during shutdown: {err:#}",
+                    snapshot.session_id
+                ));
             }
-            Err(err) => errors.push(format!("open workspace store: {err:#}")),
+        }
+        if let Ok(mut current) = handle.snapshot.lock() {
+            current.status = crate::workspace::ProcessStatus::Stopped;
+            current.ready = false;
+            current.runtime_state = crate::session_state::AgentSessionState::Interrupted;
         }
     }
 
@@ -1288,6 +1417,17 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
     } else {
         Err(anyhow!(errors.join("; ")))
     }
+}
+
+fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !crate::platform::process_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    !crate::platform::process_alive(pid)
 }
 
 fn terminate_managed_handle(handle: &SessionHandle) {
@@ -1309,6 +1449,9 @@ fn terminate_managed_handle(handle: &SessionHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archcar::harness_contract::{
+        ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
+    };
     use crate::archcar::protocol::{ArchcarInputDelivery, ArchcarInputKind};
     use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
@@ -1323,6 +1466,69 @@ mod tests {
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessStatus};
     use serde_json::json;
+
+    #[test]
+    fn provider_interaction_dispatch_registers_lists_and_resolves() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        crate::storage::migrate_workspace_db(&rusqlite::Connection::open(&db_path).unwrap())
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::RegisterProviderInteraction {
+                interaction: ProviderInteractionDraft {
+                    provider_key: "claude".to_owned(),
+                    workspace: "berlin".to_owned(),
+                    thread_id: 7,
+                    session_id: 11,
+                    native_session_id: None,
+                    native_id: "tool-1".to_owned(),
+                    kind: ProviderInteractionKind::Permission,
+                    title: "Permission".to_owned(),
+                    detail: "Allow?".to_owned(),
+                    choices: Vec::new(),
+                    native_request: json!({"tool": "bash"}),
+                },
+            },
+            &state,
+        );
+        let ArchcarResponse::ProviderInteraction { interaction } = response else {
+            panic!("expected provider interaction response");
+        };
+
+        let listed = dispatch_request(
+            ArchcarRequest::ListProviderInteractions {
+                thread_id: Some(7),
+                pending_only: true,
+            },
+            &state,
+        );
+        assert!(matches!(
+            listed,
+            ArchcarResponse::ProviderInteractions { ref interactions } if interactions.len() == 1
+        ));
+
+        let resolved = dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id,
+                resolution: ProviderInteractionResolution::Approve,
+            },
+            &state,
+        );
+        assert!(matches!(
+            resolved,
+            ArchcarResponse::ProviderInteraction { interaction } if interaction.status == crate::provider_interactions::ProviderInteractionStatus::Allowed
+        ));
+    }
 
     #[test]
     fn ensure_default_session_debounces_repeat_requests() {
@@ -1615,6 +1821,7 @@ mod tests {
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
+            capabilities: None,
             screen: String::new(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
@@ -1667,6 +1874,7 @@ mod tests {
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
+            capabilities: None,
             screen: String::new(),
         };
         let starting_snapshot = crate::archcar::session::SessionSnapshot {
@@ -1678,6 +1886,7 @@ mod tests {
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Starting,
             ready: false,
+            capabilities: None,
             screen: String::new(),
         };
         let (ready_tx, _ready_rx) = mpsc::channel();
@@ -1795,9 +2004,10 @@ mod tests {
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Running,
             ready: false,
+            capabilities: None,
             screen: String::new(),
         };
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, _command_rx) = mpsc::channel();
         let state = Arc::new(Mutex::new(ServerState {
             db_path: db_path.clone(),
             logs_dir,
@@ -1816,10 +2026,6 @@ mod tests {
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
 
-        assert!(matches!(
-            command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::Kill)
-        ));
         assert_eq!(
             store.get_process_record(process.id).unwrap().status,
             ProcessStatus::Stopped
@@ -1873,6 +2079,7 @@ mod tests {
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
             ready: true,
+            capabilities: None,
             screen: String::new(),
         };
         let (command_tx, _command_rx) = mpsc::channel();

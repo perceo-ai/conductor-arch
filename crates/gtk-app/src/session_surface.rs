@@ -1,6 +1,11 @@
 use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
+use archductor_core::archcar::harness::managed_harness_for_kind;
+use archductor_core::archcar::harness_contract::{
+    HarnessCapability, HarnessDescriptor, ProviderInteractionKind, RequiredHarnessFeature,
+    SupportMode,
+};
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
 };
@@ -15,6 +20,7 @@ use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_
 use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
+use archductor_core::provider_interactions::ProviderInteractionRecord;
 #[cfg(test)]
 use archductor_core::provider_projection::ProviderProjectionCategory;
 use archductor_core::provider_projection::{
@@ -720,14 +726,55 @@ pub fn agent_session_panel(
             let selected_harness = selected_harness.clone();
             let selected_thread = selected_thread.clone();
             let pending_commands = pending_commands.clone();
+            let database_path = database_path.clone();
+            let archcar_bridge = archcar_bridge.clone();
+            let inflight_archcar_actions = inflight_archcar_actions.clone();
+            let archcar_ready_cache = archcar_ready_cache.clone();
+            let toast_manager = toast_manager.clone();
             Rc::new(move |index| {
                 let level = session_reasoning_mode_from_index(index);
                 *reasoning_mode.borrow_mut() = Some(level.clone());
-                if *selected_harness.borrow() == SessionKind::Codex {
-                    if let (Some(thread_id), Some(command)) =
-                        (*selected_thread.borrow(), codex_reasoning_command(&level))
-                    {
-                        queue_thread_command(&pending_commands, thread_id, command);
+                let current_kind = *selected_harness.borrow();
+                if let Some(thread_id) = *selected_thread.borrow() {
+                    if managed_harness_for_kind(current_kind).is_some() {
+                        match WorkspaceStore::open_app(database_path.clone())
+                            .and_then(|store| store.list_thread_processes(thread_id))
+                        {
+                            Ok(records) => {
+                                if let Some(session_id) =
+                                    running_session_for_thread(&records, thread_id, current_kind)
+                                {
+                                    if queue_archcar_effort_update(
+                                        &archcar_bridge,
+                                        inflight_archcar_actions.as_ref(),
+                                        thread_id,
+                                        session_id,
+                                        Some(level.clone()),
+                                        current_kind,
+                                    ) {
+                                        note_archcar_ready(
+                                            &mut archcar_ready_cache.borrow_mut(),
+                                            session_id,
+                                            false,
+                                        );
+                                        return;
+                                    }
+                                    toast_manager.error(
+                                        "Could not update thinking because archcar is unavailable."
+                                            .to_owned(),
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                toast_manager
+                                    .error(format!("Read session processes failed: {err:#}"));
+                            }
+                        }
+                    }
+                    if current_kind == SessionKind::Codex {
+                        if let Some(command) = codex_reasoning_command(&level) {
+                            queue_thread_command(&pending_commands, thread_id, command);
+                        }
                     }
                 }
             })
@@ -927,9 +974,12 @@ pub fn agent_session_panel(
             let queued_count = thread_id
                 .map(|thread_id| queued_chat_inputs_count(&queued_chat_inputs, thread_id))
                 .unwrap_or_default();
-            let codex_thread_ready = if *selected_harness.borrow() == SessionKind::Codex {
+            let current_harness = *selected_harness.borrow();
+            let managed_harness_waits = managed_harness_for_kind(current_harness).is_some();
+            let managed_thread_ready = if managed_harness_waits {
                 thread_id.is_none_or(|thread_id| {
-                    codex_thread_ready_for_ui(
+                    managed_thread_ready_for_ui(
+                        current_harness,
                         thread_id,
                         &record_state.borrow(),
                         archcar_ready_cache.as_ref(),
@@ -939,8 +989,8 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            let codex_waiting_for_startup = if *selected_harness.borrow() == SessionKind::Codex {
-                !codex_thread_ready && !has_active_generation
+            let managed_waiting_for_startup = if managed_harness_waits {
+                !managed_thread_ready && !has_active_generation
             } else {
                 false
             };
@@ -951,7 +1001,7 @@ pub fn agent_session_panel(
                 has_active_generation,
                 latest_status == Some(ProcessStatus::Stopped),
                 queued_count,
-                codex_waiting_for_startup,
+                managed_waiting_for_startup,
             );
             set_composer_send_button_action(&send_btn, action);
             if action != ComposerAction::Disabled {
@@ -1273,7 +1323,7 @@ pub fn agent_session_panel(
                 );
                 if !flushed_pending {
                     if let Some(thread_id) = selected_thread_id {
-                        let can_send_next = current_kind == SessionKind::Codex
+                        let can_send_next = managed_harness_for_kind(current_kind).is_some()
                             && !pending_archcar_inputs.borrow().contains_key(&thread_id)
                             && !has_inflight_user_send_for_thread(
                                 inflight_archcar_actions.as_ref(),
@@ -1460,7 +1510,7 @@ pub fn agent_session_panel(
                                 .max_by_key(|record| record.id)
                                 .cloned()
                         });
-                    let startup_state = if current_kind == SessionKind::Codex {
+                    let startup_state = if managed_harness_for_kind(current_kind).is_some() {
                         codex_startup_state_for_thread(
                             thread_id,
                             &current,
@@ -1472,26 +1522,30 @@ pub fn agent_session_panel(
                     };
                     let working_elapsed =
                         working_elapsed_for_thread(working_threads.as_ref(), thread_id);
-                    if current_kind == SessionKind::Codex
-                        && thread_has_live_codex_session(&current, thread_id)
-                        && !matches!(startup_state, CodexStartupState::Error { .. })
-                        && !codex_thread_ready_for_ui(
-                            thread_id,
-                            &current,
-                            archcar_ready_cache.as_ref(),
-                            codex_startup_states.borrow().get(&thread_id),
-                        )
-                        && !has_pending_archcar_ensure_for_thread(
-                            inflight_archcar_actions.as_ref(),
-                            thread_id,
-                        )
-                    {
-                        request_archcar_ensure(
-                            &archcar_bridge,
-                            inflight_archcar_actions.as_ref(),
-                            workspace.clone(),
-                            Some(thread_id),
-                        );
+                    if let Some(harness) = managed_harness_for_kind(current_kind) {
+                        let descriptor = harness.descriptor();
+                        if thread_has_live_managed_session(&current, thread_id, descriptor)
+                            && !matches!(startup_state, CodexStartupState::Error { .. })
+                            && !managed_thread_ready_for_ui(
+                                current_kind,
+                                thread_id,
+                                &current,
+                                archcar_ready_cache.as_ref(),
+                                codex_startup_states.borrow().get(&thread_id),
+                            )
+                            && !has_pending_archcar_ensure_for_thread(
+                                inflight_archcar_actions.as_ref(),
+                                thread_id,
+                            )
+                        {
+                            request_archcar_ensure(
+                                &archcar_bridge,
+                                inflight_archcar_actions.as_ref(),
+                                workspace.clone(),
+                                Some(thread_id),
+                                descriptor,
+                            );
+                        }
                     }
                     let runtime_summary = record.as_ref().map(|record| {
                         let attached_sessions = active_sessions
@@ -1827,282 +1881,374 @@ pub fn agent_session_panel(
     let update_composer_for_send = update_composer_state.clone();
     let setup_readiness_for_send = setup_readiness.clone();
     let toast_for_send = toast_manager.clone();
-    let send_text = Rc::new(move |text: String, staged_review: bool| {
-        let command = text.trim().to_owned();
-        if command.is_empty() {
-            return false;
-        }
-        let workspace_for_send = current_workspace_name_for_send.borrow().clone();
-        let selected_kind = *selected_harness_for_send.borrow();
-        if let Some(message) =
-            selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
-        {
-            toast_for_send.error(message.clone());
-            let error = Label::new(Some(&message));
-            error.add_css_class("chat-agent-text");
-            error.set_selectable(true);
-            error.set_wrap(true);
-            error.set_xalign(0.0);
-            append_revealed(&messages_for_send, &error);
-            return false;
-        }
-        info!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            staged_review,
-            chars = command.len(),
-            "session send requested"
-        );
-        let mut records = record_state_for_send.borrow().clone();
-        debug!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            session_records = records.len(),
-            "session send stage: cloned record state"
-        );
-        if records.is_empty() {
-            if let Ok(store) = WorkspaceStore::open_app(db_for_send.clone()) {
-                records = store.list_sessions(&workspace_for_send).unwrap_or_default();
-                debug!(
-                    workspace = %workspace_for_send,
-                    harness = ?selected_kind,
-                    session_records = records.len(),
-                    "session send stage: loaded record state from store"
-                );
+    let send_text_with_delivery = Rc::new(
+        move |text: String, staged_review: bool, delivery: ArchcarInputDelivery| {
+            let command = text.trim().to_owned();
+            if command.is_empty() {
+                return false;
             }
-        }
-        let thread_id = match resolve_or_create_thread_id_for_send(
-            thread_state_for_send.as_ref(),
-            selected_thread_for_send.as_ref(),
-            selected_kind,
-            |title| {
-                WorkspaceStore::open_app(db_for_send.clone()).and_then(|store| {
-                    store.create_chat_thread(
-                        &workspace_for_send,
-                        session_kind_provider(selected_kind),
-                        &title,
-                        provider_model_harness_metadata(
-                            None,
-                            selected_model_for_send.borrow().as_deref(),
+            let workspace_for_send = current_workspace_name_for_send.borrow().clone();
+            let selected_kind = *selected_harness_for_send.borrow();
+            if let Some(message) =
+                selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
+            {
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
+                error.add_css_class("chat-agent-text");
+                error.set_selectable(true);
+                error.set_wrap(true);
+                error.set_xalign(0.0);
+                append_revealed(&messages_for_send, &error);
+                return false;
+            }
+            info!(
+                workspace = %workspace_for_send,
+                harness = ?selected_kind,
+                staged_review,
+                chars = command.len(),
+                "session send requested"
+            );
+            let mut records = record_state_for_send.borrow().clone();
+            debug!(
+                workspace = %workspace_for_send,
+                harness = ?selected_kind,
+                session_records = records.len(),
+                "session send stage: cloned record state"
+            );
+            if records.is_empty() {
+                if let Ok(store) = WorkspaceStore::open_app(db_for_send.clone()) {
+                    records = store.list_sessions(&workspace_for_send).unwrap_or_default();
+                    debug!(
+                        workspace = %workspace_for_send,
+                        harness = ?selected_kind,
+                        session_records = records.len(),
+                        "session send stage: loaded record state from store"
+                    );
+                }
+            }
+            let thread_id = match resolve_or_create_thread_id_for_send(
+                thread_state_for_send.as_ref(),
+                selected_thread_for_send.as_ref(),
+                selected_kind,
+                |title| {
+                    WorkspaceStore::open_app(db_for_send.clone()).and_then(|store| {
+                        store.create_chat_thread(
+                            &workspace_for_send,
+                            session_kind_provider(selected_kind),
+                            &title,
+                            provider_model_harness_metadata(
+                                None,
+                                selected_model_for_send.borrow().as_deref(),
+                            )
+                            .as_deref(),
                         )
-                        .as_deref(),
-                    )
-                })
-            },
-        ) {
-            Ok(thread_id) => {
-                app_state_for_send.set_selected_chat_thread(Some(thread_id));
-                thread_id
-            }
-            Err(err) => {
-                let message = format!("[chat thread] {err:#}");
-                toast_for_send.error(message.clone());
-                let error = Label::new(Some(&message));
-                error.add_css_class("chat-agent-text");
-                error.set_selectable(true);
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return false;
-            }
-        };
-        debug!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            thread_id,
-            "session send stage: resolved thread"
-        );
-        let thread = match WorkspaceStore::open_app(db_for_send.clone())
-            .and_then(|store| store.get_chat_thread_record(thread_id))
-        {
-            Ok(thread) => thread,
-            Err(err) => {
-                let message = format!("[chat thread] {err:#}");
-                toast_for_send.error(message.clone());
-                let error = Label::new(Some(&message));
-                error.add_css_class("chat-agent-text");
-                error.set_selectable(true);
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return false;
-            }
-        };
-        let thread_messages_for_send = match WorkspaceStore::open_app(db_for_send.clone())
-            .and_then(|store| store.list_chat_messages(thread_id))
-        {
-            Ok(messages) => messages,
-            Err(err) => {
-                let message = format!("[chat history] {err:#}");
-                toast_for_send.error(message.clone());
-                let error = Label::new(Some(&message));
-                error.add_css_class("chat-agent-text");
-                error.set_selectable(true);
-                error.set_wrap(true);
-                error.set_xalign(0.0);
-                append_revealed(&messages_for_send, &error);
-                return false;
-            }
-        };
-        let prepared_input = prepare_session_send_input(
-            &command,
-            &workspace_for_send,
-            staged_review,
-            selected_kind,
-            &thread,
-            &thread_messages_for_send,
-        );
-        let send_input = prepared_input.input;
-        let visible_input = prepared_input.visible_input;
-        debug!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            thread_id,
-            has_native_thread_id = thread.native_thread_id.is_some(),
-            "session send stage: loaded thread record"
-        );
-        let thread_records = records
-            .iter()
-            .filter(|record| record.chat_thread_id == Some(thread_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let selected_record = {
-            let selected_id = *selected_session_for_send.borrow();
-            thread_records
+                    })
+                },
+            ) {
+                Ok(thread_id) => {
+                    app_state_for_send.set_selected_chat_thread(Some(thread_id));
+                    thread_id
+                }
+                Err(err) => {
+                    let message = format!("[chat thread] {err:#}");
+                    toast_for_send.error(message.clone());
+                    let error = Label::new(Some(&message));
+                    error.add_css_class("chat-agent-text");
+                    error.set_selectable(true);
+                    error.set_wrap(true);
+                    error.set_xalign(0.0);
+                    append_revealed(&messages_for_send, &error);
+                    return false;
+                }
+            };
+            debug!(
+                workspace = %workspace_for_send,
+                harness = ?selected_kind,
+                thread_id,
+                "session send stage: resolved thread"
+            );
+            let selected_harness_descriptor =
+                managed_harness_for_kind(selected_kind).map(|harness| harness.descriptor());
+            let thread = match WorkspaceStore::open_app(db_for_send.clone())
+                .and_then(|store| store.get_chat_thread_record(thread_id))
+            {
+                Ok(thread) => thread,
+                Err(err) => {
+                    let message = format!("[chat thread] {err:#}");
+                    toast_for_send.error(message.clone());
+                    let error = Label::new(Some(&message));
+                    error.add_css_class("chat-agent-text");
+                    error.set_selectable(true);
+                    error.set_wrap(true);
+                    error.set_xalign(0.0);
+                    append_revealed(&messages_for_send, &error);
+                    return false;
+                }
+            };
+            let thread_messages_for_send = match WorkspaceStore::open_app(db_for_send.clone())
+                .and_then(|store| store.list_chat_messages(thread_id))
+            {
+                Ok(messages) => messages,
+                Err(err) => {
+                    let message = format!("[chat history] {err:#}");
+                    toast_for_send.error(message.clone());
+                    let error = Label::new(Some(&message));
+                    error.add_css_class("chat-agent-text");
+                    error.set_selectable(true);
+                    error.set_wrap(true);
+                    error.set_xalign(0.0);
+                    append_revealed(&messages_for_send, &error);
+                    return false;
+                }
+            };
+            let prepared_input = prepare_session_send_input(
+                &command,
+                &workspace_for_send,
+                staged_review,
+                selected_kind,
+                &thread,
+                &thread_messages_for_send,
+            );
+            let send_input = prepared_input.input;
+            let visible_input = prepared_input.visible_input;
+            debug!(
+                workspace = %workspace_for_send,
+                harness = ?selected_kind,
+                thread_id,
+                has_native_thread_id = thread.native_thread_id.is_some(),
+                "session send stage: loaded thread record"
+            );
+            let thread_records = records
                 .iter()
-                .find(|record| Some(record.id) == selected_id)
+                .filter(|record| record.chat_thread_id == Some(thread_id))
                 .cloned()
-                .or_else(|| thread_records.first().cloned())
-        };
-        debug!(
-            workspace = %workspace_for_send,
-            harness = ?selected_kind,
-            thread_id,
-            thread_record_count = thread_records.len(),
-            selected_record_id = selected_record.as_ref().map(|record| record.id),
-            "session send stage: selected thread record"
-        );
-        let create_turn_checkpoint = |session_id: Option<i64>| match create_turn_checkpoint_for_send(
-            &db_for_send,
-            &workspace_for_send,
-            thread_id,
-            session_id,
-            staged_review,
-        ) {
-            Ok(checkpoint_id) => Some(checkpoint_id),
-            Err(err) => {
-                warn!(
-                    workspace = %workspace_for_send,
+                .collect::<Vec<_>>();
+            let selected_record = {
+                let selected_id = *selected_session_for_send.borrow();
+                thread_records
+                    .iter()
+                    .find(|record| Some(record.id) == selected_id)
+                    .cloned()
+                    .or_else(|| thread_records.first().cloned())
+            };
+            debug!(
+                workspace = %workspace_for_send,
+                harness = ?selected_kind,
+                thread_id,
+                thread_record_count = thread_records.len(),
+                selected_record_id = selected_record.as_ref().map(|record| record.id),
+                "session send stage: selected thread record"
+            );
+            let create_turn_checkpoint =
+                |session_id: Option<i64>| match create_turn_checkpoint_for_send(
+                    &db_for_send,
+                    &workspace_for_send,
                     thread_id,
-                    error = %err,
-                    "turn checkpoint creation failed before session send queued"
-                );
-                append_session_status_message(
-                    &messages_for_send,
-                    &format!("[checkpoint] Could not create turn checkpoint: {err:#}"),
-                );
-                None
-            }
-        };
-        if matches!(selected_kind, SessionKind::Codex) {
-            let running_record = thread_records
-                .iter()
-                .find(|record| {
-                    record.status == ProcessStatus::Running
-                        && session_kind_matches_record(record, SessionKind::Codex)
-                })
-                .cloned();
-            if let Some(record) = running_record.as_ref() {
-                *selected_session_for_send.borrow_mut() = Some(record.id);
-                app_state_for_send.set_selected_agent_session(Some(record.id));
-                if archcar_ready_cache_for_send
-                    .borrow()
-                    .get(&record.id)
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    let pending_controls =
-                        flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
-                    for (index, control) in pending_controls.iter().enumerate() {
-                        if !queue_archcar_control_send(
+                    session_id,
+                    staged_review,
+                ) {
+                    Ok(checkpoint_id) => Some(checkpoint_id),
+                    Err(err) => {
+                        warn!(
+                            workspace = %workspace_for_send,
+                            thread_id,
+                            error = %err,
+                            "turn checkpoint creation failed before session send queued"
+                        );
+                        append_session_status_message(
+                            &messages_for_send,
+                            &format!("[checkpoint] Could not create turn checkpoint: {err:#}"),
+                        );
+                        None
+                    }
+                };
+            if let Some(harness_descriptor) = selected_harness_descriptor {
+                let running_record = thread_records
+                    .iter()
+                    .find(|record| {
+                        record.status == ProcessStatus::Running
+                            && session_kind_matches_record(record, harness_descriptor.kind)
+                    })
+                    .cloned();
+                if let Some(record) = running_record.as_ref() {
+                    *selected_session_for_send.borrow_mut() = Some(record.id);
+                    app_state_for_send.set_selected_agent_session(Some(record.id));
+                    if archcar_ready_cache_for_send
+                        .borrow()
+                        .get(&record.id)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        let pending_controls =
+                            flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
+                        for (index, control) in pending_controls.iter().enumerate() {
+                            if !queue_archcar_control_send(
+                                &archcar_bridge_for_send,
+                                inflight_archcar_actions_for_send.as_ref(),
+                                thread_id,
+                                record.id,
+                                control.clone(),
+                            ) {
+                                requeue_pending_controls(
+                                    &pending_commands_for_send,
+                                    thread_id,
+                                    &pending_controls,
+                                    index,
+                                );
+                                warn!(
+                                    thread_id,
+                                    process_id = record.id,
+                                    "archcar control send failed; requeued pending controls"
+                                );
+                                break;
+                            }
+                        }
+                        let kind = if staged_review {
+                            ArchcarInputKind::ReviewPrompt
+                        } else {
+                            ArchcarInputKind::User
+                        };
+                        let checkpoint_id = create_turn_checkpoint(Some(record.id));
+                        if !queue_archcar_user_send(
                             &archcar_bridge_for_send,
                             inflight_archcar_actions_for_send.as_ref(),
                             thread_id,
                             record.id,
-                            control.clone(),
+                            send_input.clone(),
+                            visible_input.clone(),
+                            kind.clone(),
+                            delivery,
+                            checkpoint_id,
+                            harness_descriptor.kind,
                         ) {
-                            requeue_pending_controls(
-                                &pending_commands_for_send,
-                                thread_id,
-                                &pending_controls,
-                                index,
-                            );
-                            warn!(
-                                thread_id,
-                                process_id = record.id,
-                                "archcar control send failed; requeued pending controls"
-                            );
-                            break;
-                        }
-                    }
-                    let kind = if staged_review {
-                        ArchcarInputKind::ReviewPrompt
-                    } else {
-                        ArchcarInputKind::User
-                    };
-                    let checkpoint_id = create_turn_checkpoint(Some(record.id));
-                    if !queue_archcar_user_send(
-                        &archcar_bridge_for_send,
-                        inflight_archcar_actions_for_send.as_ref(),
-                        thread_id,
-                        record.id,
-                        send_input.clone(),
-                        visible_input.clone(),
-                        kind.clone(),
-                        ArchcarInputDelivery::Auto,
-                        checkpoint_id,
-                    ) {
-                        if let Some(checkpoint_id) = checkpoint_id {
-                            discard_turn_checkpoint(
-                                &db_for_send,
-                                &workspace_for_send,
-                                checkpoint_id,
-                            );
-                        }
-                        append_session_status_message(
+                            if let Some(checkpoint_id) = checkpoint_id {
+                                discard_turn_checkpoint(
+                                    &db_for_send,
+                                    &workspace_for_send,
+                                    checkpoint_id,
+                                );
+                            }
+                            append_session_status_message(
                             &messages_for_send,
                             "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
                         );
-                        return false;
+                            return false;
+                        }
+                        note_archcar_ready(
+                            &mut archcar_ready_cache_for_send.borrow_mut(),
+                            record.id,
+                            false,
+                        );
+                        mark_thread_working(working_threads_for_send.as_ref(), thread_id);
+                        if staged_review {
+                            app_state_for_send.set_staged_review_prompt(None);
+                        }
+                        info!(
+                            workspace = %workspace_for_send,
+                            thread_id,
+                            process_id = record.id,
+                            staged_review,
+                            chars = command.len(),
+                            "archcar send queued"
+                        );
+                        refresh_view_for_send();
+                        return true;
                     }
-                    note_archcar_ready(
-                        &mut archcar_ready_cache_for_send.borrow_mut(),
-                        record.id,
+                }
+
+                if request_archcar_ensure(
+                    &archcar_bridge_for_send,
+                    inflight_archcar_actions_for_send.as_ref(),
+                    workspace_for_send.clone(),
+                    Some(thread_id),
+                    harness_descriptor,
+                ) {
+                    queue_archcar_input(
+                        &pending_archcar_inputs_for_send,
+                        thread_id,
+                        send_input.clone(),
+                        visible_input.clone(),
+                        if staged_review {
+                            ArchcarInputKind::ReviewPrompt
+                        } else {
+                            ArchcarInputKind::User
+                        },
+                        harness_descriptor.kind,
+                    );
+                    apply_codex_startup_signal(
+                        &mut codex_startup_states_for_send.borrow_mut(),
+                        CodexStartupSignal::Loading { thread_id },
+                    );
+                    set_codex_ready_state(
+                        codex_ready_for_send.as_ref(),
+                        update_composer_for_send.as_ref(),
                         false,
                     );
                     mark_thread_working(working_threads_for_send.as_ref(), thread_id);
-                    if staged_review {
-                        app_state_for_send.set_staged_review_prompt(None);
-                    }
-                    info!(
-                        workspace = %workspace_for_send,
+                } else {
+                    apply_codex_startup_signal(
+                    &mut codex_startup_states_for_send.borrow_mut(),
+                    CodexStartupSignal::Error {
                         thread_id,
-                        process_id = record.id,
-                        staged_review,
-                        chars = command.len(),
-                        "archcar send queued"
+                        message:
+                            "Request channel is closed. Reopen the workspace or restart the app."
+                                .to_owned(),
+                    },
+                );
+                    set_codex_ready_state(
+                        codex_ready_for_send.as_ref(),
+                        update_composer_for_send.as_ref(),
+                        false,
                     );
-                    refresh_view_for_send();
-                    return true;
+                    append_session_status_message(
+                    &messages_for_send,
+                    "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
+                );
+                    return false;
                 }
+                info!(
+                    workspace = %workspace_for_send,
+                    thread_id,
+                    running_record = running_record.as_ref().map(|record| record.id),
+                    staged_review,
+                    chars = command.len(),
+                    "queued archcar input while codex session is starting or absent"
+                );
+                if staged_review {
+                    app_state_for_send.set_staged_review_prompt(None);
+                }
+                refresh_view_for_send();
+                return true;
             }
+            let running_record = thread_records
+                .iter()
+                .find(|record| {
+                    record.status == ProcessStatus::Running
+                        && session_kind_matches_record(record, selected_kind)
+                })
+                .cloned();
 
-            if request_archcar_ensure(
-                &archcar_bridge_for_send,
-                inflight_archcar_actions_for_send.as_ref(),
-                workspace_for_send.clone(),
-                Some(thread_id),
-            ) {
+            let Some(record) = running_record else {
+                let token = request_archcar_spawn_session(
+                    &archcar_bridge_for_send,
+                    workspace_for_send.clone(),
+                    selected_kind,
+                );
+                let Some(token) = token else {
+                    append_session_status_message(
+                    &messages_for_send,
+                    "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
+                );
+                    return false;
+                };
+                inflight_archcar_actions_for_send.borrow_mut().insert(
+                    token,
+                    PendingArchcarAction::EnsureWorkspace {
+                        workspace: workspace_for_send.clone(),
+                        thread_id: Some(thread_id),
+                        kind: selected_kind,
+                    },
+                );
                 queue_archcar_input(
                     &pending_archcar_inputs_for_send,
                     thread_id,
@@ -2113,165 +2259,93 @@ pub fn agent_session_panel(
                     } else {
                         ArchcarInputKind::User
                     },
+                    selected_kind,
                 );
-                apply_codex_startup_signal(
-                    &mut codex_startup_states_for_send.borrow_mut(),
-                    CodexStartupSignal::Loading { thread_id },
-                );
-                set_codex_ready_state(
-                    codex_ready_for_send.as_ref(),
-                    update_composer_for_send.as_ref(),
-                    false,
-                );
-                mark_thread_working(working_threads_for_send.as_ref(), thread_id);
-            } else {
-                apply_codex_startup_signal(
-                    &mut codex_startup_states_for_send.borrow_mut(),
-                    CodexStartupSignal::Error {
+                let queued = Label::new(Some(
+                "[session start] Runtime session requested through archcar. Queued message will send when the session is ready.",
+            ));
+                queued.add_css_class("chat-agent-text");
+                queued.set_selectable(true);
+                queued.set_wrap(true);
+                queued.set_xalign(0.0);
+                append_revealed(&messages_for_send, &queued);
+                refresh_view_for_send();
+                return true;
+            };
+
+            let process_id = record.id;
+            *selected_session_for_send.borrow_mut() = Some(process_id);
+            app_state_for_send.set_selected_agent_session(Some(process_id));
+            active_sessions_for_send.borrow_mut().insert(process_id);
+
+            let pending_controls =
+                flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
+            for (index, control) in pending_controls.iter().enumerate() {
+                if !queue_archcar_control_send(
+                    &archcar_bridge_for_send,
+                    inflight_archcar_actions_for_send.as_ref(),
+                    thread_id,
+                    process_id,
+                    control.clone(),
+                ) {
+                    requeue_pending_controls(
+                        &pending_commands_for_send,
                         thread_id,
-                        message:
-                            "Request channel is closed. Reopen the workspace or restart the app."
-                                .to_owned(),
-                    },
-                );
-                set_codex_ready_state(
-                    codex_ready_for_send.as_ref(),
-                    update_composer_for_send.as_ref(),
-                    false,
-                );
+                        &pending_controls,
+                        index,
+                    );
+                    warn!(
+                        thread_id,
+                        process_id, "archcar control send failed; requeued pending controls"
+                    );
+                    break;
+                }
+            }
+            let input_kind = if staged_review {
+                ArchcarInputKind::ReviewPrompt
+            } else {
+                ArchcarInputKind::User
+            };
+            let checkpoint_id = create_turn_checkpoint(Some(process_id));
+            if !queue_archcar_user_send(
+                &archcar_bridge_for_send,
+                inflight_archcar_actions_for_send.as_ref(),
+                thread_id,
+                process_id,
+                send_input.clone(),
+                visible_input.clone(),
+                input_kind,
+                delivery,
+                checkpoint_id,
+                selected_kind,
+            ) {
+                if let Some(checkpoint_id) = checkpoint_id {
+                    discard_turn_checkpoint(&db_for_send, &workspace_for_send, checkpoint_id);
+                }
                 append_session_status_message(
                     &messages_for_send,
                     "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
                 );
                 return false;
             }
-            info!(
-                workspace = %workspace_for_send,
-                thread_id,
-                running_record = running_record.as_ref().map(|record| record.id),
-                staged_review,
-                chars = command.len(),
-                "queued archcar input while codex session is starting or absent"
+            note_archcar_ready(
+                &mut archcar_ready_cache_for_send.borrow_mut(),
+                process_id,
+                false,
             );
             if staged_review {
                 app_state_for_send.set_staged_review_prompt(None);
             }
             refresh_view_for_send();
-            return true;
-        }
-        let running_record = thread_records
-            .iter()
-            .find(|record| {
-                record.status == ProcessStatus::Running
-                    && session_kind_matches_record(record, selected_kind)
-            })
-            .cloned();
-
-        let Some(record) = running_record else {
-            let token =
-                archcar_bridge_for_send.spawn_session(workspace_for_send.clone(), selected_kind);
-            let Some(token) = token else {
-                append_session_status_message(
-                    &messages_for_send,
-                    "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
-                );
-                return false;
-            };
-            inflight_archcar_actions_for_send.borrow_mut().insert(
-                token,
-                PendingArchcarAction::EnsureWorkspace {
-                    workspace: workspace_for_send.clone(),
-                    thread_id: Some(thread_id),
-                },
-            );
-            queue_archcar_input(
-                &pending_archcar_inputs_for_send,
-                thread_id,
-                send_input.clone(),
-                visible_input.clone(),
-                if staged_review {
-                    ArchcarInputKind::ReviewPrompt
-                } else {
-                    ArchcarInputKind::User
-                },
-            );
-            let queued = Label::new(Some(
-                "[session start] Runtime session requested through archcar. Queued message will send when the session is ready.",
-            ));
-            queued.add_css_class("chat-agent-text");
-            queued.set_selectable(true);
-            queued.set_wrap(true);
-            queued.set_xalign(0.0);
-            append_revealed(&messages_for_send, &queued);
-            refresh_view_for_send();
-            return true;
-        };
-
-        let process_id = record.id;
-        *selected_session_for_send.borrow_mut() = Some(process_id);
-        app_state_for_send.set_selected_agent_session(Some(process_id));
-        active_sessions_for_send.borrow_mut().insert(process_id);
-
-        let pending_controls =
-            flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
-        for (index, control) in pending_controls.iter().enumerate() {
-            if !queue_archcar_control_send(
-                &archcar_bridge_for_send,
-                inflight_archcar_actions_for_send.as_ref(),
-                thread_id,
-                process_id,
-                control.clone(),
-            ) {
-                requeue_pending_controls(
-                    &pending_commands_for_send,
-                    thread_id,
-                    &pending_controls,
-                    index,
-                );
-                warn!(
-                    thread_id,
-                    process_id, "archcar control send failed; requeued pending controls"
-                );
-                break;
-            }
-        }
-        let input_kind = if staged_review {
-            ArchcarInputKind::ReviewPrompt
-        } else {
-            ArchcarInputKind::User
-        };
-        let checkpoint_id = create_turn_checkpoint(Some(process_id));
-        if !queue_archcar_user_send(
-            &archcar_bridge_for_send,
-            inflight_archcar_actions_for_send.as_ref(),
-            thread_id,
-            process_id,
-            send_input.clone(),
-            visible_input.clone(),
-            input_kind,
-            ArchcarInputDelivery::Auto,
-            checkpoint_id,
-        ) {
-            if let Some(checkpoint_id) = checkpoint_id {
-                discard_turn_checkpoint(&db_for_send, &workspace_for_send, checkpoint_id);
-            }
-            append_session_status_message(
-                &messages_for_send,
-                "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
-            );
-            return false;
-        }
-        note_archcar_ready(
-            &mut archcar_ready_cache_for_send.borrow_mut(),
-            process_id,
-            false,
-        );
-        if staged_review {
-            app_state_for_send.set_staged_review_prompt(None);
-        }
-        refresh_view_for_send();
-        true
-    });
+            true
+        },
+    );
+    let send_text: Rc<dyn Fn(String, bool) -> bool> = {
+        let send_text_with_delivery = send_text_with_delivery.clone();
+        Rc::new(move |text: String, staged_review: bool| {
+            send_text_with_delivery(text, staged_review, ArchcarInputDelivery::Auto)
+        })
+    };
     *send_text_after_ready_queue.borrow_mut() = Some(send_text.clone());
 
     {
@@ -2451,7 +2525,7 @@ pub fn agent_session_panel(
                 set_codex_ready_state(codex_ready.as_ref(), &|| {}, false);
             } else {
                 toast_manager.error(
-                    "Could not interrupt the active Codex turn because archcar is unavailable."
+                    "Could not interrupt the active agent turn because archcar is unavailable."
                         .to_owned(),
                 );
             }
@@ -2459,101 +2533,9 @@ pub fn agent_session_panel(
     });
 
     let send_immediate_input: Rc<dyn Fn(String, bool) -> bool> = Rc::new({
-        let database_path = database_path.clone();
-        let current_workspace_name = current_workspace_name.clone();
-        let selected_thread = selected_thread.clone();
-        let selected_harness = selected_harness.clone();
-        let record_state = record_state.clone();
-        let archcar_bridge = archcar_bridge.clone();
-        let inflight_archcar_actions = inflight_archcar_actions.clone();
-        let archcar_ready_cache = archcar_ready_cache.clone();
-        let working_threads = working_threads.clone();
-        let refresh_view = refresh_view.clone();
-        let toast_manager = toast_manager.clone();
+        let send_text_with_delivery = send_text_with_delivery.clone();
         move |command: String, staged_review: bool| -> bool {
-            if command.trim().is_empty() || *selected_harness.borrow() != SessionKind::Codex {
-                return false;
-            }
-            let command = command.trim().to_owned();
-            let workspace = current_workspace_name.borrow().clone();
-            let Some(thread_id) = *selected_thread.borrow() else {
-                return false;
-            };
-            let Some(session_id) = running_session_for_thread(
-                &record_state.borrow(),
-                thread_id,
-                *selected_harness.borrow(),
-            ) else {
-                return false;
-            };
-            let (thread, thread_messages) = match WorkspaceStore::open_app(database_path.clone())
-                .and_then(|store| {
-                    let thread = store.get_chat_thread_record(thread_id)?;
-                    let messages = store.list_chat_messages(thread_id)?;
-                    Ok((thread, messages))
-                }) {
-                Ok(records) => records,
-                Err(err) => {
-                    toast_manager.error(format!(
-                        "Could not prepare immediate send for chat thread: {err:#}"
-                    ));
-                    return false;
-                }
-            };
-            let prepared_input = prepare_session_send_input(
-                &command,
-                &workspace,
-                staged_review,
-                SessionKind::Codex,
-                &thread,
-                &thread_messages,
-            );
-            let checkpoint_id = match create_turn_checkpoint_for_send(
-                &database_path,
-                &workspace,
-                thread_id,
-                Some(session_id),
-                staged_review,
-            ) {
-                Ok(checkpoint_id) => Some(checkpoint_id),
-                Err(err) => {
-                    warn!(
-                        workspace = %workspace,
-                        thread_id,
-                        process_id = session_id,
-                        error = %err,
-                        "turn checkpoint creation failed before immediate archcar input submitted"
-                    );
-                    None
-                }
-            };
-            if queue_archcar_user_send(
-                &archcar_bridge,
-                inflight_archcar_actions.as_ref(),
-                thread_id,
-                session_id,
-                prepared_input.input,
-                prepared_input.visible_input,
-                if staged_review {
-                    ArchcarInputKind::ReviewPrompt
-                } else {
-                    ArchcarInputKind::User
-                },
-                ArchcarInputDelivery::Immediate,
-                checkpoint_id,
-            ) {
-                note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
-                mark_thread_working(working_threads.as_ref(), thread_id);
-                refresh_view();
-                true
-            } else {
-                if let Some(checkpoint_id) = checkpoint_id {
-                    discard_turn_checkpoint(&database_path, &workspace, checkpoint_id);
-                }
-                toast_manager
-                    .error("Could not send immediately because archcar is unavailable.".to_owned());
-                false
-            }
+            send_text_with_delivery(command, staged_review, ArchcarInputDelivery::Immediate)
         }
     });
     *send_immediate_after_ready_queue.borrow_mut() = Some(send_immediate_input.clone());
@@ -2597,9 +2579,12 @@ pub fn agent_session_panel(
             let queued_count = thread_id
                 .map(|thread_id| queued_chat_inputs_count(&queued_chat_inputs, thread_id))
                 .unwrap_or_default();
-            let codex_thread_ready = if *selected_harness.borrow() == SessionKind::Codex {
+            let current_harness = *selected_harness.borrow();
+            let managed_harness_waits = managed_harness_for_kind(current_harness).is_some();
+            let managed_thread_ready = if managed_harness_waits {
                 thread_id.is_none_or(|thread_id| {
-                    codex_thread_ready_for_ui(
+                    managed_thread_ready_for_ui(
+                        current_harness,
                         thread_id,
                         &record_state.borrow(),
                         archcar_ready_cache.as_ref(),
@@ -2609,15 +2594,14 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            let codex_waiting_for_startup = *selected_harness.borrow() == SessionKind::Codex
-                && !codex_thread_ready
-                && !has_active_generation;
+            let managed_waiting_for_startup =
+                managed_harness_waits && !managed_thread_ready && !has_active_generation;
             let action = composer_action_for_startup_state(
                 has_text,
                 has_active_generation,
                 latest_status == Some(ProcessStatus::Stopped),
                 queued_count,
-                codex_waiting_for_startup,
+                managed_waiting_for_startup,
             );
             let selected_kind = *selected_harness.borrow();
             match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
@@ -2634,6 +2618,7 @@ pub fn agent_session_panel(
                         command.clone(),
                         None,
                         ArchcarInputKind::User,
+                        *selected_harness.borrow(),
                     );
                     buffer.set_text("");
                     refresh_view();
@@ -2670,7 +2655,7 @@ pub fn agent_session_panel(
                     if has_text {
                         buffer.set_text("");
                         if intent == ComposerSubmitIntent::Immediate
-                            && selected_kind == SessionKind::Codex
+                            && managed_harness_for_kind(selected_kind).is_some()
                         {
                             if !send_immediate_input(command.clone(), false) {
                                 (send_text)(command, false);
@@ -2731,7 +2716,7 @@ pub fn agent_session_panel(
     send_btn.connect_clicked({
         let submit_composer_action = submit_composer_action.clone();
         move |_| {
-            submit_composer_action(ComposerSubmitIntent::Default);
+            submit_composer_action(composer_send_button_submit_intent());
         }
     });
     new_chat_btn.connect_clicked({
@@ -3451,6 +3436,7 @@ fn chat_structured_items_for_render(
         .iter()
         .any(|item| item.render_class == ProjectionRenderClass::UserChat)
     {
+        items.append(&mut unsequenced_messages);
         items = chat_timeline_items_anchored_to_provider_user_events(items, provider_items);
     } else {
         items.extend(
@@ -3458,8 +3444,8 @@ fn chat_structured_items_for_render(
                 .into_iter()
                 .map(ChatTimelineItem::ProviderProjection),
         );
+        items.append(&mut unsequenced_messages);
     }
-    items.append(&mut unsequenced_messages);
     items.extend(
         optimistic_immediate_inputs
             .into_iter()
@@ -6255,6 +6241,7 @@ fn queue_archcar_input(
     input: String,
     visible_input: Option<String>,
     kind: ArchcarInputKind,
+    session_kind: SessionKind,
 ) {
     let input = input.trim().to_owned();
     if input.is_empty() {
@@ -6268,6 +6255,7 @@ fn queue_archcar_input(
             input,
             visible_input,
             kind,
+            session_kind,
         });
 }
 
@@ -6344,10 +6332,10 @@ fn pending_immediate_user_input_texts_for_thread(
         .map(|message| message.content.trim().to_owned())
         .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
-    let mut inputs = Vec::new();
     inflight_actions
-        .borrow_mut()
-        .retain(|_, action| match action {
+        .borrow()
+        .values()
+        .filter_map(|action| match action {
             PendingArchcarAction::UserSend {
                 thread_id: action_thread_id,
                 input,
@@ -6357,16 +6345,15 @@ fn pending_immediate_user_input_texts_for_thread(
             } if *action_thread_id == thread_id => {
                 let input = visible_input.as_deref().unwrap_or(input).trim().to_owned();
                 if input.is_empty() || persisted.contains(&input) {
-                    return false;
+                    None
+                } else {
+                    Some(input)
                 }
-                if seen.insert(input.clone()) {
-                    inputs.push(input);
-                }
-                true
             }
-            _ => true,
-        });
-    inputs
+            _ => None,
+        })
+        .filter(|input| seen.insert(input.clone()))
+        .collect()
 }
 
 fn queued_chat_inputs_count(
@@ -6395,7 +6382,7 @@ fn queued_composer_overlay_items_for_thread(
         .flat_map(|items| items.iter().enumerate())
         .map(|(index, input)| {
             let mut actions = vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit];
-            if selected_kind == SessionKind::Codex {
+            if managed_harness_for_kind(selected_kind).is_some() {
                 actions.push(QueuedComposerAction::SendImmediately);
             }
             QueuedComposerItem {
@@ -6563,6 +6550,10 @@ fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> Co
     }
 }
 
+fn composer_send_button_submit_intent() -> ComposerSubmitIntent {
+    ComposerSubmitIntent::Immediate
+}
+
 fn composer_action_for_submit_intent(
     action: ComposerAction,
     intent: ComposerSubmitIntent,
@@ -6571,7 +6562,7 @@ fn composer_action_for_submit_intent(
 ) -> ComposerAction {
     if has_text
         && intent == ComposerSubmitIntent::Immediate
-        && selected_kind == SessionKind::Codex
+        && managed_harness_for_kind(selected_kind).is_some()
         && matches!(action, ComposerAction::Queue | ComposerAction::SendQueued)
     {
         ComposerAction::Send
@@ -6595,6 +6586,62 @@ fn composer_send_button_presentation(action: ComposerAction) -> (&'static str, &
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionUiKind {
+    Permission,
+    Question,
+    Plan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractionPresentation {
+    kind: InteractionUiKind,
+    provider_label: String,
+    title: String,
+    detail: String,
+    actions: Vec<&'static str>,
+}
+
+fn interaction_presentation(interaction: &ProviderInteractionRecord) -> InteractionPresentation {
+    let kind = match interaction.kind {
+        ProviderInteractionKind::Permission => InteractionUiKind::Permission,
+        ProviderInteractionKind::UserQuestion => InteractionUiKind::Question,
+        ProviderInteractionKind::PlanApproval => InteractionUiKind::Plan,
+    };
+    let actions = match interaction.kind {
+        ProviderInteractionKind::Permission => vec!["Allow", "Deny", "Always allow"],
+        ProviderInteractionKind::UserQuestion => vec!["Answer", "Deny"],
+        ProviderInteractionKind::PlanApproval => vec!["Approve plan", "Keep planning"],
+    };
+    InteractionPresentation {
+        kind,
+        provider_label: provider_interaction_label(&interaction.provider_key),
+        title: interaction.title.clone(),
+        detail: interaction.detail.clone(),
+        actions,
+    }
+}
+
+fn provider_interaction_label(provider_key: &str) -> String {
+    for kind in [SessionKind::Codex, SessionKind::Claude] {
+        if let Some(harness) = managed_harness_for_kind(kind) {
+            if harness.descriptor().provider_key == provider_key {
+                return harness.descriptor().display_name.to_owned();
+            }
+        }
+    }
+    provider_key.to_owned()
+}
+
+fn question_answers_complete(questions: &[String], answers: &HashMap<String, String>) -> bool {
+    !questions.is_empty()
+        && questions.iter().all(|question| {
+            answers
+                .get(question)
+                .is_some_and(|answer| !answer.trim().is_empty())
+        })
+}
+
 fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
     let (icon, tooltip, sensitive) = composer_send_button_presentation(action);
     let image = Image::from_icon_name(resolve_icon_name(icon));
@@ -6604,6 +6651,9 @@ fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
 }
 
 fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
+    if let Some(harness) = managed_harness_for_kind(session_kind_from_provider(provider)) {
+        return visible_live_controls_for_harness(harness.descriptor());
+    }
     let controls = gtk_live_controls_for_provider(provider)
         .map(|control| control.control.to_owned())
         .collect::<Vec<_>>();
@@ -6612,6 +6662,21 @@ fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
     } else {
         controls
     }
+}
+
+fn visible_live_controls_for_harness(descriptor: &HarnessDescriptor) -> Vec<String> {
+    let mut controls = vec!["provider".to_owned()];
+    if descriptor
+        .required_features
+        .contains(&RequiredHarnessFeature::SessionControls)
+    {
+        controls.push("model".to_owned());
+        controls.push("thinking".to_owned());
+    }
+    if descriptor.optional(HarnessCapability::Goals) == SupportMode::Native {
+        controls.push("goal".to_owned());
+    }
+    controls
 }
 
 fn retry_agent_prompt() -> &'static str {
@@ -6677,9 +6742,10 @@ fn ready_running_session_for_thread(
 fn ready_queued_session_for_thread(
     records: &[ProcessRecord],
     thread_id: i64,
+    harness: &'static HarnessDescriptor,
     ready_cache: &RefCell<HashMap<i64, bool>>,
 ) -> Option<i64> {
-    ready_running_session_for_thread(records, thread_id, SessionKind::Codex, ready_cache)
+    ready_running_session_for_thread(records, thread_id, harness.kind, ready_cache)
 }
 
 fn resolve_or_create_thread_id_for_send<F>(
@@ -7828,7 +7894,7 @@ enum CodexStartupSignal {
 
 fn default_codex_loading_state() -> CodexStartupState {
     CodexStartupState::Loading {
-        message: "Starting Codex...".to_owned(),
+        message: "Starting agent...".to_owned(),
     }
 }
 
@@ -7872,7 +7938,23 @@ fn codex_thread_ready_for_ui(
     ready_cache: &RefCell<HashMap<i64, bool>>,
     current_state: Option<&CodexStartupState>,
 ) -> bool {
-    thread_has_ready_codex_session(records, thread_id, ready_cache)
+    managed_thread_ready_for_ui(
+        SessionKind::Codex,
+        thread_id,
+        records,
+        ready_cache,
+        current_state,
+    )
+}
+
+fn managed_thread_ready_for_ui(
+    kind: SessionKind,
+    thread_id: i64,
+    records: &[ProcessRecord],
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    current_state: Option<&CodexStartupState>,
+) -> bool {
+    thread_has_ready_managed_session(records, thread_id, kind, ready_cache)
         || matches!(current_state, Some(CodexStartupState::Ready))
 }
 
@@ -7894,22 +7976,34 @@ fn apply_codex_startup_signal(
 }
 
 fn thread_has_live_codex_session(records: &[ProcessRecord], thread_id: i64) -> bool {
+    let Some(harness) = managed_harness_for_kind(SessionKind::Codex) else {
+        return false;
+    };
+    thread_has_live_managed_session(records, thread_id, harness.descriptor())
+}
+
+fn thread_has_live_managed_session(
+    records: &[ProcessRecord],
+    thread_id: i64,
+    harness: &'static HarnessDescriptor,
+) -> bool {
     records.iter().any(|record| {
         record.status == ProcessStatus::Running
             && record.chat_thread_id == Some(thread_id)
-            && session_kind_matches_record(record, SessionKind::Codex)
+            && session_kind_matches_record(record, harness.kind)
     })
 }
 
-fn thread_has_ready_codex_session(
+fn thread_has_ready_managed_session(
     records: &[ProcessRecord],
     thread_id: i64,
+    kind: SessionKind,
     ready_cache: &RefCell<HashMap<i64, bool>>,
 ) -> bool {
     records.iter().any(|record| {
         record.status == ProcessStatus::Running
             && record.chat_thread_id == Some(thread_id)
-            && session_kind_matches_record(record, SessionKind::Codex)
+            && session_kind_matches_record(record, kind)
             && ready_cache
                 .borrow()
                 .get(&record.id)
@@ -8453,6 +8547,7 @@ struct QueuedArchcarInput {
     input: String,
     visible_input: Option<String>,
     kind: ArchcarInputKind,
+    session_kind: SessionKind,
 }
 
 #[derive(Default)]
@@ -8482,6 +8577,7 @@ enum PendingArchcarAction {
     EnsureWorkspace {
         workspace: String,
         thread_id: Option<i64>,
+        kind: SessionKind,
     },
     ControlSend {
         thread_id: i64,
@@ -8497,6 +8593,12 @@ enum PendingArchcarAction {
         session_id: i64,
         model: Option<String>,
     },
+    EffortUpdate {
+        thread_id: i64,
+        session_id: i64,
+        effort: Option<String>,
+        session_kind: SessionKind,
+    },
     UserSend {
         thread_id: i64,
         session_id: i64,
@@ -8505,6 +8607,7 @@ enum PendingArchcarAction {
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
         checkpoint_id: Option<i64>,
+        session_kind: SessionKind,
     },
 }
 
@@ -8542,7 +8645,17 @@ fn flush_pending_archcar_inputs(
         let records = WorkspaceStore::open_app(database_path)
             .and_then(|store| store.list_thread_processes(thread_id))
             .unwrap_or_default();
-        let Some(session_id) = ready_queued_session_for_thread(&records, thread_id, ready_cache)
+        let session_kind = pending_inputs
+            .borrow()
+            .get(&thread_id)
+            .and_then(|inputs| inputs.first())
+            .map(|input| input.session_kind)
+            .unwrap_or(SessionKind::Codex);
+        let Some(harness) = managed_harness_for_kind(session_kind) else {
+            continue;
+        };
+        let Some(session_id) =
+            ready_queued_session_for_thread(&records, thread_id, harness.descriptor(), ready_cache)
         else {
             continue;
         };
@@ -8604,6 +8717,7 @@ fn flush_pending_archcar_inputs(
             queued_input.kind.clone(),
             ArchcarInputDelivery::Auto,
             checkpoint_id,
+            queued_input.session_kind,
         ) {
             if let Some(checkpoint_id) = checkpoint_id {
                 discard_turn_checkpoint(database_path, workspace, checkpoint_id);
@@ -8704,6 +8818,31 @@ fn queue_archcar_model_update(
     }
 }
 
+fn queue_archcar_effort_update(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+    session_id: i64,
+    effort: Option<String>,
+    session_kind: SessionKind,
+) -> bool {
+    let token = bridge.set_session_effort(session_id, effort.clone());
+    if let Some(token) = token {
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::EffortUpdate {
+                thread_id,
+                session_id,
+                effort,
+                session_kind,
+            },
+        );
+        true
+    } else {
+        false
+    }
+}
+
 fn requeue_pending_controls(
     pending_commands: &RefCell<HashMap<i64, Vec<String>>>,
     thread_id: i64,
@@ -8725,6 +8864,7 @@ fn queue_archcar_user_send(
     kind: ArchcarInputKind,
     delivery: ArchcarInputDelivery,
     checkpoint_id: Option<i64>,
+    session_kind: SessionKind,
 ) -> bool {
     let token = match delivery {
         ArchcarInputDelivery::Auto => bridge.send_input(
@@ -8751,6 +8891,7 @@ fn queue_archcar_user_send(
                 kind,
                 delivery,
                 checkpoint_id,
+                session_kind,
             },
         );
         true
@@ -8835,8 +8976,11 @@ fn update_working_indicator_for_archcar_event(
         }
         ArchcarEvent::SessionSpawnQueued { .. }
         | ArchcarEvent::SessionStarted { .. }
+        | ArchcarEvent::SessionCapabilitiesChanged { .. }
         | ArchcarEvent::SessionScreenUpdated { .. }
-        | ArchcarEvent::SessionMessagesUpdated { .. } => false,
+        | ArchcarEvent::SessionMessagesUpdated { .. }
+        | ArchcarEvent::ProviderInteractionRequested { .. }
+        | ArchcarEvent::ProviderInteractionResolved { .. } => false,
     }
 }
 
@@ -8916,11 +9060,43 @@ fn handle_archcar_event(
             );
             set_codex_ready_state(codex_ready, update_composer_state, true);
         }
+        ArchcarEvent::SessionCapabilitiesChanged {
+            session_id,
+            thread_id,
+            capabilities,
+        } => {
+            trace!(
+                session_id,
+                thread_id,
+                contract_version = capabilities.contract_version,
+                required = capabilities.required.len(),
+                optional = capabilities.optional.len(),
+                observed_native = capabilities.observed_native.len(),
+                "archcar session capabilities changed"
+            );
+            session_threads.borrow_mut().insert(*session_id, *thread_id);
+        }
         ArchcarEvent::SessionScreenUpdated { session_id } => {
             trace!(session_id, "archcar session screen updated");
         }
         ArchcarEvent::SessionMessagesUpdated { thread_id } => {
             trace!(thread_id, "archcar session messages updated");
+        }
+        ArchcarEvent::ProviderInteractionRequested { interaction } => {
+            trace!(
+                id = %interaction.id,
+                thread_id = interaction.thread_id,
+                session_id = interaction.session_id,
+                "archcar provider interaction requested"
+            );
+        }
+        ArchcarEvent::ProviderInteractionResolved { interaction } => {
+            trace!(
+                id = %interaction.id,
+                thread_id = interaction.thread_id,
+                session_id = interaction.session_id,
+                "archcar provider interaction resolved"
+            );
         }
         ArchcarEvent::SessionExited {
             session_id,
@@ -8985,6 +9161,7 @@ fn handle_archcar_response(
         PendingArchcarAction::EnsureWorkspace {
             workspace,
             thread_id,
+            kind: _,
         } => match response.result {
             Ok(
                 success @ (ArchcarResponse::SessionSpawnQueued { .. }
@@ -9049,6 +9226,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
             Err(err) => {
@@ -9070,6 +9250,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
         },
@@ -9145,6 +9328,9 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
                 );
             }
             Err(err) => {
@@ -9165,6 +9351,70 @@ fn handle_archcar_response(
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    managed_harness_for_kind(SessionKind::Codex)
+                        .expect("codex managed harness")
+                        .descriptor(),
+                );
+            }
+        },
+        PendingArchcarAction::EffortUpdate {
+            thread_id,
+            session_id,
+            effort,
+            session_kind,
+        } => match response.result {
+            Ok(ArchcarResponse::Ack) => {
+                debug!(
+                    thread_id,
+                    session_id,
+                    ?effort,
+                    "archcar effort update accepted"
+                );
+            }
+            Ok(other) => {
+                warn!(
+                    thread_id,
+                    session_id,
+                    ?effort,
+                    ?other,
+                    "unexpected archcar effort update response"
+                );
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar effort update response: {other:?}");
+                toast_manager.error(message.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error { thread_id, message },
+                );
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
+                request_archcar_ensure_for_kind(
+                    &bridge,
+                    inflight_actions,
+                    workspace.to_owned(),
+                    Some(thread_id),
+                    session_kind,
+                );
+            }
+            Err(err) => {
+                warn!(thread_id, session_id, ?effort, error = %err, "archcar effort update failed");
+                note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message: err,
+                    },
+                );
+                set_codex_ready_state(codex_ready, update_composer_state, false);
+                changed = true;
+                request_archcar_ensure_for_kind(
+                    &bridge,
+                    inflight_actions,
+                    workspace.to_owned(),
+                    Some(thread_id),
+                    session_kind,
                 );
             }
         },
@@ -9176,6 +9426,7 @@ fn handle_archcar_response(
             kind,
             delivery,
             checkpoint_id,
+            session_kind,
         } => match response.result {
             Ok(ArchcarResponse::Ack) => {
                 info!(
@@ -9186,13 +9437,35 @@ fn handle_archcar_response(
                     chars = input.len(),
                     "archcar input accepted"
                 );
+                if delivery == ArchcarInputDelivery::Immediate {
+                    inflight_actions.borrow_mut().insert(
+                        response.token,
+                        PendingArchcarAction::UserSend {
+                            thread_id,
+                            session_id,
+                            input,
+                            visible_input,
+                            kind,
+                            delivery,
+                            checkpoint_id,
+                            session_kind,
+                        },
+                    );
+                }
             }
             Ok(other) => {
                 warn!(thread_id, session_id, kind = ?kind, delivery = ?delivery, ?other, "unexpected archcar input response");
                 if let Some(checkpoint_id) = checkpoint_id {
                     discard_turn_checkpoint(database_path, workspace, checkpoint_id);
                 }
-                queue_archcar_input(pending_inputs, thread_id, input, visible_input, kind);
+                queue_archcar_input(
+                    pending_inputs,
+                    thread_id,
+                    input,
+                    visible_input,
+                    kind,
+                    session_kind,
+                );
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 let message = format!("Unexpected archcar input response: {other:?}");
                 toast_manager.error(message.clone());
@@ -9203,11 +9476,12 @@ fn handle_archcar_response(
                 clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
-                request_archcar_ensure(
+                request_archcar_ensure_for_kind(
                     &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    session_kind,
                 );
             }
             Err(err) => {
@@ -9215,7 +9489,16 @@ fn handle_archcar_response(
                 if let Some(checkpoint_id) = checkpoint_id {
                     discard_turn_checkpoint(database_path, workspace, checkpoint_id);
                 }
-                queue_archcar_input(pending_inputs, thread_id, input, visible_input, kind);
+                requeue_pending_input_front(
+                    pending_inputs,
+                    thread_id,
+                    QueuedArchcarInput {
+                        input,
+                        visible_input,
+                        kind,
+                        session_kind,
+                    },
+                );
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 toast_manager.error(err.clone());
                 apply_codex_startup_signal(
@@ -9228,11 +9511,12 @@ fn handle_archcar_response(
                 clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
-                request_archcar_ensure(
+                request_archcar_ensure_for_kind(
                     &bridge,
                     inflight_actions,
                     workspace.to_owned(),
                     Some(thread_id),
+                    session_kind,
                 );
             }
         },
@@ -9249,8 +9533,11 @@ fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) 
             | ArchcarEvent::SessionExited { .. }
             | ArchcarEvent::SessionError { .. } => (true, true),
             ArchcarEvent::SessionReady { .. }
+            | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
-            | ArchcarEvent::SessionMessagesUpdated { .. } => (true, false),
+            | ArchcarEvent::SessionMessagesUpdated { .. }
+            | ArchcarEvent::ProviderInteractionRequested { .. }
+            | ArchcarEvent::ProviderInteractionResolved { .. } => (true, false),
         },
         AsyncArchcarMessage::Response(_) => (false, false),
         AsyncArchcarMessage::BridgeError { .. } => (true, false),
@@ -9262,11 +9549,12 @@ fn request_archcar_ensure(
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     workspace: String,
     thread_id: Option<i64>,
+    harness: &'static HarnessDescriptor,
 ) -> bool {
     let token = if let Some(thread_id) = thread_id {
-        bridge.ensure_thread_session(workspace.clone(), thread_id, SessionKind::Codex)
+        bridge.ensure_thread_session(workspace.clone(), thread_id, harness.kind)
     } else {
-        bridge.ensure_default_session(workspace.clone(), SessionKind::Codex)
+        bridge.ensure_default_session(workspace.clone(), harness.kind)
     };
     if let Some(token) = token {
         inflight_actions.borrow_mut().insert(
@@ -9274,12 +9562,40 @@ fn request_archcar_ensure(
             PendingArchcarAction::EnsureWorkspace {
                 workspace,
                 thread_id,
+                kind: harness.kind,
             },
         );
         true
     } else {
         false
     }
+}
+
+fn request_archcar_ensure_for_kind(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    workspace: String,
+    thread_id: Option<i64>,
+    kind: SessionKind,
+) -> bool {
+    let Some(harness) = managed_harness_for_kind(kind) else {
+        return false;
+    };
+    request_archcar_ensure(
+        bridge,
+        inflight_actions,
+        workspace,
+        thread_id,
+        harness.descriptor(),
+    )
+}
+
+fn request_archcar_spawn_session(
+    bridge: &AsyncArchcarBridge,
+    workspace: String,
+    kind: SessionKind,
+) -> Option<u64> {
+    bridge.spawn_session(workspace, kind)
 }
 
 fn has_pending_archcar_ensure_for_thread(
@@ -9400,6 +9716,31 @@ mod tests {
     use archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    fn provider_interaction_fixture(kind: ProviderInteractionKind) -> ProviderInteractionRecord {
+        ProviderInteractionRecord {
+            id: "interaction-1".to_owned(),
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id: 42,
+            session_id: 7,
+            native_session_id: Some("claude-session-1".to_owned()),
+            native_id: "toolu-1".to_owned(),
+            kind,
+            title: "Need input".to_owned(),
+            detail: "Pick a scope".to_owned(),
+            choices: vec!["yes".to_owned(), "no".to_owned()],
+            native_request: serde_json::json!({"tool": "AskUserQuestion"}),
+            request_fingerprint: "fingerprint".to_owned(),
+            status: archductor_core::provider_interactions::ProviderInteractionStatus::Pending,
+            resolution: None,
+            native_response: None,
+            error: None,
+            created_at: "1".to_owned(),
+            resolved_at: None,
+            consumed_at: None,
+        }
+    }
 
     fn session_record(
         id: i64,
@@ -9875,9 +10216,35 @@ fix it
         assert!(!controls.contains(&"continue".to_owned()));
         assert!(!controls.contains(&"retry".to_owned()));
         assert!(!controls.contains(&"restart".to_owned()));
-        assert!(!controls.contains(&"goal".to_owned()));
+        assert!(controls.contains(&"goal".to_owned()));
         assert!(!controls.contains(&"attach".to_owned()));
         assert!(!visible_live_controls_for_provider("claude").contains(&"interrupt".to_owned()));
+    }
+
+    #[test]
+    fn claude_live_controls_come_from_managed_harness_descriptor() {
+        let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+        let controls = visible_live_controls_for_harness(claude.descriptor());
+
+        assert!(controls.contains(&"model".to_owned()));
+        assert!(controls.contains(&"thinking".to_owned()));
+        assert!(!controls.contains(&"goal".to_owned()));
+        assert!(!controls.contains(&"interrupt".to_owned()));
+    }
+
+    #[test]
+    fn harness_capabilities_gate_goal_control_by_descriptor_support() {
+        let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+        let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+        let codex_controls = visible_live_controls_for_harness(codex.descriptor());
+        let claude_controls = visible_live_controls_for_harness(claude.descriptor());
+
+        for control in ["provider", "model", "thinking"] {
+            assert!(codex_controls.contains(&control.to_owned()));
+            assert!(claude_controls.contains(&control.to_owned()));
+        }
+        assert!(codex_controls.contains(&"goal".to_owned()));
+        assert!(!claude_controls.contains(&"goal".to_owned()));
     }
 
     #[test]
@@ -9977,7 +10344,15 @@ fix it
                 true,
                 SessionKind::Claude,
             ),
-            ComposerAction::Queue
+            ComposerAction::Send
+        );
+    }
+
+    #[test]
+    fn composer_send_button_uses_immediate_submit_intent() {
+        assert_eq!(
+            composer_send_button_submit_intent(),
+            ComposerSubmitIntent::Immediate
         );
     }
 
@@ -10072,6 +10447,7 @@ fix it
             " first ".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
         queue_archcar_input(
             &pending,
@@ -10079,6 +10455,7 @@ fix it
             "second".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
 
         assert_eq!(queued_chat_inputs_count(&pending, 7), 2);
@@ -10095,20 +10472,95 @@ fix it
         let records = vec![
             process_record_with_thread(11, ProcessStatus::Running, Some(7), "codex"),
             process_record_with_thread(12, ProcessStatus::Running, Some(8), "codex"),
+            process_record_with_thread(13, ProcessStatus::Running, Some(9), "claude"),
         ];
-        let ready_cache = RefCell::new(HashMap::from([(11, true), (12, false)]));
+        let ready_cache = RefCell::new(HashMap::from([(11, true), (12, false), (13, true)]));
+        let codex = archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Codex)
+            .unwrap();
+        let claude =
+            archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Claude)
+                .unwrap();
 
         assert_eq!(
-            ready_queued_session_for_thread(&records, 7, &ready_cache),
+            ready_queued_session_for_thread(&records, 7, codex.descriptor(), &ready_cache),
             Some(11)
         );
         assert_eq!(
-            ready_queued_session_for_thread(&records, 8, &ready_cache),
+            ready_queued_session_for_thread(&records, 8, codex.descriptor(), &ready_cache),
             None
         );
         assert_eq!(
-            ready_queued_session_for_thread(&records, 9, &ready_cache),
+            ready_queued_session_for_thread(&records, 9, claude.descriptor(), &ready_cache),
+            Some(13)
+        );
+        assert_eq!(
+            ready_queued_session_for_thread(&records, 10, claude.descriptor(), &ready_cache),
             None
+        );
+    }
+
+    #[test]
+    fn claude_first_send_uses_managed_thread_ensure_request() {
+        assert_eq!(
+            request_kind_for_first_send(SessionKind::Claude, "berlin", 42),
+            Some(AsyncArchcarRequestKind::EnsureChatThreadSession {
+                workspace: "berlin".to_owned(),
+                thread_id: 42,
+                kind: SessionKind::Claude,
+            })
+        );
+    }
+
+    fn request_kind_for_first_send(
+        kind: SessionKind,
+        workspace: &str,
+        thread_id: i64,
+    ) -> Option<AsyncArchcarRequestKind> {
+        let harness = managed_harness_for_kind(kind)?;
+        Some(AsyncArchcarRequestKind::EnsureChatThreadSession {
+            workspace: workspace.to_owned(),
+            thread_id,
+            kind: harness.descriptor().kind,
+        })
+    }
+
+    #[test]
+    fn claude_first_send_source_uses_managed_registry_not_spawn_fallback() {
+        let source = include_str!("session_surface.rs");
+        let send_body = source
+            .split("let send_text_with_delivery = Rc::new(")
+            .nth(1)
+            .and_then(|tail| tail.split("let send_immediate_input").next())
+            .expect("send_text_with_delivery body should be present");
+
+        assert!(
+            send_body.contains("managed_harness_for_kind(selected_kind)"),
+            "first send should discover managed providers from the registry"
+        );
+        assert!(
+            !send_body.contains("spawn_session(workspace_for_send.clone(), selected_kind)"),
+            "first send must not use the generic Claude workspace-spawn fallback"
+        );
+    }
+
+    #[test]
+    fn immediate_send_uses_shared_turn_preparation_path() {
+        let source = include_str!("session_surface.rs");
+        let immediate_body = source
+            .split("let send_immediate_input: Rc<dyn Fn(String, bool) -> bool> = Rc::new({")
+            .nth(1)
+            .and_then(|tail| tail.split("*send_immediate_after_ready_queue").next())
+            .expect("send_immediate_input body should be present");
+
+        assert!(
+            immediate_body.contains(
+                "send_text_with_delivery(command, staged_review, ArchcarInputDelivery::Immediate)"
+            ),
+            "immediate send should reuse normal turn preparation and vary only delivery"
+        );
+        assert!(
+            !immediate_body.contains("queue_archcar_user_send("),
+            "immediate send must not bypass checkpoint/control/model-context preparation"
         );
     }
 
@@ -10121,6 +10573,7 @@ fix it
             "first follow-up".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
 
         let items = queued_composer_overlay_items_for_thread(&pending, Some(7), SessionKind::Codex);
@@ -10135,7 +10588,7 @@ fix it
 
         let claude_items =
             queued_composer_overlay_items_for_thread(&pending, Some(7), SessionKind::Claude);
-        assert!(!claude_items[0]
+        assert!(claude_items[0]
             .actions
             .contains(&QueuedComposerAction::SendImmediately));
     }
@@ -10858,7 +11311,14 @@ fix it
     fn queue_archcar_input_ignores_blank_messages() {
         let pending = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
 
-        queue_archcar_input(&pending, 5, "   ".to_owned(), None, ArchcarInputKind::User);
+        queue_archcar_input(
+            &pending,
+            5,
+            "   ".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
 
         assert!(pending.borrow().is_empty());
     }
@@ -10877,6 +11337,7 @@ fix it
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Auto,
                 checkpoint_id: None,
+                session_kind: SessionKind::Codex,
             },
         )]));
         queue_archcar_input(
@@ -10885,6 +11346,7 @@ fix it
             "queued while busy".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
         queue_archcar_input(
             &starting_queue,
@@ -10892,6 +11354,7 @@ fix it
             "[metadata]\nqueued while starting".to_owned(),
             Some("queued while starting".to_owned()),
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
 
         let pending =
@@ -10918,6 +11381,7 @@ fix it
             "already persisted".to_owned(),
             None,
             ArchcarInputKind::User,
+            SessionKind::Codex,
         );
         let persisted = vec![chat_message_record(
             1,
@@ -10949,6 +11413,7 @@ fix it
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Immediate,
                 checkpoint_id: None,
+                session_kind: SessionKind::Codex,
             },
         )]));
         let immediate = pending_immediate_user_input_texts_for_thread(7, &inflight, &[]);
@@ -10975,7 +11440,10 @@ fix it
             "user_send",
         )];
         assert!(pending_immediate_user_input_texts_for_thread(7, &inflight, &persisted).is_empty());
-        assert!(inflight.borrow().is_empty());
+        assert!(
+            inflight.borrow().contains_key(&12),
+            "render projection must not remove inflight actions; lifecycle responses own cleanup"
+        );
     }
 
     #[test]
@@ -11078,6 +11546,7 @@ fix it
             "  review this diff  ".to_owned(),
             None,
             ArchcarInputKind::ReviewPrompt,
+            SessionKind::Codex,
         );
 
         let queued = pending.borrow();
@@ -11124,6 +11593,7 @@ fix it
                 PendingArchcarAction::EnsureWorkspace {
                     workspace: "berlin".to_owned(),
                     thread_id: Some(7),
+                    kind: SessionKind::Codex,
                 },
             ),
             (
@@ -11131,6 +11601,7 @@ fix it
                 PendingArchcarAction::EnsureWorkspace {
                     workspace: "berlin".to_owned(),
                     thread_id: None,
+                    kind: SessionKind::Codex,
                 },
             ),
         ]));
@@ -11937,6 +12408,65 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             timeline[3],
             ChatTimelineItem::ProviderProjection(_)
         ));
+    }
+
+    #[test]
+    fn chat_render_anchors_unsequenced_user_messages_before_provider_generation() {
+        let messages = vec![ChatMessageRecord {
+            id: 30,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "new user message".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_items = vec![
+            ProviderProjectionItem {
+                id: "codex:thread-7:input-1".to_owned(),
+                sequence: 1,
+                category: ProviderProjectionCategory::UserMessage,
+                render_class: ProjectionRenderClass::UserChat,
+                title: "User".to_owned(),
+                body: "new user message".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+            ProviderProjectionItem {
+                id: "codex:thread-7:assistant-1".to_owned(),
+                sequence: 2,
+                category: ProviderProjectionCategory::AssistantMessage,
+                render_class: ProjectionRenderClass::AssistantChat,
+                title: "Assistant".to_owned(),
+                body: "working on it".to_owned(),
+                status: ProviderProjectionStatus::Complete,
+                stream_state: ProviderProjectionStreamState::Complete,
+                parent_id: None,
+                nested_thread_id: None,
+                raw_payload: None,
+                inspectable: false,
+            },
+        ];
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            provider_items,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(
+            timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+        assert_eq!(timeline.len(), 2);
     }
 
     #[test]
@@ -13013,7 +13543,7 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(
             state,
             CodexStartupState::Loading {
-                message: "Starting Codex...".to_owned(),
+                message: "Starting agent...".to_owned(),
             }
         );
     }
@@ -13092,6 +13622,7 @@ Schema confirms the app moved CRM around businesses.";
                 input: "run tests".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
             }],
         )]));
         let working_threads = RefCell::new(HashMap::new());
@@ -13159,7 +13690,7 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(
             startup_states.get(&11),
             Some(&CodexStartupState::Loading {
-                message: "Starting Codex...".to_owned(),
+                message: "Starting agent...".to_owned(),
             })
         );
     }
@@ -13181,6 +13712,7 @@ Schema confirms the app moved CRM around businesses.";
                     status: "running".to_owned(),
                     runtime_state: AgentSessionState::WaitingForInput,
                     ready: true,
+                    capabilities: None,
                 }),
             }));
         let started_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
@@ -13208,9 +13740,58 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
+    fn provider_interaction_presentation_maps_kind_actions() {
+        let permission = interaction_presentation(&provider_interaction_fixture(
+            ProviderInteractionKind::Permission,
+        ));
+        assert_eq!(permission.kind, InteractionUiKind::Permission);
+        assert_eq!(permission.actions, ["Allow", "Deny", "Always allow"]);
+        assert_eq!(permission.provider_label, "Claude Code");
+
+        let question = interaction_presentation(&provider_interaction_fixture(
+            ProviderInteractionKind::UserQuestion,
+        ));
+        assert_eq!(question.kind, InteractionUiKind::Question);
+
+        let plan = interaction_presentation(&provider_interaction_fixture(
+            ProviderInteractionKind::PlanApproval,
+        ));
+        assert_eq!(plan.actions, ["Approve plan", "Keep planning"]);
+    }
+
+    #[test]
+    fn provider_interaction_question_answers_require_all_questions() {
+        let questions = vec!["scope".to_owned(), "risk".to_owned()];
+        let mut answers = HashMap::new();
+        answers.insert("scope".to_owned(), "yes".to_owned());
+        assert!(!question_answers_complete(&questions, &answers));
+
+        answers.insert("risk".to_owned(), "low".to_owned());
+        assert!(question_answers_complete(&questions, &answers));
+    }
+
+    #[test]
+    fn provider_interaction_events_refresh_thread_only() {
+        let interaction = provider_interaction_fixture(ProviderInteractionKind::Permission);
+        let requested_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+            ArchcarEvent::ProviderInteractionRequested {
+                interaction: interaction.clone(),
+            },
+        ));
+        let resolved_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+            ArchcarEvent::ProviderInteractionResolved { interaction },
+        ));
+
+        assert_eq!(requested_scope, (true, false));
+        assert_eq!(resolved_scope, (true, false));
+    }
+
+    #[test]
     fn chat_send_paths_do_not_refresh_outer_workspace_chrome() {
         let source = include_str!("session_surface.rs");
-        let send_start = source.find("let send_text = Rc::new").unwrap();
+        let send_start = source
+            .find("let send_text_with_delivery = Rc::new")
+            .unwrap();
         let send_end = source[send_start..]
             .find("*send_text_after_ready_queue")
             .map(|offset| send_start + offset)

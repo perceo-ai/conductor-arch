@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
 };
@@ -7,6 +8,8 @@ use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, Ar
 use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use archductor_core::paths::AppPaths;
+use archductor_core::provider_adapters::claude_hooks::handle_claude_hook_json;
+use archductor_core::provider_interactions::ProviderInteractionRecord;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::settings::{
     app_shared_settings_to_toml, save_app_shared_settings_from_toml,
@@ -182,6 +185,10 @@ enum ArchcarCommand {
     Messages {
         thread_id: i64,
     },
+    Interactions {
+        #[command(subcommand)]
+        command: ArchcarInteractionsCommand,
+    },
     Send {
         session_id: i64,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
@@ -190,7 +197,7 @@ enum ArchcarCommand {
         visible_input: Option<String>,
         #[arg(
             long,
-            help = "Deliver now: steer an active Codex turn or start a new turn"
+            help = "Deliver now: steer an active agent turn or start a new turn"
         )]
         immediate: bool,
         input: Vec<String>,
@@ -199,6 +206,17 @@ enum ArchcarCommand {
         session_id: i64,
         model: String,
     },
+    Effort {
+        session_id: i64,
+        level: String,
+    },
+    PermissionMode {
+        session_id: i64,
+        mode: String,
+    },
+    Interrupt {
+        session_id: i64,
+    },
     Resize {
         session_id: i64,
         rows: u16,
@@ -206,6 +224,36 @@ enum ArchcarCommand {
     },
     Kill {
         session_id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ArchcarInteractionsCommand {
+    List {
+        #[arg(long)]
+        thread_id: Option<i64>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        detail: bool,
+    },
+    Show {
+        interaction_id: String,
+    },
+    Allow {
+        interaction_id: String,
+        #[arg(long)]
+        always: bool,
+    },
+    Deny {
+        interaction_id: String,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Answer {
+        interaction_id: String,
+        #[arg(long)]
+        answers_json: String,
     },
 }
 
@@ -434,7 +482,7 @@ enum SessionCommand {
         timeout_ms: u64,
         #[arg(
             long,
-            help = "Deliver now: steer an active Codex turn or start a new turn"
+            help = "Deliver now: steer an active agent turn or start a new turn"
         )]
         immediate: bool,
         message: Vec<String>,
@@ -532,6 +580,9 @@ enum CliArchcarInputKind {
 }
 
 fn main() -> Result<()> {
+    if handle_archcar_claude_hook()? {
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--archcar-serve") {
         let paths = AppPaths::from_env();
         reconcile_managed_sessions_on_startup(&paths)?;
@@ -636,6 +687,66 @@ fn main() -> Result<()> {
                         response => print_archcar_response(response),
                     }
                 }
+                ArchcarCommand::Interactions { command } => match command {
+                    ArchcarInteractionsCommand::List {
+                        thread_id,
+                        all,
+                        detail,
+                    } => match client.send(ArchcarRequest::ListProviderInteractions {
+                        thread_id,
+                        pending_only: !all,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        ArchcarResponse::ProviderInteractions { interactions } => {
+                            print!("{}", render_provider_interactions(&interactions, detail));
+                        }
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarInteractionsCommand::Show { interaction_id } => {
+                        match client
+                            .send(ArchcarRequest::GetProviderInteraction { interaction_id })?
+                        {
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            ArchcarResponse::ProviderInteraction { interaction } => {
+                                print!("{}", render_provider_interaction_detail(&interaction));
+                            }
+                            response => print_archcar_response(response),
+                        }
+                    }
+                    ArchcarInteractionsCommand::Allow {
+                        interaction_id,
+                        always,
+                    } => match client.send(ArchcarRequest::ResolveProviderInteraction {
+                        interaction_id,
+                        resolution: archcar_allow_resolution(always)?,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarInteractionsCommand::Deny {
+                        interaction_id,
+                        message,
+                    } => match client.send(ArchcarRequest::ResolveProviderInteraction {
+                        interaction_id,
+                        resolution: ProviderInteractionResolution::Deny { reason: message },
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarInteractionsCommand::Answer {
+                        interaction_id,
+                        answers_json,
+                    } => {
+                        let answers = parse_answers_json(&answers_json)?;
+                        match client.send(ArchcarRequest::ResolveProviderInteraction {
+                            interaction_id,
+                            resolution: ProviderInteractionResolution::Answer { answers },
+                        })? {
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            response => print_archcar_response(response),
+                        }
+                    }
+                },
                 ArchcarCommand::Send {
                     session_id,
                     kind,
@@ -656,6 +767,29 @@ fn main() -> Result<()> {
                         session_id,
                         model: Some(model),
                     })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::Effort { session_id, level } => {
+                    match client.send(ArchcarRequest::SetSessionEffort {
+                        session_id,
+                        effort: Some(level),
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::PermissionMode { session_id, mode } => {
+                    match client
+                        .send(ArchcarRequest::SetSessionPermissionMode { session_id, mode })?
+                    {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::Interrupt { session_id } => {
+                    match client.send(ArchcarRequest::InterruptTurn { session_id })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
                     }
@@ -1440,6 +1574,25 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn handle_archcar_claude_hook() -> Result<bool> {
+    let args = std::env::args().collect::<Vec<_>>();
+    let Some(index) = args.iter().position(|arg| arg == "--archcar-claude-hook") else {
+        return Ok(false);
+    };
+    let thread_id = args
+        .get(index + 1)
+        .context("--archcar-claude-hook requires a thread id")?
+        .parse::<i64>()
+        .context("parse Claude hook thread id")?;
+    let mut stdin = String::new();
+    io::stdin()
+        .read_to_string(&mut stdin)
+        .context("read Claude hook stdin")?;
+    let output = handle_claude_hook_json(thread_id, &stdin);
+    println!("{output}");
+    Ok(true)
+}
+
 fn refresh_all_repository_prompt_snapshots(paths: &AppPaths) -> Result<usize> {
     let repositories = RepositoryStore::open(&paths.database_path)?.list()?;
     let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
@@ -1471,6 +1624,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             status,
             runtime_state,
             ready,
+            capabilities,
         } => {
             println!(
                 "session {} status={} state={} ready={}",
@@ -1479,15 +1633,133 @@ fn print_archcar_response(response: ArchcarResponse) {
                 runtime_state.as_str(),
                 ready
             );
+            if let Some(capabilities) = capabilities {
+                println!(
+                    "capabilities contract={} required={} optional={} observed_native={}",
+                    capabilities.contract_version,
+                    capabilities.required.len(),
+                    capabilities.optional.len(),
+                    capabilities.observed_native.len()
+                );
+            }
         }
         ArchcarResponse::SessionScreen { screen, .. } => print!("{screen}"),
         ArchcarResponse::SessionMessages { messages, .. } => {
             print!("{}", render_archcar_protocol_messages(&messages));
         }
+        ArchcarResponse::ProviderInteraction { interaction } => {
+            print!("{}", render_provider_interactions(&[interaction], false));
+        }
+        ArchcarResponse::ProviderInteractions { interactions } => {
+            print!("{}", render_provider_interactions(&interactions, false));
+        }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
     }
+}
+
+fn render_provider_interactions(
+    interactions: &[ProviderInteractionRecord],
+    detail: bool,
+) -> String {
+    let mut output = String::new();
+    if interactions.is_empty() {
+        output.push_str("provider interactions 0\n");
+        return output;
+    }
+    for interaction in interactions {
+        output.push_str(&render_provider_interaction_line(interaction));
+        output.push('\n');
+        if detail {
+            output.push_str(&render_provider_interaction_detail(interaction));
+        }
+    }
+    output
+}
+
+fn render_provider_interaction_line(interaction: &ProviderInteractionRecord) -> String {
+    let summary = interaction_summary(interaction);
+    format!(
+        "{} provider={} kind={} status={} thread={} {}",
+        interaction.id,
+        interaction.provider_key,
+        provider_interaction_kind_label(interaction),
+        provider_interaction_status_label(interaction),
+        interaction.thread_id,
+        summary
+    )
+}
+
+fn render_provider_interaction_detail(interaction: &ProviderInteractionRecord) -> String {
+    format!(
+        "{}\nrequest={}\n",
+        render_provider_interaction_line(interaction),
+        serde_json::to_string_pretty(&interaction.native_request)
+            .unwrap_or_else(|_| "{}".to_owned())
+    )
+}
+
+fn interaction_summary(interaction: &ProviderInteractionRecord) -> String {
+    let title = interaction.title.trim();
+    let detail = interaction.detail.trim();
+    match (title.is_empty(), detail.is_empty()) {
+        (true, true) => interaction.native_id.clone(),
+        (false, true) => title.to_owned(),
+        (true, false) => detail.to_owned(),
+        (false, false) => format!("{title}: {detail}"),
+    }
+}
+
+fn provider_interaction_kind_label(interaction: &ProviderInteractionRecord) -> &'static str {
+    match interaction.kind {
+        archductor_core::archcar::harness_contract::ProviderInteractionKind::Permission => {
+            "permission"
+        }
+        archductor_core::archcar::harness_contract::ProviderInteractionKind::UserQuestion => {
+            "question"
+        }
+        archductor_core::archcar::harness_contract::ProviderInteractionKind::PlanApproval => "plan",
+    }
+}
+
+fn provider_interaction_status_label(interaction: &ProviderInteractionRecord) -> &'static str {
+    match interaction.status {
+        archductor_core::provider_interactions::ProviderInteractionStatus::Pending => "pending",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Allowed => "allowed",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Denied => "denied",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Answered => "answered",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Expired => "expired",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Failed => "failed",
+    }
+}
+
+fn parse_answers_json(value: &str) -> Result<Vec<(String, String)>> {
+    let json = serde_json::from_str::<serde_json::Value>(value).context("parse --answers-json")?;
+    let object = json
+        .as_object()
+        .context("--answers-json must be a JSON object")?;
+    Ok(object
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            )
+        })
+        .collect())
+}
+
+fn archcar_allow_resolution(always: bool) -> Result<ProviderInteractionResolution> {
+    if always {
+        anyhow::bail!(
+            "--always is not supported yet; run allow without --always for a one-time approval"
+        );
+    }
+    Ok(ProviderInteractionResolution::Approve)
 }
 
 fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
@@ -2154,8 +2426,15 @@ fn ensure_session_send_target(
         ArchcarResponse::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected archcar response: {:?}", other),
     };
-    wait_for_archcar_session_ready(client, target.0, deadline)?;
+    let thread_has_visible_history = !store.list_chat_messages(target.1)?.is_empty();
+    if session_send_waits_for_ready(kind, thread_has_visible_history) {
+        wait_for_archcar_session_ready(client, target.0, deadline)?;
+    }
     Ok(target)
+}
+
+fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
+    !matches!(kind, SessionKind::Claude) || thread_has_visible_history
 }
 
 fn wait_for_archcar_session_ready(
@@ -2683,6 +2962,45 @@ mod tests {
     }
 
     #[test]
+    fn cli_archcar_control_parses_effort_and_permission_mode() {
+        let effort = Cli::try_parse_from(["archductor", "archcar", "effort", "7", "high"]).unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::Effort { session_id, level },
+        } = effort.command
+        else {
+            panic!("expected archcar effort");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(level, "high");
+
+        let permission =
+            Cli::try_parse_from(["archductor", "archcar", "permission-mode", "7", "default"])
+                .unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::PermissionMode { session_id, mode },
+        } = permission.command
+        else {
+            panic!("expected archcar permission-mode");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(mode, "default");
+    }
+
+    #[test]
+    fn cli_archcar_interrupt_parses_session_id() {
+        let cli = Cli::try_parse_from(["archductor", "archcar", "interrupt", "7"]).unwrap();
+
+        let Command::Archcar {
+            command: ArchcarCommand::Interrupt { session_id },
+        } = cli.command
+        else {
+            panic!("expected archcar interrupt");
+        };
+
+        assert_eq!(session_id, 7);
+    }
+
+    #[test]
     fn cli_archcar_messages_reads_thread_messages() {
         let cli = Cli::try_parse_from(["archductor", "archcar", "messages", "42"]).unwrap();
 
@@ -2694,6 +3012,99 @@ mod tests {
         };
 
         assert_eq!(thread_id, 42);
+    }
+
+    #[test]
+    fn cli_archcar_provider_interactions_parse_commands() {
+        let list = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "interactions",
+            "list",
+            "--thread-id",
+            "42",
+            "--all",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Interactions {
+                    command: ArchcarInteractionsCommand::List { thread_id, all, .. },
+                },
+        } = list.command
+        else {
+            panic!("expected archcar interactions list");
+        };
+        assert_eq!(thread_id, Some(42));
+        assert!(all);
+
+        let answer = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "interactions",
+            "answer",
+            "interaction-1",
+            "--answers-json",
+            r#"{"scope":"yes"}"#,
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Interactions {
+                    command:
+                        ArchcarInteractionsCommand::Answer {
+                            interaction_id,
+                            answers_json,
+                        },
+                },
+        } = answer.command
+        else {
+            panic!("expected archcar interactions answer");
+        };
+        assert_eq!(interaction_id, "interaction-1");
+        assert_eq!(
+            parse_answers_json(&answers_json).unwrap(),
+            vec![("scope".to_owned(), "yes".to_owned())]
+        );
+
+        let always = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "interactions",
+            "allow",
+            "interaction-1",
+            "--always",
+        ])
+        .unwrap();
+        assert!(matches!(
+            always.command,
+            Command::Archcar {
+                command: ArchcarCommand::Interactions {
+                    command: ArchcarInteractionsCommand::Allow { always: true, .. }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn archcar_interactions_allow_always_is_rejected_until_persistence_exists() {
+        assert_eq!(
+            archcar_allow_resolution(true).unwrap_err().to_string(),
+            "--always is not supported yet; run allow without --always for a one-time approval"
+        );
+    }
+
+    #[test]
+    fn provider_interactions_render_concise_lines_without_raw_payload() {
+        let interaction = provider_interaction_fixture();
+        let concise = render_provider_interactions(std::slice::from_ref(&interaction), false);
+        let detail = render_provider_interactions(&[interaction], true);
+
+        assert!(concise.contains("interaction-1 provider=claude kind=question status=pending"));
+        assert!(concise.contains("Need input: Pick a scope"));
+        assert!(!concise.contains("\"secret\""));
+        assert!(detail.contains("request="));
+        assert!(detail.contains("\"secret\""));
     }
 
     #[test]
@@ -2748,6 +3159,70 @@ mod tests {
             message,
             vec!["fix".to_owned(), "the".to_owned(), "bug".to_owned()]
         );
+    }
+
+    #[test]
+    fn cli_session_send_keeps_distinct_claude_thread_targets() {
+        let first = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--thread-id",
+            "101",
+            "first",
+        ])
+        .unwrap();
+        let second = Cli::try_parse_from([
+            "archductor",
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--thread-id",
+            "202",
+            "second",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            session_send_thread_target(first),
+            Some((101, "first".to_owned()))
+        );
+        assert_eq!(
+            session_send_thread_target(second),
+            Some((202, "second".to_owned()))
+        );
+    }
+
+    #[test]
+    fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
+        assert!(!session_send_waits_for_ready(SessionKind::Claude, false));
+        assert!(session_send_waits_for_ready(SessionKind::Claude, true));
+        assert!(session_send_waits_for_ready(SessionKind::Codex, false));
+    }
+
+    fn session_send_thread_target(cli: Cli) -> Option<(i64, String)> {
+        let Command::Session {
+            command:
+                SessionCommand::Send {
+                    kind,
+                    thread_id,
+                    message,
+                    ..
+                },
+        } = cli.command
+        else {
+            return None;
+        };
+        if kind == CliSessionKind::Claude {
+            thread_id.map(|thread_id| (thread_id, message.join(" ")))
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -2996,5 +3471,30 @@ mod tests {
             text,
             "#7\t2026-07-09T12:00:00Z\tbranch.renamed\tRenamed branch lc/a to lc/b\n"
         );
+    }
+
+    fn provider_interaction_fixture() -> ProviderInteractionRecord {
+        ProviderInteractionRecord {
+            id: "interaction-1".to_owned(),
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id: 42,
+            session_id: 7,
+            native_session_id: Some("claude-session-1".to_owned()),
+            native_id: "toolu-1".to_owned(),
+            kind: archductor_core::archcar::harness_contract::ProviderInteractionKind::UserQuestion,
+            title: "Need input".to_owned(),
+            detail: "Pick a scope".to_owned(),
+            choices: vec!["yes".to_owned(), "no".to_owned()],
+            native_request: serde_json::json!({"secret": "raw"}),
+            request_fingerprint: "fingerprint".to_owned(),
+            status: archductor_core::provider_interactions::ProviderInteractionStatus::Pending,
+            resolution: None,
+            native_response: None,
+            error: None,
+            created_at: "1".to_owned(),
+            resolved_at: None,
+            consumed_at: None,
+        }
     }
 }

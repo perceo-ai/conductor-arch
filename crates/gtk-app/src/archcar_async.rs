@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarRequest, ArchcarResponse,
 };
@@ -45,6 +46,14 @@ pub enum AsyncArchcarRequestKind {
         session_id: i64,
         model: Option<String>,
     },
+    SetSessionEffort {
+        session_id: i64,
+        effort: Option<String>,
+    },
+    SetSessionPermissionMode {
+        session_id: i64,
+        mode: String,
+    },
     ResizeSession {
         session_id: i64,
         rows: u16,
@@ -55,6 +64,24 @@ pub enum AsyncArchcarRequestKind {
     },
     KillSession {
         session_id: i64,
+    },
+    RegisterProviderInteraction {
+        session_id: i64,
+        thread_id: i64,
+        native_id: String,
+    },
+    GetProviderInteraction {
+        interaction_id: String,
+    },
+    ListProviderInteractions {
+        thread_id: Option<i64>,
+        pending_only: bool,
+    },
+    ResolveProviderInteraction {
+        interaction_id: String,
+    },
+    ConsumeProviderInteraction {
+        interaction_id: String,
     },
 }
 
@@ -228,6 +255,14 @@ impl AsyncArchcarBridge {
         self.submit(ArchcarRequest::SetSessionModel { session_id, model })
     }
 
+    pub fn set_session_effort(&self, session_id: i64, effort: Option<String>) -> Option<u64> {
+        self.submit(ArchcarRequest::SetSessionEffort { session_id, effort })
+    }
+
+    pub fn set_session_permission_mode(&self, session_id: i64, mode: String) -> Option<u64> {
+        self.submit(ArchcarRequest::SetSessionPermissionMode { session_id, mode })
+    }
+
     pub fn interrupt_turn(&self, session_id: i64) -> Option<u64> {
         self.submit(ArchcarRequest::InterruptTurn { session_id })
     }
@@ -241,6 +276,32 @@ impl AsyncArchcarBridge {
             session_id,
             rows,
             cols,
+        })
+    }
+
+    pub fn list_provider_interactions(
+        &self,
+        thread_id: Option<i64>,
+        pending_only: bool,
+    ) -> Option<u64> {
+        self.submit(ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        })
+    }
+
+    pub fn get_provider_interaction(&self, interaction_id: String) -> Option<u64> {
+        self.submit(ArchcarRequest::GetProviderInteraction { interaction_id })
+    }
+
+    pub fn resolve_provider_interaction(
+        &self,
+        interaction_id: String,
+        resolution: ProviderInteractionResolution,
+    ) -> Option<u64> {
+        self.submit(ArchcarRequest::ResolveProviderInteraction {
+            interaction_id,
+            resolution,
         })
     }
 
@@ -518,6 +579,18 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
                 model: model.clone(),
             }
         }
+        ArchcarRequest::SetSessionEffort { session_id, effort } => {
+            AsyncArchcarRequestKind::SetSessionEffort {
+                session_id: *session_id,
+                effort: effort.clone(),
+            }
+        }
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => {
+            AsyncArchcarRequestKind::SetSessionPermissionMode {
+                session_id: *session_id,
+                mode: mode.clone(),
+            }
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -543,6 +616,35 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         ArchcarRequest::GetSessionMessages { thread_id } => {
             AsyncArchcarRequestKind::GetSessionStatus {
                 session_id: *thread_id,
+            }
+        }
+        ArchcarRequest::RegisterProviderInteraction { interaction } => {
+            AsyncArchcarRequestKind::RegisterProviderInteraction {
+                session_id: interaction.session_id,
+                thread_id: interaction.thread_id,
+                native_id: interaction.native_id.clone(),
+            }
+        }
+        ArchcarRequest::GetProviderInteraction { interaction_id } => {
+            AsyncArchcarRequestKind::GetProviderInteraction {
+                interaction_id: interaction_id.clone(),
+            }
+        }
+        ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        } => AsyncArchcarRequestKind::ListProviderInteractions {
+            thread_id: *thread_id,
+            pending_only: *pending_only,
+        },
+        ArchcarRequest::ResolveProviderInteraction { interaction_id, .. } => {
+            AsyncArchcarRequestKind::ResolveProviderInteraction {
+                interaction_id: interaction_id.clone(),
+            }
+        }
+        ArchcarRequest::ConsumeProviderInteraction { interaction_id, .. } => {
+            AsyncArchcarRequestKind::ConsumeProviderInteraction {
+                interaction_id: interaction_id.clone(),
             }
         }
         ArchcarRequest::Subscribe => AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 },
@@ -645,6 +747,59 @@ mod tests {
             AsyncArchcarRequestKind::SetSessionModel {
                 session_id: 9,
                 model: Some("gpt-5.6-terra".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_live_control_metadata() {
+        let effort = ArchcarRequest::SetSessionEffort {
+            session_id: 9,
+            effort: Some("high".to_owned()),
+        };
+        assert_eq!(
+            request_kind(&effort),
+            AsyncArchcarRequestKind::SetSessionEffort {
+                session_id: 9,
+                effort: Some("high".to_owned()),
+            }
+        );
+
+        let permission = ArchcarRequest::SetSessionPermissionMode {
+            session_id: 9,
+            mode: "default".to_owned(),
+        };
+        assert_eq!(
+            request_kind(&permission),
+            AsyncArchcarRequestKind::SetSessionPermissionMode {
+                session_id: 9,
+                mode: "default".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_provider_interaction_metadata() {
+        let list = ArchcarRequest::ListProviderInteractions {
+            thread_id: Some(42),
+            pending_only: true,
+        };
+        assert_eq!(
+            request_kind(&list),
+            AsyncArchcarRequestKind::ListProviderInteractions {
+                thread_id: Some(42),
+                pending_only: true,
+            }
+        );
+
+        let resolve = ArchcarRequest::ResolveProviderInteraction {
+            interaction_id: "interaction-1".to_owned(),
+            resolution: ProviderInteractionResolution::Approve,
+        };
+        assert_eq!(
+            request_kind(&resolve),
+            AsyncArchcarRequestKind::ResolveProviderInteraction {
+                interaction_id: "interaction-1".to_owned(),
             }
         );
     }

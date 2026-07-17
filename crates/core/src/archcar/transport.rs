@@ -18,7 +18,20 @@ pub type LocalStream = std::os::unix::net::UnixStream;
 #[cfg(unix)]
 pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     if endpoint.exists() {
-        let _ = std::fs::remove_file(endpoint);
+        match LocalStream::connect(endpoint) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "archcar endpoint already has a live listener",
+                ));
+            }
+            Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {
+                std::fs::remove_file(endpoint)?;
+            }
+            Err(_) => {
+                std::fs::remove_file(endpoint)?;
+            }
+        }
     }
     LocalListener::bind(endpoint)
 }
@@ -123,5 +136,17 @@ mod tests {
         client.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"pong");
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_refuses_live_unix_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-live.endpoint");
+        let _listener = bind(&endpoint).unwrap();
+
+        let err = bind(&endpoint).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 }

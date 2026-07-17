@@ -47,12 +47,9 @@ pub fn workspace_mcp_status_with_settings(
         .and_then(|settings| settings.providers.claude_code_executable_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or("claude");
-    let codex_authenticated = home
-        .as_ref()
-        .is_some_and(|_| is_codex_auth_present(codex_provider.as_deref()));
-    let claude_authenticated = home
-        .as_ref()
-        .is_some_and(|_| is_claude_auth_present(claude_provider.as_deref()));
+    let codex_authenticated = is_codex_auth_present(codex_provider.as_deref());
+    let claude_authenticated =
+        is_claude_auth_present(claude_provider.as_deref(), claude_executable);
     let cursor_authenticated = home
         .as_ref()
         .is_some_and(|home| is_file_non_empty(home.join(".cursor/mcp.json").as_path()));
@@ -114,7 +111,7 @@ fn is_codex_auth_present(provider: Option<&str>) -> bool {
     }
 }
 
-fn is_claude_auth_present(provider: Option<&str>) -> bool {
+fn is_claude_auth_present(provider: Option<&str>, executable: &str) -> bool {
     let configured_anthropic = provider
         .map(|value| {
             value.to_ascii_lowercase().contains("anthropic")
@@ -123,6 +120,7 @@ fn is_claude_auth_present(provider: Option<&str>) -> bool {
         .unwrap_or(true);
     if configured_anthropic {
         std::env::var_os("ANTHROPIC_API_KEY").is_some()
+            || crate::doctor::claude_cli_status_for_command(executable).authenticated
     } else {
         false
     }
@@ -261,6 +259,12 @@ fn parse_toml_mcp_keys(toml: &str, source: &str) -> Vec<McpServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parse_claude_json_extracts_server_names() {
@@ -279,5 +283,38 @@ mod tests {
         let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"filesystem"));
         assert!(names.contains(&"github"));
+    }
+
+    #[test]
+    fn auth_detection_uses_api_keys_without_home_directory() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_openai = std::env::var_os("OPENAI_API_KEY");
+        let previous_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
+
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        std::env::set_var("OPENAI_API_KEY", "test-openai");
+        std::env::set_var("ANTHROPIC_API_KEY", "test-anthropic");
+
+        let status = workspace_mcp_status_with_settings(temp.path(), None);
+
+        restore_env("HOME", previous_home);
+        restore_env("USERPROFILE", previous_userprofile);
+        restore_env("OPENAI_API_KEY", previous_openai);
+        restore_env("ANTHROPIC_API_KEY", previous_anthropic);
+
+        assert!(status.codex_authenticated);
+        assert!(status.claude_authenticated);
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
     }
 }

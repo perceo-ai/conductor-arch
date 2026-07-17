@@ -909,10 +909,14 @@ pub struct TurnFileChangeSummary {
     pub files: Vec<DiffFileSummary>,
 }
 
+/// File-change summary for one Git commit in a workspace branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitFileChangeSummary {
+    /// Full commit SHA.
     pub commit: String,
+    /// Commit subject line.
     pub subject: String,
+    /// Files changed by the commit with numstat counts when available.
     pub files: Vec<DiffFileSummary>,
 }
 
@@ -3091,71 +3095,21 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let unstaged = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
         let staged = git_output(&workspace.path, ["diff", "--cached", "--numstat", "--"])?;
-        let mut summaries = merge_diff_summaries(
+        file_change_summaries_from_numstat(
+            &workspace.path,
             parse_diff_numstat(&staged)
                 .into_iter()
                 .chain(parse_diff_numstat(&unstaged))
                 .collect(),
-        );
-        let mut known_paths = summaries
-            .iter()
-            .map(|summary| summary.path.clone())
-            .collect::<BTreeSet<_>>();
-        let status = git_output(
-            &workspace.path,
-            ["status", "--porcelain", "--untracked-files=all"],
-        )?;
-        apply_diff_file_status(&mut summaries, &status);
-        for path in parse_untracked_status_paths(&status) {
-            if known_paths.contains(&path) || is_conductor_context_path(&path) {
-                continue;
-            }
-            let counts = untracked_file_counts(&workspace.path.join(&path))?;
-            known_paths.insert(path.clone());
-            summaries.push(DiffFileSummary {
-                path,
-                additions: Some(counts.0),
-                deletions: Some(0),
-                staged: false,
-                unstaged: false,
-                untracked: true,
-            });
-        }
-        summaries.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(summaries)
+        )
     }
 
+    /// Summarizes all current branch, staged, unstaged, and untracked file changes.
     pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
         let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
-        let mut summaries = merge_diff_summaries(parse_diff_numstat(&diff));
-        let mut known_paths = summaries
-            .iter()
-            .map(|summary| summary.path.clone())
-            .collect::<BTreeSet<_>>();
-        let status = git_output(
-            &workspace.path,
-            ["status", "--porcelain", "--untracked-files=all"],
-        )?;
-        apply_diff_file_status(&mut summaries, &status);
-        for path in parse_untracked_status_paths(&status) {
-            if known_paths.contains(&path) || is_conductor_context_path(&path) {
-                continue;
-            }
-            let counts = untracked_file_counts(&workspace.path.join(&path))?;
-            known_paths.insert(path.clone());
-            summaries.push(DiffFileSummary {
-                path,
-                additions: Some(counts.0),
-                deletions: Some(0),
-                staged: false,
-                unstaged: false,
-                untracked: true,
-            });
-        }
-        summaries.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(summaries)
+        file_change_summaries_from_numstat(&workspace.path, parse_diff_numstat(&diff))
     }
 
     pub fn turn_file_change_summaries(
@@ -3167,6 +3121,7 @@ impl WorkspaceStore {
         self.turn_file_change_summaries_for_workspace(workspace.id, None, None, limit)
     }
 
+    /// Returns file changes associated with the latest user turn in one chat thread.
     pub fn last_turn_file_change_summary(
         &self,
         name: &str,
@@ -3331,6 +3286,7 @@ impl WorkspaceStore {
         Ok(turns)
     }
 
+    /// Returns newest workspace commits with per-file change counts.
     pub fn commit_file_change_summaries(
         &self,
         name: &str,
@@ -3341,7 +3297,7 @@ impl WorkspaceStore {
             return Ok(Vec::new());
         }
         let max_count = format!("--max-count={limit}");
-        let range = format!("{}..HEAD", workspace.base_ref);
+        let range = format!("{}..HEAD", workspace_base_ref(&workspace));
         let output = git_output_dynamic(
             &workspace.path,
             &[
@@ -4855,13 +4811,14 @@ mutation($threadId: ID!) {{
         let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
         let todos = self.list_todos(name)?;
         let open_todos = todos.iter().filter(|todo| todo.status == "open").count();
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
         let branch_push_state = if path_exists {
             self.branch_push_state(name).ok()
         } else {
             None
         };
         let source_branch_ahead = if path_exists {
-            workspace_source_branch_ahead(&workspace)
+            workspace_source_branch_ahead(&workspace, &repository.default_branch)
         } else {
             0
         };
@@ -5683,6 +5640,7 @@ mutation($threadId: ID!) {{
         self.repository_settings(&repository.root_path)
     }
 
+    /// Resolves one effective prompt for a workspace after all settings layers merge.
     pub fn resolved_prompt(&self, workspace: &str, kind: PromptKind) -> Result<Option<String>> {
         Ok(self
             .workspace_repo_settings(workspace)?
@@ -5694,6 +5652,7 @@ mutation($threadId: ID!) {{
             .map(ToOwned::to_owned))
     }
 
+    /// Rewrites managed prompt snapshots for live workspaces in a repository.
     pub fn refresh_repository_prompt_snapshots(&self, repository_id: i64) -> Result<usize> {
         let repository = self.load_repository_by_id(repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
@@ -5877,6 +5836,31 @@ mutation($threadId: ID!) {{
         )?;
         self.touch_chat_thread(thread_id, &now)?;
         self.get_chat_message(self.conn.last_insert_rowid())
+    }
+
+    pub fn append_chat_message_once_for_source(
+        &self,
+        thread_id: i64,
+        role: &str,
+        content: &str,
+        source: &str,
+    ) -> Result<ChatMessageRecord> {
+        if let Some(existing) = self
+            .conn
+            .query_row(
+                "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
+                 FROM chat_messages
+                 WHERE thread_id = ?1 AND source = ?2
+                 ORDER BY id ASC
+                 LIMIT 1",
+                params![thread_id, source],
+                row_to_chat_message,
+            )
+            .optional()?
+        {
+            return Ok(existing);
+        }
+        self.append_chat_message(thread_id, role, content, source)
     }
 
     pub fn apply_agent_chat_metadata_directive(
@@ -8233,14 +8217,19 @@ fn workspace_diff_stats_against_head(workspace: &Workspace) -> Result<(usize, us
     Ok((additions, deletions))
 }
 
-fn workspace_source_branch_ahead(workspace: &Workspace) -> usize {
+fn workspace_source_branch_ahead(workspace: &Workspace, default_branch: &str) -> usize {
     let base_ref = workspace_base_ref(workspace);
     if git_ref_exists(&workspace.path, base_ref) {
         let range = format!("HEAD..{base_ref}");
         return count_git_rev_list(&workspace.path, &range);
     }
-    if base_ref != "main" && git_ref_exists(&workspace.path, "main") {
-        return count_git_rev_list(&workspace.path, "HEAD..main");
+    let default_branch = default_branch.trim();
+    if !default_branch.is_empty()
+        && base_ref != default_branch
+        && git_ref_exists(&workspace.path, default_branch)
+    {
+        let range = format!("HEAD..{default_branch}");
+        return count_git_rev_list(&workspace.path, &range);
     }
     0
 }
@@ -8290,6 +8279,39 @@ fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary>
         entry.untracked |= summary.untracked;
     }
     merged.into_values().collect()
+}
+
+fn file_change_summaries_from_numstat(
+    workspace_path: &Path,
+    summaries: Vec<DiffFileSummary>,
+) -> Result<Vec<DiffFileSummary>> {
+    let mut summaries = merge_diff_summaries(summaries);
+    let mut known_paths = summaries
+        .iter()
+        .map(|summary| summary.path.clone())
+        .collect::<BTreeSet<_>>();
+    let status = git_output(
+        workspace_path,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    apply_diff_file_status(&mut summaries, &status);
+    for path in parse_untracked_status_paths(&status) {
+        if known_paths.contains(&path) || is_conductor_context_path(&path) {
+            continue;
+        }
+        let counts = untracked_file_counts(&workspace_path.join(&path))?;
+        known_paths.insert(path.clone());
+        summaries.push(DiffFileSummary {
+            path,
+            additions: Some(counts.0),
+            deletions: Some(0),
+            staged: false,
+            unstaged: false,
+            untracked: true,
+        });
+    }
+    summaries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(summaries)
 }
 
 fn apply_diff_file_status(summaries: &mut [DiffFileSummary], output: &str) {
@@ -9711,7 +9733,26 @@ fn quote_windows_cmd_word(value: &str) -> String {
     {
         return value.to_owned();
     }
-    format!("\"{}\"", value.replace('"', r#"\""#))
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 fn first_pull_request_url_from_json(output: &str) -> Option<String> {
@@ -10395,6 +10436,14 @@ mod tests {
             r#""C:\Program Files\Archductor\agent.exe" --profile "Codex Fast" "C:\Users\Ada\project workspace""#
         );
         assert!(!command.contains('\''));
+    }
+
+    #[test]
+    fn windows_cmd_word_doubles_trailing_backslashes_when_quoted() {
+        assert_eq!(
+            quote_windows_cmd_word(r"C:\Program Files\"),
+            r#""C:\Program Files\\""#,
+        );
     }
 
     #[test]
@@ -16720,6 +16769,80 @@ general = "Keep changes focused."
     }
 
     #[test]
+    fn checks_summary_source_ahead_falls_back_to_repository_default_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "-b", "develop"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("README.md"), "develop\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "develop moved",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("develop".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET base_ref = 'missing-base' WHERE id = ?1",
+                params![workspace.id],
+            )
+            .unwrap();
+
+        let summary = store.checks_summary("berlin").unwrap();
+
+        assert_eq!(summary.source_branch_ahead, 1);
+    }
+
+    #[test]
     fn force_push_branch_with_lease_updates_remote_branch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -21209,6 +21332,40 @@ spotlight_testing = true
         assert_eq!(commits[0].files[0].path, "src.rs");
         assert_eq!(commits[1].subject, "first workspace commit");
         assert_eq!(commits[1].files[0].path, "README.md");
+    }
+
+    #[test]
+    fn commit_file_change_summaries_use_default_base_for_legacy_empty_base_ref() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET base_ref = '' WHERE id = ?1",
+                params![workspace.id],
+            )
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nlegacy\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "legacy base commit",
+            ],
+        );
+
+        let commits = store.commit_file_change_summaries("berlin", 10).unwrap();
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "legacy base commit");
     }
 
     #[test]

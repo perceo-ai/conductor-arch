@@ -393,10 +393,11 @@ call Anthropic and does not read credentials.
 
 ### Permission Requests
 
-A `PermissionRequest` hook fires only when Claude would show a permission
-dialog. The bridge creates a persisted provider interaction, emits an Archcar
-interaction event, and waits for a UI or CLI decision within the configured
-hook timeout.
+Headless `claude -p` permission handling uses `PreToolUse` hooks unless the
+launch architecture is explicitly changed to PTY/TUI delivery. The hook receives
+the native tool name and input before execution, creates a persisted provider
+interaction, emits an Archcar interaction event, and waits for a UI or CLI
+decision within the configured hook timeout.
 
 The response supports:
 
@@ -406,8 +407,10 @@ The response supports:
 - interrupt after denial when explicitly selected.
 
 Persisted permission changes are applied only when the user selects an explicit
-"always" choice. Archductor does not silently write `.claude/settings.json` or
-user settings.
+"always" choice. That choice is represented in the Archcar resolution as an
+allow decision plus the selected native permission suggestion from the
+`PreToolUse` payload, then applied by the hook response path. Archductor does
+not silently write `.claude/settings.json` or user settings.
 
 ### AskUserQuestion And ExitPlanMode
 

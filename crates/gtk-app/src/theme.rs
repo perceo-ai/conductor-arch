@@ -1816,6 +1816,63 @@ button.ws-tab-shell {
     background-color: #242424;
     color: #e4e4e4;
 }
+.ws-changes-popover {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+popover.ws-changes-popover contents {
+    background-color: #1b1b1b;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.3);
+    padding: 0;
+}
+popover.ws-changes-popover arrow {
+    background-color: #1b1b1b;
+    border: none;
+}
+.ws-changes-menu-list {
+    min-width: 260px;
+    padding: 2px;
+}
+.ws-changes-menu-row {
+    min-height: 34px;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    box-shadow: none;
+    background: transparent;
+}
+.ws-changes-menu-row:hover {
+    background-color: #262626;
+}
+.ws-changes-menu-title {
+    color: #e2e2e2;
+    font-size: 13px;
+    font-weight: 600;
+}
+.ws-changes-menu-subtitle {
+    color: #8f8f8f;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 11px;
+}
+.ws-changes-menu-counts {
+    color: #bfc7d5;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 12px;
+    font-weight: 700;
+}
+.ws-changes-menu-separator {
+    margin: 2px 4px;
+    min-height: 1px;
+    background-color: #303030;
+}
+.ws-changes-menu-info {
+    color: #b7b7b7;
+    font-size: 12px;
+    padding: 6px 8px;
+}
 .ws-file-summary-panel {
     padding: 10px 12px 14px;
     background-color: #151515;
@@ -2339,6 +2396,10 @@ button.chat-inline-event-chip:checked {
     color: #a7a7a7;
     border: none;
     box-shadow: none;
+}
+.chat-queued-action-btn:focus-visible {
+    outline: 2px solid #8ab4f8;
+    outline-offset: 2px;
 }
 .chat-queued-action-btn:hover {
     background-color: #2a2a2a;
@@ -3077,6 +3138,9 @@ mod tests {
         let actions = selector_block(css, ".chat-queued-actions");
         assert!(actions.contains("opacity: 0;"));
         assert!(css.contains(".chat-queued-composer-row:hover .chat-queued-actions"));
+        assert!(css.contains(".chat-queued-composer-row:focus-within .chat-queued-actions"));
+        let action_focus = selector_block(css, ".chat-queued-action-btn:focus-visible");
+        assert!(action_focus.contains("outline: 2px solid"));
 
         let user_bubble = selector_block(css, ".chat-user-bubble");
         assert!(user_bubble.contains("background-color: #2e2e2e;"));

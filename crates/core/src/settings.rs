@@ -59,26 +59,46 @@ pub struct PromptSettings {
     pub run_script: Option<String>,
 }
 
+/// Identifies one of the managed prompt slots in repository settings.
+///
+/// Prompt kinds are used when resolving the effective prompt from built-in,
+/// app-shared, repository, and local project layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
+    /// Prompt used when creating a workspace from free-form instructions.
     NewWorkspace,
+    /// General instructions prepended to the first managed chat turn.
     General,
+    /// Prompt used to continue existing workspace work.
     ContinueWork,
+    /// Prompt used to summarize a saved session.
     SummarizeSession,
+    /// Prompt used to hand work off between agents or sessions.
     Handoff,
+    /// Prompt used for code review staging.
     CodeReview,
+    /// Prompt used when asking an agent to create a pull request.
     CreatePr,
+    /// Prompt used when asking an agent to fix failing checks.
     FixErrors,
+    /// Prompt used when asking an agent to resolve merge conflicts.
     ResolveMergeConflicts,
+    /// Prompt used when asking an agent to rename a branch.
     RenameBranch,
+    /// Prompt used when asking an agent to produce a commit.
     CommitGeneration,
+    /// Prompt used when asking an agent to repair tests.
     TestFixing,
+    /// Prompt used when asking an agent to perform style refactors.
     RefactorStyle,
+    /// Prompt used for setup-script assistant context.
     SetupScript,
+    /// Prompt used for run-script assistant context.
     RunScript,
 }
 
 impl PromptKind {
+    /// Returns the stable TOML field name for this prompt kind.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NewWorkspace => "new_workspace",
@@ -101,6 +121,7 @@ impl PromptKind {
 }
 
 impl PromptSettings {
+    /// Returns the configured text for a prompt kind, if that slot is set.
     pub fn get(&self, kind: PromptKind) -> Option<&str> {
         match kind {
             PromptKind::NewWorkspace => self.new_workspace.as_deref(),
@@ -272,6 +293,7 @@ pub fn save_app_shared_settings(path: &Path, settings: &RepositorySettings) -> R
     save_app_shared_settings_with_collection_intent(path, settings, &[], &[])
 }
 
+/// Saves app-shared settings while preserving selected empty collections as explicit overrides.
 pub fn save_app_shared_settings_with_explicit_empty_collections(
     path: &Path,
     settings: &RepositorySettings,
@@ -280,6 +302,11 @@ pub fn save_app_shared_settings_with_explicit_empty_collections(
     save_app_shared_settings_with_collection_intent(path, settings, explicit_empty_collections, &[])
 }
 
+/// Saves app-shared settings with explicit collection clear and unset intent.
+///
+/// `explicit_empty_collections` writes empty arrays or tables so inherited
+/// defaults are cleared. `unset_collections` removes prior collection overrides
+/// so lower-priority defaults can flow through again.
 pub fn save_app_shared_settings_with_collection_intent(
     path: &Path,
     settings: &RepositorySettings,
@@ -303,6 +330,7 @@ pub fn save_app_shared_settings_with_collection_intent(
     atomic_write_no_symlink(path, contents.as_bytes())
 }
 
+/// Imports app-shared settings TOML and preserves collection presence semantics.
 pub fn save_app_shared_settings_from_toml(path: &Path, contents: &str) -> Result<()> {
     let raw = validated_raw_repository_settings_from_toml(contents)?;
     let settings = raw.clone().into_settings();
@@ -316,6 +344,7 @@ pub fn save_app_shared_settings_from_toml(path: &Path, contents: &str) -> Result
     atomic_write_no_symlink(path, contents.as_bytes())
 }
 
+/// Exports app-shared settings TOML without dropping explicit empty collections.
 pub fn app_shared_settings_to_toml(path: &Path) -> Result<String> {
     let raw = load_optional_settings(path)?;
     let settings = raw.clone().into_settings();
@@ -509,18 +538,33 @@ pub enum SettingsLayer {
     LocalOverride,
 }
 
+/// Collection-valued settings whose presence matters during layered merges.
+///
+/// Empty collections are meaningful: an explicit empty value clears inherited
+/// defaults, while an absent value inherits from lower-priority settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsCollectionField {
+    /// Workspace file-copy include globs.
     FileIncludeGlobs,
+    /// Environment file references copied into workspaces.
     EnvFileRefs,
+    /// Environment variables configured in settings.
     EnvironmentVariables,
+    /// Named agent profile map.
     AgentProfiles,
+    /// Pull-request body section list.
     PrBodySections,
+    /// Required local file list.
     RequiredLocalFiles,
+    /// MCP server list for one named agent profile.
     AgentProfileMcpServers(String),
+    /// Theme color override map.
     ViewColors,
+    /// Dashboard column list.
     DashboardColumns,
+    /// Notification rule list.
     NotificationRules,
+    /// Command palette preset list.
     CommandPalettePresets,
 }
 
@@ -587,6 +631,7 @@ pub fn save_repository_settings(
     save_repository_settings_with_collection_intent(repo_path, layer, settings, &[], &[])
 }
 
+/// Saves repository or local settings while preserving selected empty collections.
 pub fn save_repository_settings_with_explicit_empty_collections(
     repo_path: &Path,
     layer: SettingsLayer,
@@ -602,6 +647,10 @@ pub fn save_repository_settings_with_explicit_empty_collections(
     )
 }
 
+/// Saves repository or local settings with explicit collection clear and unset intent.
+///
+/// This is the main writer used by settings UI autosave paths because it can
+/// distinguish "the user cleared this list" from "this list was not edited".
 pub fn save_repository_settings_with_collection_intent(
     repo_path: &Path,
     layer: SettingsLayer,
@@ -627,6 +676,10 @@ pub fn save_repository_settings_with_collection_intent(
     atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
+/// Replaces a settings layer with a normalized TOML file.
+///
+/// Unlike the autosave path, this intentionally drops prior collection presence
+/// markers and writes only the values represented by `settings`.
 pub fn save_repository_settings_replacing(
     repo_path: &Path,
     layer: SettingsLayer,
@@ -644,6 +697,7 @@ pub fn save_repository_settings_replacing(
     atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
+/// Imports repository or local settings TOML and preserves collection presence semantics.
 pub fn save_repository_settings_from_toml(
     repo_path: &Path,
     layer: SettingsLayer,
@@ -687,10 +741,12 @@ pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Resul
     toml::to_string_pretty(&raw).context("serialize customization settings")
 }
 
+/// Exports only the app-shared customization section as TOML.
 pub fn app_shared_customization_settings_toml(path: &Path) -> Result<String> {
     raw_customization_settings_to_toml(load_optional_settings(path)?)
 }
 
+/// Exports only the repository or local customization section as TOML.
 pub fn repository_customization_settings_toml(
     repo_path: &Path,
     layer: SettingsLayer,
@@ -865,6 +921,7 @@ pub fn repository_settings_from_toml(contents: &str) -> Result<RepositorySetting
     Ok(settings)
 }
 
+/// Returns collection fields that are explicitly present and empty in TOML.
 pub fn explicit_empty_collection_fields_from_toml(
     contents: &str,
 ) -> Result<Vec<SettingsCollectionField>> {
@@ -872,6 +929,7 @@ pub fn explicit_empty_collection_fields_from_toml(
     Ok(raw.explicit_empty_collection_fields())
 }
 
+/// Returns collection fields that are present in TOML, whether empty or populated.
 pub fn present_collection_fields_from_toml(contents: &str) -> Result<Vec<SettingsCollectionField>> {
     let raw = validated_raw_repository_settings_from_toml(contents)?;
     Ok(raw.present_collection_fields())
