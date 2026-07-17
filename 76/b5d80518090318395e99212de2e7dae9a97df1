@@ -1,0 +1,34 @@
+docs/superpowers/specs/2026-07-15-claude-code-parity-design.md
+  s_56bdc97402fc93::t_2a40c87484f3c5 491-506
+crates/gtk-app/src/session_surface.rs
+  s_56bdc97402fc93::t_19d602efbc2cf6 10144-10164
+  s_56bdc97402fc93::t_e5d1e9b932715f 2895-2900,2902-2907,2909-2914,2920-2924
+  s_56bdc97402fc93::t_95ed3016f7f497 2925-2926
+  s_56bdc97402fc93::t_698f9957de1fde 10143
+crates/core/src/workspace.rs
+  s_56bdc97402fc93::t_19d602efbc2cf6 10093-10097,10102-10106
+  s_56bdc97402fc93::t_b2b72cfbae8885 10098-10101
+  s_56bdc97402fc93::t_e5d1e9b932715f 8556-8558
+  s_56bdc97402fc93::t_15edaae9e7eb64 10091-10092
+crates/core/src/archcar/server.rs
+  s_56bdc97402fc93::t_19d602efbc2cf6 1740-1757,1761-1762
+  s_56bdc97402fc93::t_e5d1e9b932715f 129,466-469
+  s_56bdc97402fc93::t_b2b72cfbae8885 1758-1760
+  s_56bdc97402fc93::t_84947466eabbc3 470-471,1739
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "76b5d80518090318395e99212de2e7dae9a97df1",
+  "prompts": {},
+  "sessions": {
+    "s_56bdc97402fc93": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e0b-5c96-7390-bc14-93461dfeaf6f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
