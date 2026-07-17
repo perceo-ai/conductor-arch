@@ -1,0 +1,20 @@
+crates/cli/tests/cli_sessions.rs
+  s_10d3951069b861::t_d5928c2faa955a 456-457,985-1004
+  s_10d3951069b861::t_1b49a6a353bbaf 1005-1006
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6c401b941e796b13b8dffd227dd6602fb97a1012",
+  "prompts": {},
+  "sessions": {
+    "s_10d3951069b861": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e4a-4f70-7892-ba27-dbb1b2ae9957",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
