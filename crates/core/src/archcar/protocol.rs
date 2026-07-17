@@ -322,8 +322,8 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             interaction_id,
             resolution,
         } => format!(
-            "resolve_provider_interaction id={interaction_id} resolution={:?}",
-            resolution
+            "resolve_provider_interaction id={interaction_id} {}",
+            provider_interaction_resolution_summary(resolution)
         ),
         ArchcarRequest::ConsumeProviderInteraction {
             interaction_id,
@@ -333,6 +333,25 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             native_response.to_string().len()
         ),
         ArchcarRequest::Subscribe => "subscribe".to_owned(),
+    }
+}
+
+fn provider_interaction_resolution_summary(resolution: &ProviderInteractionResolution) -> String {
+    match resolution {
+        ProviderInteractionResolution::Approve => "resolution=approve".to_owned(),
+        ProviderInteractionResolution::Deny { reason } => format!(
+            "resolution=deny denial_reason_chars={}",
+            reason.as_deref().unwrap_or_default().chars().count()
+        ),
+        ProviderInteractionResolution::Answer { answers } => format!(
+            "resolution=answer answer_count={} answer_chars={}",
+            answers.len(),
+            answers
+                .iter()
+                .map(|(_, answer)| answer.chars().count())
+                .sum::<usize>()
+        ),
+        ProviderInteractionResolution::Defer => "resolution=defer".to_owned(),
     }
 }
 
@@ -694,9 +713,15 @@ mod tests {
 
         let resolve = ArchcarRequest::ResolveProviderInteraction {
             interaction_id: "interaction-1".to_owned(),
-            resolution: ProviderInteractionResolution::Approve,
+            resolution: ProviderInteractionResolution::Deny {
+                reason: Some("contains secret token".to_owned()),
+            },
         };
-        assert!(archcar_request_summary(&resolve).contains("interaction-1"));
+        let resolve_summary = archcar_request_summary(&resolve);
+        assert!(resolve_summary.contains("interaction-1"));
+        assert!(resolve_summary.contains("resolution=deny"));
+        assert!(resolve_summary.contains("denial_reason_chars="));
+        assert!(!resolve_summary.contains("secret"));
     }
 
     #[test]

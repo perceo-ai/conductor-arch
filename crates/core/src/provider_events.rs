@@ -461,94 +461,8 @@ impl ProviderEventStore {
     pub fn upsert_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
         let mut conn = self.open()?;
         let identity_key = draft.identity_key();
-        let raw_json = serde_json::to_string(&draft.raw_json)?;
-        let now = timestamp();
         let tx = conn.transaction()?;
-        let received_sequence = next_received_sequence(&tx)?;
-        let raw_sequence = next_raw_sequence(&tx)?;
-        let timeline_seq = existing_timeline_sequence(&tx, &identity_key)?
-            .map(Ok)
-            .unwrap_or_else(|| next_timeline_sequence(&tx))?;
-        let normalized_payload = merge_existing_streaming_payload(&tx, &identity_key, draft)?;
-        let normalized_payload_json = serde_json::to_string(&normalized_payload)?;
-        tx.execute(
-            "INSERT INTO provider_events (
-                identity_key, provider, provider_event_id, provider_item_id,
-                provider_thread_id, provider_turn_id, parent_provider_item_id,
-                parent_provider_thread_id, workspace_id, chat_thread_id, process_id,
-                phase, kind, provider_subtype, provider_sequence, received_sequence,
-                timeline_seq, occurred_at_ms, normalized_payload_json, raw_json, schema_version,
-                adapter_version, created_at, updated_at
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23
-             )
-             ON CONFLICT(identity_key) DO UPDATE SET
-                provider_event_id = excluded.provider_event_id,
-                provider_item_id = excluded.provider_item_id,
-                provider_thread_id = excluded.provider_thread_id,
-                provider_turn_id = excluded.provider_turn_id,
-                parent_provider_item_id = excluded.parent_provider_item_id,
-                parent_provider_thread_id = excluded.parent_provider_thread_id,
-                workspace_id = excluded.workspace_id,
-                chat_thread_id = excluded.chat_thread_id,
-                process_id = excluded.process_id,
-                phase = excluded.phase,
-                kind = excluded.kind,
-                provider_subtype = excluded.provider_subtype,
-                provider_sequence = excluded.provider_sequence,
-                timeline_seq = COALESCE(provider_events.timeline_seq, excluded.timeline_seq),
-                occurred_at_ms = excluded.occurred_at_ms,
-                normalized_payload_json = excluded.normalized_payload_json,
-                raw_json = excluded.raw_json,
-                schema_version = excluded.schema_version,
-                adapter_version = excluded.adapter_version,
-                updated_at = excluded.updated_at",
-            params![
-                identity_key,
-                draft.provider,
-                draft.provider_event_id,
-                draft.provider_item_id,
-                draft.provider_thread_id,
-                draft.provider_turn_id,
-                draft.parent_provider_item_id,
-                draft.parent_provider_thread_id,
-                draft.workspace_id,
-                draft.chat_thread_id,
-                draft.process_id,
-                draft.phase.as_str(),
-                draft.kind.as_str(),
-                draft.provider_subtype,
-                draft.provider_sequence,
-                received_sequence,
-                timeline_seq,
-                draft.occurred_at_ms as i64,
-                normalized_payload_json,
-                raw_json,
-                draft.schema_version,
-                draft.adapter_version,
-                now
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO provider_event_raw_payloads (
-                identity_key, provider, chat_thread_id, process_id, phase, kind,
-                provider_sequence, raw_sequence, occurred_at_ms, raw_json, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                identity_key,
-                draft.provider,
-                draft.chat_thread_id,
-                draft.process_id,
-                draft.phase.as_str(),
-                draft.kind.as_str(),
-                draft.provider_sequence,
-                raw_sequence,
-                draft.occurred_at_ms as i64,
-                raw_json,
-                now
-            ],
-        )?;
+        upsert_event_in_tx(&tx, draft)?;
         tx.commit()?;
         self.get_by_identity_key(&identity_key)?
             .ok_or_else(|| anyhow!("provider event upsert did not return a row"))
@@ -598,7 +512,12 @@ impl ProviderEventStore {
         process_id: i64,
         reason: &str,
     ) -> Result<usize> {
-        let events = self.list_for_process(process_id)?;
+        let mut conn = self.open()?;
+        let tx = conn.transaction()?;
+        let events = tx
+            .prepare(provider_event_select_sql("WHERE process_id = ?1").as_str())?
+            .query_map([process_id], row_to_provider_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let terminal_turns = events
             .iter()
             .filter(|event| {
@@ -634,32 +553,36 @@ impl ProviderEventStore {
                 payload.insert("status".to_owned(), Value::String("interrupted".to_owned()));
                 payload.insert("body".to_owned(), Value::String(reason.to_owned()));
             }
-            self.upsert_event(&ProviderEventDraft {
-                provider: event.provider.clone(),
-                provider_event_id: event.provider_event_id.clone(),
-                provider_item_id: event.provider_item_id.clone(),
-                provider_thread_id: event.provider_thread_id.clone(),
-                provider_turn_id: event.provider_turn_id.clone(),
-                parent_provider_item_id: event.parent_provider_item_id.clone(),
-                parent_provider_thread_id: event.parent_provider_thread_id.clone(),
-                workspace_id: event.workspace_id,
-                chat_thread_id: event.chat_thread_id,
-                process_id: event.process_id,
-                phase: ProviderEventPhase::Interrupted,
-                kind: ProviderEventKind::Turn,
-                provider_subtype: Some("archcar/session-interrupted".to_owned()),
-                provider_sequence: event.provider_sequence,
-                occurred_at_ms: unix_millis(),
-                normalized_payload,
-                raw_json: serde_json::json!({
-                    "type": "archcar_session_interrupted",
-                    "reason": reason,
-                }),
-                schema_version: event.schema_version,
-                adapter_version: "archcar-recovery-v1".to_owned(),
-            })?;
+            upsert_event_in_tx(
+                &tx,
+                &ProviderEventDraft {
+                    provider: event.provider.clone(),
+                    provider_event_id: event.provider_event_id.clone(),
+                    provider_item_id: event.provider_item_id.clone(),
+                    provider_thread_id: event.provider_thread_id.clone(),
+                    provider_turn_id: event.provider_turn_id.clone(),
+                    parent_provider_item_id: event.parent_provider_item_id.clone(),
+                    parent_provider_thread_id: event.parent_provider_thread_id.clone(),
+                    workspace_id: event.workspace_id,
+                    chat_thread_id: event.chat_thread_id,
+                    process_id: event.process_id,
+                    phase: ProviderEventPhase::Interrupted,
+                    kind: ProviderEventKind::Turn,
+                    provider_subtype: Some("archcar/session-interrupted".to_owned()),
+                    provider_sequence: event.provider_sequence,
+                    occurred_at_ms: unix_millis(),
+                    normalized_payload,
+                    raw_json: serde_json::json!({
+                        "type": "archcar_session_interrupted",
+                        "reason": reason,
+                    }),
+                    schema_version: event.schema_version,
+                    adapter_version: "archcar-recovery-v1".to_owned(),
+                },
+            )?;
         }
 
+        tx.commit()?;
         Ok(active_turns.len())
     }
 
@@ -1030,6 +953,98 @@ fn stable_text_hash(value: &str) -> u64 {
     value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     })
+}
+
+fn upsert_event_in_tx(tx: &rusqlite::Transaction<'_>, draft: &ProviderEventDraft) -> Result<()> {
+    let identity_key = draft.identity_key();
+    let raw_json = serde_json::to_string(&draft.raw_json)?;
+    let now = timestamp();
+    let received_sequence = next_received_sequence(tx)?;
+    let raw_sequence = next_raw_sequence(tx)?;
+    let timeline_seq = existing_timeline_sequence(tx, &identity_key)?
+        .map(Ok)
+        .unwrap_or_else(|| next_timeline_sequence(tx))?;
+    let normalized_payload = merge_existing_streaming_payload(tx, &identity_key, draft)?;
+    let normalized_payload_json = serde_json::to_string(&normalized_payload)?;
+    tx.execute(
+        "INSERT INTO provider_events (
+            identity_key, provider, provider_event_id, provider_item_id,
+            provider_thread_id, provider_turn_id, parent_provider_item_id,
+            parent_provider_thread_id, workspace_id, chat_thread_id, process_id,
+            phase, kind, provider_subtype, provider_sequence, received_sequence,
+            timeline_seq, occurred_at_ms, normalized_payload_json, raw_json, schema_version,
+            adapter_version, created_at, updated_at
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23
+         )
+         ON CONFLICT(identity_key) DO UPDATE SET
+            provider_event_id = excluded.provider_event_id,
+            provider_item_id = excluded.provider_item_id,
+            provider_thread_id = excluded.provider_thread_id,
+            provider_turn_id = excluded.provider_turn_id,
+            parent_provider_item_id = excluded.parent_provider_item_id,
+            parent_provider_thread_id = excluded.parent_provider_thread_id,
+            workspace_id = excluded.workspace_id,
+            chat_thread_id = excluded.chat_thread_id,
+            process_id = excluded.process_id,
+            phase = excluded.phase,
+            kind = excluded.kind,
+            provider_subtype = excluded.provider_subtype,
+            provider_sequence = excluded.provider_sequence,
+            timeline_seq = COALESCE(provider_events.timeline_seq, excluded.timeline_seq),
+            occurred_at_ms = excluded.occurred_at_ms,
+            normalized_payload_json = excluded.normalized_payload_json,
+            raw_json = excluded.raw_json,
+            schema_version = excluded.schema_version,
+            adapter_version = excluded.adapter_version,
+            updated_at = excluded.updated_at",
+        params![
+            identity_key,
+            draft.provider,
+            draft.provider_event_id,
+            draft.provider_item_id,
+            draft.provider_thread_id,
+            draft.provider_turn_id,
+            draft.parent_provider_item_id,
+            draft.parent_provider_thread_id,
+            draft.workspace_id,
+            draft.chat_thread_id,
+            draft.process_id,
+            draft.phase.as_str(),
+            draft.kind.as_str(),
+            draft.provider_subtype,
+            draft.provider_sequence,
+            received_sequence,
+            timeline_seq,
+            draft.occurred_at_ms as i64,
+            normalized_payload_json,
+            raw_json,
+            draft.schema_version,
+            draft.adapter_version,
+            now
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO provider_event_raw_payloads (
+            identity_key, provider, chat_thread_id, process_id, phase, kind,
+            provider_sequence, raw_sequence, occurred_at_ms, raw_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            identity_key,
+            draft.provider,
+            draft.chat_thread_id,
+            draft.process_id,
+            draft.phase.as_str(),
+            draft.kind.as_str(),
+            draft.provider_sequence,
+            raw_sequence,
+            draft.occurred_at_ms as i64,
+            raw_json,
+            now
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

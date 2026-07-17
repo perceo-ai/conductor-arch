@@ -3,8 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use anyhow::{anyhow, bail, Result};
+use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -36,15 +36,16 @@ impl ProviderInteractionStatus {
         }
     }
 
-    fn from_str(value: &str) -> Self {
-        match value {
+    fn from_str(value: &str) -> Result<Self> {
+        Ok(match value {
+            "pending" => Self::Pending,
             "allowed" => Self::Allowed,
             "denied" => Self::Denied,
             "answered" => Self::Answered,
             "expired" => Self::Expired,
             "failed" => Self::Failed,
-            _ => Self::Pending,
-        }
+            other => bail!("unknown provider interaction status {other}"),
+        })
     }
 }
 
@@ -83,15 +84,16 @@ impl ProviderInteractionStore {
     }
 
     pub fn register(&self, draft: ProviderInteractionDraft) -> Result<ProviderInteractionRecord> {
-        let conn = self.open()?;
+        let mut conn = self.open()?;
+        let tx = conn.transaction()?;
         let fingerprint = request_fingerprint(&draft);
-        if let Some(existing) = self.find_pending_by_fingerprint(&fingerprint)? {
+        if let Some(existing) = find_pending_by_fingerprint(&tx, &fingerprint)? {
             return Ok(existing);
         }
         let now = timestamp();
         let id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO provider_interactions (
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO provider_interactions (
                 id, provider_key, workspace, thread_id, session_id, native_session_id, native_id,
                 kind, title, detail, choices_json, native_request_json, request_fingerprint,
                 status, resolution_json, native_response_json, error, created_at, resolved_at, consumed_at
@@ -114,7 +116,14 @@ impl ProviderInteractionStore {
                 now,
             ],
         )?;
-        Ok(self.get(&id)?.expect("provider interaction inserted"))
+        let record = if inserted == 1 {
+            tx.query_row(SELECT_RECORD_SQL, params![id], row_to_record)?
+        } else {
+            find_pending_by_fingerprint(&tx, &fingerprint)?
+                .ok_or_else(|| anyhow!("pending provider interaction conflict not found"))?
+        };
+        tx.commit()?;
+        Ok(record)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<ProviderInteractionRecord>> {
@@ -179,7 +188,7 @@ impl ProviderInteractionStore {
         }
         let status = status_for_resolution(&resolution);
         let now = timestamp();
-        self.open()?.execute(
+        let updated = self.open()?.execute(
             "UPDATE provider_interactions
              SET status = ?2, resolution_json = ?3, resolved_at = ?4
              WHERE id = ?1 AND status = 'pending'",
@@ -190,7 +199,11 @@ impl ProviderInteractionStore {
                 now
             ],
         )?;
-        Ok(self.get(id)?.expect("provider interaction resolved"))
+        if updated == 0 && self.get(id)?.is_none() {
+            bail!("provider interaction {id} not found");
+        }
+        self.get(id)?
+            .ok_or_else(|| anyhow!("provider interaction {id} not found"))
     }
 
     pub fn consume_resolution(
@@ -199,40 +212,43 @@ impl ProviderInteractionStore {
         native_response: Value,
     ) -> Result<ProviderInteractionRecord> {
         let now = timestamp();
-        self.open()?.execute(
+        let updated = self.open()?.execute(
             "UPDATE provider_interactions
              SET native_response_json = COALESCE(native_response_json, ?2),
                  consumed_at = COALESCE(consumed_at, ?3)
              WHERE id = ?1",
             params![id, serde_json::to_string(&native_response)?, now],
         )?;
-        Ok(self.get(id)?.expect("provider interaction consumed"))
-    }
-
-    fn find_pending_by_fingerprint(
-        &self,
-        fingerprint: &str,
-    ) -> Result<Option<ProviderInteractionRecord>> {
-        self.open()?
-            .query_row(
-                "SELECT id, provider_key, workspace, thread_id, session_id, native_session_id,
-                    native_id, kind, title, detail, choices_json, native_request_json,
-                    request_fingerprint, status, resolution_json, native_response_json, error,
-                    created_at, resolved_at, consumed_at
-                 FROM provider_interactions
-                 WHERE request_fingerprint = ?1 AND status = 'pending'
-                 ORDER BY created_at DESC
-                 LIMIT 1",
-                params![fingerprint],
-                row_to_record,
-            )
-            .optional()
-            .map_err(Into::into)
+        if updated != 1 {
+            bail!("provider interaction {id} not found");
+        }
+        self.get(id)?
+            .ok_or_else(|| anyhow!("provider interaction {id} not found"))
     }
 
     fn open(&self) -> Result<Connection> {
         Ok(Connection::open(&self.db_path)?)
     }
+}
+
+fn find_pending_by_fingerprint(
+    conn: &Connection,
+    fingerprint: &str,
+) -> Result<Option<ProviderInteractionRecord>> {
+    conn.query_row(
+        "SELECT id, provider_key, workspace, thread_id, session_id, native_session_id,
+            native_id, kind, title, detail, choices_json, native_request_json,
+            request_fingerprint, status, resolution_json, native_response_json, error,
+            created_at, resolved_at, consumed_at
+         FROM provider_interactions
+         WHERE request_fingerprint = ?1 AND status = 'pending'
+         ORDER BY created_at DESC
+         LIMIT 1",
+        params![fingerprint],
+        row_to_record,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 const SELECT_RECORD_SQL: &str =
@@ -262,20 +278,45 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderInteractio
         session_id: row.get(4)?,
         native_session_id: row.get(5)?,
         native_id: row.get(6)?,
-        kind: serde_json::from_str(&kind_json).unwrap_or(ProviderInteractionKind::Permission),
+        kind: decode_json_column(7, &kind_json)?,
         title: row.get(8)?,
         detail: row.get(9)?,
-        choices: serde_json::from_str(&choices_json).unwrap_or_default(),
-        native_request: serde_json::from_str(&native_request_json).unwrap_or(Value::Null),
+        choices: decode_json_column(10, &choices_json)?,
+        native_request: decode_json_column(11, &native_request_json)?,
         request_fingerprint: row.get(12)?,
-        status: ProviderInteractionStatus::from_str(&status),
-        resolution: resolution_json.and_then(|json| serde_json::from_str(&json).ok()),
-        native_response: native_response_json.and_then(|json| serde_json::from_str(&json).ok()),
+        status: decode_status_column(13, &status)?,
+        resolution: decode_optional_json_column(14, resolution_json)?,
+        native_response: decode_optional_json_column(15, native_response_json)?,
         error: row.get(16)?,
         created_at: row.get(17)?,
         resolved_at: row.get(18)?,
         consumed_at: row.get(19)?,
     })
+}
+
+fn decode_status_column(index: usize, value: &str) -> rusqlite::Result<ProviderInteractionStatus> {
+    ProviderInteractionStatus::from_str(value)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(index, Type::Text, err.into()))
+}
+
+fn decode_json_column<T>(index: usize, value: &str) -> rusqlite::Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_str(value)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(index, Type::Text, err.into()))
+}
+
+fn decode_optional_json_column<T>(
+    index: usize,
+    value: Option<String>,
+) -> rusqlite::Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    value
+        .map(|json| decode_json_column(index, &json))
+        .transpose()
 }
 
 fn status_for_resolution(resolution: &ProviderInteractionResolution) -> ProviderInteractionStatus {
@@ -355,6 +396,45 @@ mod tests {
 
         assert_eq!(repeated.status, ProviderInteractionStatus::Denied);
         assert_eq!(repeated.resolution, denied.resolution);
+    }
+
+    #[test]
+    fn provider_interactions_report_missing_records_without_panic() {
+        let (store, _temp) = seeded_store();
+
+        assert!(store
+            .resolve("missing", ProviderInteractionResolution::Approve)
+            .is_err());
+        assert!(store
+            .consume_resolution("missing", json!({"ok": true}))
+            .is_err());
+    }
+
+    #[test]
+    fn provider_interactions_reject_malformed_durable_rows() {
+        let (store, _temp) = seeded_store();
+        let pending = store.register(fixture_draft()).unwrap();
+        let conn = store.open().unwrap();
+        conn.execute(
+            "UPDATE provider_interactions SET status = 'bogus' WHERE id = ?1",
+            params![pending.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(store.get(&pending.id).is_err());
+        assert!(store.list(None, false).is_err());
+    }
+
+    #[test]
+    fn provider_interactions_dedupe_pending_fingerprints_atomically() {
+        let (store, _temp) = seeded_store();
+
+        let first = store.register(fixture_draft()).unwrap();
+        let second = store.register(fixture_draft()).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(store.list(None, true).unwrap().len(), 1);
     }
 
     fn seeded_store() -> (ProviderInteractionStore, tempfile::TempDir) {

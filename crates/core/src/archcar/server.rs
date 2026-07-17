@@ -11,7 +11,8 @@ use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::archcar::harness_contract::HarnessControl;
+use crate::archcar::harness::managed_harness_for_kind;
+use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
     ArchcarMessage, ArchcarRequest, ArchcarResponse, RpcEnvelope,
@@ -275,10 +276,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             match load_or_restore_session_handle(state, session_id) {
                 Ok(Some(handle)) => {
                     let kind = handle.snapshot.lock().ok().map(|snapshot| snapshot.kind);
-                    if kind != Some(crate::workspace::SessionKind::Codex) {
+                    let interrupt_supported =
+                        kind.and_then(managed_harness_for_kind)
+                            .is_some_and(|harness| {
+                                harness
+                                    .descriptor()
+                                    .required_features
+                                    .contains(&RequiredHarnessFeature::Interrupt)
+                            });
+                    if !interrupt_supported {
                         return ArchcarResponse::Error {
                             message: format!(
-                                "interrupt_turn is only supported for codex sessions; got {kind:?}"
+                                "interrupt_turn is not supported for session kind {kind:?}"
                             ),
                         };
                     }
@@ -1286,7 +1295,6 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
             guard.sessions.values().cloned().collect::<Vec<_>>(),
         )
     };
-    let store = WorkspaceStore::open_app(&db_path)?;
     let provider_events = ProviderEventStore::new(&db_path);
 
     for handle in handles {
@@ -1301,10 +1309,7 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
         let _ = handle
             .command_tx
             .send(crate::archcar::session::SessionCommand::Kill);
-        crate::archcar::session::terminate_process(snapshot.pid);
-        let _ = store.mark_session_process_stopped(snapshot.session_id, None)?;
         if let Ok(mut current) = handle.snapshot.lock() {
-            current.status = crate::workspace::ProcessStatus::Stopped;
             current.ready = false;
             current.runtime_state = crate::session_state::AgentSessionState::Interrupted;
         }
@@ -1868,7 +1873,7 @@ mod tests {
         ));
         assert_eq!(
             store.get_process_record(process.id).unwrap().status,
-            ProcessStatus::Stopped
+            ProcessStatus::Running
         );
         let events = ProviderEventStore::new(&db_path)
             .list_for_process(process.id)

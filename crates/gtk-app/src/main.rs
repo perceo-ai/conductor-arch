@@ -1520,7 +1520,28 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
         {
             return;
         }
-        eprintln!("Windows Terminal was not found. Run manually:\n  {cmd}");
+        if std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", "start", "cmd.exe", "/K", &full_cmd])
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+        if std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Start-Process powershell -ArgumentList '-NoProfile','-NoExit','-Command',{}",
+                    powershell_single_quote(&full_cmd)
+                ),
+            ])
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+        eprintln!("No Windows terminal launcher was found. Run manually:\n  {cmd}");
     }
 
     #[cfg(not(windows))]
@@ -1581,6 +1602,11 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
 
         eprintln!("No terminal emulator found. Run manually:\n  {cmd}");
     }
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 // ── STYLES ────────────────────────────────────────────────────────────────

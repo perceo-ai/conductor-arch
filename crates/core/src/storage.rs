@@ -266,6 +266,10 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_provider_interactions_fingerprint
           ON provider_interactions(request_fingerprint, status, created_at);
 
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_interactions_pending_fingerprint
+          ON provider_interactions(request_fingerprint)
+          WHERE status = 'pending';
+
         CREATE TABLE IF NOT EXISTS provider_event_raw_payloads (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           identity_key TEXT NOT NULL,

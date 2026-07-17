@@ -113,6 +113,9 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
             text: input.content,
         }];
         let steering_active_turn = self.active_turn_id.is_some();
+        if !steering_active_turn && self.active_input_id.is_some() {
+            anyhow::bail!("Codex turn start is still pending");
+        }
 
         if let Some(active_turn_id) = self.active_turn_id.clone() {
             write_turn_steer_request_with_id(
@@ -173,10 +176,16 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
             if let Some(request_id) = message.id.as_ref().and_then(Value::as_u64) {
                 if let Some(local_input_id) = self.pending_inputs.remove(&request_id) {
                     if message.value.get("error").is_some() {
+                        let failed_pending_start = self.active_turn_id.is_none()
+                            && self.active_input_id.as_deref() == Some(local_input_id.as_str());
                         effects.push(HarnessEffect::TurnCompleted {
-                            local_input_id,
+                            local_input_id: local_input_id.clone(),
                             status: HarnessTurnStatus::Failed,
                         });
+                        if failed_pending_start {
+                            self.active_input_id = None;
+                            effects.push(HarnessEffect::Ready);
+                        }
                     } else {
                         effects.push(HarnessEffect::InputAcknowledged { local_input_id });
                     }
@@ -1779,6 +1788,68 @@ mod tests {
         )));
         assert!(!adapter.pending_inputs.contains_key(&2));
         assert_eq!(adapter.active_input_id.as_deref(), Some("turn-input"));
+    }
+
+    #[test]
+    fn codex_rejects_new_start_while_start_request_is_pending() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+
+        adapter
+            .encode_input(managed_input("first-input", "run tests", false))
+            .unwrap();
+        let err = adapter
+            .encode_input(managed_input("second-input", "run clippy", false))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("pending"));
+        assert_eq!(adapter.active_input_id.as_deref(), Some("first-input"));
+        assert_eq!(
+            adapter.pending_inputs.get(&1).map(String::as_str),
+            Some("first-input")
+        );
+        assert!(!adapter
+            .pending_inputs
+            .values()
+            .any(|id| id == "second-input"));
+    }
+
+    #[test]
+    fn codex_start_failure_clears_pending_start_and_reports_ready() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(managed_input("first-input", "run tests", false))
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(managed_record(
+                r#"{"id":1,"error":{"code":-32000,"message":"failed to start turn"}}"#,
+            ))
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "first-input"
+        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert!(adapter.active_input_id.is_none());
+        assert!(adapter.pending_inputs.is_empty());
     }
 
     fn managed_input(local_input_id: &str, content: &str, immediate: bool) -> HarnessInput {

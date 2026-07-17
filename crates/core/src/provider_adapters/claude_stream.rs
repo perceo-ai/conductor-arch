@@ -354,7 +354,9 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                         ClaudeResultStatus::Failed,
                         &mut effects,
                     );
-                    effects.push(HarnessEffect::Ready);
+                    if self.tracker.ready() {
+                        effects.push(HarnessEffect::Ready);
+                    }
                 }
             }
         }
@@ -1652,6 +1654,60 @@ mod tests {
     }
 
     #[test]
+    fn terminal_rate_limit_waits_for_all_inputs_before_ready() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: Some("fixture-session".to_owned()),
+            controls: Default::default(),
+        });
+        adapter.tracker.initialized = true;
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "active-input".to_owned(),
+                content: "active".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "queued-input".to_owned(),
+                content: "queued".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: br#"{"type":"rate_limit_event","session_id":"fixture-session","uuid":"rate_limit_terminal","rate_limit_info":{"status":"blocked","rateLimitType":"five_hour"}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::RateLimited { .. })));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "active-input"
+        )));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert_eq!(adapter.tracker.written_inputs.len(), 1);
+    }
+
+    #[test]
     fn claude_stream_contract_fixtures_cover_native_record_families_losslessly() {
         let basic = parse_claude_stream_json_lines(BASIC_TURN_FIXTURE).unwrap();
         let tools = parse_claude_stream_json_lines(TOOLS_HOOKS_LIMITS_FIXTURE).unwrap();
@@ -2031,6 +2087,7 @@ mod tests {
             native_session_id: None,
             controls: Default::default(),
         });
+        adapter.tracker.initialized = true;
         adapter
             .encode_input(HarnessInput {
                 local_input_id: "limited-input".to_owned(),

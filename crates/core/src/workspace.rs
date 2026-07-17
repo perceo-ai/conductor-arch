@@ -4711,13 +4711,14 @@ mutation($threadId: ID!) {{
         let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
         let todos = self.list_todos(name)?;
         let open_todos = todos.iter().filter(|todo| todo.status == "open").count();
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
         let branch_push_state = if path_exists {
             self.branch_push_state(name).ok()
         } else {
             None
         };
         let source_branch_ahead = if path_exists {
-            workspace_source_branch_ahead(&workspace)
+            workspace_source_branch_ahead(&workspace, &repository.default_branch)
         } else {
             0
         };
@@ -8047,14 +8048,19 @@ fn workspace_diff_stats_against_head(workspace: &Workspace) -> Result<(usize, us
     Ok((additions, deletions))
 }
 
-fn workspace_source_branch_ahead(workspace: &Workspace) -> usize {
+fn workspace_source_branch_ahead(workspace: &Workspace, default_branch: &str) -> usize {
     let base_ref = workspace_base_ref(workspace);
     if git_ref_exists(&workspace.path, base_ref) {
         let range = format!("HEAD..{base_ref}");
         return count_git_rev_list(&workspace.path, &range);
     }
-    if base_ref != "main" && git_ref_exists(&workspace.path, "main") {
-        return count_git_rev_list(&workspace.path, "HEAD..main");
+    let default_branch = default_branch.trim();
+    if !default_branch.is_empty()
+        && base_ref != default_branch
+        && git_ref_exists(&workspace.path, default_branch)
+    {
+        let range = format!("HEAD..{default_branch}");
+        return count_git_rev_list(&workspace.path, &range);
     }
     0
 }
@@ -15944,6 +15950,80 @@ general = "Keep changes focused."
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn checks_summary_source_ahead_falls_back_to_repository_default_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "-b", "develop"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("README.md"), "develop\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "develop moved",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("develop".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET base_ref = 'missing-base' WHERE id = ?1",
+                params![workspace.id],
+            )
+            .unwrap();
+
+        let summary = store.checks_summary("berlin").unwrap();
+
+        assert_eq!(summary.source_branch_ahead, 1);
     }
 
     #[test]

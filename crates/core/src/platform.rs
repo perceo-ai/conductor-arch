@@ -82,6 +82,7 @@ pub fn configure_new_process_group(command: &mut Command) {
 pub fn configure_new_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
+/// Sends SIGINT to the process group rooted at `pid`.
 pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
     Command::new("kill")
         .arg("-INT")
@@ -91,11 +92,17 @@ pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
 }
 
 #[cfg(windows)]
+/// Best-effort interruption for a Windows process tree.
+///
+/// Archductor does not currently attach managed providers to a Windows console
+/// control group that can receive CTRL_C_EVENT, so this falls back to the same
+/// non-forced tree termination used elsewhere.
 pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
     terminate_process_tree(pid, false)
 }
 
 #[cfg(not(any(unix, windows)))]
+/// Best-effort interruption for platforms without process-group support.
 pub fn interrupt_process_group(_pid: u32) -> std::io::Result<bool> {
     Ok(false)
 }

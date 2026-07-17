@@ -1594,6 +1594,31 @@ fn update_tree_visibility(
     }
 }
 
+fn toggle_file_tree_directory(
+    rows: &Rc<RefCell<Vec<FileTreeRow>>>,
+    collapsed_dirs: &Rc<RefCell<HashSet<String>>>,
+    dir_path: &str,
+    toggle: &Button,
+    icon: &Image,
+) {
+    let collapsed_now = {
+        let mut collapsed = collapsed_dirs.borrow_mut();
+        if !collapsed.remove(dir_path) {
+            collapsed.insert(dir_path.to_owned());
+            true
+        } else {
+            false
+        }
+    };
+    toggle.set_label(if collapsed_now { "▸" } else { "▾" });
+    icon.set_icon_name(Some(if collapsed_now {
+        "folder-symbolic"
+    } else {
+        "folder-open-symbolic"
+    }));
+    update_tree_visibility(rows, collapsed_dirs);
+}
+
 fn append_file_tree_rows(
     list: &ListBox,
     rows: &Rc<RefCell<Vec<FileTreeRow>>>,
@@ -1609,8 +1634,10 @@ fn append_file_tree_rows(
             let row_box = GBox::new(Orientation::Horizontal, file_tree_row_spacing());
             row_box.add_css_class("ws-dir-row");
             row_box.set_margin_start(file_tree_indent_margin_start(depth));
-            let toggle = Label::new(Some("▸"));
+            let toggle = Button::with_label("▸");
             toggle.add_css_class("ws-folder-toggle");
+            toggle.add_css_class("flat");
+            toggle.set_tooltip_text(Some("Expand or collapse directory"));
             let icon = Image::from_icon_name(file_tree_icon_name(true, &dir_path));
             icon.add_css_class("ws-folder-icon");
             let name_lbl = Label::new(Some(child));
@@ -1621,7 +1648,9 @@ fn append_file_tree_rows(
             row_box.append(&icon);
             row_box.append(&name_lbl);
             let row = ListBoxRow::builder().child(&row_box).build();
-            row.set_selectable(false);
+            row.set_selectable(true);
+            row.set_activatable(true);
+            row.set_focusable(true);
             list.append(&row);
             rows.borrow_mut().push(FileTreeRow {
                 row: row.clone(),
@@ -1629,31 +1658,33 @@ fn append_file_tree_rows(
                 is_dir: true,
             });
 
-            let row_toggle = GestureClick::new();
-            let rows_for_row_toggle = rows.clone();
-            let collapsed_for_row_toggle = collapsed_dirs.clone();
-            let dir_path_for_row_toggle = dir_path.clone();
-            let toggle_for_row = toggle.clone();
-            let icon_for_row_toggle = icon.clone();
-            row_toggle.connect_released(move |_, _, _, _| {
-                let collapsed_now = {
-                    let mut collapsed = collapsed_for_row_toggle.borrow_mut();
-                    if !collapsed.remove(&dir_path_for_row_toggle) {
-                        collapsed.insert(dir_path_for_row_toggle.clone());
-                        true
-                    } else {
-                        false
-                    }
-                };
-                toggle_for_row.set_text(if collapsed_now { "▸" } else { "▾" });
-                icon_for_row_toggle.set_icon_name(Some(if collapsed_now {
-                    "folder-symbolic"
-                } else {
-                    "folder-open-symbolic"
-                }));
-                update_tree_visibility(&rows_for_row_toggle, &collapsed_for_row_toggle);
+            let rows_for_toggle = rows.clone();
+            let collapsed_for_toggle = collapsed_dirs.clone();
+            let dir_path_for_toggle = dir_path.clone();
+            let icon_for_toggle = icon.clone();
+            toggle.connect_clicked(move |button| {
+                toggle_file_tree_directory(
+                    &rows_for_toggle,
+                    &collapsed_for_toggle,
+                    &dir_path_for_toggle,
+                    button,
+                    &icon_for_toggle,
+                );
             });
-            row_box.add_controller(row_toggle);
+            let rows_for_row_activate = rows.clone();
+            let collapsed_for_row_activate = collapsed_dirs.clone();
+            let dir_path_for_row_activate = dir_path.clone();
+            let toggle_for_row_activate = toggle.clone();
+            let icon_for_row_activate = icon.clone();
+            row.connect_activate(move |_| {
+                toggle_file_tree_directory(
+                    &rows_for_row_activate,
+                    &collapsed_for_row_activate,
+                    &dir_path_for_row_activate,
+                    &toggle_for_row_activate,
+                    &icon_for_row_activate,
+                );
+            });
 
             append_file_tree_rows(
                 list,

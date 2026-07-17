@@ -541,13 +541,27 @@ fn apply_harness_effect(
             });
         }
         HarnessEffect::InputAcknowledged { local_input_id } => {
-            let _ = runtime_store.mark_provider_input_acknowledged(&local_input_id, None);
+            if let Err(err) = runtime_store.mark_provider_input_acknowledged(&local_input_id, None)
+            {
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: format!("Provider input acknowledgement persistence failed: {err:#}"),
+                });
+            }
         }
         HarnessEffect::TurnCompleted {
             local_input_id,
             status,
         } => {
-            let _ = runtime_store.mark_provider_input_terminal(&local_input_id);
+            if let Err(err) = runtime_store.mark_provider_input_terminal(&local_input_id) {
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: format!("Provider input terminal persistence failed: {err:#}"),
+                });
+                return;
+            }
             let _ = event_tx.send(ArchcarEvent::TurnCompleted {
                 session_id: started.session_id,
                 thread_id: started.thread_id,
@@ -1762,6 +1776,7 @@ fn run_codex_app_server_session_loop(
         .unwrap_or(0);
     let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
+    let mut active_input_ids = Vec::<String>::new();
     let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
     let mut control_adapter = CodexManagedAdapter::new(HarnessAdapterContext {
         session_id: started.session_id,
@@ -1856,7 +1871,26 @@ fn run_codex_app_server_session_loop(
                         if let Some(pending) = pending_input_requests.remove(&request_id) {
                             let response_error = codex_response_error(&message);
                             match codex_input_response_action(&pending, response_error.is_some()) {
-                                CodexInputResponseAction::Complete => {}
+                                CodexInputResponseAction::Complete => {
+                                    if let Err(err) = runtime_store
+                                        .mark_provider_input_acknowledged(
+                                            &pending.local_input_id,
+                                            Some(&request_id.to_string()),
+                                        )
+                                    {
+                                        mark_provider_session_failed(
+                                            &runtime_store,
+                                            &snapshot,
+                                            &event_tx,
+                                            &started,
+                                            format!(
+                                                "Codex input acknowledgement persistence failed: {err:#}"
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                    active_input_ids.push(pending.local_input_id);
+                                }
                                 CodexInputResponseAction::RetryStart => {
                                     let Some(thread_id) = provider_thread_id.as_deref() else {
                                         let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -1898,11 +1932,18 @@ fn run_codex_app_server_session_loop(
                                         fallback_request_id,
                                         PendingCodexInputRequest {
                                             kind: CodexInputRequestKind::ImmediateFallbackStart,
+                                            local_input_id: pending.local_input_id,
                                             input: pending.input,
                                         },
                                     );
                                 }
                                 CodexInputResponseAction::ReportError => {
+                                    if let Some(error) = response_error.as_deref() {
+                                        let _ = runtime_store.mark_provider_input_failed(
+                                            &pending.local_input_id,
+                                            error,
+                                        );
+                                    }
                                     let _ = event_tx.send(ArchcarEvent::SessionError {
                                         session_id: Some(started.session_id),
                                         thread_id: Some(started.thread_id),
@@ -1921,6 +1962,20 @@ fn run_codex_app_server_session_loop(
                     if message.method.as_deref() == Some("turn/completed") {
                         active_turn_id = None;
                         control_adapter.set_active_turn_id(None);
+                        for local_input_id in active_input_ids.drain(..) {
+                            if let Err(err) =
+                                runtime_store.mark_provider_input_terminal(&local_input_id)
+                            {
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Codex input terminal persistence failed: {err:#}"),
+                                );
+                                return;
+                            }
+                        }
                         let _ = event_tx.send(ArchcarEvent::TurnCompleted {
                             session_id: started.session_id,
                             thread_id: started.thread_id,
@@ -1977,6 +2032,25 @@ fn run_codex_app_server_session_loop(
                             CodexInputRequestKind::AutoSteer
                         }
                     };
+                    if let Err(err) = enqueue_provider_input(
+                        &runtime_store,
+                        &started,
+                        &local_input_id,
+                        &input,
+                        visible_input.as_deref(),
+                        &kind,
+                        delivery,
+                        connection.native_thread_id.clone(),
+                    ) {
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Codex input persistence failed: {err:#}"),
+                        );
+                        continue;
+                    }
                     let write_result = match route {
                         CodexInputRoute::Steer { expected_turn_id } => {
                             write_turn_steer_request_with_id(
@@ -2000,16 +2074,6 @@ fn run_codex_app_server_session_loop(
                             )
                         }
                     };
-                    enqueue_provider_input(
-                        &runtime_store,
-                        &started,
-                        &local_input_id,
-                        &input,
-                        visible_input.as_deref(),
-                        &kind,
-                        delivery,
-                        connection.native_thread_id.clone(),
-                    );
                     if let Err(err) = write_result {
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
@@ -2021,12 +2085,23 @@ fn run_codex_app_server_session_loop(
                             &started,
                             format!("Codex turn input failed: {err:#}"),
                         );
+                    } else if let Err(err) =
+                        runtime_store.mark_provider_input_written(&local_input_id)
+                    {
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Codex input written-state persistence failed: {err:#}"),
+                        );
                     } else {
-                        let _ = runtime_store.mark_provider_input_written(&local_input_id);
                         pending_input_requests.insert(
                             request_id,
                             PendingCodexInputRequest {
                                 kind: request_kind,
+                                local_input_id: local_input_id.clone(),
                                 input: input.clone(),
                             },
                         );
@@ -2160,7 +2235,7 @@ fn run_claude_stream_session_loop(
                 } => {
                     let next_input_sequence = user_input_sequence + 1;
                     let local_input_id = user_input_identity_suffix(next_input_sequence);
-                    enqueue_provider_input(
+                    if let Err(err) = enqueue_provider_input(
                         &runtime_store,
                         &started,
                         &local_input_id,
@@ -2169,7 +2244,16 @@ fn run_claude_stream_session_loop(
                         &kind,
                         delivery,
                         connection.native_thread_id.clone(),
-                    );
+                    ) {
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Claude input persistence failed: {err:#}"),
+                        );
+                        continue;
+                    }
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
                         content: input.clone(),
@@ -2199,8 +2283,19 @@ fn run_claude_stream_session_loop(
                             &started,
                             format!("Claude stream input failed: {err:#}"),
                         );
+                    } else if let Err(err) =
+                        runtime_store.mark_provider_input_written(&local_input_id)
+                    {
+                        adapter.settle_failed_input_write(&local_input_id);
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Claude input written-state persistence failed: {err:#}"),
+                        );
                     } else {
-                        let _ = runtime_store.mark_provider_input_written(&local_input_id);
                         user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
@@ -2354,6 +2449,7 @@ enum CodexInputRequestKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingCodexInputRequest {
     kind: CodexInputRequestKind,
+    local_input_id: String,
     input: String,
 }
 
@@ -2639,8 +2735,8 @@ fn enqueue_provider_input(
     kind: &ArchcarInputKind,
     delivery: ArchcarInputDelivery,
     native_session_id: Option<String>,
-) {
-    let _ = runtime_store.enqueue_provider_input(ProviderInputInput {
+) -> Result<()> {
+    runtime_store.enqueue_provider_input(ProviderInputInput {
         id: local_input_id.to_owned(),
         provider: session_kind_provider_key(started.kind).to_owned(),
         thread_id: started.thread_id,
@@ -2650,7 +2746,8 @@ fn enqueue_provider_input(
         delivery: delivery.as_str().to_owned(),
         provider_input: input.to_owned(),
         visible_input: visible_input.map(str::to_owned),
-    });
+    })?;
+    Ok(())
 }
 
 fn session_kind_provider_key(kind: SessionKind) -> &'static str {
@@ -4288,6 +4385,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     fn codex_immediate_steer_error_retries_once_as_start() {
         let immediate = PendingCodexInputRequest {
             kind: CodexInputRequestKind::ImmediateSteer,
+            local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
         };
         assert_eq!(
@@ -4297,6 +4395,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
         let fallback = PendingCodexInputRequest {
             kind: CodexInputRequestKind::ImmediateFallbackStart,
+            local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
         };
         assert_eq!(

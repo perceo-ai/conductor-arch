@@ -2292,6 +2292,7 @@ button.chat-inline-event-chip:checked {
     opacity: 0;
 }
 .chat-queued-composer-row:hover .chat-queued-actions,
+.chat-queued-composer-row:focus-within .chat-queued-actions,
 .chat-queued-actions:hover {
     opacity: 1;
 }
@@ -2304,6 +2305,10 @@ button.chat-inline-event-chip:checked {
     color: #a7a7a7;
     border: none;
     box-shadow: none;
+}
+.chat-queued-action-btn:focus-visible {
+    outline: 2px solid #8ab4f8;
+    outline-offset: 2px;
 }
 .chat-queued-action-btn:hover {
     background-color: #2a2a2a;
@@ -2978,6 +2983,9 @@ mod tests {
         let actions = selector_block(css, ".chat-queued-actions");
         assert!(actions.contains("opacity: 0;"));
         assert!(css.contains(".chat-queued-composer-row:hover .chat-queued-actions"));
+        assert!(css.contains(".chat-queued-composer-row:focus-within .chat-queued-actions"));
+        let action_focus = selector_block(css, ".chat-queued-action-btn:focus-visible");
+        assert!(action_focus.contains("outline: 2px solid"));
 
         let user_bubble = selector_block(css, ".chat-user-bubble");
         assert!(user_bubble.contains("background-color: #2e2e2e;"));

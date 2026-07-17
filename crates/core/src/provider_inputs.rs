@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,15 +141,44 @@ impl ProviderInputStore {
         error: Option<&str>,
     ) -> Result<()> {
         let now = timestamp();
-        self.open()?.execute(
+        let valid_prior_states = match state {
+            ProviderInputState::Queued => &[][..],
+            ProviderInputState::Written => &["queued"][..],
+            ProviderInputState::Acknowledged => &["written"][..],
+            ProviderInputState::Terminal => &["written", "acknowledged"][..],
+            ProviderInputState::Failed => &["queued", "written", "acknowledged"][..],
+        };
+        if valid_prior_states.is_empty() {
+            bail!(
+                "provider input {} cannot transition to {}",
+                id,
+                state.as_str()
+            );
+        }
+        let prior_predicate = valid_prior_states
+            .iter()
+            .map(|state| format!("'{state}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
             "UPDATE provider_inputs
              SET state = ?2,
                  acknowledgement = COALESCE(?3, acknowledgement),
                  error = COALESCE(?4, error),
                  updated_at = ?5
-             WHERE id = ?1",
+             WHERE id = ?1 AND state IN ({prior_predicate})"
+        );
+        let updated = self.open()?.execute(
+            &sql,
             params![id, state.as_str(), acknowledgement, error, now],
         )?;
+        if updated != 1 {
+            bail!(
+                "provider input {} missing or not in a valid prior state for {}",
+                id,
+                state.as_str()
+            );
+        }
         Ok(())
     }
 
@@ -261,6 +290,28 @@ mod tests {
         let written = store.get(&queued.id).unwrap().unwrap();
         assert_eq!(written.state, ProviderInputState::Written);
         assert!(written.acknowledgement.is_none());
+    }
+
+    #[test]
+    fn provider_inputs_reject_missing_ids_and_stale_regressions() {
+        let (store, _temp) = seeded_store();
+        let queued = store.enqueue(fixture_input("input-stale")).unwrap();
+
+        assert!(store.mark_written("missing-input").is_err());
+        store.mark_written(&queued.id).unwrap();
+        store
+            .mark_acknowledged(&queued.id, Some("native-user-id"))
+            .unwrap();
+        store.mark_terminal(&queued.id).unwrap();
+
+        assert!(store.mark_written(&queued.id).is_err());
+        assert!(store.mark_acknowledged(&queued.id, None).is_err());
+        assert!(store.mark_failed(&queued.id, "late failure").is_err());
+
+        let terminal = store.get(&queued.id).unwrap().unwrap();
+        assert_eq!(terminal.state, ProviderInputState::Terminal);
+        assert_eq!(terminal.acknowledgement.as_deref(), Some("native-user-id"));
+        assert!(terminal.error.is_none());
     }
 
     #[test]
