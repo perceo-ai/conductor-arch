@@ -2892,23 +2892,36 @@ fn queued_composer_overlay_row(
     actions.add_css_class("chat-queued-actions");
     actions.set_halign(Align::End);
 
-    let edit_btn = icon_button("document-edit-symbolic", "Edit queued message");
-    edit_btn.add_css_class("chat-queued-action-btn");
-    edit_btn.connect_clicked(move |_| on_edit());
-    actions.append(&edit_btn);
+    if queued_composer_item_allows_action(item, QueuedComposerAction::Edit) {
+        let edit_btn = icon_button("document-edit-symbolic", "Edit queued message");
+        edit_btn.add_css_class("chat-queued-action-btn");
+        edit_btn.connect_clicked(move |_| on_edit());
+        actions.append(&edit_btn);
+    }
 
-    let delete_btn = icon_button("user-trash-symbolic", "Delete queued message");
-    delete_btn.add_css_class("chat-queued-action-btn");
-    delete_btn.connect_clicked(move |_| on_delete());
-    actions.append(&delete_btn);
+    if queued_composer_item_allows_action(item, QueuedComposerAction::Delete) {
+        let delete_btn = icon_button("user-trash-symbolic", "Delete queued message");
+        delete_btn.add_css_class("chat-queued-action-btn");
+        delete_btn.connect_clicked(move |_| on_delete());
+        actions.append(&delete_btn);
+    }
 
-    let send_btn = icon_button("send-symbolic", "Send immediately");
-    send_btn.add_css_class("chat-queued-action-btn");
-    send_btn.connect_clicked(move |_| on_send_immediately());
-    actions.append(&send_btn);
+    if queued_composer_item_allows_action(item, QueuedComposerAction::SendImmediately) {
+        let send_btn = icon_button("send-symbolic", "Send immediately");
+        send_btn.add_css_class("chat-queued-action-btn");
+        send_btn.connect_clicked(move |_| on_send_immediately());
+        actions.append(&send_btn);
+    }
 
     row.append(&actions);
     row
+}
+
+fn queued_composer_item_allows_action(
+    item: &QueuedComposerItem,
+    action: QueuedComposerAction,
+) -> bool {
+    item.actions.contains(&action)
 }
 
 fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
@@ -10125,6 +10138,28 @@ fix it
         assert!(!claude_items[0]
             .actions
             .contains(&QueuedComposerAction::SendImmediately));
+    }
+
+    #[test]
+    fn queued_composer_item_action_filter_controls_rendered_buttons() {
+        let item = QueuedComposerItem {
+            index: 0,
+            preview: "queued".to_owned(),
+            actions: vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit],
+        };
+
+        assert!(queued_composer_item_allows_action(
+            &item,
+            QueuedComposerAction::Delete
+        ));
+        assert!(queued_composer_item_allows_action(
+            &item,
+            QueuedComposerAction::Edit
+        ));
+        assert!(!queued_composer_item_allows_action(
+            &item,
+            QueuedComposerAction::SendImmediately
+        ));
     }
 
     #[test]

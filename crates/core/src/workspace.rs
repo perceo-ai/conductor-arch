@@ -8553,8 +8553,9 @@ fn write_managed_prompt_snapshot(
     workspace_path: &Path,
     settings: &crate::settings::RepositorySettings,
 ) -> Result<()> {
-    let context = ManagedPromptContext::open(workspace_path)?
-        .with_context(|| format!("{} must exist", workspace_path.join(".context").display()))?;
+    let Some(context) = ManagedPromptContext::open(workspace_path)? else {
+        return Ok(());
+    };
     write_managed_prompt_snapshot_in_context(&context, settings)
 }
 
@@ -10085,6 +10086,22 @@ mod tests {
             })
             .unwrap();
         (temp, repository.id, store, workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_managed_prompt_snapshot_skips_missing_context_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        fs::create_dir(&workspace_path).unwrap();
+
+        let result = write_managed_prompt_snapshot(
+            &workspace_path,
+            &crate::settings::RepositorySettings::default(),
+        );
+
+        assert!(result.is_ok());
+        assert!(!workspace_path.join(".context/PROMPTS.md").exists());
     }
 
     #[cfg(unix)]

@@ -488,11 +488,22 @@ plus observed runtime state.
 - GTK hides or disables a control only when the current session cannot perform
   it, and explains why.
 
-The minimum supported version is Claude Code 2.1.89 because documented
-PreToolUse deferral begins there. The current local 2.1.177 remains supported.
-Claude Code 2.1.208 or later is recommended for newer stream completion fixes,
-but Archductor must tolerate older supported output and must never update the
-user's CLI automatically.
+Version policy is capability-gated, not string-gated beyond the minimum needed
+for known protocol support:
+
+| Claude Code version | PreToolUse deferral | interrupt receipts | final-result delivery | `system/init.capabilities` | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| `< 2.1.89` | not accepted | not accepted | not accepted | not required | Below the documented PreToolUse deferral floor; preflight rejects unless a later conformance fixture proves the managed-harness baseline. |
+| `2.1.89` through `2.1.176` | required | fallback-only | supported through stream-json result events | optional/absent | Baseline parser and harness tests cover hook events, final assistant/result projection, and operation without capabilities. |
+| `2.1.177` | required | fallback-only | supported | optional/absent | Current local compatibility target; existing stream-json and GTK transcript tests cover PreToolUse rendering and final-result delivery. |
+| `>= 2.1.208` | required | preferred when observed | supported | preferred when present | Recommended threshold for newer stream completion fixes; `system/init.capabilities` refines controls when present and unknown values are ignored. |
+
+Preflight rejects versions below the proven minimum unless capability discovery
+or conformance fixtures prove the same managed-harness baseline. For supported
+versions, Archcar enables or disables controls from observed capabilities and
+transport fallbacks so it neither accepts incompatible older CLIs nor rejects a
+compatible newer CLI. Archductor must tolerate older supported output and must
+never update the user's CLI automatically.
 
 ## Failure Handling And Recovery
 

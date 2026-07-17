@@ -126,7 +126,7 @@ impl ArchcarServer {
             }
         }
 
-        self.state.lock().unwrap().shutting_down = true;
+        begin_shutdown(&self.state);
         for handler in handlers {
             let _ = handler.join();
         }
@@ -461,6 +461,12 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionScreen { .. }
             | ArchcarRequest::GetSessionMessages { .. }
     )
+}
+
+fn begin_shutdown(state: &Arc<Mutex<ServerState>>) {
+    let mut guard = state.lock().unwrap();
+    guard.shutting_down = true;
+    guard.subscribers.clear();
 }
 
 fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<ArchcarMessage>> {
@@ -1728,6 +1734,30 @@ mod tests {
             thread_id: 5,
         }));
         assert_eq!(state.subscribers.len(), 1);
+    }
+
+    #[test]
+    fn begin_shutdown_blocks_mutations_and_drops_subscribers() {
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        begin_shutdown(&state);
+
+        let guard = state.lock().unwrap();
+        assert!(guard.shutting_down);
+        assert!(guard.subscribers.is_empty());
+        drop(guard);
+        assert!(subscriber_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_err());
     }
 
     #[test]
