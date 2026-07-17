@@ -52,6 +52,11 @@ use crate::workspace::{
 };
 use serde_json::json;
 
+/// Builds the provider-facing first-turn text while keeping visible chat text separate.
+///
+/// General instructions are prepended only for the first visible user turn in a
+/// durable chat thread. Follow-up turns keep the user's text unchanged so the
+/// prompt snapshot does not leak into every provider input.
 pub fn compose_first_turn_input(general: Option<&str>, visible: &str, first_turn: bool) -> String {
     if first_turn {
         if let Some(general) = general.map(str::trim).filter(|prompt| !prompt.is_empty()) {

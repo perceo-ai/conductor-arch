@@ -909,10 +909,14 @@ pub struct TurnFileChangeSummary {
     pub files: Vec<DiffFileSummary>,
 }
 
+/// File-change summary for one Git commit in a workspace branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitFileChangeSummary {
+    /// Full commit SHA.
     pub commit: String,
+    /// Commit subject line.
     pub subject: String,
+    /// Files changed by the commit with numstat counts when available.
     pub files: Vec<DiffFileSummary>,
 }
 
@@ -3125,6 +3129,7 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
+    /// Summarizes all current branch, staged, unstaged, and untracked file changes.
     pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
@@ -3167,6 +3172,7 @@ impl WorkspaceStore {
         self.turn_file_change_summaries_for_workspace(workspace.id, None, None, limit)
     }
 
+    /// Returns file changes associated with the latest user turn in one chat thread.
     pub fn last_turn_file_change_summary(
         &self,
         name: &str,
@@ -3331,6 +3337,7 @@ impl WorkspaceStore {
         Ok(turns)
     }
 
+    /// Returns newest workspace commits with per-file change counts.
     pub fn commit_file_change_summaries(
         &self,
         name: &str,
@@ -5684,6 +5691,7 @@ mutation($threadId: ID!) {{
         self.repository_settings(&repository.root_path)
     }
 
+    /// Resolves one effective prompt for a workspace after all settings layers merge.
     pub fn resolved_prompt(&self, workspace: &str, kind: PromptKind) -> Result<Option<String>> {
         Ok(self
             .workspace_repo_settings(workspace)?
@@ -5695,6 +5703,7 @@ mutation($threadId: ID!) {{
             .map(ToOwned::to_owned))
     }
 
+    /// Rewrites managed prompt snapshots for live workspaces in a repository.
     pub fn refresh_repository_prompt_snapshots(&self, repository_id: i64) -> Result<usize> {
         let repository = self.load_repository_by_id(repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
