@@ -1,0 +1,97 @@
+crates/core/src/provider_interactions.rs
+  s_93b51ae7d5f68c::t_3384b0fc4c4e09 401-439
+  s_93b51ae7d5f68c::t_90ac4ce01aeae4 6-7,39-41,47-48,87-88,90,95-96,119-126,191,202-206,215,222-226,234-253,281,284-285,287-289,297-320
+  s_93b51ae7d5f68c::t_52925f197dbb0e 321
+crates/core/src/storage.rs
+  s_93b51ae7d5f68c::t_34be656d59a624 269-272
+crates/core/src/doctor.rs
+  s_93b51ae7d5f68c::t_4d2b5e6c489e27 219
+  s_93b51ae7d5f68c::t_e4ab6404d8a059 623
+crates/gtk-app/src/theme.rs
+  s_93b51ae7d5f68c::t_9469c686a3f6dc 2986-2988
+  s_93b51ae7d5f68c::t_a10f6b1e5401f9 2295,2309-2311
+  s_93b51ae7d5f68c::t_d3ef12920fcb17 2312
+crates/core/src/provider_adapters/claude_stream.rs
+  s_93b51ae7d5f68c::t_af6eac5600ce06 2090
+  s_93b51ae7d5f68c::t_fc6261c9c096fc 1657-1687,1689-1709
+  s_93b51ae7d5f68c::t_2f5e14f67cb87b 357-359
+  s_93b51ae7d5f68c::t_af925edb23ea83 1688
+  s_93b51ae7d5f68c::t_f48e24546ea8f6 1656
+README.md
+  s_93b51ae7d5f68c::t_00c8d815e89dd3 167
+crates/gtk-app/src/workspace_command_center.rs
+  s_93b51ae7d5f68c::t_8ba1c197428f9e 1597-1621,1637,1639-1640,1651-1653,1661-1686
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_93b51ae7d5f68c::t_7124093e73b456 116-118,179-180,182,185-188
+  s_93b51ae7d5f68c::t_9c71347338820d 1793-1846
+  s_93b51ae7d5f68c::t_bff349d2ab19c0 1847-1854
+crates/core/src/platform.rs
+  s_93b51ae7d5f68c::t_8d301a602d5913 85,95-99,105
+crates/core/src/archcar/protocol.rs
+  s_93b51ae7d5f68c::t_eee6c545703068 325-326,339-353
+  s_93b51ae7d5f68c::t_5de90f8d79eb21 716-718,720-723
+  s_93b51ae7d5f68c::t_9ad3fc385ca1c6 354-357,724
+crates/core/src/workspace.rs
+  s_93b51ae7d5f68c::t_da3c062eceb280 15956-16028
+  s_93b51ae7d5f68c::t_a48d50eaa5f205 4714,4721,8051,8057-8063
+  s_56bdc97402fc93::t_d7afb13274f19d 15955
+crates/core/src/archcar/server.rs
+  s_93b51ae7d5f68c::t_c253f52326e147 14-15,279-287,290
+  s_93b51ae7d5f68c::t_75c9b04a25aebb 1876
+crates/core/src/provider_inputs.rs
+  s_93b51ae7d5f68c::t_c7d6f4af0dd105 4,144-163,169-172,175-177
+  s_93b51ae7d5f68c::t_009d4c2e759056 179,295-316
+  s_93b51ae7d5f68c::t_c5cca59c52e018 178,180-181
+crates/core/src/provider_events.rs
+  s_93b51ae7d5f68c::t_f2e18bfbea7243 958-1046
+  s_93b51ae7d5f68c::t_0aa6443f3c2cf4 465,515-520,556-582
+  s_93b51ae7d5f68c::t_01234c67e0f617 585,1047-1049
+crates/gtk-app/src/main.rs
+  s_93b51ae7d5f68c::t_821cb4bbcb4781 1523-1544,1607-1609
+  s_93b51ae7d5f68c::t_aad0ddc3315a80 1610-1611
+crates/gtk-app/src/session_surface.rs
+  s_93b51ae7d5f68c::t_ee92e69487d6d0 9301-9361
+  s_93b51ae7d5f68c::t_6b5d6138607db4 1880-1881,2345-2350,2538,2540
+  s_93b51ae7d5f68c::t_a85c430042fd69 1882-1883,1886-1890,1900-1923,1925-2012,2014-2023,2025,2027-2047,2049-2114,2119-2124,2126-2137,2139-2157,2159-2169,2173-2177,2179-2186,2190-2191,2200-2205,2209-2223,2225-2231,2233-2240,2244-2266,2269-2276,2278-2312,2317-2322,2324-2329,2331,2333-2336,2338-2344,10451,10454,10466-10477,10479,10485
+  s_93b51ae7d5f68c::t_fdb863afb32e71 2599-2600,6286-6288,6298-6300,6303-6306
+  s_93b51ae7d5f68c::t_8d1dd0d30497a3 729-733,737-777,8537-8542,8762-8778
+  s_93b51ae7d5f68c::t_133c478137bf3e 8780,10478,10482,11335-11336
+  s_93b51ae7d5f68c::t_74068664bb2a50 7882-7898,7938,7941,7947,8785
+  s_93b51ae7d5f68c::t_077c3de8fd51a7 9433,9436-9441
+  s_93b51ae7d5f68c::t_e2d8f82552abbc 973-975,977-978,988-989,1000,2584-2586,2588-2589,2606
+  s_93b51ae7d5f68c::t_6f6618b94b3464 1322,1509,1525-1526
+  s_93b51ae7d5f68c::t_79a5a7f5d988f6 8779,8781-8784,8786,10480-10481,10483-10484,10486,11337-11338,13535-13537
+crates/core/src/archcar/session.rs
+  s_93b51ae7d5f68c::t_d9876128ba9af1 1779,1874-1893,1935,1941-1946,1965-1978
+  s_93b51ae7d5f68c::t_3c1e0ac58581a8 544-551,557-564,2035-2053,2088-2098,2104,2238,2247-2256,2286-2291,2293,2297
+  s_93b51ae7d5f68c::t_8bc5faa3420c05 2292,2294-2296,2452,2738-2739,2749-2750,4388,4398
+crates/core/src/archcar/transport.rs
+  s_93b51ae7d5f68c::t_4fdb172ff6685c 17-30
+  s_93b51ae7d5f68c::t_c383e2de228553 84-95
+docs/superpowers/specs/2026-07-15-claude-code-parity-design.md
+  s_93b51ae7d5f68c::t_0287309232725f 396-400,410-413
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "475809bc4ef8e053d75a0fd520932fd661a3bd3f",
+  "prompts": {},
+  "sessions": {
+    "s_56bdc97402fc93": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e0b-5c96-7390-bc14-93461dfeaf6f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_93b51ae7d5f68c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e09-8cb5-7b30-9ce2-abcbc5539da1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
