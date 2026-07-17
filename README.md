@@ -164,7 +164,7 @@ sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 Tagged releases build `archductor-<version>-windows-x86_64.zip`. Extract the
 whole directory so the GTK DLLs and data directories remain beside
 `archductor-gtk.exe`, then launch that executable. Install Git and GitHub CLI
-with `winget install Git.Git GitHub.cli`; agent CLIs remain optional.
+with `winget install --id Git.Git --id GitHub.cli`; agent CLIs remain optional.
 
 For source builds, install the MSYS2 UCRT64 GCC, pkgconf, GTK4, and libadwaita
 packages, then build the `x86_64-pc-windows-gnu` target. The CI workflow is the
