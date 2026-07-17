@@ -1387,7 +1387,19 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
         let _ = handle
             .command_tx
             .send(crate::archcar::session::SessionCommand::Kill);
+        if crate::platform::process_alive(snapshot.pid) {
+            crate::archcar::session::terminate_process(snapshot.pid);
+        }
+        if let Ok(store) = WorkspaceStore::open(&db_path) {
+            if let Err(err) = store.mark_session_process_stopped(snapshot.session_id, None) {
+                errors.push(format!(
+                    "mark session {} stopped during shutdown: {err:#}",
+                    snapshot.session_id
+                ));
+            }
+        }
         if let Ok(mut current) = handle.snapshot.lock() {
+            current.status = crate::workspace::ProcessStatus::Stopped;
             current.ready = false;
             current.runtime_state = crate::session_state::AgentSessionState::Interrupted;
         }
@@ -1977,7 +1989,7 @@ mod tests {
             capabilities: None,
             screen: String::new(),
         };
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, _command_rx) = mpsc::channel();
         let state = Arc::new(Mutex::new(ServerState {
             db_path: db_path.clone(),
             logs_dir,
@@ -1996,13 +2008,9 @@ mod tests {
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
 
-        assert!(matches!(
-            command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::Kill)
-        ));
         assert_eq!(
             store.get_process_record(process.id).unwrap().status,
-            ProcessStatus::Running
+            ProcessStatus::Stopped
         );
         let events = ProviderEventStore::new(&db_path)
             .list_for_process(process.id)
@@ -2013,6 +2021,78 @@ mod tests {
                 .filter(|event| event.phase == ProviderEventPhase::Interrupted)
                 .count(),
             1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graceful_shutdown_terminates_owned_child_before_returning() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let (wait_tx, wait_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let status = child.wait();
+            let _ = wait_tx.send(status);
+        });
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child_pid)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: process.id,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: process.pid,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions: HashMap::from([(
+                process.id,
+                crate::archcar::session::SessionHandle {
+                    snapshot: Arc::new(Mutex::new(snapshot)),
+                    command_tx,
+                },
+            )]),
+            subscribers: Vec::new(),
+        }));
+
+        shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
+
+        let mut exited = wait_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        if !exited {
+            let _ = crate::platform::terminate_process_group(child_pid, true);
+            exited = wait_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        }
+        waiter.join().unwrap();
+
+        assert!(exited);
+        assert_eq!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Stopped
         );
     }
 

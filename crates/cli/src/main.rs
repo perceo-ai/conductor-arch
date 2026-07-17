@@ -715,10 +715,10 @@ fn main() -> Result<()> {
                     }
                     ArchcarInteractionsCommand::Allow {
                         interaction_id,
-                        always: _,
+                        always,
                     } => match client.send(ArchcarRequest::ResolveProviderInteraction {
                         interaction_id,
-                        resolution: ProviderInteractionResolution::Approve,
+                        resolution: archcar_allow_resolution(always)?,
                     })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
@@ -1751,6 +1751,15 @@ fn parse_answers_json(value: &str) -> Result<Vec<(String, String)>> {
             )
         })
         .collect())
+}
+
+fn archcar_allow_resolution(always: bool) -> Result<ProviderInteractionResolution> {
+    if always {
+        anyhow::bail!(
+            "--always is not supported yet; run allow without --always for a one-time approval"
+        );
+    }
+    Ok(ProviderInteractionResolution::Approve)
 }
 
 fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
@@ -3049,6 +3058,32 @@ mod tests {
         assert_eq!(
             parse_answers_json(&answers_json).unwrap(),
             vec![("scope".to_owned(), "yes".to_owned())]
+        );
+
+        let always = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "interactions",
+            "allow",
+            "interaction-1",
+            "--always",
+        ])
+        .unwrap();
+        assert!(matches!(
+            always.command,
+            Command::Archcar {
+                command: ArchcarCommand::Interactions {
+                    command: ArchcarInteractionsCommand::Allow { always: true, .. }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn archcar_interactions_allow_always_is_rejected_until_persistence_exists() {
+        assert_eq!(
+            archcar_allow_resolution(true).unwrap_err().to_string(),
+            "--always is not supported yet; run allow without --always for a one-time approval"
         );
     }
 

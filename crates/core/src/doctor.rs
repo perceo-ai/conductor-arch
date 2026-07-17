@@ -338,7 +338,7 @@ pub fn claude_cli_status_for_command(command: &str) -> ClaudeCliStatus {
     let version = command_output(command, &["--version"])
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|stdout| parse_claude_version(&stdout));
-    let supported = version.map(claude_version_supported).unwrap_or(true);
+    let supported = version.map(claude_version_supported).unwrap_or(false);
 
     if !supported {
         return ClaudeCliStatus {
@@ -734,6 +734,28 @@ ID_LIKE=arch
         );
         assert!(claude_version_supported((2, 1, 177)));
         assert!(!claude_version_supported((2, 1, 88)));
+    }
+
+    #[test]
+    fn claude_cli_status_fails_closed_when_version_probe_cannot_be_parsed() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_claude = temp.path().join("claude");
+        std::fs::write(
+            &fake_claude,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo unknown; exit 0; fi\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let status = claude_cli_status_for_command(fake_claude.to_str().unwrap());
+
+        assert!(status.installed);
+        assert!(!status.supported);
+        assert!(!status.authenticated);
     }
 
     #[test]

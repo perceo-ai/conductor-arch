@@ -2941,7 +2941,16 @@ fn terminal_process_alive(process_id: u32) -> bool {
 }
 
 pub(crate) fn terminate_process(process_id: u32) {
-    let _ = crate::platform::terminate_process_group(process_id, true);
+    if crate::platform::terminate_process_group(process_id, true).unwrap_or(false) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(process_id.to_string())
+            .status();
+    }
 }
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {

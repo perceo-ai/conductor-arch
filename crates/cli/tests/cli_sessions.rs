@@ -353,38 +353,9 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
-    let fake_codex = temp.path().join("fake-codex");
+    let fake_codex = fake_codex_path(temp.path());
     let provider_inputs = temp.path().join("provider-inputs.txt");
-    fs::write(
-        &fake_codex,
-        r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-
-capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
-for raw in sys.stdin:
-    message = json.loads(raw)
-    method = message.get("method")
-    if method == "initialize":
-        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
-    elif method in ("thread/start", "thread/resume"):
-        print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thread-test"}}}), flush=True)
-    elif method == "turn/start":
-        text = message["params"]["input"][0]["text"]
-        with open(capture, "a", encoding="utf-8") as output:
-            output.write(json.dumps(text) + "\n")
-        turn_id = "turn-test"
-        print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
-        print(json.dumps({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}}), flush=True)
-"#,
-    )
-    .unwrap();
-    Command::new("chmod")
-        .arg("+x")
-        .arg(&fake_codex)
-        .status()
-        .unwrap();
+    write_fake_codex(&fake_codex).unwrap();
 
     app(temp.path())
         .args([
@@ -508,6 +479,81 @@ for raw in sys.stdin:
         .assert()
         .success();
     wait_for_session_exit(temp.path(), second_session);
+}
+
+#[cfg(unix)]
+fn fake_codex_path(root: &Path) -> PathBuf {
+    root.join("fake-codex")
+}
+
+#[cfg(windows)]
+fn fake_codex_path(root: &Path) -> PathBuf {
+    root.join("fake-codex.cmd")
+}
+
+#[cfg(unix)]
+fn write_fake_codex(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method in ("thread/start", "thread/resume"):
+        print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thread-test"}}}), flush=True)
+    elif method == "turn/start":
+        text = message["params"]["input"][0]["text"]
+        with open(capture, "a", encoding="utf-8") as output:
+            output.write(json.dumps(text) + "\n")
+        turn_id = "turn-test"
+        print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(windows)]
+fn write_fake_codex(path: &Path) -> std::io::Result<()> {
+    let script = path.with_extension("ps1");
+    fs::write(
+        path,
+        format!(
+            "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\n",
+            script.display()
+        ),
+    )?;
+    fs::write(
+        script,
+        r#"
+$capture = $env:ARCHDUCTOR_CAPTURE_PATH
+while (($raw = [Console]::In.ReadLine()) -ne $null) {
+  $message = $raw | ConvertFrom-Json
+  $method = $message.method
+  if ($method -eq "initialize") {
+    Write-Output (@{ id = $message.id; result = @{} } | ConvertTo-Json -Compress -Depth 8)
+  } elseif ($method -eq "thread/start" -or $method -eq "thread/resume") {
+    Write-Output (@{ id = $message.id; result = @{ thread = @{ id = "thread-test" } } } | ConvertTo-Json -Compress -Depth 8)
+  } elseif ($method -eq "turn/start") {
+    $text = $message.params.input[0].text
+    Add-Content -Path $capture -Encoding UTF8 -Value ($text | ConvertTo-Json -Compress)
+    $turnId = "turn-test"
+    Write-Output (@{ id = $message.id; result = @{ turn = @{ id = $turnId } } } | ConvertTo-Json -Compress -Depth 8)
+    Write-Output (@{ method = "turn/completed"; params = @{ turn = @{ id = $turnId; status = "completed" } } } | ConvertTo-Json -Compress -Depth 8)
+  }
+  [Console]::Out.Flush()
+}
+"#,
+    )
 }
 
 #[test]

@@ -3095,38 +3095,13 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let unstaged = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
         let staged = git_output(&workspace.path, ["diff", "--cached", "--numstat", "--"])?;
-        let mut summaries = merge_diff_summaries(
+        file_change_summaries_from_numstat(
+            &workspace.path,
             parse_diff_numstat(&staged)
                 .into_iter()
                 .chain(parse_diff_numstat(&unstaged))
                 .collect(),
-        );
-        let mut known_paths = summaries
-            .iter()
-            .map(|summary| summary.path.clone())
-            .collect::<BTreeSet<_>>();
-        let status = git_output(
-            &workspace.path,
-            ["status", "--porcelain", "--untracked-files=all"],
-        )?;
-        apply_diff_file_status(&mut summaries, &status);
-        for path in parse_untracked_status_paths(&status) {
-            if known_paths.contains(&path) || is_conductor_context_path(&path) {
-                continue;
-            }
-            let counts = untracked_file_counts(&workspace.path.join(&path))?;
-            known_paths.insert(path.clone());
-            summaries.push(DiffFileSummary {
-                path,
-                additions: Some(counts.0),
-                deletions: Some(0),
-                staged: false,
-                unstaged: false,
-                untracked: true,
-            });
-        }
-        summaries.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(summaries)
+        )
     }
 
     /// Summarizes all current branch, staged, unstaged, and untracked file changes.
@@ -3134,33 +3109,7 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
         let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
-        let mut summaries = merge_diff_summaries(parse_diff_numstat(&diff));
-        let mut known_paths = summaries
-            .iter()
-            .map(|summary| summary.path.clone())
-            .collect::<BTreeSet<_>>();
-        let status = git_output(
-            &workspace.path,
-            ["status", "--porcelain", "--untracked-files=all"],
-        )?;
-        apply_diff_file_status(&mut summaries, &status);
-        for path in parse_untracked_status_paths(&status) {
-            if known_paths.contains(&path) || is_conductor_context_path(&path) {
-                continue;
-            }
-            let counts = untracked_file_counts(&workspace.path.join(&path))?;
-            known_paths.insert(path.clone());
-            summaries.push(DiffFileSummary {
-                path,
-                additions: Some(counts.0),
-                deletions: Some(0),
-                staged: false,
-                unstaged: false,
-                untracked: true,
-            });
-        }
-        summaries.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(summaries)
+        file_change_summaries_from_numstat(&workspace.path, parse_diff_numstat(&diff))
     }
 
     pub fn turn_file_change_summaries(
@@ -3348,7 +3297,7 @@ impl WorkspaceStore {
             return Ok(Vec::new());
         }
         let max_count = format!("--max-count={limit}");
-        let range = format!("{}..HEAD", workspace.base_ref);
+        let range = format!("{}..HEAD", workspace_base_ref(&workspace));
         let output = git_output_dynamic(
             &workspace.path,
             &[
@@ -8332,6 +8281,39 @@ fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary>
     merged.into_values().collect()
 }
 
+fn file_change_summaries_from_numstat(
+    workspace_path: &Path,
+    summaries: Vec<DiffFileSummary>,
+) -> Result<Vec<DiffFileSummary>> {
+    let mut summaries = merge_diff_summaries(summaries);
+    let mut known_paths = summaries
+        .iter()
+        .map(|summary| summary.path.clone())
+        .collect::<BTreeSet<_>>();
+    let status = git_output(
+        workspace_path,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    apply_diff_file_status(&mut summaries, &status);
+    for path in parse_untracked_status_paths(&status) {
+        if known_paths.contains(&path) || is_conductor_context_path(&path) {
+            continue;
+        }
+        let counts = untracked_file_counts(&workspace_path.join(&path))?;
+        known_paths.insert(path.clone());
+        summaries.push(DiffFileSummary {
+            path,
+            additions: Some(counts.0),
+            deletions: Some(0),
+            staged: false,
+            unstaged: false,
+            untracked: true,
+        });
+    }
+    summaries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(summaries)
+}
+
 fn apply_diff_file_status(summaries: &mut [DiffFileSummary], output: &str) {
     for line in output.lines() {
         let Some((path, staged, unstaged, untracked)) = parse_status_summary_line(line) else {
@@ -9751,7 +9733,26 @@ fn quote_windows_cmd_word(value: &str) -> String {
     {
         return value.to_owned();
     }
-    format!("\"{}\"", value.replace('"', r#"\""#))
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 fn first_pull_request_url_from_json(output: &str) -> Option<String> {
@@ -10435,6 +10436,14 @@ mod tests {
             r#""C:\Program Files\Archductor\agent.exe" --profile "Codex Fast" "C:\Users\Ada\project workspace""#
         );
         assert!(!command.contains('\''));
+    }
+
+    #[test]
+    fn windows_cmd_word_doubles_trailing_backslashes_when_quoted() {
+        assert_eq!(
+            quote_windows_cmd_word(r"C:\Program Files\"),
+            r#""C:\Program Files\\""#,
+        );
     }
 
     #[test]
@@ -21323,6 +21332,40 @@ spotlight_testing = true
         assert_eq!(commits[0].files[0].path, "src.rs");
         assert_eq!(commits[1].subject, "first workspace commit");
         assert_eq!(commits[1].files[0].path, "README.md");
+    }
+
+    #[test]
+    fn commit_file_change_summaries_use_default_base_for_legacy_empty_base_ref() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET base_ref = '' WHERE id = ?1",
+                params![workspace.id],
+            )
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nlegacy\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "legacy base commit",
+            ],
+        );
+
+        let commits = store.commit_file_change_summaries("berlin", 10).unwrap();
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "legacy base commit");
     }
 
     #[test]

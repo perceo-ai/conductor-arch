@@ -14,7 +14,7 @@ use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
     Paned, PolicyType, Popover, ScrolledWindow, Separator, Spinner, Stack, StackSwitcher, TextTag,
-    TextView, WrapMode,
+    TextView, Widget, WrapMode,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -4064,7 +4064,7 @@ fn workspace_changes_panel(
     name: &str,
     selected_chat_thread: Option<i64>,
     open_file: Option<OpenWorkspaceFile>,
-    refresh_hub: RefreshHub,
+    _refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
@@ -4084,75 +4084,49 @@ fn workspace_changes_panel(
     body_stack.set_vexpand(true);
     body_stack.set_hexpand(true);
 
-    let all_summaries = store.all_file_change_summaries(name).unwrap_or_default();
-    body_stack.add_named(
-        &workspace_file_summary_scope_view(&all_summaries, true, open_file.clone()),
-        Some("all_changes"),
+    let mut scope_items = Vec::new();
+    let mut menu_entries = Vec::new();
+    add_file_summary_scope(
+        &body_stack,
+        &mut scope_items,
+        FileSummaryScopeConfig {
+            label: "All Changes",
+            stack_key: "all_changes",
+            menu_label: "All Changes",
+            persisted_scope: "all",
+            show_state: true,
+        },
+        store.all_file_change_summaries(name),
+        open_file.clone(),
     );
-
-    let mut scope_items = vec![WorkspaceChangesScopeItem {
-        label: "All changes".to_owned(),
-        stack_key: "all_changes".to_owned(),
-        menu_label: "All changes".to_owned(),
-        persisted_scope: "all".to_owned(),
-    }];
-
-    let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
-    body_stack.add_named(
-        &workspace_file_summary_scope_view(&uncommitted_summaries, true, open_file.clone()),
-        Some("uncommitted"),
+    if let Some(item) = scope_items.last().cloned() {
+        menu_entries.push(ChangesScopeMenuEntry::Item(WorkspaceChangesMenuRow {
+            item,
+            title: "All Changes".to_owned(),
+            subtitle: None,
+            counts: None,
+        }));
+    }
+    add_file_summary_scope(
+        &body_stack,
+        &mut scope_items,
+        FileSummaryScopeConfig {
+            label: "Uncommitted Changes",
+            stack_key: "uncommitted",
+            menu_label: "Uncommitted Changes",
+            persisted_scope: "uncommitted",
+            show_state: true,
+        },
+        store.diff_file_summaries(name),
+        open_file.clone(),
     );
-
-    scope_items.push(WorkspaceChangesScopeItem {
-        label: "Uncommitted changes".to_owned(),
-        stack_key: "uncommitted".to_owned(),
-        menu_label: "Uncommitted".to_owned(),
-        persisted_scope: "uncommitted".to_owned(),
-    });
-
-    match store.commit_file_change_summaries(name, WORKSPACE_COMMIT_CHANGE_LIMIT) {
-        Ok(commits) => {
-            for (index, commit) in commits.iter().enumerate() {
-                let key = format!("commit_{index}");
-                let label = commit_scope_label(&commit.commit, &commit.subject);
-                body_stack.add_named(
-                    &workspace_file_summary_scope_view(&commit.files, false, open_file.clone()),
-                    Some(&key),
-                );
-                scope_items.push(WorkspaceChangesScopeItem {
-                    label: label.clone(),
-                    stack_key: key,
-                    menu_label: label,
-                    persisted_scope: persisted_commit_changes_scope(&commit.commit),
-                });
-            }
-            if commits.is_empty() {
-                body_stack.add_named(
-                    &workspace_empty_changes_scope_view("No commits on this workspace branch yet."),
-                    Some("commits_empty"),
-                );
-                scope_items.push(WorkspaceChangesScopeItem {
-                    label: "Commits".to_owned(),
-                    stack_key: "commits_empty".to_owned(),
-                    menu_label: "Commits".to_owned(),
-                    persisted_scope: "commits".to_owned(),
-                });
-            }
-        }
-        Err(err) => {
-            body_stack.add_named(
-                &workspace_empty_changes_scope_view(&format!(
-                    "Could not read commit file changes: {err:#}"
-                )),
-                Some("commits_error"),
-            );
-            scope_items.push(WorkspaceChangesScopeItem {
-                label: "Commits".to_owned(),
-                stack_key: "commits_error".to_owned(),
-                menu_label: "Commits".to_owned(),
-                persisted_scope: "commits".to_owned(),
-            });
-        }
+    if let Some(item) = scope_items.last().cloned() {
+        menu_entries.push(ChangesScopeMenuEntry::Item(WorkspaceChangesMenuRow {
+            item,
+            title: "Uncommitted Changes".to_owned(),
+            subtitle: None,
+            counts: None,
+        }));
     }
 
     let last_turn_key = "last_turn";
@@ -4172,11 +4146,42 @@ fn workspace_changes_panel(
     };
     body_stack.add_named(&last_turn_view, Some(last_turn_key));
     scope_items.push(WorkspaceChangesScopeItem {
-        label: "Last turn".to_owned(),
+        label: "Last Turn".to_owned(),
         stack_key: last_turn_key.to_owned(),
-        menu_label: "Last turn".to_owned(),
+        menu_label: "Last Turn".to_owned(),
         persisted_scope: "last_turn".to_owned(),
     });
+    if let Some(item) = scope_items.last().cloned() {
+        menu_entries.push(ChangesScopeMenuEntry::Item(WorkspaceChangesMenuRow {
+            item,
+            title: "Last Turn".to_owned(),
+            subtitle: None,
+            counts: None,
+        }));
+    }
+
+    match store.commit_file_change_summaries(name, WORKSPACE_COMMIT_CHANGE_LIMIT) {
+        Ok(commits) => {
+            for (index, commit) in commits.iter().enumerate() {
+                let key = format!("commit_{index}");
+                let menu_entry = commit_changes_menu_entry(&key, commit);
+                body_stack.add_named(
+                    &workspace_file_summary_scope_view(&commit.files, false, open_file.clone()),
+                    Some(&key),
+                );
+                scope_items.push(menu_entry.item.clone());
+                append_commit_changes_menu_entry(&mut menu_entries, menu_entry);
+            }
+        }
+        Err(err) => {
+            if !menu_entries.is_empty() {
+                menu_entries.push(ChangesScopeMenuEntry::Separator);
+            }
+            menu_entries.push(ChangesScopeMenuEntry::Info(format!(
+                "Could not read branch commits: {err:#}"
+            )));
+        }
+    }
 
     let saved_scope = store.workspace_changes_scope(name).unwrap_or_default();
     let selected_scope =
@@ -4191,39 +4196,54 @@ fn workspace_changes_panel(
     panel.append(&scope_feedback);
 
     let popover = gtk::Popover::new();
-    popover.add_css_class("context-menu-popover");
+    popover.add_css_class("ws-changes-popover");
     popover.set_parent(&menu_btn);
-    let menu = GBox::new(Orientation::Vertical, 4);
-    menu.add_css_class("chat-menu-list");
+    let menu = GBox::new(Orientation::Vertical, 0);
+    menu.add_css_class("ws-changes-menu-list");
 
-    for scope_item in scope_items {
-        let item = menu_text_button(&scope_item.label);
-        let body_stack_for_item = body_stack.clone();
-        let menu_btn_for_item = menu_btn.clone();
-        let popover_for_item = popover.clone();
-        let db_path_for_item = db_path.to_path_buf();
-        let workspace_name_for_item = name.to_owned();
-        let feedback_for_item = scope_feedback.clone();
-        let toast_for_item = toast_overlay.clone();
-        let refresh_for_item = refresh_hub.clone();
-        item.connect_clicked(move |_| {
-            body_stack_for_item.set_visible_child_name(&scope_item.stack_key);
-            menu_btn_for_item.set_label(&scope_item.menu_label);
-            if let Err(err) = WorkspaceStore::open_app(&db_path_for_item).and_then(|store| {
-                store.set_workspace_changes_scope(
-                    &workspace_name_for_item,
-                    Some(&scope_item.persisted_scope),
-                )
-            }) {
-                let message = format!("Could not save changes scope: {err:#}");
-                error!("{message}");
-                apply_action_feedback(&feedback_for_item, &toast_for_item, &message, true);
-            } else {
-                refresh_for_item.refresh(RefreshScope::Workspace);
+    for entry in menu_entries {
+        match entry {
+            ChangesScopeMenuEntry::Separator => {
+                let separator = Separator::new(Orientation::Horizontal);
+                separator.add_css_class("ws-changes-menu-separator");
+                menu.append(&separator);
             }
-            popover_for_item.popdown();
-        });
-        menu.append(&item);
+            ChangesScopeMenuEntry::Info(message) => {
+                let label = Label::new(Some(&message));
+                label.add_css_class("ws-changes-menu-info");
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                menu.append(&label);
+            }
+            ChangesScopeMenuEntry::Item(row) => {
+                let item = changes_scope_menu_row(&row);
+                let body_stack_for_item = body_stack.clone();
+                let menu_btn_for_item = menu_btn.clone();
+                let popover_for_item = popover.clone();
+                let db_path_for_item = db_path.to_path_buf();
+                let workspace_name_for_item = name.to_owned();
+                let feedback_for_item = scope_feedback.clone();
+                let toast_for_item = toast_overlay.clone();
+                item.connect_clicked(move |_| {
+                    body_stack_for_item.set_visible_child_name(&row.item.stack_key);
+                    menu_btn_for_item.set_label(&row.item.menu_label);
+                    if let Err(err) =
+                        WorkspaceStore::open_app(&db_path_for_item).and_then(|store| {
+                            store.set_workspace_changes_scope(
+                                &workspace_name_for_item,
+                                Some(&row.item.persisted_scope),
+                            )
+                        })
+                    {
+                        let message = format!("Could not save changes scope: {err:#}");
+                        error!("{message}");
+                        apply_action_feedback(&feedback_for_item, &toast_for_item, &message, true);
+                    }
+                    popover_for_item.popdown();
+                });
+                menu.append(&item);
+            }
+        }
     }
     popover.set_child(Some(&menu));
     menu_btn.connect_clicked(move |_| {
@@ -4231,6 +4251,211 @@ fn workspace_changes_panel(
     });
 
     panel
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceChangesMenuRow {
+    item: WorkspaceChangesScopeItem,
+    title: String,
+    subtitle: Option<String>,
+    counts: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChangesScopeMenuEntry {
+    Item(WorkspaceChangesMenuRow),
+    Separator,
+    Info(String),
+}
+
+impl ChangesScopeMenuEntry {
+    #[cfg(test)]
+    fn test_label(&self) -> &str {
+        match self {
+            ChangesScopeMenuEntry::Item(row) => row.title.as_str(),
+            ChangesScopeMenuEntry::Separator => "---",
+            ChangesScopeMenuEntry::Info(message) => message.as_str(),
+        }
+    }
+}
+
+fn commit_changes_menu_entry(
+    stack_key: &str,
+    commit: &archductor_core::workspace::CommitFileChangeSummary,
+) -> WorkspaceChangesMenuRow {
+    WorkspaceChangesMenuRow {
+        item: WorkspaceChangesScopeItem {
+            label: commit.subject.clone(),
+            stack_key: stack_key.to_owned(),
+            menu_label: short_commit(&commit.commit),
+            persisted_scope: persisted_commit_changes_scope(&commit.commit),
+        },
+        title: commit.subject.clone(),
+        subtitle: Some(short_commit(&commit.commit)),
+        counts: diff_summaries_counts_text(&commit.files),
+    }
+}
+
+fn append_commit_changes_menu_entries(
+    entries: &mut Vec<ChangesScopeMenuEntry>,
+    commits: &[archductor_core::workspace::CommitFileChangeSummary],
+) {
+    for (index, commit) in commits.iter().enumerate() {
+        append_commit_changes_menu_entry(
+            entries,
+            commit_changes_menu_entry(&format!("commit_{index}"), commit),
+        );
+    }
+}
+
+fn append_commit_changes_menu_entry(
+    entries: &mut Vec<ChangesScopeMenuEntry>,
+    entry: WorkspaceChangesMenuRow,
+) {
+    if !matches!(entries.last(), Some(ChangesScopeMenuEntry::Separator)) {
+        entries.push(ChangesScopeMenuEntry::Separator);
+    }
+    entries.push(ChangesScopeMenuEntry::Item(entry));
+}
+
+fn diff_summaries_counts_text(summaries: &[DiffFileSummary]) -> Option<String> {
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    let mut saw_text_counts = false;
+    let mut saw_binary = false;
+    for summary in summaries {
+        match (summary.additions, summary.deletions) {
+            (Some(add), Some(del)) => {
+                additions += add;
+                deletions += del;
+                saw_text_counts = true;
+            }
+            _ => saw_binary = true,
+        }
+    }
+    if saw_text_counts {
+        Some(format!("+{additions} -{deletions}"))
+    } else if saw_binary {
+        Some("binary".to_owned())
+    } else {
+        None
+    }
+}
+
+fn changes_scope_menu_row(row: &WorkspaceChangesMenuRow) -> Button {
+    let button = Button::new();
+    button.add_css_class("ws-changes-menu-row");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(true);
+
+    let content = GBox::new(Orientation::Horizontal, 12);
+    content.set_hexpand(true);
+    let labels = GBox::new(Orientation::Vertical, 1);
+    labels.set_hexpand(true);
+
+    let title = Label::new(Some(&row.title));
+    title.add_css_class("ws-changes-menu-title");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    labels.append(&title);
+
+    if let Some(subtitle) = &row.subtitle {
+        let subtitle_label = Label::new(Some(subtitle));
+        subtitle_label.add_css_class("ws-changes-menu-subtitle");
+        subtitle_label.set_xalign(0.0);
+        subtitle_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        labels.append(&subtitle_label);
+    }
+    content.append(&labels);
+
+    if let Some(counts) = &row.counts {
+        let counts_label = Label::new(Some(counts));
+        counts_label.add_css_class("ws-changes-menu-counts");
+        counts_label.set_xalign(1.0);
+        content.append(&counts_label);
+    }
+
+    button.set_child(Some(&content));
+    button
+}
+
+struct FileSummaryScopeConfig {
+    label: &'static str,
+    stack_key: &'static str,
+    menu_label: &'static str,
+    persisted_scope: &'static str,
+    show_state: bool,
+}
+
+#[derive(Debug)]
+struct FileSummaryScopeResult {
+    item: WorkspaceChangesScopeItem,
+    summaries: Option<Vec<DiffFileSummary>>,
+    message: String,
+}
+
+fn file_summary_scope_from_result(
+    label: &'static str,
+    stack_key: &'static str,
+    persisted_scope: &'static str,
+    result: anyhow::Result<Vec<DiffFileSummary>>,
+) -> FileSummaryScopeResult {
+    file_summary_scope_from_result_with_menu(label, stack_key, label, persisted_scope, result)
+}
+
+fn file_summary_scope_from_result_with_menu(
+    label: &'static str,
+    stack_key: &'static str,
+    menu_label: &'static str,
+    persisted_scope: &'static str,
+    result: anyhow::Result<Vec<DiffFileSummary>>,
+) -> FileSummaryScopeResult {
+    match result {
+        Ok(summaries) => FileSummaryScopeResult {
+            item: WorkspaceChangesScopeItem {
+                label: label.to_owned(),
+                stack_key: stack_key.to_owned(),
+                menu_label: menu_label.to_owned(),
+                persisted_scope: persisted_scope.to_owned(),
+            },
+            summaries: Some(summaries),
+            message: String::new(),
+        },
+        Err(err) => FileSummaryScopeResult {
+            item: WorkspaceChangesScopeItem {
+                label: label.to_owned(),
+                stack_key: stack_key.to_owned(),
+                menu_label: menu_label.to_owned(),
+                persisted_scope: persisted_scope.to_owned(),
+            },
+            summaries: None,
+            message: format!("Could not read {label}: {err:#}"),
+        },
+    }
+}
+
+fn add_file_summary_scope(
+    body_stack: &Stack,
+    scope_items: &mut Vec<WorkspaceChangesScopeItem>,
+    config: FileSummaryScopeConfig,
+    result: anyhow::Result<Vec<DiffFileSummary>>,
+    open_file: Option<OpenWorkspaceFile>,
+) {
+    let scope = file_summary_scope_from_result_with_menu(
+        config.label,
+        config.stack_key,
+        config.menu_label,
+        config.persisted_scope,
+        result,
+    );
+    let view = match scope.summaries.as_deref() {
+        Some(summaries) => {
+            workspace_file_summary_scope_view(summaries, config.show_state, open_file)
+        }
+        None => workspace_empty_changes_scope_view(&scope.message),
+    };
+    body_stack.add_named(&view, Some(config.stack_key));
+    scope_items.push(scope.item);
 }
 
 fn workspace_file_summary_scope_view(
@@ -4306,17 +4531,8 @@ fn workspace_file_summary_row(
     summary: &DiffFileSummary,
     show_state: bool,
     open_file: Option<OpenWorkspaceFile>,
-) -> Button {
+) -> Widget {
     let model = workspace_change_file_row_model(summary, show_state);
-    let button = Button::new();
-    button.add_css_class("ws-file-summary-row");
-    button.set_halign(Align::Fill);
-    button.set_hexpand(true);
-    if let Some(open_file) = open_file {
-        let path = model.path.clone();
-        button.connect_clicked(move |_| open_file(path.as_str()));
-    }
-
     let row = GBox::new(Orientation::Horizontal, file_tree_row_spacing());
     row.add_css_class("ws-file-summary-row-content");
     row.set_hexpand(true);
@@ -4342,8 +4558,40 @@ fn workspace_file_summary_row(
     counts.add_css_class("ws-file-summary-counts");
     row.append(&counts);
 
-    button.set_child(Some(&row));
-    button
+    match workspace_file_summary_row_kind(open_file.is_some()) {
+        WorkspaceFileSummaryRowKind::Button => {
+            let button = Button::new();
+            button.add_css_class("ws-file-summary-row");
+            button.set_halign(Align::Fill);
+            button.set_hexpand(true);
+            if let Some(open_file) = open_file {
+                let path = model.path.clone();
+                button.connect_clicked(move |_| open_file(path.as_str()));
+            }
+            button.set_child(Some(&row));
+            button.upcast()
+        }
+        WorkspaceFileSummaryRowKind::Static => {
+            row.add_css_class("ws-file-summary-row");
+            row.set_halign(Align::Fill);
+            row.set_hexpand(true);
+            row.upcast()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceFileSummaryRowKind {
+    Button,
+    Static,
+}
+
+fn workspace_file_summary_row_kind(has_open_file: bool) -> WorkspaceFileSummaryRowKind {
+    if has_open_file {
+        WorkspaceFileSummaryRowKind::Button
+    } else {
+        WorkspaceFileSummaryRowKind::Static
+    }
 }
 
 fn diff_counts_text(summary: &DiffFileSummary) -> String {
@@ -4426,9 +4674,10 @@ fn workspace_diff_sections(
     let base_ref = store
         .workspace_base_ref(name)
         .unwrap_or_else(|_| "base".to_owned());
-    let mut out = format!("Target: {target}\nBase comparison: {base_ref}\n\n");
+    let mut out =
+        format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
     out.push_str(&format_diff_section(
-        "Base comparison",
+        "Working tree changes",
         store.unified_diff_against_base(name, path_ref),
         limit,
     ));
@@ -7948,6 +8197,134 @@ mod tests {
         assert_eq!(row.path, "src/ui/panel.rs");
         assert_eq!(row.counts, "+12 -3");
         assert_eq!(row.state, Some("[staged]"));
+    }
+
+    #[test]
+    fn changed_file_rows_are_interactive_only_when_open_action_exists() {
+        assert_eq!(
+            workspace_file_summary_row_kind(false),
+            WorkspaceFileSummaryRowKind::Static
+        );
+        assert_eq!(
+            workspace_file_summary_row_kind(true),
+            WorkspaceFileSummaryRowKind::Button
+        );
+    }
+
+    #[test]
+    fn summary_query_errors_render_error_scopes() {
+        let scope = file_summary_scope_from_result(
+            "All changes",
+            "all_changes",
+            "all",
+            Err(anyhow::anyhow!("bad revision")),
+        );
+
+        assert_eq!(scope.item.label, "All changes");
+        assert_eq!(scope.item.stack_key, "all_changes");
+        assert!(scope.message.contains("Could not read All changes"));
+        assert!(scope.message.contains("bad revision"));
+    }
+
+    #[test]
+    fn commit_changes_menu_entry_shows_subject_hash_and_counts() {
+        let commit = archductor_core::workspace::CommitFileChangeSummary {
+            commit: "abcdef1234567890".to_owned(),
+            subject: "feat: wire diff viewer".to_owned(),
+            files: vec![
+                DiffFileSummary {
+                    path: "src/app.rs".to_owned(),
+                    additions: Some(5),
+                    deletions: Some(1),
+                    staged: false,
+                    unstaged: false,
+                    untracked: false,
+                },
+                DiffFileSummary {
+                    path: "assets/logo.png".to_owned(),
+                    additions: None,
+                    deletions: None,
+                    staged: false,
+                    unstaged: false,
+                    untracked: false,
+                },
+            ],
+        };
+
+        let entry = commit_changes_menu_entry("commit_0", &commit);
+
+        assert_eq!(entry.title, "feat: wire diff viewer");
+        assert_eq!(entry.subtitle.as_deref(), Some("abcdef1"));
+        assert_eq!(entry.counts.as_deref(), Some("+5 -1"));
+        assert_eq!(entry.item.persisted_scope, "commit:abcdef1234567890");
+    }
+
+    #[test]
+    fn changes_menu_entries_place_commits_inline_after_last_turn() {
+        let mut entries = Vec::new();
+        entries.push(ChangesScopeMenuEntry::Item(WorkspaceChangesMenuRow {
+            item: WorkspaceChangesScopeItem {
+                label: "All changes".to_owned(),
+                stack_key: "all_changes".to_owned(),
+                menu_label: "All changes".to_owned(),
+                persisted_scope: "all".to_owned(),
+            },
+            title: "All changes".to_owned(),
+            subtitle: None,
+            counts: None,
+        }));
+        entries.push(ChangesScopeMenuEntry::Item(WorkspaceChangesMenuRow {
+            item: WorkspaceChangesScopeItem {
+                label: "Uncommitted changes".to_owned(),
+                stack_key: "uncommitted".to_owned(),
+                menu_label: "Uncommitted".to_owned(),
+                persisted_scope: "uncommitted".to_owned(),
+            },
+            title: "Uncommitted changes".to_owned(),
+            subtitle: None,
+            counts: None,
+        }));
+        entries.push(ChangesScopeMenuEntry::Item(WorkspaceChangesMenuRow {
+            item: WorkspaceChangesScopeItem {
+                label: "Last turn".to_owned(),
+                stack_key: "last_turn".to_owned(),
+                menu_label: "Last turn".to_owned(),
+                persisted_scope: "last_turn".to_owned(),
+            },
+            title: "Last turn".to_owned(),
+            subtitle: None,
+            counts: None,
+        }));
+        append_commit_changes_menu_entries(
+            &mut entries,
+            &[archductor_core::workspace::CommitFileChangeSummary {
+                commit: "1234567890abcdef".to_owned(),
+                subject: "fix: base diff".to_owned(),
+                files: vec![DiffFileSummary {
+                    path: "README.md".to_owned(),
+                    additions: Some(2),
+                    deletions: Some(0),
+                    staged: false,
+                    unstaged: false,
+                    untracked: false,
+                }],
+            }],
+        );
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(ChangesScopeMenuEntry::test_label)
+                .collect::<Vec<_>>(),
+            vec![
+                "All changes",
+                "Uncommitted changes",
+                "Last turn",
+                "---",
+                "fix: base diff",
+            ]
+        );
+        assert!(!entries.iter().any(|entry| entry.test_label() == "Commits"));
     }
 
     #[test]

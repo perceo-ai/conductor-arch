@@ -1588,21 +1588,7 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
             return;
         }
         if std::process::Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", "start", "cmd.exe", "/K", &full_cmd])
-            .spawn()
-            .is_ok()
-        {
-            return;
-        }
-        if std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "Start-Process powershell -ArgumentList '-NoProfile','-NoExit','-Command',{}",
-                    powershell_single_quote(&full_cmd)
-                ),
-            ])
+            .args(windows_cmd_terminal_fallback_args(&full_cmd))
             .spawn()
             .is_ok()
         {
@@ -1671,9 +1657,17 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
     }
 }
 
-#[cfg(windows)]
-fn powershell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+#[cfg(any(test, windows))]
+fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
+    vec![
+        "/D".to_owned(),
+        "/S".to_owned(),
+        "/C".to_owned(),
+        "start".to_owned(),
+        "cmd.exe".to_owned(),
+        "/K".to_owned(),
+        full_cmd.to_owned(),
+    ]
 }
 
 // ── STYLES ────────────────────────────────────────────────────────────────
@@ -1777,6 +1771,24 @@ mod tests {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
         assert_eq!(preferences.theme, Some(ViewTheme::Light));
+    }
+
+    #[test]
+    fn windows_terminal_fallback_launches_cmd_with_cmd_syntax() {
+        let args = windows_cmd_terminal_fallback_args("cargo test & echo. & pause");
+
+        assert_eq!(
+            args,
+            vec![
+                "/D".to_owned(),
+                "/S".to_owned(),
+                "/C".to_owned(),
+                "start".to_owned(),
+                "cmd.exe".to_owned(),
+                "/K".to_owned(),
+                "cargo test & echo. & pause".to_owned(),
+            ]
+        );
     }
 
     #[test]
