@@ -5,13 +5,13 @@ use archductor_core::settings::{
     app_shared_customization_settings_toml, customization_settings_from_toml,
     default_repository_settings_toml, ensure_repository_config,
     explicit_empty_collection_fields_from_toml, inspect_repository_settings,
-    load_app_shared_settings, load_effective_repository_settings,
-    load_repository_settings_for_layer, present_collection_fields_from_toml,
-    repository_customization_settings_toml, repository_settings_from_toml,
-    save_app_shared_settings_with_collection_intent, save_repository_settings_replacing,
-    save_repository_settings_with_collection_intent, AgentProfileSettings, GitSettings, PromptKind,
-    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsCollectionField,
-    SettingsLayer,
+    load_app_shared_settings, load_effective_app_shared_settings,
+    load_effective_repository_settings, load_repository_settings_for_layer,
+    present_collection_fields_from_toml, repository_customization_settings_toml,
+    repository_settings_from_toml, save_app_shared_settings_with_collection_intent,
+    save_repository_settings_replacing, save_repository_settings_with_collection_intent,
+    AgentProfileSettings, GitSettings, PromptKind, PromptSettings, ProviderSettings,
+    RepositorySettings, ScriptSettings, SettingsCollectionField, SettingsLayer,
 };
 use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
@@ -885,17 +885,11 @@ pub(crate) fn build_settings_page(
                 String,
             )> = match scope {
                 SettingsUiScope::Shared => load_app_shared_settings(&shared_settings_path_load)
-                    .and_then(|settings| {
+                    .and_then(|raw| {
+                        let effective =
+                            load_effective_app_shared_settings(&shared_settings_path_load)?;
                         app_shared_customization_settings_toml(&shared_settings_path_load).map(
-                            |source| {
-                                (
-                                    SettingsSaveTarget::Shared,
-                                    settings.clone(),
-                                    settings,
-                                    None,
-                                    source,
-                                )
-                            },
+                            |source| (SettingsSaveTarget::Shared, effective, raw, None, source),
                         )
                     }),
                 SettingsUiScope::Local => repository_root(&db_path_load_settings, &repo_name)
@@ -1083,17 +1077,18 @@ pub(crate) fn build_settings_page(
                             .collect::<Vec<_>>()
                             .join("\n"),
                     );
-                    let prompts = settings.prompts.as_ref().cloned().unwrap_or_default();
-                    let raw_prompts = raw_settings.prompts.as_ref().cloned().unwrap_or_default();
                     for editor in &prompt_editors_load {
                         editor
                             .buffer
-                            .set_text(prompts.get(editor.kind).unwrap_or(""));
-                        editor.inherited_label.set_visible(
-                            scope == SettingsUiScope::Local
-                                && raw_prompts.get(editor.kind).is_none()
-                                && prompts.get(editor.kind).is_some(),
-                        );
+                            .set_text(prompt_editor_display_text(&settings, editor.kind));
+                        editor
+                            .inherited_label
+                            .set_visible(prompt_editor_shows_inherited_label(
+                                scope,
+                                &settings,
+                                &raw_settings,
+                                editor.kind,
+                            ));
                     }
                     customization_buffer_load.set_text(&customization_source);
                     settings_result_load.set_text(match target {
@@ -2177,6 +2172,33 @@ fn prompt_settings_is_empty(settings: &PromptSettings) -> bool {
     settings == &PromptSettings::default()
 }
 
+fn prompt_editor_display_text(settings: &RepositorySettings, kind: PromptKind) -> &str {
+    settings
+        .prompts
+        .as_ref()
+        .and_then(|prompts| prompts.get(kind))
+        .unwrap_or("")
+}
+
+fn prompt_editor_shows_inherited_label(
+    scope: SettingsUiScope,
+    settings: &RepositorySettings,
+    raw_settings: &RepositorySettings,
+    kind: PromptKind,
+) -> bool {
+    scope == SettingsUiScope::Local
+        && raw_settings
+            .prompts
+            .as_ref()
+            .and_then(|prompts| prompts.get(kind))
+            .is_none()
+        && settings
+            .prompts
+            .as_ref()
+            .and_then(|prompts| prompts.get(kind))
+            .is_some()
+}
+
 fn set_prompt_value(settings: &mut PromptSettings, kind: PromptKind, value: Option<String>) {
     match kind {
         PromptKind::NewWorkspace => settings.new_workspace = value,
@@ -2832,6 +2854,76 @@ notification_rules = []
             target == SettingsSaveTarget::Local("alpha".to_owned())
         }));
         assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn shared_prompt_editor_displays_effective_default_values() {
+        let settings = RepositorySettings {
+            prompts: Some(PromptSettings {
+                general: Some("Default general prompt".to_owned()),
+                create_pr: Some("Shared PR prompt".to_owned()),
+                ..PromptSettings::default()
+            }),
+            ..RepositorySettings::default()
+        };
+        let raw = RepositorySettings {
+            prompts: Some(PromptSettings {
+                create_pr: Some("Shared PR prompt".to_owned()),
+                ..PromptSettings::default()
+            }),
+            ..RepositorySettings::default()
+        };
+
+        assert_eq!(
+            prompt_editor_display_text(&settings, PromptKind::General),
+            "Default general prompt"
+        );
+        assert_eq!(
+            prompt_editor_display_text(&settings, PromptKind::CreatePr),
+            "Shared PR prompt"
+        );
+        assert!(!prompt_editor_shows_inherited_label(
+            SettingsUiScope::Shared,
+            &settings,
+            &raw,
+            PromptKind::General
+        ));
+    }
+
+    #[test]
+    fn local_prompt_editor_marks_inherited_effective_values() {
+        let settings = RepositorySettings {
+            prompts: Some(PromptSettings {
+                general: Some("Inherited general prompt".to_owned()),
+                create_pr: Some("Local PR prompt".to_owned()),
+                ..PromptSettings::default()
+            }),
+            ..RepositorySettings::default()
+        };
+        let raw = RepositorySettings {
+            prompts: Some(PromptSettings {
+                create_pr: Some("Local PR prompt".to_owned()),
+                ..PromptSettings::default()
+            }),
+            ..RepositorySettings::default()
+        };
+
+        assert_eq!(
+            prompt_editor_display_text(&settings, PromptKind::General),
+            "Inherited general prompt"
+        );
+        assert!(prompt_editor_shows_inherited_label(
+            SettingsUiScope::Local,
+            &settings,
+            &raw,
+            PromptKind::General
+        ));
+        assert!(!prompt_editor_shows_inherited_label(
+            SettingsUiScope::Local,
+            &settings,
+            &raw,
+            PromptKind::CreatePr
+        ));
     }
 
     #[test]

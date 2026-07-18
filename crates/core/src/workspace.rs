@@ -5932,17 +5932,14 @@ mutation($threadId: ID!) {{
         thread_id: i64,
         content: &str,
     ) -> Result<String> {
-        let accepts_metadata = !self.thread_has_agent_message(thread_id)?;
         let (content, directive) = extract_archductor_metadata_directive(content);
-        if accepts_metadata {
-            if let Some(directive) = directive {
-                if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
-                    warn!(
-                        thread_id,
-                        error = %err,
-                        "failed to apply archductor metadata directive"
-                    );
-                }
+        if let Some(directive) = directive {
+            if let Err(err) = self.apply_archductor_metadata_directive(thread_id, directive) {
+                warn!(
+                    thread_id,
+                    error = %err,
+                    "failed to apply archductor metadata directive"
+                );
             }
         }
         Ok(content)
@@ -5977,7 +5974,7 @@ mutation($threadId: ID!) {{
             .as_deref()
             .and_then(normalize_chat_title)
         {
-            if is_default_chat_thread_title_core(&thread.title) || thread.title == chat_title {
+            if thread.title != chat_title {
                 self.update_chat_thread_title(thread_id, &chat_title)?;
             }
         }
@@ -6071,15 +6068,6 @@ mutation($threadId: ID!) {{
     fn workspace_has_user_message(&self, thread_id: i64) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1 AND role = 'user'",
-            [thread_id],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    fn thread_has_agent_message(&self, thread_id: i64) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1 AND role = 'agent'",
             [thread_id],
             |row| row.get(0),
         )?;
@@ -8621,15 +8609,6 @@ fn normalize_chat_title(raw: &str) -> Option<String> {
         .trim()
         .to_owned();
     (!title.is_empty()).then_some(title)
-}
-
-fn is_default_chat_thread_title_core(title: &str) -> bool {
-    let title = title.trim();
-    title == "New Chat"
-        || title
-            .strip_prefix("New Chat ")
-            .and_then(|suffix| suffix.parse::<usize>().ok())
-            .is_some()
 }
 
 fn slugify(text: &str) -> String {
@@ -20276,7 +20255,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn later_agent_metadata_directives_do_not_rename_workspace() {
+    fn workspace_metadata_directives_only_rename_workspace_and_branch_once() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "New Chat", None)
@@ -20287,7 +20266,7 @@ spotlight_testing = true
         store
             .append_agent_chat_message_with_metadata(
                 thread.id,
-                "First response.",
+                "<archductor_metadata>{\"workspace_name\":\"first rename\",\"branch_name\":\"lc/first-rename\"}</archductor_metadata>\nFirst response.",
                 "agent_screen_parse",
             )
             .unwrap();
@@ -20300,13 +20279,13 @@ spotlight_testing = true
             )
             .unwrap();
 
+        let workspace = store.get_by_name("first-rename").unwrap();
+        assert_eq!(workspace.branch, "lc/first-rename");
         assert!(store.get_by_name("late-rename").is_err());
-        let workspace = store.get_by_name("berlin").unwrap();
-        assert_eq!(workspace.branch, "lc/berlin");
     }
 
     #[test]
-    fn later_agent_metadata_directives_are_hidden_without_applying_metadata() {
+    fn later_agent_metadata_directives_are_hidden_and_can_retitle_chat() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "New Chat", None)
@@ -20317,7 +20296,7 @@ spotlight_testing = true
         store
             .append_agent_chat_message_with_metadata(
                 thread.id,
-                "First response.",
+                "<archductor_metadata>{\"workspace_name\":\"first rename\",\"branch_name\":\"lc/first-rename\",\"chat_title\":\"Initial Rename\"}</archductor_metadata>\nFirst response.",
                 "agent_screen_parse",
             )
             .unwrap();
@@ -20331,11 +20310,44 @@ spotlight_testing = true
             .unwrap();
 
         assert!(store.get_by_name("late-rename").is_err());
+        let workspace = store.get_by_name("first-rename").unwrap();
+        assert_eq!(workspace.branch, "lc/first-rename");
         let updated_thread = store.get_chat_thread_record(thread.id).unwrap();
-        assert_eq!(updated_thread.title, "New Chat");
+        assert_eq!(updated_thread.title, "Late Rename");
         let messages = store.list_chat_messages(thread.id).unwrap();
         assert_eq!(messages[2].content, "Continuing.");
         assert!(!messages[2].content.contains("archductor_metadata"));
+    }
+
+    #[test]
+    fn later_agent_metadata_directives_can_retitle_same_chat_repeatedly() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"chat_title\":\"Initial Title\"}</archductor_metadata>\nFirst.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"chat_title\":\"Better Title\"}</archductor_metadata>\nContinuing.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let updated_thread = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(updated_thread.title, "Better Title");
+        let workspace = store.get_by_name("berlin").unwrap();
+        assert_eq!(workspace.branch, "lc/berlin");
     }
 
     #[test]

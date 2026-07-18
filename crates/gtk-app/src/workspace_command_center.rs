@@ -2054,15 +2054,11 @@ fn workspace_prompt_tab_view(
     let modal_title_label = Label::new(Some(modal_title));
     modal_title_label.add_css_class("detail-label");
     modal_title_label.set_xalign(0.5);
-    let stage_btn = text_button(match title {
-        "Setup Prompt" => "Queue Bootstrap Draft",
-        "Run Prompt" => "Queue Launch Draft",
-        _ => "Queue Prompt",
-    });
+    let stage_btn = text_button(workspace_prompt_queue_button_label(title));
     stage_btn.add_css_class("suggested-action");
     let prompt_text = prompt.to_owned();
     stage_btn.connect_clicked(move |_| {
-        app_state.set_staged_review_prompt(Some(prompt_text.clone()));
+        queue_workspace_prompt_draft(&app_state, &prompt_text);
     });
     modal.append(&modal_title_label);
     modal.append(&stage_btn);
@@ -2070,6 +2066,21 @@ fn workspace_prompt_tab_view(
     panel.append(&prompt_overlay);
 
     panel
+}
+
+fn workspace_prompt_queue_button_label(title: &str) -> &'static str {
+    match title {
+        "Setup Prompt" => "Queue Bootstrap Draft",
+        "Run Prompt" => "Queue Launch Draft",
+        _ => "Queue Prompt",
+    }
+}
+
+fn queue_workspace_prompt_draft(app_state: &AppState, prompt: &str) {
+    let prompt = prompt.trim();
+    if !prompt.is_empty() {
+        app_state.set_staged_review_prompt(Some(prompt.to_owned()));
+    }
 }
 
 fn workspace_terminal_tab_view(
@@ -7899,6 +7910,39 @@ mod tests {
         ] {
             assert!(chat_outcome_requires_nav_refresh(&outcome));
         }
+    }
+
+    #[test]
+    fn setup_and_run_prompt_tabs_use_specific_queue_button_labels() {
+        assert_eq!(
+            workspace_prompt_queue_button_label("Setup Prompt"),
+            "Queue Bootstrap Draft"
+        );
+        assert_eq!(
+            workspace_prompt_queue_button_label("Run Prompt"),
+            "Queue Launch Draft"
+        );
+        assert_eq!(
+            workspace_prompt_queue_button_label("Review Prompt"),
+            "Queue Prompt"
+        );
+    }
+
+    #[test]
+    fn prompt_tab_queue_button_stages_prompt_for_selected_chat() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            crate::AppPage::Workspace,
+        );
+
+        queue_workspace_prompt_draft(&state, "  Bootstrap repo setup.  ");
+
+        assert_eq!(
+            state.staged_review_prompt().as_deref(),
+            Some("Bootstrap repo setup.")
+        );
     }
 
     fn test_checks_summary(
