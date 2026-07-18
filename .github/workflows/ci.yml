@@ -413,12 +413,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  linux-release-build:
-    name: Linux release build
+  linux-release-packages:
+    name: Linux release packages
     needs: [preflight]
     if: needs.preflight.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -430,7 +430,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            fuse libfuse2 git sqlite3 openssh-client
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -440,6 +441,85 @@ jobs:
 
       - name: Smoke release CLI doctor
         run: target/release/archductor doctor
+
+      - name: Derive preview version
+        id: version
+        run: echo "version=0.0.0-ci.${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Create dist directory
+        run: mkdir -p dist
+
+      - name: Package tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tar -czf "dist/archductor-${VERSION}-linux-x86_64.tar.gz" \
+            -C target/release archductor archductor-gtk
+
+      - name: Install nfpm
+        run: |
+          set -euxo pipefail
+          NFPM_VERSION="2.38.0"
+          curl -fsSL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build .deb
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: nfpm package --packager deb --target dist/
+
+      - name: Build .rpm
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: nfpm package --packager rpm --target dist/
+
+      - name: Install appimagetool
+        run: |
+          set -euxo pipefail
+          sudo curl -fsSL -o /usr/local/bin/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          sudo chmod +x /usr/local/bin/appimagetool
+
+      - name: Assemble AppDir
+        run: |
+          set -euxo pipefail
+          APPDIR="packaging/appimage/archductor.AppDir"
+          install -Dm755 target/release/archductor "$APPDIR/usr/bin/archductor"
+          install -Dm755 target/release/archductor-gtk "$APPDIR/usr/bin/archductor-gtk"
+
+      - name: Build AppImage
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          APPDIR="packaging/appimage/archductor.AppDir"
+          appimagetool --appimage-extract-and-run "$APPDIR" \
+            "dist/archductor-${VERSION}-x86_64.AppImage"
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS
+
+      - name: Scan release artifacts with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: dist
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          scanners: vuln
+          timeout: 10m
+
+      - name: Upload Linux release preview artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-linux-release-packages
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
 
   windows-port:
     name: Windows core CLI build and smoke
@@ -493,6 +573,121 @@ jobs:
 
       - name: Smoke Windows CLI
         run: .\target\debug\archductor.exe doctor
+
+  windows-release-package:
+    name: Windows release package
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
+      CC_x86_64_pc_windows_gnu: gcc
+      AR_x86_64_pc_windows_gnu: ar
+      PKG_CONFIG: pkgconf
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      PKG_CONFIG_PATH: C:\msys64\ucrt64\lib\pkgconfig
+      PKG_CONFIG_PATH_x86_64_pc_windows_gnu: C:\msys64\ucrt64\lib\pkgconfig
+      PKG_CONFIG_x86_64_pc_windows_gnu: pkgconf
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install Windows GTK toolchain
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+
+      - name: Add UCRT64 runtime to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-windows-release-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-release-cargo-
+
+      - name: Verify Windows GTK pkg-config
+        shell: pwsh
+        run: |
+          pkgconf --version
+          pkgconf --libs --cflags glib-2.0
+          gcc --version
+
+      - name: Build Windows release binaries
+        run: cargo build --workspace --release --target x86_64-pc-windows-gnu --locked
+
+      - name: Derive preview version
+        id: version
+        shell: pwsh
+        run: |
+          "version=0.0.0-ci.$env:GITHUB_RUN_ID" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Assemble portable Windows bundle
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $bundle = "dist\archductor-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item target\x86_64-pc-windows-gnu\release\archductor.exe $bundle
+          Copy-Item target\x86_64-pc-windows-gnu\release\archductor-gtk.exe $bundle
+          Copy-Item target\x86_64-pc-windows-gnu\release\archcar.exe $bundle
+          Copy-Item C:\msys64\ucrt64\bin\*.dll $bundle
+          New-Item -ItemType Directory -Force -Path "$bundle\lib" | Out-Null
+          Copy-Item C:\msys64\ucrt64\lib\gdk-pixbuf-2.0 "$bundle\lib" -Recurse
+          if (Test-Path C:\msys64\ucrt64\lib\gtk-4.0) {
+            Copy-Item C:\msys64\ucrt64\lib\gtk-4.0 "$bundle\lib" -Recurse
+          }
+          New-Item -ItemType Directory -Force -Path "$bundle\share" | Out-Null
+          Copy-Item C:\msys64\ucrt64\share\glib-2.0 "$bundle\share" -Recurse
+          Copy-Item C:\msys64\ucrt64\share\icons "$bundle\share" -Recurse
+          Copy-Item C:\msys64\ucrt64\share\mime "$bundle\share" -Recurse
+          $originalPath = $env:PATH
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and ($_ -notlike 'C:\msys64\ucrt64\bin*')
+          }) -join ';'
+          try {
+            Push-Location $bundle
+            .\archductor.exe doctor
+          } finally {
+            Pop-Location
+            $env:PATH = $originalPath
+          }
+          Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip"
+          $archive = Get-Item "$bundle.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive.FullName).Hash.ToLowerInvariant()
+          "$hash  $($archive.Name)" | Set-Content dist\SHA256SUMS-windows.txt
+
+      - name: Upload Windows release preview artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-windows-release-package
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 7
 
   linux-musl:
     name: Linux musl build
@@ -601,8 +796,9 @@ jobs:
       - linux-clippy
       - linux-tests
       - linux-smoke
-      - linux-release-build
+      - linux-release-packages
       - windows-port
+      - windows-release-package
       - linux-musl
       - linux-distros
     if: ${{ always() }}
@@ -621,8 +817,9 @@ jobs:
             linux-clippy=${{ needs.linux-clippy.result }}
             linux-tests=${{ needs.linux-tests.result }}
             linux-smoke=${{ needs.linux-smoke.result }}
-            linux-release-build=${{ needs.linux-release-build.result }}
+            linux-release-packages=${{ needs.linux-release-packages.result }}
             windows-port=${{ needs.windows-port.result }}
+            windows-release-package=${{ needs.windows-release-package.result }}
             linux-musl=${{ needs.linux-musl.result }}
             linux-distros=${{ needs.linux-distros.result }}
         run: |
