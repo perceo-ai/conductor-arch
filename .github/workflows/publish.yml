@@ -356,6 +356,24 @@ jobs:
             archlinux:base-devel \
             bash -lc 'useradd -m builder && chown -R builder:builder /pkg && su builder -c "cd /pkg && makepkg --printsrcinfo > .SRCINFO"'
 
+      - name: Validate AUR package
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -v "$PWD/aur-package:/pkg" \
+            archlinux:base-devel \
+            bash -lc '
+              set -euxo pipefail
+              pacman -Syu --noconfirm \
+                cargo dbus git github-cli gtk4 libadwaita openssh pkgconf rust sqlite xorg-server-xvfb
+              useradd -m builder
+              chown -R builder:builder /pkg
+              su builder -c "cd /pkg && makepkg --noconfirm"
+              pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*
+              archductor doctor
+              xvfb-run -a timeout 15s archductor-gtk --page dashboard
+            '
+
       - name: Publish to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -440,6 +458,26 @@ jobs:
           source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/archive/refs/tags/v${VERSION}.tar.gz"
           checksum="$(curl -fsSL "$source_url" | sha256sum | awk '{print $1}')"
           scripts/update-homebrew-formula.sh "$VERSION" "$checksum"
+
+      - name: Install Homebrew
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends build-essential curl file git procps xz-utils xvfb
+          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+
+      - name: Validate Homebrew formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euxo pipefail
+          brew --version
+          brew audit --strict --online --formula packaging/homebrew/Formula/archductor.rb
+          brew install --build-from-source packaging/homebrew/Formula/archductor.rb
+          brew test archductor
+          archductor doctor
+          xvfb-run -a timeout 15s archductor-gtk --page dashboard
 
       - name: Publish formula to tap
         env:

@@ -64,6 +64,21 @@ fn publish_build_uses_ci_verified_release_packaging() {
         "Windows release should use the PATH-resolved UCRT64 gcc executable"
     );
     assert!(
+        publish.contains("Validate AUR package")
+            && publish.contains("makepkg --noconfirm")
+            && publish.contains("pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*")
+            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard"),
+        "publish should build, install, and smoke-test the AUR package before publishing"
+    );
+    assert!(
+        publish.contains("Validate Homebrew formula")
+            && publish.contains("brew audit --strict --online --formula")
+            && publish.contains("brew install --build-from-source packaging/homebrew/Formula/archductor.rb")
+            && publish.contains("brew test archductor")
+            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard"),
+        "publish should audit, install, test, and smoke-test the Homebrew formula before publishing"
+    );
+    assert!(
         !publish.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe")
             && !ci.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe"),
         "absolute MSYS pkgconf paths failed to spawn in GitHub Actions"

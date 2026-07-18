@@ -115,8 +115,16 @@ the AUR package:
 scripts/update-aur-checksum.sh 0.1.0 <64-character-sha256>
 ```
 
-Then run `makepkg -si` from `packaging/aur` on Arch before publishing. AUR
-publishes from a Git repository at
+Then install and smoke the AUR package on Arch before publishing:
+
+```bash
+cd packaging/aur
+makepkg -si
+archductor doctor
+xvfb-run -a timeout 15s archductor-gtk --page dashboard
+```
+
+AUR publishes from a Git repository at
 `ssh://aur@aur.archlinux.org/archductor.git`; commit `PKGBUILD` and `.SRCINFO`
 to its `master` branch.
 
@@ -133,7 +141,17 @@ scripts/update-homebrew-formula.sh 0.1.0 <64-character-sha256>
 cp packaging/homebrew/Formula/archductor.rb ../homebrew-tap/Formula/archductor.rb
 ```
 
-Then commit and push the tap repository.
+Then install, audit, test, and smoke the formula on Linuxbrew before publishing:
+
+```bash
+brew audit --strict --online --formula packaging/homebrew/Formula/archductor.rb
+brew install --build-from-source packaging/homebrew/Formula/archductor.rb
+brew test archductor
+archductor doctor
+xvfb-run -a timeout 15s archductor-gtk --page dashboard
+```
+
+After the checks pass, commit and push the tap repository.
 
 ## Nix
 
