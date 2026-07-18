@@ -188,11 +188,7 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
       CC_x86_64_pc_windows_gnu: gcc
       AR_x86_64_pc_windows_gnu: ar
-      PKG_CONFIG: pkgconf
       PKG_CONFIG_ALLOW_CROSS: "1"
-      PKG_CONFIG_PATH: C:\msys64\ucrt64\lib\pkgconfig
-      PKG_CONFIG_PATH_x86_64_pc_windows_gnu: C:\msys64\ucrt64\lib\pkgconfig
-      PKG_CONFIG_x86_64_pc_windows_gnu: pkgconf
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -200,6 +196,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Windows GTK toolchain
+        id: msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
           msystem: UCRT64
@@ -210,9 +207,20 @@ jobs:
             mingw-w64-ucrt-x86_64-gtk4
             mingw-w64-ucrt-x86_64-libadwaita
 
-      - name: Add UCRT64 runtime to PATH
+      - name: Configure Windows GTK environment
         shell: pwsh
-        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
+        run: |
+          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64"
+          $pkgconf = "$ucrt\bin\pkgconf.exe"
+          $pkgConfigPath = "$ucrt\lib\pkgconfig"
+          Add-Content -Path $env:GITHUB_PATH -Value "$ucrt\bin"
+          @(
+            "UCRT64_ROOT=$ucrt",
+            "PKG_CONFIG=$pkgconf",
+            "PKG_CONFIG_x86_64_pc_windows_gnu=$pkgconf",
+            "PKG_CONFIG_PATH=$pkgConfigPath",
+            "PKG_CONFIG_PATH_x86_64_pc_windows_gnu=$pkgConfigPath"
+          ) | Add-Content -Path $env:GITHUB_ENV
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -257,19 +265,19 @@ jobs:
           Copy-Item target\x86_64-pc-windows-gnu\release\archductor.exe $bundle
           Copy-Item target\x86_64-pc-windows-gnu\release\archductor-gtk.exe $bundle
           Copy-Item target\x86_64-pc-windows-gnu\release\archcar.exe $bundle
-          Copy-Item C:\msys64\ucrt64\bin\*.dll $bundle
+          Copy-Item "$env:UCRT64_ROOT\bin\*.dll" $bundle
           New-Item -ItemType Directory -Force -Path "$bundle\lib" | Out-Null
-          Copy-Item C:\msys64\ucrt64\lib\gdk-pixbuf-2.0 "$bundle\lib" -Recurse
-          if (Test-Path C:\msys64\ucrt64\lib\gtk-4.0) {
-            Copy-Item C:\msys64\ucrt64\lib\gtk-4.0 "$bundle\lib" -Recurse
+          Copy-Item "$env:UCRT64_ROOT\lib\gdk-pixbuf-2.0" "$bundle\lib" -Recurse
+          if (Test-Path "$env:UCRT64_ROOT\lib\gtk-4.0") {
+            Copy-Item "$env:UCRT64_ROOT\lib\gtk-4.0" "$bundle\lib" -Recurse
           }
           New-Item -ItemType Directory -Force -Path "$bundle\share" | Out-Null
-          Copy-Item C:\msys64\ucrt64\share\glib-2.0 "$bundle\share" -Recurse
-          Copy-Item C:\msys64\ucrt64\share\icons "$bundle\share" -Recurse
-          Copy-Item C:\msys64\ucrt64\share\mime "$bundle\share" -Recurse
+          Copy-Item "$env:UCRT64_ROOT\share\glib-2.0" "$bundle\share" -Recurse
+          Copy-Item "$env:UCRT64_ROOT\share\icons" "$bundle\share" -Recurse
+          Copy-Item "$env:UCRT64_ROOT\share\mime" "$bundle\share" -Recurse
           $originalPath = $env:PATH
           $env:PATH = (($env:PATH -split ';') | Where-Object {
-            $_ -and ($_ -notlike 'C:\msys64\ucrt64\bin*')
+            $_ -and ($_ -notlike "$env:UCRT64_ROOT\bin*")
           }) -join ';'
           try {
             Push-Location $bundle

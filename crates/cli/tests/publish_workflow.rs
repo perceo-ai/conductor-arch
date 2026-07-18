@@ -43,15 +43,25 @@ fn publish_build_uses_ci_verified_release_packaging() {
         "CI should scan generated release artifacts before publish"
     );
     assert!(
-        publish.contains("PKG_CONFIG: pkgconf"),
-        "Windows release should use the PATH-resolved pkgconf executable"
+        publish.contains("\"PKG_CONFIG=$pkgconf\"") && ci.contains("\"PKG_CONFIG=$pkgconf\""),
+        "Windows workflows should use pkgconf from the actual MSYS2 install"
+    );
+    assert!(
+        publish.contains("steps.msys2.outputs.msys2-location")
+            && ci.contains("steps.msys2.outputs.msys2-location"),
+        "Windows workflows should derive MSYS2 paths from setup-msys2 output"
     );
     assert!(
         publish.contains("CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc"),
         "Windows release should use the PATH-resolved UCRT64 gcc executable"
     );
     assert!(
-        !publish.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe"),
+        !publish.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe")
+            && !ci.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe"),
         "absolute MSYS pkgconf paths failed to spawn in GitHub Actions"
+    );
+    assert!(
+        !publish.contains("C:\\msys64\\ucrt64") && !ci.contains("C:\\msys64\\ucrt64"),
+        "Windows workflows should not assume setup-msys2 installs under C:\\msys64"
     );
 }
