@@ -1002,7 +1002,7 @@ fn attach_workspace_row_context_menu(
                                     }
                                 },
                                 move |result| match result {
-                                    Ok(deleted) => {
+                                    Ok(_) => {
                                         let snapshot = state.snapshot();
                                         let was_selected_workspace =
                                             snapshot.selected_workspace.as_deref()
@@ -1025,25 +1025,6 @@ fn attach_workspace_row_context_menu(
                                         refresh_workspace();
                                         refresh_hub
                                             .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-                                        let db_cleanup =
-                                            state.workspace_database_path().to_path_buf();
-                                        std::thread::spawn(move || {
-                                            if let Err(err) =
-                                                WorkspaceStore::open_app(db_cleanup).and_then(|store| {
-                                                    store.cleanup_deleted_workspace_artifacts(
-                                                        &deleted,
-                                                        true,
-                                                        delete_branch_after_delete,
-                                                    )
-                                                })
-                                            {
-                                                error!(
-                                                    workspace = %deleted.name,
-                                                    error = %err,
-                                                    "background workspace artifact cleanup failed after delete"
-                                                );
-                                            }
-                                        });
                                     }
                                     Err(err) => {
                                         row.set_sensitive(true);

@@ -98,6 +98,9 @@ paths and known rough edges.
 - Workspace command center with status header, agents panel, runtime panel,
   Changes, Checks, Review, Chat/Terminal, Big Terminal, Todos, Processes,
   Branch, Timeline, Checkpoints, lifecycle actions, and linked-directory panel.
+- Workspace delete lifecycle jobs own artifact cleanup and retry behavior; GTK
+  surfaces invoke the lifecycle job instead of starting detached duplicate
+  cleanup.
 - Agent/session surface for Shell, Codex, Claude, and Cursor session launch
   paths, transcript persistence, selected-session input, staged review prompts,
   provider/auth/MCP status, harness metadata, prompt preview, profile selector,
@@ -110,6 +113,9 @@ paths and known rough edges.
 - GTK refreshes use typed events for routine runtime, review, workspace
   inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
   explicit manual refresh and startup reconciliation.
+- GTK background sync samples persisted running chat markers off the main timer
+  callback, coalesces lifecycle refreshes by workspace, and avoids loading
+  hidden full chat timelines for off-focus work.
 - Running chat sessions are sampled in the background with lightweight ids and
   sequence markers so sidebar/dashboard/history and chat tab state can update
   while another workspace or thread is selected.

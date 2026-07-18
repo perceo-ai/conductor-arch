@@ -3126,7 +3126,6 @@ fn lifecycle_panel(
                 let refresh_after_delete = refresh_after_action.clone();
                 let progress_after_delete = progress_action.clone();
                 let toast_after_delete = toast_action.clone();
-                let db_cleanup_after_delete = db_action.clone();
                 let state_after_delete = state_after_action.clone();
                 spawn_background_job(
                     move || {
@@ -3154,22 +3153,6 @@ fn lifecycle_panel(
                                     &state_after_delete,
                                     &Ok(deleted.clone()),
                                 );
-                                let db_cleanup = db_cleanup_after_delete.clone();
-                                std::thread::spawn(move || {
-                                    if let Err(err) =
-                                        WorkspaceStore::open_app(db_cleanup).and_then(|store| {
-                                            store.cleanup_deleted_workspace_artifacts(
-                                                &deleted, true, true,
-                                            )
-                                        })
-                                    {
-                                        error!(
-                                            workspace = %deleted.name,
-                                            error = %err,
-                                            "background workspace artifact cleanup failed after delete"
-                                        );
-                                    }
-                                });
                             }
                             Err(err) => {
                                 let err = anyhow::anyhow!(err);
@@ -3185,12 +3168,13 @@ fn lifecycle_panel(
                 );
                 return;
             }
-            let result = WorkspaceStore::open_app(db_action.clone()).and_then(|store| match action {
-                "archive" => store.archive(&workspace, false),
-                "restore" => store.restore(&workspace),
-                "discard" => store.discard(&workspace),
-                _ => unreachable!(),
-            });
+            let result =
+                WorkspaceStore::open_app(db_action.clone()).and_then(|store| match action {
+                    "archive" => store.archive(&workspace, false),
+                    "restore" => store.restore(&workspace),
+                    "discard" => store.discard(&workspace),
+                    _ => unreachable!(),
+                });
             match result {
                 Ok(workspace) => progress_action.set_text(&format!(
                     "{} complete: {}",
@@ -5297,15 +5281,14 @@ fn connect_merge_pr_button(
         let result = WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
             store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
         });
+        let refresh_event = pull_request_merge_refresh_event(&workspace_for_merge, &result);
         apply_action_feedback(
             &feedback_for_merge,
             &toast_for_merge,
             &pull_request_merge_and_archive_feedback(result),
             true,
         );
-        refresh_hub.refresh_event(RefreshEvent::WorkspaceReviewChanged {
-            workspace: workspace_for_merge.clone(),
-        });
+        refresh_hub.refresh_event(refresh_event);
     });
 }
 
@@ -6428,15 +6411,15 @@ fn workspace_checks_panel(
                                     Some(&method),
                                 )
                             });
+                        let refresh_event =
+                            pull_request_merge_refresh_event(&workspace_for_merge, &result);
                         apply_action_feedback(
                             &feedback_for_merge,
                             &toast_for_merge,
                             &pull_request_merge_and_archive_feedback(result),
                             true,
                         );
-                        refresh_after_merge.refresh_event(RefreshEvent::WorkspaceReviewChanged {
-                            workspace: workspace_for_merge.clone(),
-                        });
+                        refresh_after_merge.refresh_event(refresh_event);
                     });
 
                     let db_for_stage = db_path.to_path_buf();
@@ -7021,6 +7004,23 @@ fn pull_request_merge_and_archive_feedback(
             text
         }
         Err(err) => format!("Merge PR failed: {err:#}"),
+    }
+}
+
+fn pull_request_merge_refresh_event(
+    workspace: &str,
+    result: &anyhow::Result<archductor_core::workspace::MergePullRequestResult>,
+) -> RefreshEvent {
+    if result
+        .as_ref()
+        .map(|result| result.archived_workspace.is_some())
+        .unwrap_or(false)
+    {
+        RefreshEvent::WorkspaceInventoryChanged
+    } else {
+        RefreshEvent::WorkspaceReviewChanged {
+            workspace: workspace.to_owned(),
+        }
     }
 }
 
@@ -9130,6 +9130,50 @@ mod tests {
             },
         ));
         assert_eq!(no_archive, "Merged PR: Merged pull request #42");
+    }
+
+    #[test]
+    fn pull_request_merge_refresh_event_uses_inventory_after_archive() {
+        let archived = Ok(archductor_core::workspace::MergePullRequestResult {
+            merge_output: "Merged pull request #42\n".to_owned(),
+            archived_workspace: Some(Workspace {
+                id: 1,
+                repository_id: 2,
+                name: "berlin".to_owned(),
+                path: std::path::PathBuf::from("/tmp/berlin"),
+                branch: "lc/berlin".to_owned(),
+                base_ref: "main".to_owned(),
+                port_base: 4200,
+                status: "archived".to_owned(),
+                archived_at: Some("now".to_owned()),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            }),
+        });
+        assert_eq!(
+            pull_request_merge_refresh_event("berlin", &archived),
+            RefreshEvent::WorkspaceInventoryChanged
+        );
+
+        let not_archived = Ok(archductor_core::workspace::MergePullRequestResult {
+            merge_output: "Merged pull request #42\n".to_owned(),
+            archived_workspace: None,
+        });
+        assert_eq!(
+            pull_request_merge_refresh_event("berlin", &not_archived),
+            RefreshEvent::WorkspaceReviewChanged {
+                workspace: "berlin".to_owned()
+            }
+        );
+
+        let failed: anyhow::Result<archductor_core::workspace::MergePullRequestResult> =
+            Err(anyhow::anyhow!("merge failed"));
+        assert_eq!(
+            pull_request_merge_refresh_event("berlin", &failed),
+            RefreshEvent::WorkspaceReviewChanged {
+                workspace: "berlin".to_owned()
+            }
+        );
     }
 
     #[test]

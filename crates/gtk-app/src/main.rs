@@ -40,7 +40,7 @@ use gtk::{
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1142,6 +1142,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let previous_background = Rc::new(RefCell::new(
             background_sync::BackgroundSyncSnapshot::default(),
         ));
+        let background_sync_in_flight = Rc::new(Cell::new(false));
         // PER-190: Background sync samples persisted running chat markers while
         // off-focus event routing is still being split from active timelines.
         // Remove when archcar/runtime producers emit typed RefreshEvents for
@@ -1149,22 +1150,36 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         // PER-190: running chats can update while their workspace is not
         // focused; keep summaries current without loading hidden timelines.
         glib::timeout_add_seconds_local(2, move || {
-            match background_sync::load_background_sync_snapshot(&db_path_background) {
-                Ok(next) => {
+            if background_sync_in_flight.get() {
+                return glib::ControlFlow::Continue;
+            }
+            background_sync_in_flight.set(true);
+            let db_path = db_path_background.clone();
+            let hub = hub_background.clone();
+            let previous_background = Rc::clone(&previous_background);
+            let in_flight = Rc::clone(&background_sync_in_flight);
+            archcar_async::spawn_background_job(
+                move || background_sync::load_background_sync_snapshot(&db_path),
+                move |result| {
+                    in_flight.set(false);
+                    let next = match result {
+                        Ok(next) => next,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "gtk background sync snapshot failed");
+                            return;
+                        }
+                    };
                     let previous = previous_background.borrow().clone();
                     if previous.running_threads.is_empty() && next.running_threads.is_empty() {
-                        return glib::ControlFlow::Continue;
+                        return;
                     }
                     let events = background_sync::diff_background_sync(&previous, &next);
                     *previous_background.borrow_mut() = next;
                     for event in events {
-                        hub_background.refresh_event(event);
+                        hub.refresh_event(event);
                     }
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, "gtk background sync snapshot failed");
-                }
-            }
+                },
+            );
             glib::ControlFlow::Continue
         });
     }

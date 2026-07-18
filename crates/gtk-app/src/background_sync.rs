@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
-use std::collections::HashSet;
 
 use archductor_core::workspace::{ChatThreadRecord, ProcessStatus, WorkspaceStore};
 
@@ -99,13 +98,12 @@ pub fn diff_background_sync(
 ) -> Vec<RefreshEvent> {
     let previous_by_thread = snapshot_by_thread(previous);
     let next_by_thread = snapshot_by_thread(next);
+    let mut lifecycle_workspaces = BTreeSet::new();
     let mut events = Vec::new();
 
     for (key, next_thread) in &next_by_thread {
         let Some(previous_thread) = previous_by_thread.get(key) else {
-            events.push(RefreshEvent::WorkspaceChatLifecycleChanged {
-                workspace: next_thread.workspace.clone(),
-            });
+            lifecycle_workspaces.insert(next_thread.workspace.clone());
             continue;
         };
 
@@ -113,11 +111,8 @@ pub fn diff_background_sync(
             || previous_thread.provider != next_thread.provider
             || previous_thread.status != next_thread.status
             || previous_thread.running_session_id != next_thread.running_session_id
-            || previous_thread.updated_at != next_thread.updated_at
         {
-            events.push(RefreshEvent::WorkspaceChatLifecycleChanged {
-                workspace: next_thread.workspace.clone(),
-            });
+            lifecycle_workspaces.insert(next_thread.workspace.clone());
         }
 
         if previous_thread.latest_message_id != next_thread.latest_message_id
@@ -132,11 +127,15 @@ pub fn diff_background_sync(
 
     for (key, previous_thread) in &previous_by_thread {
         if !next_by_thread.contains_key(key) {
-            events.push(RefreshEvent::WorkspaceChatLifecycleChanged {
-                workspace: previous_thread.workspace.clone(),
-            });
+            lifecycle_workspaces.insert(previous_thread.workspace.clone());
         }
     }
+
+    events.extend(
+        lifecycle_workspaces
+            .into_iter()
+            .map(|workspace| RefreshEvent::WorkspaceChatLifecycleChanged { workspace }),
+    );
 
     events
 }
@@ -216,6 +215,48 @@ mod tests {
         changed.title = "Fix login".into();
         let next = BackgroundSyncSnapshot {
             running_threads: vec![changed],
+        };
+
+        let events = diff_background_sync(&previous, &next);
+
+        assert_eq!(
+            events,
+            vec![RefreshEvent::WorkspaceChatLifecycleChanged {
+                workspace: "berlin".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_ignores_timestamp_only_thread_change() {
+        let previous = BackgroundSyncSnapshot {
+            running_threads: vec![thread_snapshot()],
+        };
+        let mut changed = thread_snapshot();
+        changed.updated_at = "2026-07-18T12:00:01Z".into();
+        let next = BackgroundSyncSnapshot {
+            running_threads: vec![changed],
+        };
+
+        let events = diff_background_sync(&previous, &next);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn diff_coalesces_lifecycle_changes_by_workspace() {
+        let mut first = thread_snapshot();
+        first.thread_id = 7;
+        let mut second = thread_snapshot();
+        second.thread_id = 8;
+        second.title = "Fix review".into();
+        let previous = BackgroundSyncSnapshot {
+            running_threads: vec![first.clone(), second.clone()],
+        };
+        first.title = "Fix login".into();
+        second.status = "idle".into();
+        let next = BackgroundSyncSnapshot {
+            running_threads: vec![first, second],
         };
 
         let events = diff_background_sync(&previous, &next);

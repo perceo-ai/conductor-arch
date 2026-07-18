@@ -70,6 +70,7 @@ const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
+const WORKSPACE_LIFECYCLE_MAX_ATTEMPTS: i64 = 3;
 const WORKSPACE_PORT_START: u16 = 42000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "arch",
@@ -1869,6 +1870,10 @@ impl WorkspaceStore {
     }
 
     fn mark_workspace_lifecycle_job_queued_error(&self, job_id: i64, error: &str) -> Result<()> {
+        let attempts = self.load_workspace_lifecycle_job(job_id)?.attempts;
+        if attempts >= WORKSPACE_LIFECYCLE_MAX_ATTEMPTS {
+            return self.mark_workspace_lifecycle_job_failed(job_id, error);
+        }
         let now = timestamp();
         self.conn.execute(
             "UPDATE workspace_lifecycle_jobs
@@ -1934,9 +1939,6 @@ impl WorkspaceStore {
         let payload: WorkspaceCreateJobPayload = serde_json::from_str(&job.payload_json)
             .with_context(|| format!("parse workspace create job {}", job.id))?;
 
-        let db_path = self.db_path.clone();
-        let logs_dir = self.logs_dir.clone();
-        let app_settings_path = self.app_settings_path.clone();
         let mut after_insert = Some(after_insert);
         let workspace_id = if let Some(workspace_id) = job.workspace_id {
             Some(workspace_id)
@@ -1949,13 +1951,7 @@ impl WorkspaceStore {
             self.resume_workspace_creation_by_id(workspace_id)
         } else {
             self.create_with_progress(payload.input, |workspace| {
-                if let Ok(store) = WorkspaceStore::open_with_logs_and_app_settings(
-                    &db_path,
-                    &logs_dir,
-                    app_settings_path.clone(),
-                ) {
-                    let _ = store.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id);
-                }
+                let _ = self.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id);
                 if let Some(callback) = after_insert.take() {
                     callback(workspace);
                 }
@@ -2040,17 +2036,6 @@ impl WorkspaceStore {
         let job = self.load_workspace_lifecycle_job(job_id)?;
         let mut payload: WorkspaceDeleteJobPayload = serde_json::from_str(&job.payload_json)
             .with_context(|| format!("parse workspace delete job {}", job.id))?;
-
-        if payload.workspace.is_none() {
-            if let Ok(workspace) = self.get_by_name(&payload.name) {
-                payload.workspace = Some(workspace.clone());
-                self.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id)?;
-                self.update_workspace_lifecycle_job_payload(
-                    job_id,
-                    &serde_json::to_string(&payload)?,
-                )?;
-            }
-        }
 
         let result = match self.get_by_name(&payload.name) {
             Ok(workspace) => {
@@ -13024,6 +13009,69 @@ CUSTOM_VALUE = "from-settings"
             )
             .unwrap();
         assert_eq!(status, "succeeded");
+    }
+
+    #[test]
+    fn delete_lifecycle_job_fails_after_repeated_cleanup_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::remove_dir_all(&workspace.path).unwrap();
+        fs::write(&workspace.path, "not a directory\n").unwrap();
+
+        let deleted = store.delete_lifecycle_job("berlin", true, false).unwrap();
+        assert!(deleted.cleanup_error.is_some());
+
+        let queued: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, "queued");
+
+        assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 1);
+        assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 1);
+
+        let (status, attempts, error): (String, i64, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT status, attempts, error FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(attempts, 3);
+        assert!(error
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("not a directory"));
+        assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 0);
     }
 
     #[test]
