@@ -9,10 +9,11 @@ fn publish_build_uses_ci_verified_release_packaging() {
     let nfpm = fs::read_to_string(repo_root.join("nfpm.yaml")).unwrap();
     let app_run =
         fs::read_to_string(repo_root.join("packaging/appimage/archductor.AppDir/AppRun")).unwrap();
-    let flatpak = fs::read_to_string(
-        repo_root.join("packaging/flatpak/io.github.pranavkannepalli.archductor.yml"),
-    )
-    .unwrap();
+    let flatpak =
+        fs::read_to_string(repo_root.join("packaging/flatpak/ai.perceo.Archductor.yml")).unwrap();
+    let nix = fs::read_to_string(repo_root.join("flake.nix")).unwrap();
+    let homebrew =
+        fs::read_to_string(repo_root.join("packaging/homebrew/Formula/archductor.rb")).unwrap();
 
     assert!(
         publish.contains("Verify Windows GTK pkg-config"),
@@ -89,6 +90,18 @@ fn publish_build_uses_ci_verified_release_packaging() {
             &flatpak,
             vec!["install -Dm755 target/release/archductor /app/bin/archductor"],
             vec!["install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk"],
+        ),
+        (
+            "nix",
+            &nix,
+            vec!["install -Dm755 target/release/archductor \"$out/bin/archductor\""],
+            vec!["install -Dm755 target/release/archductor-gtk \"$out/bin/archductor-gtk\""],
+        ),
+        (
+            "homebrew",
+            &homebrew,
+            vec!["bin.install \"target/release/archductor\""],
+            vec!["bin.install \"target/release/archductor-gtk\""],
         ),
         (
             "publish",

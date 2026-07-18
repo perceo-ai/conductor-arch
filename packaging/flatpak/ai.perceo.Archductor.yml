@@ -1,4 +1,4 @@
-app-id: io.github.pranavkannepalli.archductor
+app-id: ai.perceo.Archductor
 runtime: org.gnome.Platform
 runtime-version: '47'
 sdk: org.gnome.Sdk
@@ -8,16 +8,14 @@ sdk-extensions:
 command: archductor-gtk
 
 finish-args:
-  # Full filesystem access required for arbitrary repository and workspace paths
+  # Full filesystem access is required for arbitrary repository and workspace paths.
   - --filesystem=host
-  # Network access for git fetch, gh CLI, and agent sessions
+  # Network access is required for git fetch, gh CLI, and agent sessions.
   - --share=network
-  # IPC for desktop integration
+  # IPC and display sockets are required for GTK desktop integration.
   - --share=ipc
-  # Allow launching editors and terminal emulators on the host
   - --socket=fallback-x11
   - --socket=wayland
-  # Talk to the host shell environment
   - --env=SHELL=/bin/bash
 
 build-options:
@@ -34,12 +32,12 @@ modules:
       - install -Dm755 target/release/archductor /app/bin/archductor
       - install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk
       - install -Dm644 README.md /app/share/doc/archductor/README.md
-      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.archductor.appdata.xml
-          /app/share/metainfo/io.github.pranavkannepalli.archductor.appdata.xml
-      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.archductor.desktop
-          /app/share/applications/io.github.pranavkannepalli.archductor.desktop
+      - install -Dm644 packaging/flatpak/ai.perceo.Archductor.metainfo.xml
+          /app/share/metainfo/ai.perceo.Archductor.metainfo.xml
+      - install -Dm644 packaging/flatpak/ai.perceo.Archductor.desktop
+          /app/share/applications/ai.perceo.Archductor.desktop
       - install -Dm644 packaging/archductor.svg
-          /app/share/icons/hicolor/scalable/apps/io.github.pranavkannepalli.archductor.svg
+          /app/share/icons/hicolor/scalable/apps/ai.perceo.Archductor.svg
     sources:
       - type: dir
         path: ../..

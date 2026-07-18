@@ -97,7 +97,7 @@ debugging, and fallback workflows.
 
 ```bash
 curl -Lo archductor.AppImage \
-  https://github.com/pranavkannepalli/conductor-arch/releases/latest/download/archductor-x86_64.AppImage
+  https://github.com/perceo-ai/conductor-arch/releases/latest/download/archductor-x86_64.AppImage
 chmod +x archductor.AppImage
 sudo mv archductor.AppImage /usr/local/bin/archductor
 ```
@@ -110,6 +110,23 @@ archductor
 
 The AppImage opens the GTK app with no arguments and forwards CLI arguments to
 the command-line interface.
+
+### Package Managers
+
+```bash
+# Arch Linux AUR
+paru -S archductor
+
+# Nix
+nix run github:perceo-ai/conductor-arch#archductor -- doctor
+
+# Homebrew / Linuxbrew
+brew tap perceo-ai/tap
+brew install archductor
+```
+
+Flatpak/Flathub packaging uses app ID `ai.perceo.Archductor` and remains
+experimental until the sandbox and screenshots pass Flathub review.
 
 ### Build From Source
 
@@ -133,7 +150,7 @@ curl https://sh.rustup.rs -sSf | sh
 Build and run:
 
 ```bash
-git clone https://github.com/pranavkannepalli/conductor-arch
+git clone https://github.com/perceo-ai/conductor-arch
 cd conductor-arch
 cargo build --workspace --release --locked
 ./target/release/archductor-gtk
