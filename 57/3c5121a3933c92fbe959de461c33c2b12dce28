@@ -1,0 +1,21 @@
+crates/cli/tests/makefile_dev.rs
+  s_d37bf9840d3576::t_8af2673c411707 1-21
+Makefile
+  s_d37bf9840d3576::t_2fdae41e24369c 23-31,33,35-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "573c5121a3933c92fbe959de461c33c2b12dce28",
+  "prompts": {},
+  "sessions": {
+    "s_d37bf9840d3576": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f738d-d79e-75e3-a927-b05d5700eab5",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
