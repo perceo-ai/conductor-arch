@@ -18,7 +18,6 @@ pub enum AppPage {
     Projects,
     Workspace,
     History,
-    PtyInspector,
     Settings,
     Review,
 }

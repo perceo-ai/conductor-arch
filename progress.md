@@ -82,8 +82,8 @@ paths and known rough edges.
 
 ### GTK App
 
-- GTK/libadwaita app with Dashboard, Projects, History, Workspace, and
-  debug-only PTY Inspector pages. Settings, Dashboard filters, and History tabs
+- GTK/libadwaita app with Dashboard, Projects, History, and Workspace pages.
+  Settings, Dashboard filters, and History tabs
   reuse the standard close-free workspace chat-tab presentation.
 - Project onboarding from local repository path or Git clone URL.
 - Scope-aware Settings page: Shared applies machine-wide defaults to every

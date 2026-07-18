@@ -10,7 +10,6 @@ mod history_data;
 mod logger;
 mod motion;
 mod projects;
-mod pty_inspector;
 mod refresh;
 mod session_surface;
 mod settings;
@@ -323,11 +322,6 @@ fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<Laun
         ["dashboard"] => target.page = AppPage::Dashboard,
         ["projects"] | ["repositories"] => target.page = AppPage::Projects,
         ["history"] => target.page = AppPage::History,
-        ["session-logs"] | ["session", "logs"] | ["pty-inspector"] | ["pty", "inspector"]
-            if debug_mode =>
-        {
-            target.page = AppPage::PtyInspector;
-        }
         ["workspace"] | ["workspaces"] => target.page = AppPage::Workspace,
         [] => {}
         [page] => target.page = parse_app_page_with_debug_mode(page, debug_mode)?,
@@ -356,16 +350,13 @@ fn parse_app_page(value: &str) -> Result<AppPage, String> {
     parse_app_page_with_debug_mode(value, false)
 }
 
-fn parse_app_page_with_debug_mode(value: &str, debug_mode: bool) -> Result<AppPage, String> {
+fn parse_app_page_with_debug_mode(value: &str, _debug_mode: bool) -> Result<AppPage, String> {
     match normalize_launch_token(value).as_str() {
         "dashboard" | "home" => Ok(AppPage::Dashboard),
         "projects" | "repositories" | "repos" => Ok(AppPage::Projects),
         "settings" | "config" => Ok(AppPage::Settings),
         "history" | "archive" => Ok(AppPage::History),
         "workspace" | "workspaces" => Ok(AppPage::Workspace),
-        "sessionlogs" | "sessionlog" | "ptyinspector" | "pty" if debug_mode => {
-            Ok(AppPage::PtyInspector)
-        }
         other => Err(format!("unknown page: {other}")),
     }
 }
@@ -897,18 +888,11 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     main_stack.add_named(&settings_page, Some("settings"));
     main_stack.add_named(&history_page, Some("history"));
     main_stack.add_named(&workspace_preference_scope, Some("workspace"));
-    if debug_mode {
-        main_stack.add_named(
-            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
-            Some("pty-inspector"),
-        );
-    }
     main_stack.set_visible_child_name(match app_state.snapshot().active_page {
         AppPage::Workspace => "workspace",
         AppPage::Projects => "projects",
         AppPage::Settings => "settings",
         AppPage::History => "history",
-        AppPage::PtyInspector if debug_mode => "pty-inspector",
         _ => "dashboard",
     });
 
@@ -918,7 +902,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         main_stack.clone(),
         window.clone(),
         split.clone(),
-        debug_mode,
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
         toast_manager.clone(),
@@ -998,7 +981,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 .unwrap_or_default();
             let commands = palette_commands(
                 state_for_palette.snapshot().selected_workspace.is_some(),
-                debug_mode,
                 &keybindings,
                 &custom_commands,
             );
@@ -1409,7 +1391,6 @@ fn page_stack_name(page: &AppPage) -> &'static str {
         AppPage::Projects => "projects",
         AppPage::Settings => "settings",
         AppPage::History => "history",
-        AppPage::PtyInspector => "pty-inspector",
         AppPage::Workspace | AppPage::Review => "workspace",
     }
 }
@@ -2003,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn session_logs_route_is_gated_by_debug_mode() {
+    fn session_logs_route_is_removed() {
         let err = parse_launch_target_with_debug_mode(
             ["archductor-gtk", "--page", "session-logs"],
             false,
@@ -2011,19 +1992,17 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "unknown page: sessionlogs");
 
-        let target =
+        let debug_err =
             parse_launch_target_with_debug_mode(["archductor-gtk", "--page", "session-logs"], true)
-                .unwrap();
+                .unwrap_err();
+        assert_eq!(debug_err, "unknown page: sessionlogs");
 
-        assert_eq!(target.page, AppPage::PtyInspector);
-        assert_eq!(target.workspace, None);
-
-        let legacy_target = parse_launch_target_with_debug_mode(
+        let legacy_err = parse_launch_target_with_debug_mode(
             ["archductor-gtk", "--page", "pty-inspector"],
             true,
         )
-        .unwrap();
-        assert_eq!(legacy_target.page, AppPage::PtyInspector);
+        .unwrap_err();
+        assert_eq!(legacy_err, "unknown page: ptyinspector");
     }
 
     #[test]
