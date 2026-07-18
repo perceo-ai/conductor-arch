@@ -20,7 +20,7 @@ use crate::archcar_async::{
 };
 use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
-use crate::refresh::{RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
 use crate::toast::{surface_label_error, ToastManager};
@@ -31,7 +31,6 @@ pub(crate) fn build_app_sidebar(
     stack: Stack,
     window: ApplicationWindow,
     split: adw::OverlaySplitView,
-    debug_mode: bool,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
     toast_manager: ToastManager,
@@ -139,23 +138,6 @@ pub(crate) fn build_app_sidebar(
         });
     }
     nav_group.append(&history_nav_btn);
-    if debug_mode {
-        let pty_inspector_nav_btn =
-            sidebar_nav_button("utilities-terminal-symbolic", "Session Logs");
-        {
-            let stack_p = stack.clone();
-            let state_p = app_state.clone();
-            let refresh_hub = refresh_hub.clone();
-            let sync_nav_buttons = sync_nav_buttons.clone();
-            pty_inspector_nav_btn.connect_clicked(move |_| {
-                state_p.navigate_to_page(AppPage::PtyInspector);
-                stack_p.set_visible_child_name("pty-inspector");
-                refresh_hub.refresh(RefreshScope::Sidebar);
-                sync_nav_buttons();
-            });
-        }
-        nav_group.append(&pty_inspector_nav_btn);
-    }
     sidebar_box.append(&nav_group);
 
     sidebar_box.append(&gtk::Separator::new(Orientation::Horizontal));
@@ -324,7 +306,7 @@ pub(crate) fn build_app_sidebar(
                                     let inserted_workspace_name = inserted_workspace_name.clone();
                                     move |progress| {
                                         WorkspaceStore::open_app(db_path).and_then(|store| {
-                                            store.create_with_progress(
+                                            store.create_lifecycle_job_with_progress(
                                                 CreateWorkspace {
                                                     repository_name: repo_name,
                                                     name: String::new(),
@@ -573,7 +555,6 @@ pub(crate) fn build_app_sidebar(
                     refresh_workspace_back();
                 }
                 AppPage::History => stack_back.set_visible_child_name("history"),
-                AppPage::PtyInspector => stack_back.set_visible_child_name("pty-inspector"),
                 AppPage::Settings => stack_back.set_visible_child_name("settings"),
                 AppPage::Review => stack_back.set_visible_child_name("workspace"),
             }
@@ -600,7 +581,6 @@ pub(crate) fn build_app_sidebar(
                     refresh_workspace_forward();
                 }
                 AppPage::History => stack_forward.set_visible_child_name("history"),
-                AppPage::PtyInspector => stack_forward.set_visible_child_name("pty-inspector"),
                 AppPage::Settings => stack_forward.set_visible_child_name("settings"),
                 AppPage::Review => stack_forward.set_visible_child_name("workspace"),
             }
@@ -826,7 +806,7 @@ fn attach_workspace_row_context_menu(
                         state.rename_workspace_in_navigation(&workspace_name, &workspace.name);
                         refresh_view_preferences();
                         refresh_workspace();
-                        refresh_hub.refresh(RefreshScope::All);
+                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                         Ok(())
                     }
                 }),
@@ -901,7 +881,8 @@ fn attach_workspace_row_context_menu(
                                     stack.set_visible_child_name("workspace");
                                     refresh_view_preferences();
                                     refresh_workspace();
-                                    refresh_hub.refresh(RefreshScope::All);
+                                    refresh_hub
+                                        .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                                 }
                                 Err(err) => {
                                     show_workspace_error_dialog(
@@ -1001,18 +982,27 @@ fn attach_workspace_row_context_menu(
                                     let db_path = state.workspace_database_path().to_path_buf();
                                     let workspace_name = workspace_name.clone();
                                     move || {
-	                                        WorkspaceStore::open_app(db_path).and_then(|store| {
-	                                            store.delete(
-	                                                &workspace_name,
-	                                                force_delete_workspace,
-	                                                delete_branch_after_delete,
-	                                            )
-	                                        })
+                                        WorkspaceStore::open_app(db_path)
+                                            .and_then(|store| {
+                                                let result = store.delete_lifecycle_job(
+                                                    &workspace_name,
+                                                    force_delete_workspace,
+                                                    delete_branch_after_delete,
+                                                )?;
+                                                if let Some(err) = result.cleanup_error {
+                                                    error!(
+                                                        workspace = %result.workspace.name,
+                                                        error = %err,
+                                                        "workspace artifact cleanup failed after metadata delete"
+                                                    );
+                                                }
+                                                Ok(result.workspace)
+                                            })
                                             .map_err(|err| format!("{err:#}"))
                                     }
                                 },
                                 move |result| match result {
-                                    Ok(deleted) => {
+                                    Ok(_) => {
                                         let snapshot = state.snapshot();
                                         let was_selected_workspace =
                                             snapshot.selected_workspace.as_deref()
@@ -1033,32 +1023,14 @@ fn attach_workspace_row_context_menu(
                                         }
                                         refresh_view_preferences();
                                         refresh_workspace();
-                                        refresh_hub.refresh(RefreshScope::All);
-                                        let db_cleanup =
-                                            state.workspace_database_path().to_path_buf();
-                                        std::thread::spawn(move || {
-                                            if let Err(err) =
-                                                WorkspaceStore::open_app(db_cleanup).and_then(|store| {
-                                                    store.cleanup_deleted_workspace_artifacts(
-                                                        &deleted,
-                                                        true,
-                                                        delete_branch_after_delete,
-                                                    )
-                                                })
-                                            {
-                                                error!(
-                                                    workspace = %deleted.name,
-                                                    error = %err,
-                                                    "background workspace artifact cleanup failed after delete"
-                                                );
-                                            }
-                                        });
+                                        refresh_hub
+                                            .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                                     }
                                     Err(err) => {
                                         row.set_sensitive(true);
                                         refresh_view_preferences();
                                         refresh_workspace();
-                                        refresh_hub.refresh(RefreshScope::All);
+                                        refresh_hub.refresh(RefreshScope::Sidebar);
                                         show_workspace_error_dialog(
                                             &window,
                                             "Workspace action failed",
@@ -1107,7 +1079,9 @@ fn attach_workspace_row_context_menu(
                                             }
                                             refresh_view_preferences();
                                             refresh_workspace();
-                                            refresh_hub.refresh(RefreshScope::All);
+                                            refresh_hub.refresh_event(
+                                                RefreshEvent::WorkspaceInventoryChanged,
+                                            );
                                 }
                                 Err(err) => {
                                             refresh_view_preferences();
@@ -1421,12 +1395,8 @@ fn show_workspace_error_dialog(
     dialog.present();
 }
 
-fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
-    let mut labels = vec!["Dashboard", "History"];
-    if debug_mode {
-        labels.push("Session Logs");
-    }
-    labels
+fn primary_sidebar_nav_labels() -> Vec<&'static str> {
+    vec!["Dashboard", "History"]
 }
 
 fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
@@ -1560,14 +1530,7 @@ mod tests {
 
     #[test]
     fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
-        assert_eq!(
-            primary_sidebar_nav_labels(false),
-            vec!["Dashboard", "History"]
-        );
-        assert_eq!(
-            primary_sidebar_nav_labels(true),
-            vec!["Dashboard", "History", "Session Logs"]
-        );
+        assert_eq!(primary_sidebar_nav_labels(), vec!["Dashboard", "History"]);
     }
 
     #[test]

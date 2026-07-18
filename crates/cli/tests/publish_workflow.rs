@@ -6,6 +6,13 @@ fn publish_build_uses_ci_verified_release_packaging() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let publish = fs::read_to_string(repo_root.join(".github/workflows/publish.yml")).unwrap();
     let ci = fs::read_to_string(repo_root.join(".github/workflows/ci.yml")).unwrap();
+    let nfpm = fs::read_to_string(repo_root.join("nfpm.yaml")).unwrap();
+    let app_run =
+        fs::read_to_string(repo_root.join("packaging/appimage/archductor.AppDir/AppRun")).unwrap();
+    let flatpak = fs::read_to_string(
+        repo_root.join("packaging/flatpak/io.github.pranavkannepalli.archductor.yml"),
+    )
+    .unwrap();
 
     assert!(
         publish.contains("Verify Windows GTK pkg-config"),
@@ -64,4 +71,67 @@ fn publish_build_uses_ci_verified_release_packaging() {
         !publish.contains("C:\\msys64\\ucrt64") && !ci.contains("C:\\msys64\\ucrt64"),
         "Windows workflows should not assume setup-msys2 installs under C:\\msys64"
     );
+    for (name, manifest, archductor_tokens, gtk_tokens) in [
+        (
+            "nfpm",
+            &nfpm,
+            vec!["src: target/release/archductor\n    dst: /usr/bin/archductor"],
+            vec!["src: target/release/archductor-gtk\n    dst: /usr/bin/archductor-gtk"],
+        ),
+        (
+            "AppRun",
+            &app_run,
+            vec!["exec \"$SELF_DIR/usr/bin/archductor\" \"$@\""],
+            vec!["exec \"$SELF_DIR/usr/bin/archductor-gtk\""],
+        ),
+        (
+            "flatpak",
+            &flatpak,
+            vec!["install -Dm755 target/release/archductor /app/bin/archductor"],
+            vec!["install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk"],
+        ),
+        (
+            "publish",
+            &publish,
+            vec![
+                "-C target/release archductor archductor-gtk",
+                "install -Dm755 target/release/archductor \"$APPDIR/usr/bin/archductor\"",
+                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor.exe $bundle",
+            ],
+            vec![
+                "install -Dm755 target/release/archductor-gtk \"$APPDIR/usr/bin/archductor-gtk\"",
+                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor-gtk.exe $bundle",
+            ],
+        ),
+        (
+            "ci",
+            &ci,
+            vec![
+                "cp target/debug/archductor ci-artifacts/bin/",
+                "-C target/release archductor archductor-gtk",
+                "install -Dm755 target/release/archductor \"$APPDIR/usr/bin/archductor\"",
+                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor.exe $bundle",
+            ],
+            vec![
+                "cp target/debug/archductor-gtk ci-artifacts/bin/",
+                "install -Dm755 target/release/archductor-gtk \"$APPDIR/usr/bin/archductor-gtk\"",
+                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor-gtk.exe $bundle",
+            ],
+        ),
+    ] {
+        assert!(
+            archductor_tokens
+                .iter()
+                .all(|token| manifest.contains(token)),
+            "{name} should ship the plain archductor binary through exact package paths or tokens"
+        );
+        assert!(
+            gtk_tokens.iter().all(|token| manifest.contains(token)),
+            "{name} should ship the archductor-gtk binary"
+        );
+        assert!(
+            !manifest.contains("archductor-cli"),
+            "{name} packaged CLI binary should remain archductor, not archductor-cli"
+        );
+    }
 }

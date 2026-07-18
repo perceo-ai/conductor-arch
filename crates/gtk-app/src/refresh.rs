@@ -11,6 +11,20 @@ pub enum RefreshScope {
     Workspace,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshEvent {
+    Manual,
+    ProjectInventoryChanged,
+    SettingsChanged,
+    WorkspaceSelectionChanged,
+    WorkspaceInventoryChanged,
+    WorkspaceRuntimeChanged { workspace: String },
+    WorkspaceReviewChanged { workspace: String },
+    WorkspaceChatLifecycleChanged { workspace: String },
+    WorkspaceChatMessagesChanged { workspace: String, thread_id: i64 },
+    TerminalChanged { workspace: String },
+}
+
 type RefreshHandler = Rc<dyn Fn()>;
 
 /// Dumb UI fanout for page refresh callbacks.
@@ -49,6 +63,47 @@ impl RefreshHub {
         *self.workspace.borrow_mut() = Some(Rc::new(handler));
     }
 
+    pub fn refresh_event(&self, event: RefreshEvent) {
+        match event {
+            RefreshEvent::Manual => self.refresh(RefreshScope::All),
+            RefreshEvent::ProjectInventoryChanged => {
+                self.refresh(RefreshScope::Projects);
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Dashboard);
+            }
+            RefreshEvent::SettingsChanged => {
+                self.refresh(RefreshScope::Projects);
+                self.refresh(RefreshScope::Workspace);
+            }
+            RefreshEvent::WorkspaceSelectionChanged => {
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Workspace);
+            }
+            RefreshEvent::WorkspaceInventoryChanged => {
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Dashboard);
+                self.refresh(RefreshScope::History);
+                self.refresh(RefreshScope::Workspace);
+            }
+            RefreshEvent::WorkspaceRuntimeChanged { .. }
+            | RefreshEvent::WorkspaceChatLifecycleChanged { .. }
+            | RefreshEvent::TerminalChanged { .. } => {
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Dashboard);
+                self.refresh(RefreshScope::History);
+                self.refresh(RefreshScope::Workspace);
+            }
+            RefreshEvent::WorkspaceReviewChanged { .. } => {
+                self.refresh(RefreshScope::Dashboard);
+                self.refresh(RefreshScope::History);
+                self.refresh(RefreshScope::Workspace);
+            }
+            RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
+                self.refresh(RefreshScope::Workspace);
+            }
+        }
+    }
+
     pub fn refresh(&self, scope: RefreshScope) {
         match scope {
             RefreshScope::All => {
@@ -77,6 +132,45 @@ impl RefreshHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[derive(Default)]
+    struct RefreshCounts {
+        sidebar: Rc<Cell<u32>>,
+        dashboard: Rc<Cell<u32>>,
+        projects: Rc<Cell<u32>>,
+        history: Rc<Cell<u32>>,
+        workspace: Rc<Cell<u32>>,
+    }
+
+    impl RefreshCounts {
+        fn install(&self, hub: &RefreshHub) {
+            let sidebar = Rc::clone(&self.sidebar);
+            hub.set_sidebar(move || sidebar.set(sidebar.get() + 1));
+
+            let dashboard = Rc::clone(&self.dashboard);
+            hub.set_dashboard(move || dashboard.set(dashboard.get() + 1));
+
+            let projects = Rc::clone(&self.projects);
+            hub.set_projects(move || projects.set(projects.get() + 1));
+
+            let history = Rc::clone(&self.history);
+            hub.set_history(move || history.set(history.get() + 1));
+
+            let workspace = Rc::clone(&self.workspace);
+            hub.set_workspace(move || workspace.set(workspace.get() + 1));
+        }
+
+        fn values(&self) -> (u32, u32, u32, u32, u32) {
+            (
+                self.sidebar.get(),
+                self.dashboard.get(),
+                self.projects.get(),
+                self.history.get(),
+                self.workspace.get(),
+            )
+        }
+    }
 
     #[test]
     fn refresh_handler_can_replace_same_scope_without_refcell_panic() {
@@ -87,5 +181,65 @@ mod tests {
         });
 
         hub.refresh(RefreshScope::Workspace);
+    }
+
+    #[test]
+    fn runtime_refresh_event_skips_projects() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: "demo".to_owned(),
+        });
+
+        assert_eq!(counts.values(), (1, 1, 0, 1, 1));
+    }
+
+    #[test]
+    fn chat_message_refresh_event_only_refreshes_workspace() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "demo".to_owned(),
+            thread_id: 7,
+        });
+
+        assert_eq!(counts.values(), (0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn project_inventory_refresh_event_updates_global_summaries() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::ProjectInventoryChanged);
+
+        assert_eq!(counts.values(), (1, 1, 1, 0, 0));
+    }
+
+    #[test]
+    fn routine_sources_do_not_use_refresh_all() {
+        for (path, source) in [
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            (
+                "workspace_command_center.rs",
+                include_str!("workspace_command_center.rs"),
+            ),
+            ("projects.rs", include_str!("projects.rs")),
+        ] {
+            assert!(
+                !source.contains("RefreshScope::All"),
+                "{path} contains a routine RefreshScope::All call"
+            );
+        }
+
+        let main_source = include_str!("main.rs");
+        assert_eq!(main_source.matches("RefreshScope::All").count(), 3);
+        assert!(main_source.contains("Some(ShortcutAction::Refresh)"));
+        assert!(main_source.contains("PaletteTarget::Refresh =>"));
     }
 }

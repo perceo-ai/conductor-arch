@@ -305,6 +305,23 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           changes_scope TEXT,
           updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS workspace_lifecycle_jobs (
+          id INTEGER PRIMARY KEY,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          workspace_id INTEGER,
+          payload_json TEXT NOT NULL,
+          error TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspace_lifecycle_jobs_status
+          ON workspace_lifecycle_jobs(status, id);
         ",
     )?;
     remove_chat_events_exact_unique_constraint(conn)?;

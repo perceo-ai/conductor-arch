@@ -152,9 +152,16 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   each keeps its own PID, chat thread, raw chunks, parsed events, screen
   snapshot, readiness/composer state, and transcript after switching between
   workspaces.
+- [ ] Start a managed Codex or Claude session in workspace A, switch to
+  workspace B while it is generating, and confirm sidebar/dashboard/history
+  reflect workspace A's running state without opening workspace A's full
+  timeline.
 - [ ] Start two Codex sessions in the same workspace but different chat threads;
   confirm selecting one thread never shows the other thread's transcript,
   runtime state, readiness state, or queued input.
+- [ ] Generate in chat thread 1, select chat thread 2, and confirm thread 1 is
+  marked running/unread in the chat tab bar while thread 2's timeline and queue
+  remain stable.
 - [ ] While a managed Codex session is running, stop and restart the archcar
   daemon; confirm the GTK session surface reconnects or shows a single
   deduped bridge error, persisted transcript state reloads, and stale managed
@@ -217,6 +224,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Run a one-shot terminal command and confirm stdout, stderr, and exit code.
 - [ ] Start multiple PTY shells, select one, send input to it, and stop only
   that shell.
+- [ ] Stop a terminal shell and confirm the Terminal tab, Processes panel,
+  sidebar, and dashboard reflect the stopped process without a manual refresh.
 - [ ] Run a full-screen TUI command that enters/exits the alternate screen and
   confirm the transcript view returns to the normal shell output afterward.
 - [ ] Run cursor-heavy shell output or a TUI transcript and confirm CSI cursor
@@ -225,22 +234,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm stopped/exited terminal process rows reconcile after restart.
 - [ ] Confirm terminal transcripts are persisted, searchable, and reloadable.
 - [ ] Launch `./target/release/archductor-gtk` without
-  `ARCHDUCTOR_DEBUG`; confirm there is no PTY Inspector sidebar item, no debug
-  fields in normal workspace/session UI, and `--page pty-inspector` falls back
-  to the normal default page.
-- [ ] Launch `ARCHDUCTOR_DEBUG=1 ./target/release/archductor-gtk`;
-  confirm PTY Inspector appears directly under Dashboard and History.
-- [ ] With debug mode on and at least one active or recent agent session,
-  select PTY Inspector and confirm the left list shows session id, workspace,
-  process status, parser state, last activity, PID, and chunk count.
-- [ ] Select an inspector session and confirm the raw/normalized output pane,
-  parsed event panel, and process diagnostics panel update together.
-- [ ] In the inspector, exercise raw vs normalized output, pause auto-scroll,
-  clear local view, copy visible output, jump to latest, and parsed-event
-  filter controls.
-- [ ] Confirm inspector diagnostics redact token/secret/password/key values and
-  show PID, command, workspace, start time, exit code/signal, restart count,
-  session state, last lifecycle action, and ordered lifecycle transitions.
+  `ARCHDUCTOR_DEBUG`; confirm there is no PTY Inspector sidebar item or debug
+  fields in normal workspace/session UI.
+- [ ] Launch `./target/release/archductor-gtk --page pty-inspector`; confirm it
+  falls back to the normal default page.
 
 ## Runtime
 
@@ -367,6 +364,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Type in the command palette and confirm commands filter by label,
   shortcut, and aliases such as `ci`, `diff`, `chat`, and `terminal`.
 - [ ] `Ctrl+R` refreshes the visible workspace state.
+- [ ] Confirm routine setup/run/stop, PR refresh/merge/review actions, terminal
+  shell start/stop, and workspace archive/restore/delete update only their
+  affected GTK surfaces; use `Ctrl+R` or command-palette Refresh for a full
+  manual refresh.
 - [ ] `Ctrl+B` toggles the sidebar.
 - [ ] Use the command palette to navigate Dashboard, Projects, History,
   Workspace, Changes, Checks, Review, Chat/Terminal, Big Terminal, Todos,

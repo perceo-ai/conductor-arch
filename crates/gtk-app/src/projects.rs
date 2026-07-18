@@ -1236,7 +1236,7 @@ impl WorkspaceSourceRequest {
         after_insert: impl FnOnce(&archductor_core::workspace::Workspace),
     ) -> anyhow::Result<archductor_core::workspace::Workspace> {
         match self {
-            Self::Branch { name, branch, base } => store.create_with_progress(
+            Self::Branch { name, branch, base } => store.create_lifecycle_job_with_progress(
                 CreateWorkspace {
                     repository_name: repository_name.to_owned(),
                     name: name.clone(),

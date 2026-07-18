@@ -289,6 +289,14 @@ pub fn load_app_shared_settings(path: &Path) -> Result<RepositorySettings> {
     Ok(settings)
 }
 
+pub fn load_effective_app_shared_settings(path: &Path) -> Result<RepositorySettings> {
+    let settings = RawRepositorySettings::from_settings(&default_app_shared_settings())
+        .merge(load_optional_settings(path)?)
+        .into_settings();
+    validate_repository_settings(&settings)?;
+    Ok(settings)
+}
+
 pub fn save_app_shared_settings(path: &Path, settings: &RepositorySettings) -> Result<()> {
     save_app_shared_settings_with_collection_intent(path, settings, &[], &[])
 }
@@ -2994,6 +3002,63 @@ mod tests {
             prompts.get(PromptKind::CreatePr),
             Some("Write a concise PR.")
         );
+    }
+
+    #[test]
+    fn default_prompt_pack_has_non_empty_prompt_for_every_kind() {
+        let pack = default_prompt_pack_toml().unwrap();
+        let raw: RawPromptPackFile = toml::from_str(&pack).unwrap();
+        let prompts = raw.prompts.into_settings();
+
+        for kind in [
+            PromptKind::NewWorkspace,
+            PromptKind::General,
+            PromptKind::ContinueWork,
+            PromptKind::SummarizeSession,
+            PromptKind::Handoff,
+            PromptKind::CodeReview,
+            PromptKind::CreatePr,
+            PromptKind::FixErrors,
+            PromptKind::ResolveMergeConflicts,
+            PromptKind::RenameBranch,
+            PromptKind::CommitGeneration,
+            PromptKind::TestFixing,
+            PromptKind::RefactorStyle,
+            PromptKind::SetupScript,
+            PromptKind::RunScript,
+        ] {
+            assert!(
+                prompts
+                    .get(kind)
+                    .is_some_and(|prompt| !prompt.trim().is_empty()),
+                "{} should have a default prompt",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn effective_app_shared_settings_show_default_prompt_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "[prompts]\ncreate_pr = \"Shared PR prompt\"\n").unwrap();
+
+        let raw = load_app_shared_settings(&path).unwrap();
+        assert_eq!(
+            raw.prompts
+                .as_ref()
+                .and_then(|prompts| prompts.general.as_deref()),
+            None
+        );
+
+        let effective = load_effective_app_shared_settings(&path).unwrap();
+        let prompts = effective.prompts.unwrap();
+        assert_eq!(
+            prompts.general.as_deref(),
+            default_prompt_settings().general.as_deref()
+        );
+        assert_eq!(prompts.create_pr.as_deref(), Some("Shared PR prompt"));
     }
 
     #[test]

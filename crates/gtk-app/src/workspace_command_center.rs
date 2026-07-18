@@ -33,6 +33,10 @@ const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 const WORKSPACE_COMMIT_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
+
+fn chat_outcome_requires_nav_refresh(outcome: &session_surface::ChatRefreshOutcome) -> bool {
+    outcome.requires_nav_refresh()
+}
 type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
@@ -41,7 +45,7 @@ fn clone_external_thread_selection_controller(
     controller.borrow().as_ref().cloned()
 }
 
-use crate::refresh::{RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceRightPanelTab, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
@@ -241,7 +245,18 @@ fn workspace_creation_status_shell(
             spawn_background_job(
                 move || {
                     WorkspaceStore::open_app(db_delete_job)
-                        .and_then(|store| store.delete(&workspace_delete_job, true, false))
+                        .and_then(|store| {
+                            let result =
+                                store.delete_lifecycle_job(&workspace_delete_job, true, false)?;
+                            if let Some(err) = result.cleanup_error {
+                                error!(
+                                    workspace = %result.workspace.name,
+                                    error = %err,
+                                    "workspace artifact cleanup failed after metadata delete"
+                                );
+                            }
+                            Ok(result.workspace)
+                        })
                         .map_err(|err| format!("{err:#}"))
                 },
                 move |result| {
@@ -259,7 +274,7 @@ fn workspace_creation_status_shell(
                             );
                         }
                     }
-                    refresh_done.refresh(RefreshScope::All);
+                    refresh_done.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                 },
             );
         });
@@ -761,12 +776,37 @@ fn ws_center_panel(
                 .or_else(|| visible_threads.first().map(|thread| thread.id));
             *selected_thread.borrow_mut() = selected;
             state.set_selected_chat_thread(selected);
+            let workspace_name = current_workspace_name.borrow().clone();
+            let nav_items_by_thread = crate::background_sync::load_workspace_chat_nav(
+                &db_path,
+                &workspace_name,
+                selected,
+            )
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| (item.thread_id, item))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
             while let Some(child) = chat_tabs.first_child() {
                 chat_tabs.remove(&child);
             }
             chat_tab_buttons.borrow_mut().clear();
             for thread in visible_threads {
-                let (tab_shell, close_button) = ws_tab_surface(&workspace_chat_tab_label(&thread));
+                let tab_label = nav_items_by_thread
+                    .get(&thread.id)
+                    .map(workspace_chat_nav_label)
+                    .unwrap_or_else(|| workspace_chat_tab_label(&thread));
+                let (tab_shell, close_button) = ws_tab_surface(&tab_label);
+                if let Some(nav_item) = nav_items_by_thread.get(&thread.id) {
+                    if nav_item.running {
+                        tab_shell.add_css_class("ws-tab-running");
+                    }
+                    if nav_item.unread {
+                        tab_shell.add_css_class("ws-tab-unread");
+                    }
+                }
                 let controller_for_click = external_thread_selection.clone();
                 let content_for_click = content.clone();
                 let selected_thread_for_click = selected_thread.clone();
@@ -1264,6 +1304,18 @@ fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
     let title = thread.title.trim();
     if title.is_empty() {
         "New Chat".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
+fn workspace_chat_nav_label(item: &crate::background_sync::WorkspaceChatNavItem) -> String {
+    let title = item.title.trim();
+    let title = if title.is_empty() { "New Chat" } else { title };
+    if item.unread {
+        format!("{title} *")
+    } else if item.running {
+        format!("{title} ...")
     } else {
         title.to_owned()
     }
@@ -2013,15 +2065,11 @@ fn workspace_prompt_tab_view(
     let modal_title_label = Label::new(Some(modal_title));
     modal_title_label.add_css_class("detail-label");
     modal_title_label.set_xalign(0.5);
-    let stage_btn = text_button(match title {
-        "Setup Prompt" => "Queue Bootstrap Draft",
-        "Run Prompt" => "Queue Launch Draft",
-        _ => "Queue Prompt",
-    });
+    let stage_btn = text_button(workspace_prompt_queue_button_label(title));
     stage_btn.add_css_class("suggested-action");
     let prompt_text = prompt.to_owned();
     stage_btn.connect_clicked(move |_| {
-        app_state.set_staged_review_prompt(Some(prompt_text.clone()));
+        queue_workspace_prompt_draft(&app_state, &prompt_text);
     });
     modal.append(&modal_title_label);
     modal.append(&stage_btn);
@@ -2029,6 +2077,21 @@ fn workspace_prompt_tab_view(
     panel.append(&prompt_overlay);
 
     panel
+}
+
+fn workspace_prompt_queue_button_label(title: &str) -> &'static str {
+    match title {
+        "Setup Prompt" => "Queue Bootstrap Draft",
+        "Run Prompt" => "Queue Launch Draft",
+        _ => "Queue Prompt",
+    }
+}
+
+fn queue_workspace_prompt_draft(app_state: &AppState, prompt: &str) {
+    let prompt = prompt.trim();
+    if !prompt.is_empty() {
+        app_state.queue_pending_chat_prompt(prompt.to_owned());
+    }
 }
 
 fn workspace_terminal_tab_view(
@@ -2730,7 +2793,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Setup", &err),
             ),
         }
-        refresh_setup.refresh(RefreshScope::All);
+        refresh_setup.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: setup_workspace.clone(),
+        });
     });
 
     let run_workspace = ws.name.clone();
@@ -2753,7 +2818,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Run", &err),
             ),
         }
-        refresh_run.refresh(RefreshScope::All);
+        refresh_run.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: run_workspace.clone(),
+        });
     });
 
     let stop_workspace = ws.name.clone();
@@ -2776,7 +2843,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Stop", &err),
             ),
         }
-        refresh_stop.refresh(RefreshScope::All);
+        refresh_stop.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: stop_workspace.clone(),
+        });
     });
 
     let spotlight_workspace = ws.name.clone();
@@ -2799,7 +2868,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight", &err),
             ),
         }
-        refresh_spotlight_on.refresh(RefreshScope::All);
+        refresh_spotlight_on.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_workspace.clone(),
+        });
     });
 
     let spotlight_sync_workspace = ws.name.clone();
@@ -2827,7 +2898,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight sync", &err),
             ),
         }
-        refresh_spotlight_sync.refresh(RefreshScope::All);
+        refresh_spotlight_sync.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_sync_workspace.clone(),
+        });
     });
 
     let spotlight_repair_workspace = ws.name.clone();
@@ -2855,7 +2928,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight repair", &err),
             ),
         }
-        refresh_spotlight_repair.refresh(RefreshScope::All);
+        refresh_spotlight_repair.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_repair_workspace.clone(),
+        });
     });
 
     let spotlight_stop_workspace = ws.name.clone();
@@ -2878,7 +2953,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight stop", &err),
             ),
         }
-        refresh_spotlight_off.refresh(RefreshScope::All);
+        refresh_spotlight_off.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_stop_workspace.clone(),
+        });
     });
 
     let path = ws.path.clone();
@@ -2981,7 +3058,7 @@ fn lifecycle_panel(
                 lifecycle_action_failure_feedback("Rename", &err),
             ),
         }
-        refresh_after_rename.refresh(RefreshScope::All);
+        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     });
 
     let db_duplicate = db_path.to_path_buf();
@@ -3020,7 +3097,7 @@ fn lifecycle_panel(
                 lifecycle_action_failure_feedback("Duplicate", &err),
             ),
         }
-        refresh_after_duplicate.refresh(RefreshScope::All);
+        refresh_after_duplicate.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     });
 
     for (button, action) in [
@@ -3049,12 +3126,22 @@ fn lifecycle_panel(
                 let refresh_after_delete = refresh_after_action.clone();
                 let progress_after_delete = progress_action.clone();
                 let toast_after_delete = toast_action.clone();
-                let db_cleanup_after_delete = db_action.clone();
                 let state_after_delete = state_after_action.clone();
                 spawn_background_job(
                     move || {
                         WorkspaceStore::open_app(db_delete)
-                            .and_then(|store| store.delete(&workspace_delete, false, false))
+                            .and_then(|store| {
+                                let result =
+                                    store.delete_lifecycle_job(&workspace_delete, false, false)?;
+                                if let Some(err) = result.cleanup_error {
+                                    error!(
+                                        workspace = %result.workspace.name,
+                                        error = %err,
+                                        "workspace artifact cleanup failed after metadata delete"
+                                    );
+                                }
+                                Ok(result.workspace)
+                            })
                             .map_err(|err| format!("{err:#}"))
                     },
                     move |result| {
@@ -3066,22 +3153,6 @@ fn lifecycle_panel(
                                     &state_after_delete,
                                     &Ok(deleted.clone()),
                                 );
-                                let db_cleanup = db_cleanup_after_delete.clone();
-                                std::thread::spawn(move || {
-                                    if let Err(err) =
-                                        WorkspaceStore::open_app(db_cleanup).and_then(|store| {
-                                            store.cleanup_deleted_workspace_artifacts(
-                                                &deleted, true, true,
-                                            )
-                                        })
-                                    {
-                                        error!(
-                                            workspace = %deleted.name,
-                                            error = %err,
-                                            "background workspace artifact cleanup failed after delete"
-                                        );
-                                    }
-                                });
                             }
                             Err(err) => {
                                 let err = anyhow::anyhow!(err);
@@ -3092,17 +3163,18 @@ fn lifecycle_panel(
                                 );
                             }
                         }
-                        refresh_after_delete.refresh(RefreshScope::All);
+                        refresh_after_delete.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                     },
                 );
                 return;
             }
-            let result = WorkspaceStore::open_app(db_action.clone()).and_then(|store| match action {
-                "archive" => store.archive(&workspace, false),
-                "restore" => store.restore(&workspace),
-                "discard" => store.discard(&workspace),
-                _ => unreachable!(),
-            });
+            let result =
+                WorkspaceStore::open_app(db_action.clone()).and_then(|store| match action {
+                    "archive" => store.archive(&workspace, false),
+                    "restore" => store.restore(&workspace),
+                    "discard" => store.discard(&workspace),
+                    _ => unreachable!(),
+                });
             match result {
                 Ok(workspace) => progress_action.set_text(&format!(
                     "{} complete: {}",
@@ -3115,7 +3187,7 @@ fn lifecycle_panel(
                     lifecycle_action_failure_feedback(&title_case_workspace(action), &err),
                 ),
             }
-            refresh_after_action.refresh(RefreshScope::All);
+            refresh_after_action.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
         });
     }
 
@@ -5209,13 +5281,14 @@ fn connect_merge_pr_button(
         let result = WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
             store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
         });
+        let refresh_event = pull_request_merge_refresh_event(&workspace_for_merge, &result);
         apply_action_feedback(
             &feedback_for_merge,
             &toast_for_merge,
             &pull_request_merge_and_archive_feedback(result),
             true,
         );
-        refresh_hub.refresh(RefreshScope::All);
+        refresh_hub.refresh_event(refresh_event);
     });
 }
 
@@ -6044,7 +6117,11 @@ fn workspace_check_runner_panel(
                                 ),
                                 true,
                             );
-                            refresh_after_run.refresh(RefreshScope::All);
+                            refresh_after_run.refresh_event(
+                                RefreshEvent::WorkspaceRuntimeChanged {
+                                    workspace: workspace_for_run.clone(),
+                                },
+                            );
                         }
                         Err(err) => apply_action_feedback(
                             &feedback_for_run,
@@ -6082,7 +6159,7 @@ fn workspace_check_runner_panel(
             .and_then(|store| latest_check_agent_prompt(&store, &workspace_for_stage))
         {
             Ok(prompt) => {
-                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                app_state_for_stage.queue_pending_chat_prompt(prompt);
                 apply_action_feedback(
                     &feedback_for_stage,
                     &toast_for_stage,
@@ -6232,7 +6309,7 @@ fn workspace_checks_panel(
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                app_state_for_stage.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_stage,
                                     &toast_for_stage,
@@ -6259,7 +6336,7 @@ fn workspace_checks_panel(
                             store.pull_request_review_agent_prompt(&workspace_for_review)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_review.set_staged_review_prompt(Some(prompt));
+                                app_state_for_review.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_review,
                                     &toast_for_review,
@@ -6293,7 +6370,9 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh(RefreshScope::All);
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_refresh.clone(),
+                        });
                     });
 
                     top_row.append(&summary_btn);
@@ -6332,13 +6411,15 @@ fn workspace_checks_panel(
                                     Some(&method),
                                 )
                             });
+                        let refresh_event =
+                            pull_request_merge_refresh_event(&workspace_for_merge, &result);
                         apply_action_feedback(
                             &feedback_for_merge,
                             &toast_for_merge,
                             &pull_request_merge_and_archive_feedback(result),
                             true,
                         );
-                        refresh_after_merge.refresh(RefreshScope::All);
+                        refresh_after_merge.refresh_event(refresh_event);
                     });
 
                     let db_for_stage = db_path.to_path_buf();
@@ -6351,7 +6432,7 @@ fn workspace_checks_panel(
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                app_state_for_stage.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_stage,
                                     &toast_for_stage,
@@ -6385,7 +6466,9 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh(RefreshScope::All);
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_refresh.clone(),
+                        });
                     });
 
                     merge_row.append(&merge_method);
@@ -6412,7 +6495,7 @@ fn workspace_checks_panel(
                             store.pull_request_checks_agent_prompt(&workspace_for_fix)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_fix.set_staged_review_prompt(Some(prompt));
+                                app_state_for_fix.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_fix,
                                     &toast_for_fix,
@@ -6439,7 +6522,7 @@ fn workspace_checks_panel(
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                app_state_for_stage.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_stage,
                                     &toast_for_stage,
@@ -6473,7 +6556,9 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh(RefreshScope::All);
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_refresh.clone(),
+                        });
                     });
 
                     top_row.append(&fix_btn);
@@ -6493,7 +6578,7 @@ fn workspace_checks_panel(
                     continue_btn.connect_clicked(move |_| {
                         let prompt =
                             workspace_continue_prompt(&db_for_continue, &workspace_for_continue);
-                        app_state_for_continue.set_staged_review_prompt(Some(prompt));
+                        app_state_for_continue.queue_pending_chat_prompt(prompt);
                     });
 
                     let db_for_archive = db_path.to_path_buf();
@@ -6510,7 +6595,8 @@ fn workspace_checks_panel(
                             &pull_request_archive_feedback(result),
                             true,
                         );
-                        refresh_after_archive.refresh(RefreshScope::All);
+                        refresh_after_archive
+                            .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                     });
 
                     top_row.append(&continue_btn);
@@ -6673,7 +6759,7 @@ fn workspace_conflict_resolution_panel(
         let conflict_workspace_for_open = conflict_workspace.clone();
         open_workspace_btn.connect_clicked(move |_| {
             app_state_for_open.set_selected_workspace(Some(conflict_workspace_for_open.clone()));
-            refresh_for_open.refresh(RefreshScope::All);
+            refresh_for_open.refresh_event(RefreshEvent::WorkspaceSelectionChanged);
         });
 
         let action_row = make_action_row();
@@ -6921,6 +7007,23 @@ fn pull_request_merge_and_archive_feedback(
     }
 }
 
+fn pull_request_merge_refresh_event(
+    workspace: &str,
+    result: &anyhow::Result<archductor_core::workspace::MergePullRequestResult>,
+) -> RefreshEvent {
+    if result
+        .as_ref()
+        .map(|result| result.archived_workspace.is_some())
+        .unwrap_or(false)
+    {
+        RefreshEvent::WorkspaceInventoryChanged
+    } else {
+        RefreshEvent::WorkspaceReviewChanged {
+            workspace: workspace.to_owned(),
+        }
+    }
+}
+
 fn pull_request_refresh_feedback(result: anyhow::Result<Option<PullRequest>>) -> String {
     match result {
         Ok(Some(pr)) => format!("PR #{} state: {}", pr.number, pr.state),
@@ -7126,7 +7229,11 @@ fn workspace_review_panel(
                                 true,
                             );
                             if should_refresh {
-                                refresh_after_resolution.refresh(RefreshScope::All);
+                                refresh_after_resolution.refresh_event(
+                                    RefreshEvent::WorkspaceReviewChanged {
+                                        workspace: workspace_for_resolution.clone(),
+                                    },
+                                );
                             }
                         });
                         row.append(&button);
@@ -7210,7 +7317,9 @@ fn workspace_review_panel(
                 file_for_add.set_text("");
                 line_for_add.set_text("");
                 body_for_add.set_text("");
-                refresh_after_add.refresh(RefreshScope::All);
+                refresh_after_add.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                    workspace: workspace_for_add.clone(),
+                });
             }
             Err(err) => apply_action_feedback(
                 &feedback_for_add,
@@ -7241,7 +7350,7 @@ fn workspace_review_panel(
             Ok(prompt)
         }) {
             Ok(prompt) => {
-                app_state.set_staged_review_prompt(Some(prompt));
+                app_state.queue_pending_chat_prompt(prompt);
                 apply_action_feedback(
                     &stage_feedback,
                     &stage_toast,
@@ -7276,6 +7385,7 @@ fn workspace_review_panel(
                     let button = secondary_button("Resolve");
                     let db_for_resolve = db_path.to_path_buf();
                     let refresh_after_resolve = refresh_hub.clone();
+                    let workspace_for_resolve = name.to_owned();
                     let comment_id = comment.id;
                     let feedback_for_resolve = feedback.clone();
                     let toast_for_resolve = toast_overlay.clone();
@@ -7295,7 +7405,11 @@ fn workspace_review_panel(
                             true,
                         );
                         if result.is_ok() {
-                            refresh_after_resolve.refresh(RefreshScope::All);
+                            refresh_after_resolve.refresh_event(
+                                RefreshEvent::WorkspaceReviewChanged {
+                                    workspace: workspace_for_resolve.clone(),
+                                },
+                            );
                         }
                     });
                     row.append(&button);
@@ -7788,6 +7902,70 @@ mod tests {
             created_at: "then".to_owned(),
             updated_at: "now".to_owned(),
         }
+    }
+
+    #[test]
+    fn chat_outcome_nav_refresh_ignores_message_only_changes() {
+        let messages_only = session_surface::ChatRefreshOutcome {
+            messages_changed: true,
+            ..Default::default()
+        };
+        assert!(!chat_outcome_requires_nav_refresh(&messages_only));
+
+        for outcome in [
+            session_surface::ChatRefreshOutcome {
+                thread_title_changed: true,
+                ..Default::default()
+            },
+            session_surface::ChatRefreshOutcome {
+                workspace_name_changed: true,
+                ..Default::default()
+            },
+            session_surface::ChatRefreshOutcome {
+                branch_changed: true,
+                ..Default::default()
+            },
+            session_surface::ChatRefreshOutcome {
+                session_lifecycle_changed: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(chat_outcome_requires_nav_refresh(&outcome));
+        }
+    }
+
+    #[test]
+    fn setup_and_run_prompt_tabs_use_specific_queue_button_labels() {
+        assert_eq!(
+            workspace_prompt_queue_button_label("Setup Prompt"),
+            "Queue Bootstrap Draft"
+        );
+        assert_eq!(
+            workspace_prompt_queue_button_label("Run Prompt"),
+            "Queue Launch Draft"
+        );
+        assert_eq!(
+            workspace_prompt_queue_button_label("Review Prompt"),
+            "Queue Prompt"
+        );
+    }
+
+    #[test]
+    fn prompt_tab_queue_button_queues_prompt_for_active_chat() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            crate::AppPage::Workspace,
+        );
+
+        queue_workspace_prompt_draft(&state, "  Bootstrap repo setup.  ");
+
+        assert_eq!(
+            state.take_pending_chat_prompt().as_deref(),
+            Some("Bootstrap repo setup.")
+        );
+        assert_eq!(state.staged_review_prompt(), None);
     }
 
     fn test_checks_summary(
@@ -8417,6 +8595,28 @@ mod tests {
     }
 
     #[test]
+    fn workspace_chat_nav_label_marks_running_and_unread_threads() {
+        let base = crate::background_sync::WorkspaceChatNavItem {
+            thread_id: 7,
+            title: "Fix auth".to_owned(),
+            provider: "codex".to_owned(),
+            status: "active".to_owned(),
+            running: false,
+            unread: false,
+            updated_at: "now".to_owned(),
+        };
+        assert_eq!(workspace_chat_nav_label(&base), "Fix auth");
+
+        let mut running = base.clone();
+        running.running = true;
+        assert_eq!(workspace_chat_nav_label(&running), "Fix auth ...");
+
+        let mut unread = running;
+        unread.unread = true;
+        assert_eq!(workspace_chat_nav_label(&unread), "Fix auth *");
+    }
+
+    #[test]
     fn workspace_chat_tabs_hide_shell_threads() {
         let shell = ChatThreadRecord {
             id: 1,
@@ -8930,6 +9130,50 @@ mod tests {
             },
         ));
         assert_eq!(no_archive, "Merged PR: Merged pull request #42");
+    }
+
+    #[test]
+    fn pull_request_merge_refresh_event_uses_inventory_after_archive() {
+        let archived = Ok(archductor_core::workspace::MergePullRequestResult {
+            merge_output: "Merged pull request #42\n".to_owned(),
+            archived_workspace: Some(Workspace {
+                id: 1,
+                repository_id: 2,
+                name: "berlin".to_owned(),
+                path: std::path::PathBuf::from("/tmp/berlin"),
+                branch: "lc/berlin".to_owned(),
+                base_ref: "main".to_owned(),
+                port_base: 4200,
+                status: "archived".to_owned(),
+                archived_at: Some("now".to_owned()),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            }),
+        });
+        assert_eq!(
+            pull_request_merge_refresh_event("berlin", &archived),
+            RefreshEvent::WorkspaceInventoryChanged
+        );
+
+        let not_archived = Ok(archductor_core::workspace::MergePullRequestResult {
+            merge_output: "Merged pull request #42\n".to_owned(),
+            archived_workspace: None,
+        });
+        assert_eq!(
+            pull_request_merge_refresh_event("berlin", &not_archived),
+            RefreshEvent::WorkspaceReviewChanged {
+                workspace: "berlin".to_owned()
+            }
+        );
+
+        let failed: anyhow::Result<archductor_core::workspace::MergePullRequestResult> =
+            Err(anyhow::anyhow!("merge failed"));
+        assert_eq!(
+            pull_request_merge_refresh_event("berlin", &failed),
+            RefreshEvent::WorkspaceReviewChanged {
+                workspace: "berlin".to_owned()
+            }
+        );
     }
 
     #[test]

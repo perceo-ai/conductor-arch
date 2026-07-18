@@ -2,6 +2,7 @@
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
 mod archcar_async;
+mod background_sync;
 mod buttons;
 mod command_palette;
 mod dashboard;
@@ -10,7 +11,6 @@ mod history_data;
 mod logger;
 mod motion;
 mod projects;
-mod pty_inspector;
 mod refresh;
 mod session_surface;
 mod settings;
@@ -38,9 +38,9 @@ use gtk::{
     Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use refresh::{RefreshHub, RefreshScope};
+use refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -323,11 +323,6 @@ fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<Laun
         ["dashboard"] => target.page = AppPage::Dashboard,
         ["projects"] | ["repositories"] => target.page = AppPage::Projects,
         ["history"] => target.page = AppPage::History,
-        ["session-logs"] | ["session", "logs"] | ["pty-inspector"] | ["pty", "inspector"]
-            if debug_mode =>
-        {
-            target.page = AppPage::PtyInspector;
-        }
         ["workspace"] | ["workspaces"] => target.page = AppPage::Workspace,
         [] => {}
         [page] => target.page = parse_app_page_with_debug_mode(page, debug_mode)?,
@@ -356,16 +351,13 @@ fn parse_app_page(value: &str) -> Result<AppPage, String> {
     parse_app_page_with_debug_mode(value, false)
 }
 
-fn parse_app_page_with_debug_mode(value: &str, debug_mode: bool) -> Result<AppPage, String> {
+fn parse_app_page_with_debug_mode(value: &str, _debug_mode: bool) -> Result<AppPage, String> {
     match normalize_launch_token(value).as_str() {
         "dashboard" | "home" => Ok(AppPage::Dashboard),
         "projects" | "repositories" | "repos" => Ok(AppPage::Projects),
         "settings" | "config" => Ok(AppPage::Settings),
         "history" | "archive" => Ok(AppPage::History),
         "workspace" | "workspaces" => Ok(AppPage::Workspace),
-        "sessionlogs" | "sessionlog" | "ptyinspector" | "pty" if debug_mode => {
-            Ok(AppPage::PtyInspector)
-        }
         other => Err(format!("unknown page: {other}")),
     }
 }
@@ -897,18 +889,11 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     main_stack.add_named(&settings_page, Some("settings"));
     main_stack.add_named(&history_page, Some("history"));
     main_stack.add_named(&workspace_preference_scope, Some("workspace"));
-    if debug_mode {
-        main_stack.add_named(
-            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
-            Some("pty-inspector"),
-        );
-    }
     main_stack.set_visible_child_name(match app_state.snapshot().active_page {
         AppPage::Workspace => "workspace",
         AppPage::Projects => "projects",
         AppPage::Settings => "settings",
         AppPage::History => "history",
-        AppPage::PtyInspector if debug_mode => "pty-inspector",
         _ => "dashboard",
     });
 
@@ -918,7 +903,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         main_stack.clone(),
         window.clone(),
         split.clone(),
-        debug_mode,
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
         toast_manager.clone(),
@@ -998,7 +982,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 .unwrap_or_default();
             let commands = palette_commands(
                 state_for_palette.snapshot().selected_workspace.is_some(),
-                debug_mode,
                 &keybindings,
                 &custom_commands,
             );
@@ -1039,10 +1022,25 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     ) {
         refresh_hub.refresh(RefreshScope::All);
     }
+    match WorkspaceStore::open_app(app_state.workspace_database_path())
+        .and_then(|store| store.recover_workspace_lifecycle_jobs())
+    {
+        Ok(recovered) if recovered > 0 => {
+            refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+        }
+        Ok(_) => {}
+        Err(err) => report_runtime_error(
+            &runtime_error_reporter,
+            &toast_manager,
+            "workspace lifecycle recovery",
+            err,
+        ),
+    }
 
     let spotlight_event_tx = {
         let (tx, rx) = mpsc::channel();
         let hub_spotlight_events = refresh_hub.clone();
+        let state_spotlight_events = app_state.clone();
         let db_path_spotlight_events = app_state.workspace_database_path();
         let runtime_reporter_spotlight_events = runtime_error_reporter.clone();
         let toast_spotlight_events = toast_manager.clone();
@@ -1057,7 +1055,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     "spotlight event",
                 )
             {
-                hub_spotlight_events.refresh(RefreshScope::All);
+                refresh_runtime_reconciliation_event(
+                    &hub_spotlight_events,
+                    &state_spotlight_events,
+                );
             }
             glib::ControlFlow::Continue
         });
@@ -1081,6 +1082,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_on_close = app_state.workspace_database_path();
         let hub_on_close = refresh_hub.clone();
+        let state_on_close = app_state.clone();
         let spotlight_watcher_on_close = spotlight_watcher.clone();
         let runtime_reporter_on_close = runtime_error_reporter.clone();
         let toast_on_close = toast_manager.clone();
@@ -1094,7 +1096,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 &toast_on_close,
                 "close",
             ) {
-                hub_on_close.refresh(RefreshScope::All);
+                refresh_runtime_reconciliation_event(&hub_on_close, &state_on_close);
             }
         });
     }
@@ -1102,6 +1104,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_on_focus = app_state.workspace_database_path();
         let hub_on_focus = refresh_hub.clone();
+        let state_on_focus = app_state.clone();
         let runtime_reporter_on_focus = runtime_error_reporter.clone();
         let toast_on_focus = toast_manager.clone();
         window.connect_is_active_notify(move |window| {
@@ -1114,8 +1117,70 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 &toast_on_focus,
                 "focus",
             ) {
-                hub_on_focus.refresh(RefreshScope::All);
+                refresh_runtime_reconciliation_event(&hub_on_focus, &state_on_focus);
             }
+            match WorkspaceStore::open_app(&db_path_on_focus)
+                .and_then(|store| store.recover_workspace_lifecycle_jobs())
+            {
+                Ok(recovered) if recovered > 0 => {
+                    hub_on_focus.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                }
+                Ok(_) => {}
+                Err(err) => report_runtime_error(
+                    &runtime_reporter_on_focus,
+                    &toast_on_focus,
+                    "workspace lifecycle recovery",
+                    err,
+                ),
+            }
+        });
+    }
+
+    {
+        let db_path_background = app_state.workspace_database_path();
+        let hub_background = refresh_hub.clone();
+        let previous_background = Rc::new(RefCell::new(
+            background_sync::BackgroundSyncSnapshot::default(),
+        ));
+        let background_sync_in_flight = Rc::new(Cell::new(false));
+        // PER-190: Background sync samples persisted running chat markers while
+        // off-focus event routing is still being split from active timelines.
+        // Remove when archcar/runtime producers emit typed RefreshEvents for
+        // every running workspace regardless of the selected GTK page.
+        // PER-190: running chats can update while their workspace is not
+        // focused; keep summaries current without loading hidden timelines.
+        glib::timeout_add_seconds_local(2, move || {
+            if background_sync_in_flight.get() {
+                return glib::ControlFlow::Continue;
+            }
+            background_sync_in_flight.set(true);
+            let db_path = db_path_background.clone();
+            let hub = hub_background.clone();
+            let previous_background = Rc::clone(&previous_background);
+            let in_flight = Rc::clone(&background_sync_in_flight);
+            archcar_async::spawn_background_job(
+                move || background_sync::load_background_sync_snapshot(&db_path),
+                move |result| {
+                    in_flight.set(false);
+                    let next = match result {
+                        Ok(next) => next,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "gtk background sync snapshot failed");
+                            return;
+                        }
+                    };
+                    let previous = previous_background.borrow().clone();
+                    if previous.running_threads.is_empty() && next.running_threads.is_empty() {
+                        return;
+                    }
+                    let events = background_sync::diff_background_sync(&previous, &next);
+                    *previous_background.borrow_mut() = next;
+                    for event in events {
+                        hub.refresh_event(event);
+                    }
+                },
+            );
+            glib::ControlFlow::Continue
         });
     }
 
@@ -1239,6 +1304,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
 
     let db_path_runtime_auto = app_state.workspace_database_path();
     let hub_runtime_auto = refresh_hub.clone();
+    let state_runtime_auto = app_state.clone();
     let spotlight_watcher_auto = spotlight_watcher.clone();
     let spotlight_event_tx_auto = spotlight_event_tx.clone();
     let runtime_reporter_auto = runtime_error_reporter.clone();
@@ -1252,7 +1318,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             &toast_auto,
             "timer",
         ) {
-            hub_runtime_auto.refresh(RefreshScope::All);
+            refresh_runtime_reconciliation_event(&hub_runtime_auto, &state_runtime_auto);
         }
         if let Err(err) = refresh_spotlight_file_watcher(
             &db_path_runtime_auto,
@@ -1409,8 +1475,15 @@ fn page_stack_name(page: &AppPage) -> &'static str {
         AppPage::Projects => "projects",
         AppPage::Settings => "settings",
         AppPage::History => "history",
-        AppPage::PtyInspector => "pty-inspector",
         AppPage::Workspace | AppPage::Review => "workspace",
+    }
+}
+
+fn refresh_runtime_reconciliation_event(refresh_hub: &RefreshHub, state: &AppState) {
+    if let Some(workspace) = state.selected_workspace() {
+        refresh_hub.refresh_event(RefreshEvent::WorkspaceRuntimeChanged { workspace });
+    } else {
+        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     }
 }
 
@@ -2003,7 +2076,7 @@ mod tests {
     }
 
     #[test]
-    fn session_logs_route_is_gated_by_debug_mode() {
+    fn session_logs_route_is_removed() {
         let err = parse_launch_target_with_debug_mode(
             ["archductor-gtk", "--page", "session-logs"],
             false,
@@ -2011,19 +2084,17 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "unknown page: sessionlogs");
 
-        let target =
+        let debug_err =
             parse_launch_target_with_debug_mode(["archductor-gtk", "--page", "session-logs"], true)
-                .unwrap();
+                .unwrap_err();
+        assert_eq!(debug_err, "unknown page: sessionlogs");
 
-        assert_eq!(target.page, AppPage::PtyInspector);
-        assert_eq!(target.workspace, None);
-
-        let legacy_target = parse_launch_target_with_debug_mode(
+        let legacy_err = parse_launch_target_with_debug_mode(
             ["archductor-gtk", "--page", "pty-inspector"],
             true,
         )
-        .unwrap();
-        assert_eq!(legacy_target.page, AppPage::PtyInspector);
+        .unwrap_err();
+        assert_eq!(legacy_err, "unknown page: ptyinspector");
     }
 
     #[test]

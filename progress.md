@@ -82,8 +82,8 @@ paths and known rough edges.
 
 ### GTK App
 
-- GTK/libadwaita app with Dashboard, Projects, History, Workspace, and
-  debug-only PTY Inspector pages. Settings, Dashboard filters, and History tabs
+- GTK/libadwaita app with Dashboard, Projects, History, and Workspace pages.
+  Settings, Dashboard filters, and History tabs
   reuse the standard close-free workspace chat-tab presentation.
 - Project onboarding from local repository path or Git clone URL.
 - Scope-aware Settings page: Shared applies machine-wide defaults to every
@@ -98,6 +98,9 @@ paths and known rough edges.
 - Workspace command center with status header, agents panel, runtime panel,
   Changes, Checks, Review, Chat/Terminal, Big Terminal, Todos, Processes,
   Branch, Timeline, Checkpoints, lifecycle actions, and linked-directory panel.
+- Workspace delete lifecycle jobs own artifact cleanup and retry behavior; GTK
+  surfaces invoke the lifecycle job instead of starting detached duplicate
+  cleanup.
 - Agent/session surface for Shell, Codex, Claude, and Cursor session launch
   paths, transcript persistence, selected-session input, staged review prompts,
   provider/auth/MCP status, harness metadata, prompt preview, profile selector,
@@ -107,6 +110,15 @@ paths and known rough edges.
   visible, and Claude hides unsupported goals.
 - Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
   queue-row reconciliation isolated from streaming chat refreshes.
+- GTK refreshes use typed events for routine runtime, review, workspace
+  inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
+  explicit manual refresh and startup reconciliation.
+- GTK background sync samples persisted running chat markers off the main timer
+  callback, coalesces lifecycle refreshes by workspace, and avoids loading
+  hidden full chat timelines for off-focus work.
+- Running chat sessions are sampled in the background with lightweight ids and
+  sequence markers so sidebar/dashboard/history and chat tab state can update
+  while another workspace or thread is selected.
 - Terminal surfaces for one-shot commands, PTY shell tabs, transcript
   persistence/search/reload, basic ANSI/control redraw handling, alternate
   screen restoration, configured terminal font, configured scrollback, and

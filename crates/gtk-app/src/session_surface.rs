@@ -95,6 +95,26 @@ type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 type SendChatTextController = Rc<RefCell<Option<Rc<dyn Fn(String, bool) -> bool>>>>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ChatRefreshOutcome {
+    pub messages_changed: bool,
+    pub thread_title_changed: bool,
+    pub workspace_name_changed: bool,
+    pub branch_changed: bool,
+    pub session_lifecycle_changed: bool,
+    pub provider_controls_changed: bool,
+    pub composer_state_changed: bool,
+}
+
+impl ChatRefreshOutcome {
+    pub(crate) fn requires_nav_refresh(&self) -> bool {
+        self.thread_title_changed
+            || self.workspace_name_changed
+            || self.branch_changed
+            || self.session_lifecycle_changed
+    }
+}
+
 fn clone_refresh_chat_surface_controller(
     controller: &RefreshChatSurfaceController,
 ) -> Option<Rc<dyn Fn()>> {
@@ -259,6 +279,7 @@ type ChatRenderMessageSignature = (i64, String, Option<i64>, String, String);
 type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
 type ChatRenderProviderEventSignature = (String, i64, ProviderEventKind, ProviderEventPhase, usize);
 type ChatRenderPendingInputSignature = (usize, String);
+type ChatThreadNavSignature = (i64, String, String, String, Option<String>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChatRenderSignature {
@@ -276,6 +297,21 @@ struct ChatRenderSignature {
     transcript_display: String,
     render_state: &'static str,
     runtime_summary: Option<String>,
+}
+
+fn chat_thread_nav_signature(threads: &[ChatThreadRecord]) -> Vec<ChatThreadNavSignature> {
+    threads
+        .iter()
+        .map(|thread| {
+            (
+                thread.id,
+                thread.provider.clone(),
+                thread.title.clone(),
+                thread.status.clone(),
+                thread.archived_at.clone(),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1075,6 +1111,7 @@ pub fn agent_session_panel(
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
         Rc::new(move || {
+            let mut outcome = ChatRefreshOutcome::default();
             let workspace = current_workspace_name.borrow().clone();
             debug!(workspace = %workspace, "chat refresh_view start");
             let chat_scroll = capture_chat_scroll(&scroll);
@@ -1173,6 +1210,8 @@ pub fn agent_session_panel(
                     }
                 }
             };
+            let previous_threads = thread_state.borrow().clone();
+            let previous_selected_thread = *selected_thread.borrow();
             {
                 let mut current = record_state.borrow_mut();
                 current.clear();
@@ -1207,6 +1246,12 @@ pub fn agent_session_panel(
                     }
                 },
             );
+            if chat_thread_nav_signature(&previous_threads)
+                != chat_thread_nav_signature(&thread_state.borrow())
+                || previous_selected_thread != *selected_thread.borrow()
+            {
+                outcome.session_lifecycle_changed = true;
+            }
             let selected_thread_record = {
                 let selected_thread_id = *selected_thread.borrow();
                 let threads = thread_state.borrow();
@@ -1239,7 +1284,9 @@ pub fn agent_session_panel(
             let current_kind = *selected_harness.borrow();
             let selected_thread_id = *selected_thread.borrow();
             let mut archcar_changed = false;
+            let mut archcar_intent = ArchcarRefreshIntent::default();
             while let Some(message) = archcar_bridge.try_recv() {
+                archcar_intent.merge(archcar_message_refresh_intent(&message));
                 match message {
                     AsyncArchcarMessage::Event(event) => {
                         let _ = update_working_indicator_for_archcar_event(
@@ -1376,11 +1423,16 @@ pub fn agent_session_panel(
                 }
                 update_composer_for_view();
             }
-            if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
-                (external_chat_tabs.on_threads_changed)(
-                    thread_state.borrow().clone(),
-                    *selected_thread.borrow(),
-                );
+            outcome.messages_changed |= archcar_intent.chat_surface;
+            outcome.session_lifecycle_changed |=
+                archcar_intent.workspace_nav || archcar_intent.global_summary;
+            if outcome.requires_nav_refresh() {
+                if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
+                    (external_chat_tabs.on_threads_changed)(
+                        thread_state.borrow().clone(),
+                        *selected_thread.borrow(),
+                    );
+                }
             }
 
             clear_box(&thread_row);
@@ -1651,7 +1703,12 @@ pub fn agent_session_panel(
                                         thread_state.as_ref(),
                                         metadata_update.clone(),
                                     );
-                                    if changes.workspace_changed || changes.branch_changed {
+                                    outcome.workspace_name_changed |= changes.workspace_changed;
+                                    outcome.branch_changed |= changes.branch_changed;
+                                    outcome.thread_title_changed |= changes.chat_title_changed;
+                                    let metadata_workspace_changed =
+                                        outcome.workspace_name_changed || outcome.branch_changed;
+                                    if metadata_workspace_changed {
                                         if let Some(external_chat_tabs) =
                                             external_chat_tabs.as_ref()
                                         {
@@ -1661,7 +1718,7 @@ pub fn agent_session_panel(
                                         }
                                         refresh_for_metadata();
                                     }
-                                    if changes.chat_title_changed {
+                                    if outcome.thread_title_changed {
                                         if let Some(external_chat_tabs) =
                                             external_chat_tabs.as_ref()
                                         {
@@ -1697,8 +1754,10 @@ pub fn agent_session_panel(
                                     last_render_signature.as_ref(),
                                     signature,
                                 ) {
+                                    debug!(?outcome, "chat refresh_view outcome");
                                     return;
                                 }
+                                outcome.messages_changed = true;
                                 clear_box(&messages);
                                 apply_context_usage_state(
                                     &context_usage,
@@ -1748,6 +1807,7 @@ pub fn agent_session_panel(
                                         }
                                     }
                                 }
+                                debug!(?outcome, "chat refresh_view outcome");
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
                             }
@@ -1790,6 +1850,7 @@ pub fn agent_session_panel(
                     if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
                         return;
                     }
+                    outcome.messages_changed = true;
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
                     append_chat_status_banner(
@@ -1842,7 +1903,7 @@ pub fn agent_session_panel(
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
             }
-            debug!(workspace = %workspace, "chat refresh_view complete");
+            debug!(workspace = %workspace, ?outcome, "chat refresh_view complete");
         }) as Rc<dyn Fn()>
     };
     *refresh_chat_surface.borrow_mut() = Some(refresh_view.clone());
@@ -6527,8 +6588,6 @@ fn composer_action_for_startup_state(
     if waiting_for_startup {
         if has_text {
             ComposerAction::Queue
-        } else if queued_count > 0 {
-            ComposerAction::SendQueued
         } else {
             ComposerAction::Disabled
         }
@@ -8534,6 +8593,17 @@ fn session_refresh_error_text(operation: &str, err: &anyhow::Error) -> String {
     format!("[session refresh] {operation} failed: {err:#}")
 }
 
+fn archcar_turn_completion_allows_queue_drain(status: Option<&str>) -> bool {
+    !matches!(
+        status.map(|status| status.trim().to_ascii_lowercase()),
+        Some(status)
+            if matches!(
+                status.as_str(),
+                "failed" | "error" | "interrupted" | "cancelled" | "canceled" | "deferred"
+            )
+    )
+}
+
 fn is_codex_session_record(records: &[ProcessRecord], process_id: i64) -> bool {
     records
         .iter()
@@ -9051,14 +9121,28 @@ fn handle_archcar_event(
         } => {
             info!(session_id, thread_id, ?status, "archcar turn completed");
             session_threads.borrow_mut().insert(*session_id, *thread_id);
-            note_archcar_ready(&mut ready_cache.borrow_mut(), *session_id, true);
-            apply_codex_startup_signal(
-                &mut startup_states.borrow_mut(),
-                CodexStartupSignal::Ready {
-                    thread_id: *thread_id,
-                },
-            );
-            set_codex_ready_state(codex_ready, update_composer_state, true);
+            let ready = archcar_turn_completion_allows_queue_drain(status.as_deref());
+            note_archcar_ready(&mut ready_cache.borrow_mut(), *session_id, ready);
+            if ready {
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Ready {
+                        thread_id: *thread_id,
+                    },
+                );
+            } else {
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id: *thread_id,
+                        message: format!(
+                            "Agent turn {}.",
+                            status.as_deref().unwrap_or("did not complete")
+                        ),
+                    },
+                );
+            }
+            set_codex_ready_state(codex_ready, update_composer_state, ready);
         }
         ArchcarEvent::SessionCapabilitiesChanged {
             session_id,
@@ -9524,23 +9608,51 @@ fn handle_archcar_response(
     changed
 }
 
-fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArchcarRefreshIntent {
+    chat_surface: bool,
+    workspace_nav: bool,
+    global_summary: bool,
+}
+
+impl ArchcarRefreshIntent {
+    fn merge(&mut self, next: Self) {
+        self.chat_surface |= next.chat_surface;
+        self.workspace_nav |= next.workspace_nav;
+        self.global_summary |= next.global_summary;
+    }
+}
+
+fn archcar_message_refresh_intent(message: &AsyncArchcarMessage) -> ArchcarRefreshIntent {
     match message {
         AsyncArchcarMessage::Event(event) => match event {
             ArchcarEvent::SessionSpawnQueued { .. }
             | ArchcarEvent::SessionStarted { .. }
             | ArchcarEvent::TurnCompleted { .. }
             | ArchcarEvent::SessionExited { .. }
-            | ArchcarEvent::SessionError { .. } => (true, true),
+            | ArchcarEvent::SessionError { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            },
             ArchcarEvent::SessionReady { .. }
             | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
             | ArchcarEvent::SessionMessagesUpdated { .. }
             | ArchcarEvent::ProviderInteractionRequested { .. }
-            | ArchcarEvent::ProviderInteractionResolved { .. } => (true, false),
+            | ArchcarEvent::ProviderInteractionResolved { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            },
         },
-        AsyncArchcarMessage::Response(_) => (false, false),
-        AsyncArchcarMessage::BridgeError { .. } => (true, false),
+        AsyncArchcarMessage::Response(_) | AsyncArchcarMessage::BridgeError { .. } => {
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        }
     }
 }
 
@@ -10386,6 +10498,10 @@ fix it
             composer_action_for_startup_state(true, false, false, 0, true),
             ComposerAction::Queue
         );
+        assert_eq!(
+            composer_action_for_startup_state(false, false, false, 1, true),
+            ComposerAction::Disabled
+        );
     }
 
     #[test]
@@ -10644,6 +10760,29 @@ fix it
 
         assert!(changed);
         assert!(!working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn failed_or_interrupted_turn_completion_does_not_allow_queue_drain() {
+        assert!(archcar_turn_completion_allows_queue_drain(Some("success")));
+        assert!(archcar_turn_completion_allows_queue_drain(Some(
+            "completed"
+        )));
+        assert!(archcar_turn_completion_allows_queue_drain(None));
+
+        for status in [
+            "failed",
+            "error",
+            "interrupted",
+            "cancelled",
+            "canceled",
+            "deferred",
+        ] {
+            assert!(
+                !archcar_turn_completion_allows_queue_drain(Some(status)),
+                "{status} turn completion must leave queued messages untouched"
+            );
+        }
     }
 
     #[test]
@@ -13305,6 +13444,26 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
+    fn chat_thread_nav_signature_ignores_updated_at_only_changes() {
+        let mut thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: "Fix auth".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "then".to_owned(),
+            updated_at: "2026-07-18T12:00:00Z".to_owned(),
+            archived_at: None,
+        };
+        let before = chat_thread_nav_signature(&[thread.clone()]);
+        thread.updated_at = "2026-07-18T12:00:01Z".to_owned();
+
+        assert_eq!(before, chat_thread_nav_signature(&[thread]));
+    }
+
+    #[test]
     fn provider_empty_reasoning_rows_are_skipped() {
         let mut reasoning = provider_event_record(
             ProviderEventKind::PlanningReasoning,
@@ -13697,14 +13856,14 @@ Schema confirms the app moved CRM around businesses.";
 
     #[test]
     fn routine_archcar_updates_do_not_force_outer_refresh() {
-        let ready_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let ready_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::SessionReady {
                 session_id: 61,
                 thread_id: 4,
             },
         ));
-        let status_scope =
-            archcar_message_refresh_scope(&AsyncArchcarMessage::Response(AsyncArchcarResponse {
+        let status_intent =
+            archcar_message_refresh_intent(&AsyncArchcarMessage::Response(AsyncArchcarResponse {
                 token: 7,
                 request: AsyncArchcarRequestKind::GetSessionStatus { session_id: 61 },
                 result: Ok(ArchcarResponse::SessionStatus {
@@ -13715,7 +13874,7 @@ Schema confirms the app moved CRM around businesses.";
                     capabilities: None,
                 }),
             }));
-        let started_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let started_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::SessionStarted {
                 session_id: 61,
                 thread_id: 4,
@@ -13725,18 +13884,46 @@ Schema confirms the app moved CRM around businesses.";
             },
         ));
 
-        assert_eq!(ready_scope, (true, false));
-        assert_eq!(status_scope, (false, false));
-        assert_eq!(started_scope, (true, true));
+        assert_eq!(
+            ready_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        );
+        assert_eq!(
+            status_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        );
+        assert_eq!(
+            started_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            }
+        );
 
-        let turn_completed_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let turn_completed_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::TurnCompleted {
                 session_id: 61,
                 thread_id: 4,
                 status: Some("completed".to_owned()),
             },
         ));
-        assert_eq!(turn_completed_scope, (true, true));
+        assert_eq!(
+            turn_completed_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            }
+        );
     }
 
     #[test]
@@ -13773,17 +13960,24 @@ Schema confirms the app moved CRM around businesses.";
     #[test]
     fn provider_interaction_events_refresh_thread_only() {
         let interaction = provider_interaction_fixture(ProviderInteractionKind::Permission);
-        let requested_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let requested_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::ProviderInteractionRequested {
                 interaction: interaction.clone(),
             },
         ));
-        let resolved_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let resolved_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::ProviderInteractionResolved { interaction },
         ));
 
-        assert_eq!(requested_scope, (true, false));
-        assert_eq!(resolved_scope, (true, false));
+        assert_eq!(
+            requested_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        );
+        assert_eq!(resolved_intent, requested_intent);
     }
 
     #[test]

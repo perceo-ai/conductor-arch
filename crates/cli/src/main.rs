@@ -41,6 +41,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
+    Gtk {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     Settings {
         #[command(subcommand)]
         command: AppSettingsCommand,
@@ -583,7 +587,7 @@ fn main() -> Result<()> {
     if handle_archcar_claude_hook()? {
         return Ok(());
     }
-    if std::env::args().any(|arg| arg == "--archcar-serve") {
+    if should_run_archcar_server_mode(std::env::args()) {
         let paths = AppPaths::from_env();
         reconcile_managed_sessions_on_startup(&paths)?;
         return ArchcarServer::bind(paths)?.serve();
@@ -593,6 +597,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
+        Command::Gtk { args } => launch_gtk(&args)?,
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
                 let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
@@ -904,6 +909,7 @@ fn main() -> Result<()> {
         }
         Command::Workspace { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
+            store.recover_workspace_lifecycle_jobs()?;
             match command {
                 WorkspaceCommand::Create {
                     repository,
@@ -960,7 +966,7 @@ fn main() -> Result<()> {
                         let branch = branch.with_context(|| {
                             "--branch is required when not using a source option"
                         })?;
-                        store.create(CreateWorkspace {
+                        store.create_lifecycle_job(CreateWorkspace {
                             repository_name: repository,
                             name,
                             branch,
@@ -1022,8 +1028,21 @@ fn main() -> Result<()> {
                     remove_worktree,
                     delete_branch,
                 } => {
-                    let workspace = store.delete(&name, remove_worktree, delete_branch)?;
-                    println!("Deleted workspace {}", workspace.name);
+                    let result =
+                        store.delete_lifecycle_job(&name, remove_worktree, delete_branch)?;
+                    println!("Deleted workspace {}", result.workspace.name);
+                    if remove_worktree || delete_branch {
+                        if let Some(err) = result.cleanup_error {
+                            eprintln!(
+                                "Artifact cleanup failed after metadata delete for {}: {err}",
+                                result.workspace.name
+                            );
+                            anyhow::bail!(
+                                "workspace metadata deleted but artifact cleanup failed: {err}"
+                            );
+                        }
+                        println!("Cleaned workspace artifacts for {}", result.workspace.name);
+                    }
                 }
                 WorkspaceCommand::Rename { name, new_name } => {
                     let workspace = store.rename(&name, &new_name)?;
@@ -1574,6 +1593,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn should_run_archcar_server_mode<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    matches!(
+        args.next().as_ref().map(|arg| arg.as_ref()),
+        Some("--archcar-serve")
+    )
+}
+
 fn handle_archcar_claude_hook() -> Result<bool> {
     let args = std::env::args().collect::<Vec<_>>();
     let Some(index) = args.iter().position(|arg| arg == "--archcar-claude-hook") else {
@@ -2052,6 +2084,36 @@ fn cli_input_delivery(immediate: bool) -> ArchcarInputDelivery {
     } else {
         ArchcarInputDelivery::Auto
     }
+}
+
+fn launch_gtk(args: &[String]) -> Result<()> {
+    let binary = gtk_binary_path();
+    let status = ProcessCommand::new(&binary)
+        .args(args)
+        .status()
+        .with_context(|| format!("launch GTK app {}", binary.display()))?;
+    anyhow::ensure!(status.success(), "GTK app exited with status {status}");
+    Ok(())
+}
+
+fn gtk_binary_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("ARCHDUCTOR_GTK_BIN") {
+        return PathBuf::from(path);
+    }
+    gtk_binary_path_for_cli_exe(std::env::current_exe().ok())
+}
+
+fn gtk_binary_path_for_cli_exe(cli_exe: Option<PathBuf>) -> PathBuf {
+    let binary_name = format!("archductor-gtk{}", std::env::consts::EXE_SUFFIX);
+    if let Some(cli_exe) = cli_exe {
+        if let Some(parent) = cli_exe.parent() {
+            let sibling = parent.join(&binary_name);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from(binary_name)
 }
 
 fn open_interactive_session(launch: &SessionLaunch, terminal: Option<&str>) -> Result<()> {
@@ -2661,6 +2723,12 @@ fn print_doctor(report: doctor::DoctorReport) {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    fn cli_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parses_app_shared_settings_export() {
@@ -3345,6 +3413,141 @@ mod tests {
         let parse = Cli::try_parse_from(["archductor", "internal", "run-codex-session", "demo"]);
 
         assert!(parse.is_err());
+    }
+
+    #[test]
+    fn cli_parses_gtk_launcher_with_passthrough_args() {
+        let parse = Cli::try_parse_from([
+            "archductor",
+            "gtk",
+            "--workspace",
+            "berlin",
+            "--tab",
+            "checks",
+        ])
+        .unwrap();
+
+        match parse.command {
+            Command::Gtk { args } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "--workspace".to_owned(),
+                        "berlin".to_owned(),
+                        "--tab".to_owned(),
+                        "checks".to_owned(),
+                    ]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_mode_detection_ignores_gtk_trailing_archcar_serve() {
+        assert!(should_run_archcar_server_mode([
+            "archductor",
+            "--archcar-serve"
+        ]));
+        assert!(!should_run_archcar_server_mode([
+            "archductor",
+            "gtk",
+            "--archcar-serve"
+        ]));
+    }
+
+    #[test]
+    fn gtk_binary_path_prefers_env_override() {
+        let _guard = cli_env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let override_path = temp.path().join("custom-gtk");
+        let previous = std::env::var_os("ARCHDUCTOR_GTK_BIN");
+        std::env::set_var("ARCHDUCTOR_GTK_BIN", &override_path);
+
+        let selected = gtk_binary_path();
+
+        match previous {
+            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_BIN", previous),
+            None => std::env::remove_var("ARCHDUCTOR_GTK_BIN"),
+        }
+        assert_eq!(selected, override_path);
+    }
+
+    #[test]
+    fn gtk_binary_path_prefers_existing_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let cli = temp
+            .path()
+            .join(format!("archductor{}", std::env::consts::EXE_SUFFIX));
+        let gtk = temp
+            .path()
+            .join(format!("archductor-gtk{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&gtk, "").unwrap();
+
+        assert_eq!(gtk_binary_path_for_cli_exe(Some(cli)), gtk);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_gtk_forwards_child_arguments_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = cli_env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("archductor-gtk");
+        let args_out = temp.path().join("args.txt");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARCHDUCTOR_GTK_ARGS_OUT\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let previous_bin = std::env::var_os("ARCHDUCTOR_GTK_BIN");
+        let previous_out = std::env::var_os("ARCHDUCTOR_GTK_ARGS_OUT");
+        std::env::set_var("ARCHDUCTOR_GTK_BIN", &fake);
+        std::env::set_var("ARCHDUCTOR_GTK_ARGS_OUT", &args_out);
+
+        launch_gtk(&[
+            "--workspace".to_owned(),
+            "berlin".to_owned(),
+            "--archcar-serve".to_owned(),
+        ])
+        .unwrap();
+
+        match previous_bin {
+            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_BIN", previous),
+            None => std::env::remove_var("ARCHDUCTOR_GTK_BIN"),
+        }
+        match previous_out {
+            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_ARGS_OUT", previous),
+            None => std::env::remove_var("ARCHDUCTOR_GTK_ARGS_OUT"),
+        }
+        assert_eq!(
+            fs::read_to_string(args_out).unwrap(),
+            "--workspace\nberlin\n--archcar-serve\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_gtk_reports_nonzero_child_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = cli_env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("archductor-gtk");
+        fs::write(&fake, "#!/bin/sh\nexit 17\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let previous = std::env::var_os("ARCHDUCTOR_GTK_BIN");
+        std::env::set_var("ARCHDUCTOR_GTK_BIN", &fake);
+
+        let err = launch_gtk(&[]).unwrap_err();
+
+        match previous {
+            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_BIN", previous),
+            None => std::env::remove_var("ARCHDUCTOR_GTK_BIN"),
+        }
+        assert!(format!("{err:#}").contains("GTK app exited with status"));
     }
 
     #[test]
