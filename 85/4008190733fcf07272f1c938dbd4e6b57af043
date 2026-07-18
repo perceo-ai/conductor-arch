@@ -1,0 +1,21 @@
+crates/core/src/archcar/server.rs
+  s_5fb542657fcc55::t_16a817887ef7f1 86-88
+crates/core/src/paths.rs
+  s_5fb542657fcc55::t_3a8c7a510d4127 2-3,54-64,75-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "854008190733fcf07272f1c938dbd4e6b57af043",
+  "prompts": {},
+  "sessions": {
+    "s_5fb542657fcc55": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f73ac-f41e-7a91-89d2-307de001de23",
+        "model": "unknown"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
