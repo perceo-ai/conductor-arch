@@ -129,9 +129,11 @@ mod tests {
 
         let events = diff_background_sync(&previous, &next);
 
-        assert!(events.contains(&RefreshEvent::WorkspaceChatLifecycleChanged {
-            workspace: "berlin".into(),
-        }));
+        assert!(
+            events.contains(&RefreshEvent::WorkspaceChatLifecycleChanged {
+                workspace: "berlin".into(),
+            })
+        );
     }
 
     #[test]

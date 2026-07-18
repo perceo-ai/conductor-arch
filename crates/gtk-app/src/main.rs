@@ -38,7 +38,7 @@ use gtk::{
     Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use refresh::{RefreshHub, RefreshScope};
+use refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -1026,6 +1026,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let spotlight_event_tx = {
         let (tx, rx) = mpsc::channel();
         let hub_spotlight_events = refresh_hub.clone();
+        let state_spotlight_events = app_state.clone();
         let db_path_spotlight_events = app_state.workspace_database_path();
         let runtime_reporter_spotlight_events = runtime_error_reporter.clone();
         let toast_spotlight_events = toast_manager.clone();
@@ -1040,7 +1041,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     "spotlight event",
                 )
             {
-                hub_spotlight_events.refresh(RefreshScope::All);
+                refresh_runtime_reconciliation_event(
+                    &hub_spotlight_events,
+                    &state_spotlight_events,
+                );
             }
             glib::ControlFlow::Continue
         });
@@ -1064,6 +1068,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_on_close = app_state.workspace_database_path();
         let hub_on_close = refresh_hub.clone();
+        let state_on_close = app_state.clone();
         let spotlight_watcher_on_close = spotlight_watcher.clone();
         let runtime_reporter_on_close = runtime_error_reporter.clone();
         let toast_on_close = toast_manager.clone();
@@ -1077,7 +1082,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 &toast_on_close,
                 "close",
             ) {
-                hub_on_close.refresh(RefreshScope::All);
+                refresh_runtime_reconciliation_event(&hub_on_close, &state_on_close);
             }
         });
     }
@@ -1085,6 +1090,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_on_focus = app_state.workspace_database_path();
         let hub_on_focus = refresh_hub.clone();
+        let state_on_focus = app_state.clone();
         let runtime_reporter_on_focus = runtime_error_reporter.clone();
         let toast_on_focus = toast_manager.clone();
         window.connect_is_active_notify(move |window| {
@@ -1097,7 +1103,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 &toast_on_focus,
                 "focus",
             ) {
-                hub_on_focus.refresh(RefreshScope::All);
+                refresh_runtime_reconciliation_event(&hub_on_focus, &state_on_focus);
             }
         });
     }
@@ -1105,8 +1111,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_background = app_state.workspace_database_path();
         let hub_background = refresh_hub.clone();
-        let previous_background =
-            Rc::new(RefCell::new(background_sync::BackgroundSyncSnapshot::default()));
+        let previous_background = Rc::new(RefCell::new(
+            background_sync::BackgroundSyncSnapshot::default(),
+        ));
         // PER-190: Background sync samples persisted running chat markers while
         // off-focus event routing is still being split from active timelines.
         // Remove when archcar/runtime producers emit typed RefreshEvents for
@@ -1254,6 +1261,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
 
     let db_path_runtime_auto = app_state.workspace_database_path();
     let hub_runtime_auto = refresh_hub.clone();
+    let state_runtime_auto = app_state.clone();
     let spotlight_watcher_auto = spotlight_watcher.clone();
     let spotlight_event_tx_auto = spotlight_event_tx.clone();
     let runtime_reporter_auto = runtime_error_reporter.clone();
@@ -1267,7 +1275,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             &toast_auto,
             "timer",
         ) {
-            hub_runtime_auto.refresh(RefreshScope::All);
+            refresh_runtime_reconciliation_event(&hub_runtime_auto, &state_runtime_auto);
         }
         if let Err(err) = refresh_spotlight_file_watcher(
             &db_path_runtime_auto,
@@ -1425,6 +1433,14 @@ fn page_stack_name(page: &AppPage) -> &'static str {
         AppPage::Settings => "settings",
         AppPage::History => "history",
         AppPage::Workspace | AppPage::Review => "workspace",
+    }
+}
+
+fn refresh_runtime_reconciliation_event(refresh_hub: &RefreshHub, state: &AppState) {
+    if let Some(workspace) = state.selected_workspace() {
+        refresh_hub.refresh_event(RefreshEvent::WorkspaceRuntimeChanged { workspace });
+    } else {
+        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     }
 }
 

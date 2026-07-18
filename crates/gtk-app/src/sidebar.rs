@@ -20,7 +20,7 @@ use crate::archcar_async::{
 };
 use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
-use crate::refresh::{RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
 use crate::toast::{surface_label_error, ToastManager};
@@ -806,7 +806,7 @@ fn attach_workspace_row_context_menu(
                         state.rename_workspace_in_navigation(&workspace_name, &workspace.name);
                         refresh_view_preferences();
                         refresh_workspace();
-                        refresh_hub.refresh(RefreshScope::All);
+                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                         Ok(())
                     }
                 }),
@@ -881,7 +881,8 @@ fn attach_workspace_row_context_menu(
                                     stack.set_visible_child_name("workspace");
                                     refresh_view_preferences();
                                     refresh_workspace();
-                                    refresh_hub.refresh(RefreshScope::All);
+                                    refresh_hub
+                                        .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                                 }
                                 Err(err) => {
                                     show_workspace_error_dialog(
@@ -1013,7 +1014,8 @@ fn attach_workspace_row_context_menu(
                                         }
                                         refresh_view_preferences();
                                         refresh_workspace();
-                                        refresh_hub.refresh(RefreshScope::All);
+                                        refresh_hub
+                                            .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                                         let db_cleanup =
                                             state.workspace_database_path().to_path_buf();
                                         std::thread::spawn(move || {
@@ -1038,7 +1040,7 @@ fn attach_workspace_row_context_menu(
                                         row.set_sensitive(true);
                                         refresh_view_preferences();
                                         refresh_workspace();
-                                        refresh_hub.refresh(RefreshScope::All);
+                                        refresh_hub.refresh(RefreshScope::Sidebar);
                                         show_workspace_error_dialog(
                                             &window,
                                             "Workspace action failed",
@@ -1087,7 +1089,9 @@ fn attach_workspace_row_context_menu(
                                             }
                                             refresh_view_preferences();
                                             refresh_workspace();
-                                            refresh_hub.refresh(RefreshScope::All);
+                                            refresh_hub.refresh_event(
+                                                RefreshEvent::WorkspaceInventoryChanged,
+                                            );
                                 }
                                 Err(err) => {
                                             refresh_view_preferences();
@@ -1536,10 +1540,7 @@ mod tests {
 
     #[test]
     fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
-        assert_eq!(
-            primary_sidebar_nav_labels(),
-            vec!["Dashboard", "History"]
-        );
+        assert_eq!(primary_sidebar_nav_labels(), vec!["Dashboard", "History"]);
     }
 
     #[test]

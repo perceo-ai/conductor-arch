@@ -45,7 +45,7 @@ fn clone_external_thread_selection_controller(
     controller.borrow().as_ref().cloned()
 }
 
-use crate::refresh::{RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceRightPanelTab, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
@@ -263,7 +263,7 @@ fn workspace_creation_status_shell(
                             );
                         }
                     }
-                    refresh_done.refresh(RefreshScope::All);
+                    refresh_done.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                 },
             );
         });
@@ -2734,7 +2734,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Setup", &err),
             ),
         }
-        refresh_setup.refresh(RefreshScope::All);
+        refresh_setup.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: setup_workspace.clone(),
+        });
     });
 
     let run_workspace = ws.name.clone();
@@ -2757,7 +2759,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Run", &err),
             ),
         }
-        refresh_run.refresh(RefreshScope::All);
+        refresh_run.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: run_workspace.clone(),
+        });
     });
 
     let stop_workspace = ws.name.clone();
@@ -2780,7 +2784,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Stop", &err),
             ),
         }
-        refresh_stop.refresh(RefreshScope::All);
+        refresh_stop.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: stop_workspace.clone(),
+        });
     });
 
     let spotlight_workspace = ws.name.clone();
@@ -2803,7 +2809,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight", &err),
             ),
         }
-        refresh_spotlight_on.refresh(RefreshScope::All);
+        refresh_spotlight_on.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_workspace.clone(),
+        });
     });
 
     let spotlight_sync_workspace = ws.name.clone();
@@ -2831,7 +2839,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight sync", &err),
             ),
         }
-        refresh_spotlight_sync.refresh(RefreshScope::All);
+        refresh_spotlight_sync.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_sync_workspace.clone(),
+        });
     });
 
     let spotlight_repair_workspace = ws.name.clone();
@@ -2859,7 +2869,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight repair", &err),
             ),
         }
-        refresh_spotlight_repair.refresh(RefreshScope::All);
+        refresh_spotlight_repair.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_repair_workspace.clone(),
+        });
     });
 
     let spotlight_stop_workspace = ws.name.clone();
@@ -2882,7 +2894,9 @@ fn runtime_panel(
                 runtime_action_failure_feedback("Spotlight stop", &err),
             ),
         }
-        refresh_spotlight_off.refresh(RefreshScope::All);
+        refresh_spotlight_off.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: spotlight_stop_workspace.clone(),
+        });
     });
 
     let path = ws.path.clone();
@@ -2985,7 +2999,7 @@ fn lifecycle_panel(
                 lifecycle_action_failure_feedback("Rename", &err),
             ),
         }
-        refresh_after_rename.refresh(RefreshScope::All);
+        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     });
 
     let db_duplicate = db_path.to_path_buf();
@@ -3024,7 +3038,7 @@ fn lifecycle_panel(
                 lifecycle_action_failure_feedback("Duplicate", &err),
             ),
         }
-        refresh_after_duplicate.refresh(RefreshScope::All);
+        refresh_after_duplicate.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     });
 
     for (button, action) in [
@@ -3096,7 +3110,7 @@ fn lifecycle_panel(
                                 );
                             }
                         }
-                        refresh_after_delete.refresh(RefreshScope::All);
+                        refresh_after_delete.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                     },
                 );
                 return;
@@ -3119,7 +3133,7 @@ fn lifecycle_panel(
                     lifecycle_action_failure_feedback(&title_case_workspace(action), &err),
                 ),
             }
-            refresh_after_action.refresh(RefreshScope::All);
+            refresh_after_action.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
         });
     }
 
@@ -5219,7 +5233,9 @@ fn connect_merge_pr_button(
             &pull_request_merge_and_archive_feedback(result),
             true,
         );
-        refresh_hub.refresh(RefreshScope::All);
+        refresh_hub.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+            workspace: workspace_for_merge.clone(),
+        });
     });
 }
 
@@ -6048,7 +6064,11 @@ fn workspace_check_runner_panel(
                                 ),
                                 true,
                             );
-                            refresh_after_run.refresh(RefreshScope::All);
+                            refresh_after_run.refresh_event(
+                                RefreshEvent::WorkspaceRuntimeChanged {
+                                    workspace: workspace_for_run.clone(),
+                                },
+                            );
                         }
                         Err(err) => apply_action_feedback(
                             &feedback_for_run,
@@ -6297,7 +6317,9 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh(RefreshScope::All);
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_refresh.clone(),
+                        });
                     });
 
                     top_row.append(&summary_btn);
@@ -6342,7 +6364,9 @@ fn workspace_checks_panel(
                             &pull_request_merge_and_archive_feedback(result),
                             true,
                         );
-                        refresh_after_merge.refresh(RefreshScope::All);
+                        refresh_after_merge.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_merge.clone(),
+                        });
                     });
 
                     let db_for_stage = db_path.to_path_buf();
@@ -6389,7 +6413,9 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh(RefreshScope::All);
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_refresh.clone(),
+                        });
                     });
 
                     merge_row.append(&merge_method);
@@ -6477,7 +6503,9 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh(RefreshScope::All);
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                            workspace: workspace_for_refresh.clone(),
+                        });
                     });
 
                     top_row.append(&fix_btn);
@@ -6514,7 +6542,8 @@ fn workspace_checks_panel(
                             &pull_request_archive_feedback(result),
                             true,
                         );
-                        refresh_after_archive.refresh(RefreshScope::All);
+                        refresh_after_archive
+                            .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                     });
 
                     top_row.append(&continue_btn);
@@ -6677,7 +6706,7 @@ fn workspace_conflict_resolution_panel(
         let conflict_workspace_for_open = conflict_workspace.clone();
         open_workspace_btn.connect_clicked(move |_| {
             app_state_for_open.set_selected_workspace(Some(conflict_workspace_for_open.clone()));
-            refresh_for_open.refresh(RefreshScope::All);
+            refresh_for_open.refresh_event(RefreshEvent::WorkspaceSelectionChanged);
         });
 
         let action_row = make_action_row();
@@ -7130,7 +7159,11 @@ fn workspace_review_panel(
                                 true,
                             );
                             if should_refresh {
-                                refresh_after_resolution.refresh(RefreshScope::All);
+                                refresh_after_resolution.refresh_event(
+                                    RefreshEvent::WorkspaceReviewChanged {
+                                        workspace: workspace_for_resolution.clone(),
+                                    },
+                                );
                             }
                         });
                         row.append(&button);
@@ -7214,7 +7247,9 @@ fn workspace_review_panel(
                 file_for_add.set_text("");
                 line_for_add.set_text("");
                 body_for_add.set_text("");
-                refresh_after_add.refresh(RefreshScope::All);
+                refresh_after_add.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                    workspace: workspace_for_add.clone(),
+                });
             }
             Err(err) => apply_action_feedback(
                 &feedback_for_add,
@@ -7280,6 +7315,7 @@ fn workspace_review_panel(
                     let button = secondary_button("Resolve");
                     let db_for_resolve = db_path.to_path_buf();
                     let refresh_after_resolve = refresh_hub.clone();
+                    let workspace_for_resolve = name.to_owned();
                     let comment_id = comment.id;
                     let feedback_for_resolve = feedback.clone();
                     let toast_for_resolve = toast_overlay.clone();
@@ -7299,7 +7335,11 @@ fn workspace_review_panel(
                             true,
                         );
                         if result.is_ok() {
-                            refresh_after_resolve.refresh(RefreshScope::All);
+                            refresh_after_resolve.refresh_event(
+                                RefreshEvent::WorkspaceReviewChanged {
+                                    workspace: workspace_for_resolve.clone(),
+                                },
+                            );
                         }
                     });
                     row.append(&button);

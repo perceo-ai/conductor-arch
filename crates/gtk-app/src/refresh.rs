@@ -220,4 +220,26 @@ mod tests {
 
         assert_eq!(counts.values(), (1, 1, 1, 0, 0));
     }
+
+    #[test]
+    fn routine_sources_do_not_use_refresh_all() {
+        for (path, source) in [
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            (
+                "workspace_command_center.rs",
+                include_str!("workspace_command_center.rs"),
+            ),
+            ("projects.rs", include_str!("projects.rs")),
+        ] {
+            assert!(
+                !source.contains("RefreshScope::All"),
+                "{path} contains a routine RefreshScope::All call"
+            );
+        }
+
+        let main_source = include_str!("main.rs");
+        assert_eq!(main_source.matches("RefreshScope::All").count(), 3);
+        assert!(main_source.contains("Some(ShortcutAction::Refresh)"));
+        assert!(main_source.contains("PaletteTarget::Refresh =>"));
+    }
 }
