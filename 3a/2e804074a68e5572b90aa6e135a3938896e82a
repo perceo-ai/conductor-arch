@@ -1,0 +1,31 @@
+.github/workflows/publish.yml
+  s_32109acf6d1f93::t_60390e7659b70d 374-378,484-488
+crates/cli/tests/publish_workflow.rs
+  s_32109acf6d1f93::t_97640a07071eb1 14,84-88
+  s_32109acf6d1f93::t_0dfbd7435ae2ee 71-72,80-81
+  s_32109acf6d1f93::t_091273c3e95847 89
+docs/release-readiness.md
+  s_32109acf6d1f93::t_9210c64237c9a7 124-126,153-155
+packaging/aur/PKGBUILD
+  s_32109acf6d1f93::t_63f55714d03eda 16,24
+flake.nix
+  s_32109acf6d1f93::t_41f5d894960b46 35,38
+packaging/homebrew/Formula/archductor.rb
+  s_32109acf6d1f93::t_d9a67290e910fb 15,18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3a2e804074a68e5572b90aa6e135a3938896e82a",
+  "prompts": {},
+  "sessions": {
+    "s_32109acf6d1f93": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f74f6-6ae2-7ac2-ab69-bc30ca2325bc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
