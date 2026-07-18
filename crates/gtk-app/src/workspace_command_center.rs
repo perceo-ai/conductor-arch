@@ -33,6 +33,10 @@ const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 const WORKSPACE_COMMIT_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
+
+fn chat_outcome_requires_nav_refresh(outcome: &session_surface::ChatRefreshOutcome) -> bool {
+    outcome.requires_nav_refresh()
+}
 type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
@@ -7787,6 +7791,36 @@ mod tests {
             state: state.to_owned(),
             created_at: "then".to_owned(),
             updated_at: "now".to_owned(),
+        }
+    }
+
+    #[test]
+    fn chat_outcome_nav_refresh_ignores_message_only_changes() {
+        let messages_only = session_surface::ChatRefreshOutcome {
+            messages_changed: true,
+            ..Default::default()
+        };
+        assert!(!chat_outcome_requires_nav_refresh(&messages_only));
+
+        for outcome in [
+            session_surface::ChatRefreshOutcome {
+                thread_title_changed: true,
+                ..Default::default()
+            },
+            session_surface::ChatRefreshOutcome {
+                workspace_name_changed: true,
+                ..Default::default()
+            },
+            session_surface::ChatRefreshOutcome {
+                branch_changed: true,
+                ..Default::default()
+            },
+            session_surface::ChatRefreshOutcome {
+                session_lifecycle_changed: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(chat_outcome_requires_nav_refresh(&outcome));
         }
     }
 
