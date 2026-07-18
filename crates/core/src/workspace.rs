@@ -274,7 +274,7 @@ const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "sudo-make-me-a-sandwich",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Workspace {
     pub id: i64,
     pub repository_id: i64,
@@ -287,6 +287,40 @@ pub struct Workspace {
     pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceDeleteResult {
+    pub workspace: Workspace,
+    pub cleanup_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLifecycleJob {
+    pub id: i64,
+    pub kind: String,
+    pub status: String,
+    pub workspace_id: Option<i64>,
+    pub payload_json: String,
+    pub error: Option<String>,
+    pub attempts: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceCreateJobPayload {
+    input: CreateWorkspace,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceDeleteJobPayload {
+    name: String,
+    remove_worktree: bool,
+    delete_branch: bool,
+    workspace: Option<Workspace>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,7 +392,7 @@ pub struct WorkspaceModel {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreateWorkspace {
     pub repository_name: String,
     pub name: String,
@@ -1214,6 +1248,53 @@ impl WorkspaceStore {
         self.create_with_progress(input, |_| {})
     }
 
+    pub fn create_lifecycle_job(&self, input: CreateWorkspace) -> Result<Workspace> {
+        self.create_lifecycle_job_with_progress(input, |_| {})
+    }
+
+    pub fn create_lifecycle_job_with_progress(
+        &self,
+        input: CreateWorkspace,
+        after_insert: impl FnOnce(&Workspace),
+    ) -> Result<Workspace> {
+        let input = self.resolve_lifecycle_create_input(input)?;
+        let payload = WorkspaceCreateJobPayload { input };
+        let job_id = self.insert_workspace_lifecycle_job(
+            "workspace.create",
+            None,
+            &serde_json::to_string(&payload)?,
+        )?;
+        self.execute_create_lifecycle_job(job_id, after_insert)
+    }
+
+    fn resolve_lifecycle_create_input(&self, input: CreateWorkspace) -> Result<CreateWorkspace> {
+        let repository = self.load_repository(&input.repository_name)?;
+        ensure_repository_config(&repository.root_path)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
+        validate_workspace_name(&name)?;
+        let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
+        let (name, branch) = self.resolve_create_identity(&repository, &name, &branch)?;
+        let base_ref = if let Some(base_ref) = input.base_ref.as_deref() {
+            let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
+            Some(resolve_source_base_ref(
+                &repository.root_path,
+                &repository.remote_name,
+                base_ref,
+                remote_available,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(CreateWorkspace {
+            repository_name: input.repository_name,
+            name,
+            branch,
+            base_ref,
+        })
+    }
+
     pub fn create_with_progress(
         &self,
         input: CreateWorkspace,
@@ -1226,7 +1307,6 @@ impl WorkspaceStore {
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
         let (name, branch) = self.resolve_create_identity(&repository, &name, &branch)?;
-        let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
         let default_base_branch = settings
             .customization
             .workspace_defaults
@@ -1235,17 +1315,12 @@ impl WorkspaceStore {
             .unwrap_or(&repository.default_branch)
             .to_owned();
         let base_ref = if let Some(base_ref) = input.base_ref {
+            let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
             resolve_source_base_ref(
                 &repository.root_path,
                 &repository.remote_name,
                 &base_ref,
                 remote_available,
-            )?
-        } else if remote_available {
-            sync_repository_default_branch(
-                &repository.root_path,
-                &repository.remote_name,
-                &default_base_branch,
             )?
         } else {
             default_base_branch
@@ -1287,37 +1362,8 @@ impl WorkspaceStore {
         )?;
         after_insert(&workspace);
 
-        let create_result = (|| -> Result<()> {
-            git_dynamic(
-                &repository.root_path,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    workspace.branch.as_str(),
-                    workspace.path.to_string_lossy().as_ref(),
-                    workspace.base_ref.as_str(),
-                ],
-            )?;
-            std::fs::create_dir_all(workspace.path.join(".context")).with_context(|| {
-                format!(
-                    "create workspace context directory {}",
-                    workspace.path.display()
-                )
-            })?;
-            initialize_context_files(&workspace.path, &settings)?;
-            copy_included_ignored_files(&repository.root_path, &workspace.path, &settings)?;
-
-            let auto_setup = settings
-                .customization
-                .automation
-                .auto_setup
-                .unwrap_or(false);
-            if auto_setup {
-                self.setup_workspace(&workspace.name)?;
-            }
-            Ok(())
-        })();
+        let create_result =
+            self.finish_workspace_creation(&repository, &settings, &workspace, true);
 
         if let Err(err) = create_result {
             let _ = self.mark_workspace_status(workspace.id, "failed");
@@ -1339,6 +1385,46 @@ impl WorkspaceStore {
             &format!("Created workspace on branch {}", workspace.branch),
         )?;
         Ok(workspace)
+    }
+
+    fn finish_workspace_creation(
+        &self,
+        repository: &RepositoryRecord,
+        settings: &RepositorySettings,
+        workspace: &Workspace,
+        run_auto_setup: bool,
+    ) -> Result<()> {
+        if !workspace_worktree_ready(&workspace.path, &workspace.branch) {
+            git_dynamic(
+                &repository.root_path,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    workspace.branch.as_str(),
+                    workspace.path.to_string_lossy().as_ref(),
+                    workspace.base_ref.as_str(),
+                ],
+            )?;
+        }
+        std::fs::create_dir_all(workspace.path.join(".context")).with_context(|| {
+            format!(
+                "create workspace context directory {}",
+                workspace.path.display()
+            )
+        })?;
+        initialize_context_files(&workspace.path, settings)?;
+        copy_included_ignored_files(&repository.root_path, &workspace.path, settings)?;
+
+        let auto_setup = settings
+            .customization
+            .automation
+            .auto_setup
+            .unwrap_or(false);
+        if run_auto_setup && auto_setup {
+            self.setup_workspace(&workspace.name)?;
+        }
+        Ok(())
     }
 
     fn mark_workspace_status(&self, workspace_id: i64, status: &str) -> Result<()> {
@@ -1582,14 +1668,47 @@ impl WorkspaceStore {
         remove_worktree: bool,
         delete_branch: bool,
     ) -> Result<Workspace> {
+        let result = self.delete_fast(name, remove_worktree, delete_branch)?;
+        if let Some(err) = result.cleanup_error {
+            anyhow::bail!("{err}");
+        }
+        Ok(result.workspace)
+    }
+
+    pub fn delete_lifecycle_job(
+        &self,
+        name: &str,
+        remove_worktree: bool,
+        delete_branch: bool,
+    ) -> Result<WorkspaceDeleteResult> {
+        let payload = WorkspaceDeleteJobPayload {
+            name: name.to_owned(),
+            remove_worktree,
+            delete_branch,
+            workspace: None,
+        };
+        let job_id = self.insert_workspace_lifecycle_job(
+            "workspace.delete",
+            None,
+            &serde_json::to_string(&payload)?,
+        )?;
+        self.execute_delete_lifecycle_job(job_id)
+    }
+
+    pub fn delete_fast(
+        &self,
+        name: &str,
+        remove_worktree: bool,
+        delete_branch: bool,
+    ) -> Result<WorkspaceDeleteResult> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
 
-        self.stop_workspace_processes(workspace.id)?;
-
         if remove_worktree {
-            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
+            validate_workspace_artifact_cleanup_target(&repository, &workspace)?;
         }
+
+        self.stop_workspace_processes(workspace.id)?;
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
@@ -1612,14 +1731,18 @@ impl WorkspaceStore {
             }
         }
 
-        if delete_branch {
-            let _ = git_dynamic(
-                &repository.root_path,
-                &["branch", "-D", workspace.branch.as_str()],
-            );
-        }
+        let cleanup_error = if remove_worktree || delete_branch {
+            self.cleanup_deleted_workspace_artifacts(&workspace, remove_worktree, delete_branch)
+                .err()
+                .map(|err| format!("{err:#}"))
+        } else {
+            None
+        };
 
-        Ok(workspace)
+        Ok(WorkspaceDeleteResult {
+            workspace,
+            cleanup_error,
+        })
     }
 
     pub fn cleanup_deleted_workspace_artifacts(
@@ -1630,6 +1753,7 @@ impl WorkspaceStore {
     ) -> Result<()> {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         if remove_worktree {
+            validate_workspace_artifact_cleanup_target(&repository, workspace)?;
             remove_workspace_worktree(&repository.root_path, &workspace.path)?;
         }
         if delete_branch {
@@ -1639,6 +1763,352 @@ impl WorkspaceStore {
             );
         }
         Ok(())
+    }
+
+    pub fn recover_workspace_lifecycle_jobs(&self) -> Result<usize> {
+        let jobs = self.pending_workspace_lifecycle_jobs()?;
+        let mut recovered = 0;
+        for job in jobs {
+            match job.kind.as_str() {
+                "workspace.create" => {
+                    self.execute_create_lifecycle_job(job.id, |_| {})?;
+                    recovered += 1;
+                }
+                "workspace.delete" => {
+                    self.execute_delete_lifecycle_job(job.id)?;
+                    recovered += 1;
+                }
+                _ => {
+                    self.mark_workspace_lifecycle_job_failed(
+                        job.id,
+                        &format!("unknown workspace lifecycle job kind {}", job.kind),
+                    )?;
+                }
+            }
+        }
+        Ok(recovered)
+    }
+
+    fn pending_workspace_lifecycle_jobs(&self) -> Result<Vec<WorkspaceLifecycleJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, status, workspace_id, payload_json, error, attempts,
+                    created_at, updated_at, started_at, finished_at
+             FROM workspace_lifecycle_jobs
+             WHERE status IN ('queued', 'running')
+             ORDER BY id",
+        )?;
+        let jobs = stmt
+            .query_map([], row_to_workspace_lifecycle_job)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(jobs)
+    }
+
+    fn insert_workspace_lifecycle_job(
+        &self,
+        kind: &str,
+        workspace_id: Option<i64>,
+        payload_json: &str,
+    ) -> Result<i64> {
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO workspace_lifecycle_jobs (
+                kind, status, workspace_id, payload_json, error,
+                attempts, created_at, updated_at, started_at, finished_at
+             ) VALUES (?1, 'queued', ?2, ?3, NULL, 0, ?4, ?4, NULL, NULL)",
+            params![kind, workspace_id, payload_json, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn mark_workspace_lifecycle_job_running(&self, job_id: i64) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspace_lifecycle_jobs
+             SET status = 'running',
+                 attempts = attempts + 1,
+                 error = NULL,
+                 started_at = ?1,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, job_id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_workspace_lifecycle_job_succeeded(
+        &self,
+        job_id: i64,
+        workspace_id: Option<i64>,
+    ) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspace_lifecycle_jobs
+             SET status = 'succeeded',
+                 workspace_id = COALESCE(?1, workspace_id),
+                 error = NULL,
+                 updated_at = ?2,
+                 finished_at = ?2
+             WHERE id = ?3",
+            params![workspace_id, now, job_id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_workspace_lifecycle_job_failed(&self, job_id: i64, error: &str) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspace_lifecycle_jobs
+             SET status = 'failed',
+                 error = ?1,
+                 updated_at = ?2,
+                 finished_at = ?2
+             WHERE id = ?3",
+            params![error, now, job_id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_workspace_lifecycle_job_queued_error(&self, job_id: i64, error: &str) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspace_lifecycle_jobs
+             SET status = 'queued',
+                 error = ?1,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![error, now, job_id],
+        )?;
+        Ok(())
+    }
+
+    fn update_workspace_lifecycle_job_workspace_id(
+        &self,
+        job_id: i64,
+        workspace_id: i64,
+    ) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspace_lifecycle_jobs
+             SET workspace_id = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![workspace_id, now, job_id],
+        )?;
+        Ok(())
+    }
+
+    fn update_workspace_lifecycle_job_payload(
+        &self,
+        job_id: i64,
+        payload_json: &str,
+    ) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspace_lifecycle_jobs
+             SET payload_json = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![payload_json, now, job_id],
+        )?;
+        Ok(())
+    }
+
+    fn load_workspace_lifecycle_job(&self, job_id: i64) -> Result<WorkspaceLifecycleJob> {
+        self.conn
+            .query_row(
+                "SELECT id, kind, status, workspace_id, payload_json, error, attempts,
+                        created_at, updated_at, started_at, finished_at
+                 FROM workspace_lifecycle_jobs
+                 WHERE id = ?1",
+                [job_id],
+                row_to_workspace_lifecycle_job,
+            )
+            .with_context(|| format!("load workspace lifecycle job {job_id}"))
+    }
+
+    fn execute_create_lifecycle_job(
+        &self,
+        job_id: i64,
+        after_insert: impl FnOnce(&Workspace),
+    ) -> Result<Workspace> {
+        self.mark_workspace_lifecycle_job_running(job_id)?;
+        let job = self.load_workspace_lifecycle_job(job_id)?;
+        let payload: WorkspaceCreateJobPayload = serde_json::from_str(&job.payload_json)
+            .with_context(|| format!("parse workspace create job {}", job.id))?;
+
+        let db_path = self.db_path.clone();
+        let logs_dir = self.logs_dir.clone();
+        let app_settings_path = self.app_settings_path.clone();
+        let mut after_insert = Some(after_insert);
+        let workspace_id = if let Some(workspace_id) = job.workspace_id {
+            Some(workspace_id)
+        } else {
+            self.workspace_id_for_create_job_payload(&payload.input)?
+        };
+
+        let result = if let Some(workspace_id) = workspace_id {
+            self.update_workspace_lifecycle_job_workspace_id(job_id, workspace_id)?;
+            self.resume_workspace_creation_by_id(workspace_id)
+        } else {
+            self.create_with_progress(payload.input, |workspace| {
+                if let Ok(store) = WorkspaceStore::open_with_logs_and_app_settings(
+                    &db_path,
+                    &logs_dir,
+                    app_settings_path.clone(),
+                ) {
+                    let _ = store.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id);
+                }
+                if let Some(callback) = after_insert.take() {
+                    callback(workspace);
+                }
+            })
+        };
+
+        match result {
+            Ok(workspace) => {
+                self.mark_workspace_lifecycle_job_succeeded(job_id, Some(workspace.id))?;
+                Ok(workspace)
+            }
+            Err(err) => {
+                let detail = format!("{err:#}");
+                let _ = self.mark_workspace_lifecycle_job_failed(job_id, &detail);
+                Err(err)
+            }
+        }
+    }
+
+    fn workspace_id_for_create_job_payload(&self, input: &CreateWorkspace) -> Result<Option<i64>> {
+        if input.name.trim().is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id
+             FROM workspaces
+             WHERE name = ?1
+               AND branch = ?2
+               AND (?3 IS NULL OR base_ref = ?3)
+               AND status IN ('creating', 'active', 'failed')
+             ORDER BY id DESC
+             LIMIT 1",
+        )?;
+        let id = stmt
+            .query_row(
+                params![
+                    input.name.trim(),
+                    input.branch.trim(),
+                    input.base_ref.as_deref()
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
+    fn resume_workspace_creation_by_id(&self, workspace_id: i64) -> Result<Workspace> {
+        let workspace = self.get_by_id(workspace_id)?;
+        if workspace.status == "active" {
+            return Ok(workspace);
+        }
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        let create_result =
+            self.finish_workspace_creation(&repository, &settings, &workspace, false);
+        if let Err(err) = create_result {
+            let _ = self.mark_workspace_status(workspace.id, "failed");
+            let _ = self.record_workspace_event(
+                workspace.id,
+                &workspace.name,
+                "workspace.create_failed",
+                &format!("Workspace creation recovery failed: {err:#}"),
+            );
+            return Err(err);
+        }
+        self.mark_workspace_status(workspace.id, "active")?;
+        let workspace = self.get_by_id(workspace.id)?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "workspace.created",
+            &format!(
+                "Recovered workspace creation on branch {}",
+                workspace.branch
+            ),
+        )?;
+        Ok(workspace)
+    }
+
+    fn execute_delete_lifecycle_job(&self, job_id: i64) -> Result<WorkspaceDeleteResult> {
+        self.mark_workspace_lifecycle_job_running(job_id)?;
+        let job = self.load_workspace_lifecycle_job(job_id)?;
+        let mut payload: WorkspaceDeleteJobPayload = serde_json::from_str(&job.payload_json)
+            .with_context(|| format!("parse workspace delete job {}", job.id))?;
+
+        if payload.workspace.is_none() {
+            if let Ok(workspace) = self.get_by_name(&payload.name) {
+                payload.workspace = Some(workspace.clone());
+                self.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id)?;
+                self.update_workspace_lifecycle_job_payload(
+                    job_id,
+                    &serde_json::to_string(&payload)?,
+                )?;
+            }
+        }
+
+        let result = match self.get_by_name(&payload.name) {
+            Ok(workspace) => {
+                payload.workspace = Some(workspace.clone());
+                self.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id)?;
+                self.update_workspace_lifecycle_job_payload(
+                    job_id,
+                    &serde_json::to_string(&payload)?,
+                )?;
+                self.delete_fast(
+                    &payload.name,
+                    payload.remove_worktree,
+                    payload.delete_branch,
+                )?
+            }
+            Err(_) => {
+                let Some(workspace) = payload.workspace.clone() else {
+                    self.mark_workspace_lifecycle_job_succeeded(job_id, None)?;
+                    return Ok(WorkspaceDeleteResult {
+                        workspace: Workspace {
+                            id: 0,
+                            repository_id: 0,
+                            name: payload.name,
+                            path: PathBuf::new(),
+                            branch: String::new(),
+                            base_ref: String::new(),
+                            port_base: 0,
+                            status: "deleted".to_owned(),
+                            archived_at: None,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                        },
+                        cleanup_error: None,
+                    });
+                };
+                match self.cleanup_deleted_workspace_artifacts(
+                    &workspace,
+                    payload.remove_worktree,
+                    payload.delete_branch,
+                ) {
+                    Ok(()) => WorkspaceDeleteResult {
+                        workspace,
+                        cleanup_error: None,
+                    },
+                    Err(err) => WorkspaceDeleteResult {
+                        workspace,
+                        cleanup_error: Some(format!("{err:#}")),
+                    },
+                }
+            }
+        };
+
+        if let Some(err) = &result.cleanup_error {
+            self.mark_workspace_lifecycle_job_queued_error(job_id, err)?;
+        } else {
+            self.mark_workspace_lifecycle_job_succeeded(job_id, Some(result.workspace.id))?;
+        }
+        Ok(result)
     }
 
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
@@ -3560,7 +4030,7 @@ impl WorkspaceStore {
         let branch = format!("{prefix}/{issue_number}/{slug}");
         let workspace_name = format!("issue-{issue_number}");
 
-        let workspace = self.create_with_progress(
+        let workspace = self.create_lifecycle_job_with_progress(
             CreateWorkspace {
                 repository_name: repository_name.to_owned(),
                 name: workspace_name,
@@ -3645,7 +4115,7 @@ impl WorkspaceStore {
             ],
         )?;
 
-        let workspace = self.create_with_progress(
+        let workspace = self.create_lifecycle_job_with_progress(
             CreateWorkspace {
                 repository_name: repository_name.to_owned(),
                 name: workspace_name
@@ -3721,7 +4191,7 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(prompt);
-        let workspace = self.create_with_progress(
+        let workspace = self.create_lifecycle_job_with_progress(
             CreateWorkspace {
                 repository_name: repository_name.to_owned(),
                 name: workspace_name
@@ -3786,7 +4256,7 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(&issue.title);
-        let workspace = self.create_with_progress(
+        let workspace = self.create_lifecycle_job_with_progress(
             CreateWorkspace {
                 repository_name: repository_name.to_owned(),
                 name: workspace_name
@@ -7572,75 +8042,48 @@ fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> R
         return Ok(());
     }
 
-    let workspace_path_arg = workspace_path.to_string_lossy();
-    match git_dynamic(
-        repository_root,
-        &["worktree", "remove", "--force", workspace_path_arg.as_ref()],
-    ) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let top_level = git_output_dynamic(workspace_path, &["rev-parse", "--show-toplevel"])
-                .with_context(|| {
-                format!(
-                    "confirm fallback worktree path {} after git worktree remove failed: {err:#}",
-                    workspace_path.display()
-                )
-            })?;
-            let top_level = PathBuf::from(top_level.trim());
-            let canonical_workspace_path = workspace_path.canonicalize().with_context(|| {
-                format!(
-                    "canonicalize workspace path {} after git worktree remove failed: {err:#}",
-                    workspace_path.display()
-                )
-            })?;
-            anyhow::ensure!(
-                top_level == canonical_workspace_path,
-                "refusing fallback delete for {} because git top-level is {} after git worktree remove failed: {err:#}",
-                workspace_path.display(),
-                top_level.display()
-            );
-            let repository_common_dir = git_common_dir(repository_root).with_context(|| {
-                format!(
-                    "confirm repository git common dir {} after git worktree remove failed: {err:#}",
-                    repository_root.display()
-                )
-            })?;
-            let workspace_common_dir = git_common_dir(workspace_path).with_context(|| {
-                format!(
-                    "confirm workspace git common dir {} after git worktree remove failed: {err:#}",
-                    workspace_path.display()
-                )
-            })?;
-            anyhow::ensure!(
-                workspace_common_dir == repository_common_dir,
-                "refusing fallback delete for {} because git common dir {} does not match repository common dir {} after git worktree remove failed: {err:#}",
-                workspace_path.display(),
-                workspace_common_dir.display(),
-                repository_common_dir.display()
-            );
-            fs::remove_dir_all(workspace_path).with_context(|| {
-                format!(
-                    "remove moved worktree directory {} after git worktree remove failed: {err:#}",
-                    workspace_path.display()
-                )
-            })?;
-            let _ = git_dynamic(repository_root, &["worktree", "prune"]);
-            Ok(())
-        }
-    }
+    fs::remove_dir_all(workspace_path)
+        .with_context(|| format!("remove workspace directory {}", workspace_path.display()))?;
+    let _ = git_dynamic(repository_root, &["worktree", "prune"]);
+    Ok(())
 }
 
-fn git_common_dir(path: &Path) -> Result<PathBuf> {
-    let raw = git_output_dynamic(path, &["rev-parse", "--git-common-dir"])?;
-    let common_dir = PathBuf::from(raw.trim());
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        path.join(common_dir)
-    };
-    common_dir
-        .canonicalize()
-        .with_context(|| format!("canonicalize git common dir {}", common_dir.display()))
+fn validate_workspace_artifact_cleanup_target(
+    repository: &RepositoryRecord,
+    workspace: &Workspace,
+) -> Result<()> {
+    anyhow::ensure!(
+        workspace
+            .path
+            .starts_with(&repository.workspace_parent_path),
+        "refusing artifact cleanup for {} because it is outside workspace parent {}",
+        workspace.path.display(),
+        repository.workspace_parent_path.display()
+    );
+    anyhow::ensure!(
+        workspace.path != repository.workspace_parent_path,
+        "refusing artifact cleanup for workspace parent {}",
+        workspace.path.display()
+    );
+    Ok(())
+}
+
+fn row_to_workspace_lifecycle_job(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceLifecycleJob> {
+    Ok(WorkspaceLifecycleJob {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        status: row.get(2)?,
+        workspace_id: row.get(3)?,
+        payload_json: row.get(4)?,
+        error: row.get(5)?,
+        attempts: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        started_at: row.get(9)?,
+        finished_at: row.get(10)?,
+    })
 }
 
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
@@ -8714,6 +9157,13 @@ fn local_branch_exists(repository_root: &Path, branch: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+fn workspace_worktree_ready(workspace_path: &Path, branch: &str) -> bool {
+    workspace_path.is_dir()
+        && git_output_dynamic(workspace_path, &["branch", "--show-current"])
+            .map(|output| output.trim() == branch)
+            .unwrap_or(false)
+}
+
 fn initialize_context_files(
     workspace_path: &Path,
     settings: &crate::settings::RepositorySettings,
@@ -8963,20 +9413,6 @@ fn fetch_remote_source_branch(root_path: &Path, remote_name: &str, branch: &str)
     let _ = git_dynamic(root_path, &["fetch", remote_name, branch, "--prune"]);
     let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
     Ok(git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref]).is_ok())
-}
-
-fn sync_repository_default_branch(
-    root_path: &Path,
-    remote_name: &str,
-    default_branch: &str,
-) -> Result<String> {
-    git_dynamic(
-        root_path,
-        &["fetch", remote_name, default_branch, "--prune"],
-    )?;
-    let remote_ref = format!("refs/remotes/{remote_name}/{default_branch}");
-    git_dynamic(root_path, &["rev-parse", "--verify", &remote_ref])?;
-    Ok(format!("{remote_name}/{default_branch}"))
 }
 
 #[cfg(test)]
@@ -9531,29 +9967,18 @@ fn copy_included_ignored_files(
     }
 
     let matcher = build_glob_set(&patterns)?;
-    for entry in WalkDir::new(repo_path)
-        .into_iter()
-        .filter_entry(|entry| should_descend(entry.path()))
-    {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
+    for relative_path in ignored_repository_files(repo_path)? {
+        if !matcher.is_match(&relative_path) {
             continue;
         }
 
-        let source_path = entry.path();
-        let relative_path = source_path
-            .strip_prefix(repo_path)
-            .with_context(|| format!("strip repository path {}", source_path.display()))?;
-        if !matcher.is_match(relative_path) || !git_ignored(repo_path, relative_path) {
-            continue;
-        }
-
+        let source_path = repo_path.join(&relative_path);
         let destination = workspace_path.join(relative_path);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create copy destination {}", parent.display()))?;
         }
-        fs::copy(source_path, &destination).with_context(|| {
+        fs::copy(&source_path, &destination).with_context(|| {
             format!(
                 "copy ignored included file {} to {}",
                 source_path.display(),
@@ -9563,6 +9988,33 @@ fn copy_included_ignored_files(
     }
 
     Ok(())
+}
+
+fn ignored_repository_files(repo_path: &Path) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()
+        .with_context(|| format!("list ignored files in {}", repo_path.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git command failed in {}: {}\n{}",
+        repo_path.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }
 
 fn included_file_patterns(repo_path: &Path, settings: &RepositorySettings) -> Result<Vec<String>> {
@@ -9593,25 +10045,6 @@ fn build_glob_set(patterns: &[String]) -> Result<GlobSet> {
         builder.add(Glob::new(pattern).with_context(|| format!("parse include glob {pattern}"))?);
     }
     builder.build().context("build include glob set")
-}
-
-fn should_descend(path: &Path) -> bool {
-    !path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| matches!(name, ".git" | "node_modules" | "target"))
-        .unwrap_or(false)
-}
-
-fn git_ignored(repo_path: &Path, relative_path: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .arg("check-ignore")
-        .arg(relative_path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -10599,7 +11032,7 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_syncs_default_branch_before_worktree_add() {
+    fn create_workspace_syncs_explicit_remote_base_before_worktree_add() {
         let temp = tempfile::tempdir().unwrap();
         let seed_path = init_repo(temp.path().join("seed"));
         let remote_path = temp.path().join("origin.git");
@@ -10678,7 +11111,7 @@ mod tests {
                 repository_name: "demo".to_owned(),
                 name: "berlin".to_owned(),
                 branch: "lc/berlin".to_owned(),
-                base_ref: None,
+                base_ref: Some("origin/main".to_owned()),
             })
             .unwrap();
 
@@ -10689,6 +11122,148 @@ mod tests {
             git_output(&repo_path, ["rev-parse", "origin/main"]),
             git_output(&seed_path, ["rev-parse", "main"])
         );
+    }
+
+    #[test]
+    fn create_workspace_without_explicit_base_uses_local_default_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/demo.git",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: None,
+            })
+            .unwrap();
+
+        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(
+            git_output(&workspace.path, ["branch", "--show-current"]).trim(),
+            "lc/berlin"
+        );
+    }
+
+    #[test]
+    fn queued_create_lifecycle_job_recovers_to_active_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let now = timestamp();
+        let payload = serde_json::json!({
+            "input": {
+                "repository_name": "demo",
+                "name": "berlin",
+                "branch": "lc/berlin",
+                "base_ref": "main"
+            }
+        })
+        .to_string();
+        store
+            .conn
+            .execute(
+                "INSERT INTO workspace_lifecycle_jobs (
+                    kind, status, workspace_id, payload_json, error,
+                    attempts, created_at, updated_at, started_at, finished_at
+                 ) VALUES ('workspace.create', 'queued', NULL, ?1, NULL, 0, ?2, ?2, NULL, NULL)",
+                params![payload, now],
+            )
+            .unwrap();
+
+        let recovered = store.recover_workspace_lifecycle_jobs().unwrap();
+
+        assert_eq!(recovered, 1);
+        let workspace = store.get_by_name("berlin").unwrap();
+        assert_eq!(workspace.status, "active");
+        assert!(workspace.path.join(".context").is_dir());
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM workspace_lifecycle_jobs WHERE kind = 'workspace.create'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "succeeded");
+    }
+
+    #[test]
+    fn create_lifecycle_job_persists_resolved_generated_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create_lifecycle_job(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: String::new(),
+                branch: String::new(),
+                base_ref: None,
+            })
+            .unwrap();
+        let payload_json: String = store
+            .conn
+            .query_row(
+                "SELECT payload_json FROM workspace_lifecycle_jobs WHERE kind = 'workspace.create'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: WorkspaceCreateJobPayload = serde_json::from_str(&payload_json).unwrap();
+
+        assert_eq!(payload.input.name, workspace.name);
+        assert_eq!(payload.input.branch, workspace.branch);
+        assert_eq!(payload.input.base_ref, None);
     }
 
     #[test]
@@ -12290,6 +12865,168 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn fast_delete_removes_metadata_before_artifact_cleanup_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::remove_dir_all(&workspace.path).unwrap();
+        fs::write(&workspace.path, "not a directory\n").unwrap();
+
+        let deleted = store.delete_fast("berlin", true, false).unwrap();
+
+        assert_eq!(deleted.workspace.name, "berlin");
+        assert!(deleted.cleanup_error.is_some());
+        assert!(store.get_by_name("berlin").is_err());
+    }
+
+    #[test]
+    fn fast_delete_refuses_artifact_cleanup_outside_workspace_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let outside = temp.path().join("outside-workspace");
+        fs::create_dir(&outside).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET path = ?1 WHERE id = ?2",
+                params![outside.to_string_lossy(), workspace.id],
+            )
+            .unwrap();
+
+        let err = store.delete_fast("berlin", true, false).unwrap_err();
+
+        assert!(format!("{err:#}").contains("outside workspace parent"));
+        assert!(store.get_by_name("berlin").is_ok());
+    }
+
+    #[test]
+    fn queued_delete_lifecycle_job_recovers_after_process_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let now = timestamp();
+        let payload = serde_json::json!({
+            "name": "berlin",
+            "remove_worktree": true,
+            "delete_branch": true,
+            "workspace": {
+                "id": workspace.id,
+                "repository_id": workspace.repository_id,
+                "name": workspace.name,
+                "path": workspace.path,
+                "branch": workspace.branch,
+                "base_ref": workspace.base_ref,
+                "port_base": workspace.port_base,
+                "status": workspace.status,
+                "archived_at": workspace.archived_at,
+                "created_at": workspace.created_at,
+                "updated_at": workspace.updated_at
+            }
+        })
+        .to_string();
+        store
+            .conn
+            .execute(
+                "INSERT INTO workspace_lifecycle_jobs (
+                    kind, status, workspace_id, payload_json, error,
+                    attempts, created_at, updated_at, started_at, finished_at
+                 ) VALUES ('workspace.delete', 'queued', ?1, ?2, NULL, 0, ?3, ?3, NULL, NULL)",
+                params![workspace.id, payload, now],
+            )
+            .unwrap();
+
+        let recovered = store.recover_workspace_lifecycle_jobs().unwrap();
+
+        assert_eq!(recovered, 1);
+        assert!(store.get_by_name("berlin").is_err());
+        assert!(!workspace.path.exists());
+        assert!(String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["branch", "--list", "lc/berlin"])
+                .output()
+                .unwrap()
+                .stdout
+        )
+        .trim()
+        .is_empty());
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "succeeded");
+    }
+
+    #[test]
     fn delete_failed_workspace_keeps_metadata_when_worktree_cleanup_fails() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -12542,8 +13279,9 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        store.delete("berlin", true, true).unwrap();
+        let deleted = store.delete_fast("berlin", true, true).unwrap();
 
+        assert!(deleted.cleanup_error.is_none());
         assert!(!workspace.path.exists());
         let branches = Command::new("git")
             .arg("-C")
@@ -12604,7 +13342,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn sync_default_branch_preserves_local_commits() {
+    fn explicit_remote_base_fetch_preserves_local_commits() {
         let temp = tempfile::tempdir().unwrap();
         let remote_path = temp.path().join("origin.git");
         Command::new("git")
@@ -12659,7 +13397,7 @@ CUSTOM_VALUE = "from-settings"
             .status()
             .unwrap();
 
-        let base = sync_repository_default_branch(&repo_path, "origin", "main").unwrap();
+        let base = resolve_source_base_ref(&repo_path, "origin", "origin/main", true).unwrap();
 
         assert_eq!(base, "origin/main");
         assert_eq!(

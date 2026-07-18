@@ -6588,8 +6588,6 @@ fn composer_action_for_startup_state(
     if waiting_for_startup {
         if has_text {
             ComposerAction::Queue
-        } else if queued_count > 0 {
-            ComposerAction::SendQueued
         } else {
             ComposerAction::Disabled
         }
@@ -8595,6 +8593,17 @@ fn session_refresh_error_text(operation: &str, err: &anyhow::Error) -> String {
     format!("[session refresh] {operation} failed: {err:#}")
 }
 
+fn archcar_turn_completion_allows_queue_drain(status: Option<&str>) -> bool {
+    !matches!(
+        status.map(|status| status.trim().to_ascii_lowercase()),
+        Some(status)
+            if matches!(
+                status.as_str(),
+                "failed" | "error" | "interrupted" | "cancelled" | "canceled" | "deferred"
+            )
+    )
+}
+
 fn is_codex_session_record(records: &[ProcessRecord], process_id: i64) -> bool {
     records
         .iter()
@@ -9112,14 +9121,28 @@ fn handle_archcar_event(
         } => {
             info!(session_id, thread_id, ?status, "archcar turn completed");
             session_threads.borrow_mut().insert(*session_id, *thread_id);
-            note_archcar_ready(&mut ready_cache.borrow_mut(), *session_id, true);
-            apply_codex_startup_signal(
-                &mut startup_states.borrow_mut(),
-                CodexStartupSignal::Ready {
-                    thread_id: *thread_id,
-                },
-            );
-            set_codex_ready_state(codex_ready, update_composer_state, true);
+            let ready = archcar_turn_completion_allows_queue_drain(status.as_deref());
+            note_archcar_ready(&mut ready_cache.borrow_mut(), *session_id, ready);
+            if ready {
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Ready {
+                        thread_id: *thread_id,
+                    },
+                );
+            } else {
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id: *thread_id,
+                        message: format!(
+                            "Agent turn {}.",
+                            status.as_deref().unwrap_or("did not complete")
+                        ),
+                    },
+                );
+            }
+            set_codex_ready_state(codex_ready, update_composer_state, ready);
         }
         ArchcarEvent::SessionCapabilitiesChanged {
             session_id,
@@ -10475,6 +10498,10 @@ fix it
             composer_action_for_startup_state(true, false, false, 0, true),
             ComposerAction::Queue
         );
+        assert_eq!(
+            composer_action_for_startup_state(false, false, false, 1, true),
+            ComposerAction::Disabled
+        );
     }
 
     #[test]
@@ -10733,6 +10760,29 @@ fix it
 
         assert!(changed);
         assert!(!working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn failed_or_interrupted_turn_completion_does_not_allow_queue_drain() {
+        assert!(archcar_turn_completion_allows_queue_drain(Some("success")));
+        assert!(archcar_turn_completion_allows_queue_drain(Some(
+            "completed"
+        )));
+        assert!(archcar_turn_completion_allows_queue_drain(None));
+
+        for status in [
+            "failed",
+            "error",
+            "interrupted",
+            "cancelled",
+            "canceled",
+            "deferred",
+        ] {
+            assert!(
+                !archcar_turn_completion_allows_queue_drain(Some(status)),
+                "{status} turn completion must leave queued messages untouched"
+            );
+        }
     }
 
     #[test]

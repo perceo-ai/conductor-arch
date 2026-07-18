@@ -6,6 +6,13 @@ fn publish_build_uses_ci_verified_release_packaging() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let publish = fs::read_to_string(repo_root.join(".github/workflows/publish.yml")).unwrap();
     let ci = fs::read_to_string(repo_root.join(".github/workflows/ci.yml")).unwrap();
+    let nfpm = fs::read_to_string(repo_root.join("nfpm.yaml")).unwrap();
+    let app_run =
+        fs::read_to_string(repo_root.join("packaging/appimage/archductor.AppDir/AppRun")).unwrap();
+    let flatpak = fs::read_to_string(
+        repo_root.join("packaging/flatpak/io.github.pranavkannepalli.archductor.yml"),
+    )
+    .unwrap();
 
     assert!(
         publish.contains("Verify Windows GTK pkg-config"),
@@ -64,4 +71,14 @@ fn publish_build_uses_ci_verified_release_packaging() {
         !publish.contains("C:\\msys64\\ucrt64") && !ci.contains("C:\\msys64\\ucrt64"),
         "Windows workflows should not assume setup-msys2 installs under C:\\msys64"
     );
+    for manifest in [&nfpm, &app_run, &flatpak, &publish, &ci] {
+        assert!(
+            manifest.contains("archductor") && manifest.contains("archductor-gtk"),
+            "packages should ship the archductor and archductor-gtk binaries"
+        );
+        assert!(
+            !manifest.contains("archductor-cli"),
+            "the packaged CLI binary should remain archductor, not archductor-cli"
+        );
+    }
 }

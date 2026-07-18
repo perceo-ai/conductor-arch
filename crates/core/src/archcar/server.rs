@@ -82,6 +82,11 @@ fn archcar_process_alive(pid: u32) -> bool {
 impl ArchcarServer {
     pub fn bind(paths: AppPaths) -> Result<Self> {
         fs::create_dir_all(&paths.state_dir)?;
+        if let Err(err) = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)
+            .and_then(|store| store.recover_workspace_lifecycle_jobs())
+        {
+            warn!(error = %err, "archcar workspace lifecycle job recovery failed");
+        }
         let endpoint_path = paths.archcar_endpoint_path();
         if let Some(parent) = endpoint_path.parent() {
             fs::create_dir_all(parent)?;

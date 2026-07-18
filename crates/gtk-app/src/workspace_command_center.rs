@@ -245,7 +245,18 @@ fn workspace_creation_status_shell(
             spawn_background_job(
                 move || {
                     WorkspaceStore::open_app(db_delete_job)
-                        .and_then(|store| store.delete(&workspace_delete_job, true, false))
+                        .and_then(|store| {
+                            let result =
+                                store.delete_lifecycle_job(&workspace_delete_job, true, false)?;
+                            if let Some(err) = result.cleanup_error {
+                                error!(
+                                    workspace = %result.workspace.name,
+                                    error = %err,
+                                    "workspace artifact cleanup failed after metadata delete"
+                                );
+                            }
+                            Ok(result.workspace)
+                        })
                         .map_err(|err| format!("{err:#}"))
                 },
                 move |result| {
@@ -2079,7 +2090,7 @@ fn workspace_prompt_queue_button_label(title: &str) -> &'static str {
 fn queue_workspace_prompt_draft(app_state: &AppState, prompt: &str) {
     let prompt = prompt.trim();
     if !prompt.is_empty() {
-        app_state.set_staged_review_prompt(Some(prompt.to_owned()));
+        app_state.queue_pending_chat_prompt(prompt.to_owned());
     }
 }
 
@@ -3120,7 +3131,18 @@ fn lifecycle_panel(
                 spawn_background_job(
                     move || {
                         WorkspaceStore::open_app(db_delete)
-                            .and_then(|store| store.delete(&workspace_delete, false, false))
+                            .and_then(|store| {
+                                let result =
+                                    store.delete_lifecycle_job(&workspace_delete, false, false)?;
+                                if let Some(err) = result.cleanup_error {
+                                    error!(
+                                        workspace = %result.workspace.name,
+                                        error = %err,
+                                        "workspace artifact cleanup failed after metadata delete"
+                                    );
+                                }
+                                Ok(result.workspace)
+                            })
                             .map_err(|err| format!("{err:#}"))
                     },
                     move |result| {
@@ -6154,7 +6176,7 @@ fn workspace_check_runner_panel(
             .and_then(|store| latest_check_agent_prompt(&store, &workspace_for_stage))
         {
             Ok(prompt) => {
-                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                app_state_for_stage.queue_pending_chat_prompt(prompt);
                 apply_action_feedback(
                     &feedback_for_stage,
                     &toast_for_stage,
@@ -6304,7 +6326,7 @@ fn workspace_checks_panel(
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                app_state_for_stage.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_stage,
                                     &toast_for_stage,
@@ -6331,7 +6353,7 @@ fn workspace_checks_panel(
                             store.pull_request_review_agent_prompt(&workspace_for_review)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_review.set_staged_review_prompt(Some(prompt));
+                                app_state_for_review.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_review,
                                     &toast_for_review,
@@ -6427,7 +6449,7 @@ fn workspace_checks_panel(
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                app_state_for_stage.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_stage,
                                     &toast_for_stage,
@@ -6490,7 +6512,7 @@ fn workspace_checks_panel(
                             store.pull_request_checks_agent_prompt(&workspace_for_fix)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_fix.set_staged_review_prompt(Some(prompt));
+                                app_state_for_fix.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_fix,
                                     &toast_for_fix,
@@ -6517,7 +6539,7 @@ fn workspace_checks_panel(
                             store.pull_request_readiness_agent_prompt(&workspace_for_stage)
                         }) {
                             Ok(prompt) => {
-                                app_state_for_stage.set_staged_review_prompt(Some(prompt));
+                                app_state_for_stage.queue_pending_chat_prompt(prompt);
                                 apply_action_feedback(
                                     &feedback_for_stage,
                                     &toast_for_stage,
@@ -6573,7 +6595,7 @@ fn workspace_checks_panel(
                     continue_btn.connect_clicked(move |_| {
                         let prompt =
                             workspace_continue_prompt(&db_for_continue, &workspace_for_continue);
-                        app_state_for_continue.set_staged_review_prompt(Some(prompt));
+                        app_state_for_continue.queue_pending_chat_prompt(prompt);
                     });
 
                     let db_for_archive = db_path.to_path_buf();
@@ -7328,7 +7350,7 @@ fn workspace_review_panel(
             Ok(prompt)
         }) {
             Ok(prompt) => {
-                app_state.set_staged_review_prompt(Some(prompt));
+                app_state.queue_pending_chat_prompt(prompt);
                 apply_action_feedback(
                     &stage_feedback,
                     &stage_toast,
@@ -7929,7 +7951,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_tab_queue_button_stages_prompt_for_selected_chat() {
+    fn prompt_tab_queue_button_queues_prompt_for_active_chat() {
         let state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -7940,9 +7962,10 @@ mod tests {
         queue_workspace_prompt_draft(&state, "  Bootstrap repo setup.  ");
 
         assert_eq!(
-            state.staged_review_prompt().as_deref(),
+            state.take_pending_chat_prompt().as_deref(),
             Some("Bootstrap repo setup.")
         );
+        assert_eq!(state.staged_review_prompt(), None);
     }
 
     fn test_checks_summary(

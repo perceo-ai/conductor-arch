@@ -41,6 +41,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
+    Gtk {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     Settings {
         #[command(subcommand)]
         command: AppSettingsCommand,
@@ -593,6 +597,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
+        Command::Gtk { args } => launch_gtk(&args)?,
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
                 let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
@@ -904,6 +909,7 @@ fn main() -> Result<()> {
         }
         Command::Workspace { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
+            store.recover_workspace_lifecycle_jobs()?;
             match command {
                 WorkspaceCommand::Create {
                     repository,
@@ -960,7 +966,7 @@ fn main() -> Result<()> {
                         let branch = branch.with_context(|| {
                             "--branch is required when not using a source option"
                         })?;
-                        store.create(CreateWorkspace {
+                        store.create_lifecycle_job(CreateWorkspace {
                             repository_name: repository,
                             name,
                             branch,
@@ -1022,8 +1028,21 @@ fn main() -> Result<()> {
                     remove_worktree,
                     delete_branch,
                 } => {
-                    let workspace = store.delete(&name, remove_worktree, delete_branch)?;
-                    println!("Deleted workspace {}", workspace.name);
+                    let result =
+                        store.delete_lifecycle_job(&name, remove_worktree, delete_branch)?;
+                    println!("Deleted workspace {}", result.workspace.name);
+                    if remove_worktree || delete_branch {
+                        if let Some(err) = result.cleanup_error {
+                            eprintln!(
+                                "Artifact cleanup failed after metadata delete for {}: {err}",
+                                result.workspace.name
+                            );
+                            anyhow::bail!(
+                                "workspace metadata deleted but artifact cleanup failed: {err}"
+                            );
+                        }
+                        println!("Cleaned workspace artifacts for {}", result.workspace.name);
+                    }
                 }
                 WorkspaceCommand::Rename { name, new_name } => {
                     let workspace = store.rename(&name, &new_name)?;
@@ -2052,6 +2071,36 @@ fn cli_input_delivery(immediate: bool) -> ArchcarInputDelivery {
     } else {
         ArchcarInputDelivery::Auto
     }
+}
+
+fn launch_gtk(args: &[String]) -> Result<()> {
+    let binary = gtk_binary_path();
+    let status = ProcessCommand::new(&binary)
+        .args(args)
+        .status()
+        .with_context(|| format!("launch GTK app {}", binary.display()))?;
+    anyhow::ensure!(status.success(), "GTK app exited with status {status}");
+    Ok(())
+}
+
+fn gtk_binary_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("ARCHDUCTOR_GTK_BIN") {
+        return PathBuf::from(path);
+    }
+    gtk_binary_path_for_cli_exe(std::env::current_exe().ok())
+}
+
+fn gtk_binary_path_for_cli_exe(cli_exe: Option<PathBuf>) -> PathBuf {
+    let binary_name = format!("archductor-gtk{}", std::env::consts::EXE_SUFFIX);
+    if let Some(cli_exe) = cli_exe {
+        if let Some(parent) = cli_exe.parent() {
+            let sibling = parent.join(&binary_name);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from(binary_name)
 }
 
 fn open_interactive_session(launch: &SessionLaunch, terminal: Option<&str>) -> Result<()> {
@@ -3345,6 +3394,34 @@ mod tests {
         let parse = Cli::try_parse_from(["archductor", "internal", "run-codex-session", "demo"]);
 
         assert!(parse.is_err());
+    }
+
+    #[test]
+    fn cli_parses_gtk_launcher_with_passthrough_args() {
+        let parse = Cli::try_parse_from([
+            "archductor",
+            "gtk",
+            "--workspace",
+            "berlin",
+            "--tab",
+            "checks",
+        ])
+        .unwrap();
+
+        match parse.command {
+            Command::Gtk { args } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "--workspace".to_owned(),
+                        "berlin".to_owned(),
+                        "--tab".to_owned(),
+                        "checks".to_owned(),
+                    ]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

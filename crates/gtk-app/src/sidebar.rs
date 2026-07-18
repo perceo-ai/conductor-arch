@@ -306,7 +306,7 @@ pub(crate) fn build_app_sidebar(
                                     let inserted_workspace_name = inserted_workspace_name.clone();
                                     move |progress| {
                                         WorkspaceStore::open_app(db_path).and_then(|store| {
-                                            store.create_with_progress(
+                                            store.create_lifecycle_job_with_progress(
                                                 CreateWorkspace {
                                                     repository_name: repo_name,
                                                     name: String::new(),
@@ -982,13 +982,22 @@ fn attach_workspace_row_context_menu(
                                     let db_path = state.workspace_database_path().to_path_buf();
                                     let workspace_name = workspace_name.clone();
                                     move || {
-	                                        WorkspaceStore::open_app(db_path).and_then(|store| {
-	                                            store.delete(
-	                                                &workspace_name,
-	                                                force_delete_workspace,
-	                                                delete_branch_after_delete,
-	                                            )
-	                                        })
+                                        WorkspaceStore::open_app(db_path)
+                                            .and_then(|store| {
+                                                let result = store.delete_lifecycle_job(
+                                                    &workspace_name,
+                                                    force_delete_workspace,
+                                                    delete_branch_after_delete,
+                                                )?;
+                                                if let Some(err) = result.cleanup_error {
+                                                    error!(
+                                                        workspace = %result.workspace.name,
+                                                        error = %err,
+                                                        "workspace artifact cleanup failed after metadata delete"
+                                                    );
+                                                }
+                                                Ok(result.workspace)
+                                            })
                                             .map_err(|err| format!("{err:#}"))
                                     }
                                 },

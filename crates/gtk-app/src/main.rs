@@ -1022,6 +1022,20 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     ) {
         refresh_hub.refresh(RefreshScope::All);
     }
+    match WorkspaceStore::open_app(app_state.workspace_database_path())
+        .and_then(|store| store.recover_workspace_lifecycle_jobs())
+    {
+        Ok(recovered) if recovered > 0 => {
+            refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+        }
+        Ok(_) => {}
+        Err(err) => report_runtime_error(
+            &runtime_error_reporter,
+            &toast_manager,
+            "workspace lifecycle recovery",
+            err,
+        ),
+    }
 
     let spotlight_event_tx = {
         let (tx, rx) = mpsc::channel();
@@ -1104,6 +1118,20 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 "focus",
             ) {
                 refresh_runtime_reconciliation_event(&hub_on_focus, &state_on_focus);
+            }
+            match WorkspaceStore::open_app(&db_path_on_focus)
+                .and_then(|store| store.recover_workspace_lifecycle_jobs())
+            {
+                Ok(recovered) if recovered > 0 => {
+                    hub_on_focus.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                }
+                Ok(_) => {}
+                Err(err) => report_runtime_error(
+                    &runtime_reporter_on_focus,
+                    &toast_on_focus,
+                    "workspace lifecycle recovery",
+                    err,
+                ),
             }
         });
     }
