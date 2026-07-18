@@ -1,0 +1,31 @@
+crates/gtk-app/src/command_palette.rs
+  s_50c4860c810a87::t_411d3112a69a20 424,444,457,484,495,590,601,608
+  s_50c4860c810a87::t_c7a967f1449ef5 478,482
+progress.md
+  s_50c4860c810a87::t_c7a967f1449ef5 85-86
+crates/gtk-app/src/main.rs
+  s_50c4860c810a87::t_645eb11883e5ca 353
+  s_50c4860c810a87::t_c7a967f1449ef5 1987,1995,1997-1998,2000,2004-2005
+docs/manual-testing-checklist.md
+  s_50c4860c810a87::t_c7a967f1449ef5 228-230
+  s_50c4860c810a87::t_fc40b3e3ec0d66 231
+crates/gtk-app/src/sidebar.rs
+  s_50c4860c810a87::t_751528b14593da 1404,1540
+  s_50c4860c810a87::t_c7a967f1449ef5 1405
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4635d228d2b7e5768017b62f78dd37b7827be6c5",
+  "prompts": {},
+  "sessions": {
+    "s_50c4860c810a87": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f742c-163c-7500-a706-d65dfd7bfcaa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
