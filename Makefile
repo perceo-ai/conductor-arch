@@ -20,10 +20,20 @@ help:
 
 dev:
 	@cargo build --workspace
-	@trap 'kill 0' INT TERM EXIT; \
+	@cleanup_dev() { \
+		status=$$?; \
+		trap - INT TERM EXIT; \
+		if [ -n "$$archcar_pid" ]; then kill "$$archcar_pid" 2>/dev/null || true; fi; \
+		if [ -n "$$gtk_pid" ]; then kill "$$gtk_pid" 2>/dev/null || true; fi; \
+		wait "$$archcar_pid" "$$gtk_pid" 2>/dev/null || true; \
+		exit "$$status"; \
+	}; \
+	trap cleanup_dev INT TERM EXIT; \
 	$(DEV_ENV) cargo run --bin archcar & \
+	archcar_pid=$$!; \
 	$(DEV_ENV) cargo watch -x "run --bin archductor-gtk" & \
-	wait
+	gtk_pid=$$!; \
+	wait "$$archcar_pid" "$$gtk_pid"
 
 dev-env:
 	@$(DEV_ENV) --print
