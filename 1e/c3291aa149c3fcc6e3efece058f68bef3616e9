@@ -1,0 +1,19 @@
+docs/gtk-state-refresh-map.md
+  s_50c4860c810a87::t_29f9c9b2d086c7 1-926
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "1ec3291aa149c3fcc6e3efece058f68bef3616e9",
+  "prompts": {},
+  "sessions": {
+    "s_50c4860c810a87": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f742c-163c-7500-a706-d65dfd7bfcaa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
