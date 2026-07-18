@@ -1,0 +1,21 @@
+crates/cli/tests/dev_instance_env.rs
+  s_d37bf9840d3576::t_8de39164648ad0 1-37
+scripts/dev-instance-env.sh
+  s_d37bf9840d3576::t_bcb610787876e2 26-27,30,39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "e44cdcc0350cf26470be5e7681c5bd509af0f43e",
+  "prompts": {},
+  "sessions": {
+    "s_d37bf9840d3576": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f738d-d79e-75e3-a927-b05d5700eab5",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
