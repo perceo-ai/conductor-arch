@@ -107,6 +107,12 @@ paths and known rough edges.
   visible, and Claude hides unsupported goals.
 - Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
   queue-row reconciliation isolated from streaming chat refreshes.
+- GTK refreshes use typed events for routine runtime, review, workspace
+  inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
+  explicit manual refresh and startup reconciliation.
+- Running chat sessions are sampled in the background with lightweight ids and
+  sequence markers so sidebar/dashboard/history and chat tab state can update
+  while another workspace or thread is selected.
 - Terminal surfaces for one-shot commands, PTY shell tabs, transcript
   persistence/search/reload, basic ANSI/control redraw handling, alternate
   screen restoration, configured terminal font, configured scrollback, and

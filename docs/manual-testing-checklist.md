@@ -152,9 +152,16 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   each keeps its own PID, chat thread, raw chunks, parsed events, screen
   snapshot, readiness/composer state, and transcript after switching between
   workspaces.
+- [ ] Start a managed Codex or Claude session in workspace A, switch to
+  workspace B while it is generating, and confirm sidebar/dashboard/history
+  reflect workspace A's running state without opening workspace A's full
+  timeline.
 - [ ] Start two Codex sessions in the same workspace but different chat threads;
   confirm selecting one thread never shows the other thread's transcript,
   runtime state, readiness state, or queued input.
+- [ ] Generate in chat thread 1, select chat thread 2, and confirm thread 1 is
+  marked running/unread in the chat tab bar while thread 2's timeline and queue
+  remain stable.
 - [ ] While a managed Codex session is running, stop and restart the archcar
   daemon; confirm the GTK session surface reconnects or shows a single
   deduped bridge error, persisted transcript state reloads, and stale managed
@@ -217,6 +224,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Run a one-shot terminal command and confirm stdout, stderr, and exit code.
 - [ ] Start multiple PTY shells, select one, send input to it, and stop only
   that shell.
+- [ ] Stop a terminal shell and confirm the Terminal tab, Processes panel,
+  sidebar, and dashboard reflect the stopped process without a manual refresh.
 - [ ] Run a full-screen TUI command that enters/exits the alternate screen and
   confirm the transcript view returns to the normal shell output afterward.
 - [ ] Run cursor-heavy shell output or a TUI transcript and confirm CSI cursor
@@ -355,6 +364,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Type in the command palette and confirm commands filter by label,
   shortcut, and aliases such as `ci`, `diff`, `chat`, and `terminal`.
 - [ ] `Ctrl+R` refreshes the visible workspace state.
+- [ ] Confirm routine setup/run/stop, PR refresh/merge/review actions, terminal
+  shell start/stop, and workspace archive/restore/delete update only their
+  affected GTK surfaces; use `Ctrl+R` or command-palette Refresh for a full
+  manual refresh.
 - [ ] `Ctrl+B` toggles the sidebar.
 - [ ] Use the command palette to navigate Dashboard, Projects, History,
   Workspace, Changes, Checks, Review, Chat/Terminal, Big Terminal, Todos,
