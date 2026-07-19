@@ -14,7 +14,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use crate::archcar_async::spawn_background_job_with_progress;
+use crate::archcar_async::{spawn_background_job, spawn_background_job_with_progress};
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
 use crate::state::{AppState, WorkspaceUiPhase};
@@ -850,12 +850,20 @@ pub(crate) fn show_create_workspace_dialog(
         let repo_select = repo_select.clone();
         let branch_select = branch_select.clone();
         let loaded_source_choices = loaded_source_choices.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
-                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                    *loaded_source_choices.borrow_mut() = None;
-                    load_branch_choices(&repo_root, &branch_select);
-                }
+                *loaded_source_choices.borrow_mut() = None;
+                let repo_root = repository_root(&database_path, &repo_name);
+                let branch_select = branch_select.clone();
+                let toast_manager = toast_manager.clone();
+                spawn_background_job(
+                    move || repo_root.and_then(|root| load_branch_choice_rows(&root)),
+                    move |result| match result {
+                        Ok(rows) => apply_combo_rows(&branch_select, rows),
+                        Err(err) => toast_manager.error(format!("Load branches failed: {err:#}")),
+                    },
+                );
             }
         }
     });
@@ -864,12 +872,20 @@ pub(crate) fn show_create_workspace_dialog(
         let repo_select = repo_select.clone();
         let github_issue_select = github_issue_select.clone();
         let loaded_source_choices = loaded_source_choices.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
-                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                    *loaded_source_choices.borrow_mut() = None;
-                    load_github_issue_choices(&repo_root, &github_issue_select);
-                }
+                *loaded_source_choices.borrow_mut() = None;
+                let repo_root = repository_root(&database_path, &repo_name);
+                let github_issue_select = github_issue_select.clone();
+                let toast_manager = toast_manager.clone();
+                spawn_background_job(
+                    move || repo_root.and_then(|root| load_github_issue_choice_rows(&root)),
+                    move |result| match result {
+                        Ok(rows) => apply_combo_rows(&github_issue_select, rows),
+                        Err(err) => toast_manager.error(format!("Load issues failed: {err:#}")),
+                    },
+                );
             }
         }
     });
@@ -878,12 +894,20 @@ pub(crate) fn show_create_workspace_dialog(
         let repo_select = repo_select.clone();
         let github_pr_select = github_pr_select.clone();
         let loaded_source_choices = loaded_source_choices.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
-                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                    *loaded_source_choices.borrow_mut() = None;
-                    load_github_pr_choices(&repo_root, &github_pr_select);
-                }
+                *loaded_source_choices.borrow_mut() = None;
+                let repo_root = repository_root(&database_path, &repo_name);
+                let github_pr_select = github_pr_select.clone();
+                let toast_manager = toast_manager.clone();
+                spawn_background_job(
+                    move || repo_root.and_then(|root| load_github_pr_choice_rows(&root)),
+                    move |result| match result {
+                        Ok(rows) => apply_combo_rows(&github_pr_select, rows),
+                        Err(err) => toast_manager.error(format!("Load PRs failed: {err:#}")),
+                    },
+                );
             }
         }
     });
@@ -1949,8 +1973,16 @@ fn clear_combo_text(combo: &ComboBoxText) {
     combo.append(Some(""), "Select...");
 }
 
-fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
+fn apply_combo_rows(combo: &ComboBoxText, rows: Vec<(String, String)>) {
     clear_combo_text(combo);
+    let has_items = !rows.is_empty();
+    for (value, label) in rows {
+        combo.append(Some(&value), &label);
+    }
+    combo.set_active(Some(if has_items { 1 } else { 0 }));
+}
+
+fn load_branch_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -1960,13 +1992,13 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
             "refs/heads",
             "refs/remotes/origin",
         ])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
+        .output()
+        .context("load git branches")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git branch load exited with {}",
+        output.status
+    );
     let mut branches = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
@@ -1976,11 +2008,18 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
         .collect::<Vec<_>>();
     branches.sort();
     branches.dedup();
-    let has_items = !branches.is_empty();
-    for branch in branches {
-        combo.append(Some(&branch), &branch);
+    Ok(branches
+        .into_iter()
+        .map(|branch| (branch.clone(), branch))
+        .collect())
+}
+
+fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
+    if let Ok(rows) = load_branch_choice_rows(repo_root) {
+        apply_combo_rows(combo, rows);
+    } else {
+        clear_combo_text(combo);
     }
-    combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
 
 fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
@@ -2024,8 +2063,7 @@ fn github_selection_preview_label(
     Some(selected_text.to_owned())
 }
 
-fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
-    clear_combo_text(combo);
+fn load_github_issue_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("gh")
         .arg("-C")
         .arg(repo_root)
@@ -2041,23 +2079,29 @@ fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
             "--template",
             "{{range .}}{{.number}}{{\"\\t\"}}{{.state}}{{\"\\t\"}}{{.title}}{{\"\\n\"}}{{end}}",
         ])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
+        .output()
+        .context("load GitHub issues")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh issue list exited with {}",
+        output.status
+    );
     let choices = parse_github_numbered_stateful_choices(&String::from_utf8_lossy(&output.stdout));
-    let has_items = !choices.is_empty();
-    for choice in choices {
-        combo.append(Some(&choice.value), &choice.label);
-    }
-    combo.set_active(Some(if has_items { 1 } else { 0 }));
+    Ok(choices
+        .into_iter()
+        .map(|choice| (choice.value, choice.label))
+        .collect())
 }
 
-fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
-    clear_combo_text(combo);
+fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
+    if let Ok(rows) = load_github_issue_choice_rows(repo_root) {
+        apply_combo_rows(combo, rows);
+    } else {
+        clear_combo_text(combo);
+    }
+}
+
+fn load_github_pr_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("gh")
         .arg("-C")
         .arg(repo_root)
@@ -2073,19 +2117,26 @@ fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
             "--template",
             "{{range .}}{{.number}}{{\"\\t\"}}{{if .isDraft}}DRAFT{{else}}{{.state}}{{end}}{{\"\\t\"}}{{.title}}{{\"\\n\"}}{{end}}",
         ])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
+        .output()
+        .context("load GitHub PRs")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh pr list exited with {}",
+        output.status
+    );
     let choices = parse_github_numbered_stateful_choices(&String::from_utf8_lossy(&output.stdout));
-    let has_items = !choices.is_empty();
-    for choice in choices {
-        combo.append(Some(&choice.value), &choice.label);
+    Ok(choices
+        .into_iter()
+        .map(|choice| (choice.value, choice.label))
+        .collect())
+}
+
+fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
+    if let Ok(rows) = load_github_pr_choice_rows(repo_root) {
+        apply_combo_rows(combo, rows);
+    } else {
+        clear_combo_text(combo);
     }
-    combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
 
 fn new_project_templates() -> Vec<NewProjectTemplate> {
@@ -2295,6 +2346,24 @@ mod tests {
         assert!(
             function.contains("navigate_created_workspace(name);"),
             "workspace should open as soon as the inserted workspace name is known"
+        );
+    }
+
+    #[test]
+    fn source_choice_refresh_buttons_spawn_background_loads() {
+        let source = include_str!("projects.rs");
+        let branch_handler = source
+            .split("branch_refresh_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("github_issue_refresh_btn.connect_clicked")
+                    .next()
+            })
+            .expect("branch refresh handler exists");
+
+        assert!(
+            branch_handler.contains("spawn_background_job"),
+            "branch choice loading can call git and must not block GTK"
         );
     }
 
