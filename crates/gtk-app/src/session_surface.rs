@@ -65,6 +65,7 @@ use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
+use crate::refresh::RefreshEvent;
 use crate::state::{AppPage, AppState, AppStateSnapshot};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
@@ -92,9 +93,26 @@ thread_local! {
 
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
-type RegisterChatSurfaceRefresh = Rc<dyn Fn(Rc<dyn Fn()>)>;
+pub(crate) type RegisterChatSurfaceRefresh = Rc<dyn Fn(Rc<dyn Fn(ChatRefreshKind)>)>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 type SendChatTextController = Rc<RefCell<Option<Rc<dyn Fn(String, bool) -> bool>>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatRefreshKind {
+    Full,
+    Messages { thread_id: i64 },
+    ThreadNav,
+}
+
+pub(crate) fn chat_refresh_kind_for_event(event: &RefreshEvent) -> ChatRefreshKind {
+    match event {
+        RefreshEvent::WorkspaceChatMessagesChanged { thread_id, .. } => ChatRefreshKind::Messages {
+            thread_id: *thread_id,
+        },
+        RefreshEvent::WorkspaceChatLifecycleChanged { .. } => ChatRefreshKind::ThreadNav,
+        _ => ChatRefreshKind::Full,
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ChatRefreshOutcome {
@@ -1911,7 +1929,8 @@ pub fn agent_session_panel(
     *refresh_chat_surface.borrow_mut() = Some(refresh_view.clone());
     if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
         if let Some(register_refresh) = external_chat_tabs.on_chat_surface_refresh_ready.as_ref() {
-            register_refresh(refresh_view.clone());
+            let refresh_view_for_external = refresh_view.clone();
+            register_refresh(Rc::new(move |_| refresh_view_for_external()));
         }
     }
     install_archcar_wake(&root, &archcar_bridge, refresh_view.clone());
@@ -14175,6 +14194,31 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*selected_thread.borrow(), Some(7));
         assert_eq!(*app_state.borrow(), None);
         assert_eq!(*composer_updates.borrow(), 0);
+    }
+
+    #[test]
+    fn message_event_maps_to_message_refresh_kind() {
+        let event = RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "berlin".to_owned(),
+            thread_id: 42,
+        };
+
+        assert_eq!(
+            chat_refresh_kind_for_event(&event),
+            ChatRefreshKind::Messages { thread_id: 42 }
+        );
+    }
+
+    #[test]
+    fn lifecycle_event_maps_to_thread_nav_refresh_kind() {
+        let event = RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "berlin".to_owned(),
+        };
+
+        assert_eq!(
+            chat_refresh_kind_for_event(&event),
+            ChatRefreshKind::ThreadNav
+        );
     }
 
     #[test]

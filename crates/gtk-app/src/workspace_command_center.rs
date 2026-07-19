@@ -978,7 +978,9 @@ fn ws_center_panel(
                                 state.selected_workspace().as_deref(),
                                 state.selected_chat_thread(),
                             ) {
-                                refresh_chat_surface();
+                                refresh_chat_surface(session_surface::chat_refresh_kind_for_event(
+                                    event,
+                                ));
                             }
                         }
                     });
