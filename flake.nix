@@ -42,19 +42,9 @@
             installPhase = ''
               runHook preInstall
 
-              release_dir="$(
-                find target -type f -path '*/release/archductor' -executable \
-                  -printf '%h\n' -quit
-              )"
-              if [ -z "$release_dir" ]; then
-                echo "release binaries not found under target/" >&2
-                find target -maxdepth 4 -type f -executable >&2
-                exit 1
-              fi
-
-              install -Dm755 "$release_dir/archductor" "$out/bin/archductor"
-              install -Dm755 "$release_dir/archductor-gtk" "$out/bin/archductor-gtk"
-              install -Dm755 "$release_dir/archcar" "$out/bin/archcar"
+              install -Dm755 target/release/archductor "$out/bin/archductor"
+              install -Dm755 target/release/archductor-gtk "$out/bin/archductor-gtk"
+              install -Dm755 target/release/archcar "$out/bin/archcar"
               install -Dm644 packaging/archductor-gtk.desktop \
                 "$out/share/applications/archductor-gtk.desktop"
               install -Dm644 packaging/archductor.svg \
