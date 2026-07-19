@@ -390,7 +390,6 @@ pub(crate) fn build_projects_page(
     let db_path_create = paths.database_path.clone();
     let refresh_after_create = refresh.clone();
     let refresh_dashboard_inline = refresh_dashboard.clone();
-    let refresh_workspace_inline = refresh_workspace.clone();
     let create_btn_inline = create_btn.clone();
     let result_inline = result.clone();
     let toast_create_inline = toast_manager.clone();
@@ -435,7 +434,6 @@ pub(crate) fn build_projects_page(
         let create_btn = create_btn_inline.clone();
         let refresh_after_create = refresh_after_create.clone();
         let refresh_dashboard_inline = refresh_dashboard_inline.clone();
-        let refresh_workspace_inline = refresh_workspace_inline.clone();
         let toast_create_inline = toast_create_inline.clone();
         let navigate_created_workspace_inline = navigate_created_workspace_inline.clone();
         spawn_workspace_create_with_navigation(
@@ -446,11 +444,9 @@ pub(crate) fn build_projects_page(
             {
                 let refresh_after_create = refresh_after_create.clone();
                 let refresh_dashboard_inline = refresh_dashboard_inline.clone();
-                let refresh_workspace_inline = refresh_workspace_inline.clone();
                 move || {
                     refresh_after_create();
                     refresh_dashboard_inline();
-                    refresh_workspace_inline();
                 }
             },
             move |create_result| {
@@ -463,7 +459,6 @@ pub(crate) fn build_projects_page(
                 create_btn.set_sensitive(true);
                 refresh_after_create();
                 refresh_dashboard_inline();
-                refresh_workspace_inline();
             },
         );
     });
@@ -494,7 +489,7 @@ pub(crate) fn show_create_workspace_dialog(
     database_path: PathBuf,
     refresh: Rc<dyn Fn()>,
     refresh_dashboard: Rc<dyn Fn()>,
-    refresh_workspace: Rc<dyn Fn()>,
+    _refresh_workspace: Rc<dyn Fn()>,
     navigate_created_workspace: Rc<dyn Fn(String)>,
     preselected_repo: Option<String>,
     toast_manager: ToastManager,
@@ -705,7 +700,6 @@ pub(crate) fn show_create_workspace_dialog(
     let db_path_for_create = database_path.clone();
     let refresh_for_create = refresh.clone();
     let refresh_dashboard_for_create = refresh_dashboard.clone();
-    let refresh_workspace_for_create = refresh_workspace.clone();
     let loaded_source_choices = Rc::new(RefCell::new(None::<(String, String)>));
     let refresh_modal_copy: Rc<dyn Fn()> = {
         let source_select = source_select.clone();
@@ -963,7 +957,6 @@ pub(crate) fn show_create_workspace_dialog(
         let feedback = feedback_for_create.clone();
         let refresh_for_create = refresh_for_create.clone();
         let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
-        let refresh_workspace_for_create = refresh_workspace_for_create.clone();
         let dialog_for_create = dialog_for_create.clone();
         let toast_create = toast_create.clone();
         let navigate_created_workspace = navigate_created_workspace.clone();
@@ -975,18 +968,15 @@ pub(crate) fn show_create_workspace_dialog(
             {
                 let refresh_for_create = refresh_for_create.clone();
                 let refresh_dashboard_for_create = refresh_dashboard_for_create.clone();
-                let refresh_workspace_for_create = refresh_workspace_for_create.clone();
                 move || {
                     refresh_for_create();
                     refresh_dashboard_for_create();
-                    refresh_workspace_for_create();
                 }
             },
             move |create_result| {
                 create_btn.set_sensitive(true);
                 refresh_for_create();
                 refresh_dashboard_for_create();
-                refresh_workspace_for_create();
                 match create_result {
                     Ok(_) => dialog_for_create.close(),
                     Err(err) => surface_label_error(
@@ -2227,6 +2217,38 @@ mod tests {
                 Err(anyhow::anyhow!("LINEAR_API_KEY missing")),
             ),
             "Create failed from linear_issue: LINEAR_API_KEY missing"
+        );
+    }
+
+    #[test]
+    fn workspace_create_callbacks_do_not_refresh_workspace_shell_directly() {
+        let source = include_str!("projects.rs");
+        let start = source
+            .find("spawn_workspace_create_with_navigation(")
+            .expect("workspace create call exists");
+        let end = source[start..]
+            .find("let db_path_modal_workspace")
+            .map(|offset| start + offset)
+            .expect("inline create block has an end marker");
+        let inline_create = &source[start..end];
+
+        assert!(
+            !inline_create.contains("refresh_workspace_inline();"),
+            "workspace create should rely on navigation for selected-shell refresh"
+        );
+
+        let start = source
+            .find("let refresh_for_create = refresh.clone();")
+            .expect("modal create setup exists");
+        let end = source[start..]
+            .find("fn repository_root")
+            .map(|offset| start + offset)
+            .expect("modal create block has an end marker");
+        let modal_create = &source[start..end];
+
+        assert!(
+            !modal_create.contains("refresh_workspace_for_create();"),
+            "modal workspace create should rely on navigation for selected-shell refresh"
         );
     }
 
