@@ -1533,6 +1533,7 @@ pub fn agent_session_panel(
                             archcar_ready_cache.as_ref(),
                             codex_startup_states.as_ref(),
                             archcar_session_threads.as_ref(),
+                            inflight_archcar_actions.as_ref(),
                             current_kind,
                             selected_thread_id,
                             codex_ready.as_ref(),
@@ -1900,19 +1901,12 @@ pub fn agent_session_panel(
                                 };
                             let transcript_display =
                                 transcript_display_for_workspace(&database_path, &workspace);
-                            let pending_user_inputs = pending_user_input_texts_for_thread(
+                            let submitted_user_inputs = submitted_user_input_texts_for_thread(
                                 thread_id,
                                 pending_archcar_inputs.as_ref(),
-                                &app_state,
                                 inflight_archcar_actions.as_ref(),
                                 &thread_messages,
                             );
-                            let pending_immediate_inputs =
-                                pending_immediate_user_input_texts_for_thread(
-                                    thread_id,
-                                    inflight_archcar_actions.as_ref(),
-                                    &thread_messages,
-                                );
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(
                                     &thread_events,
@@ -1988,7 +1982,7 @@ pub fn agent_session_panel(
                                     &thread_messages,
                                     &thread_events,
                                     &provider_events,
-                                    &pending_user_inputs,
+                                    &submitted_user_inputs,
                                     &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
@@ -2004,8 +1998,8 @@ pub fn agent_session_panel(
                                     thread_messages.clone(),
                                     thread_events,
                                     provider_projection.items,
-                                    pending_user_inputs.clone(),
-                                    pending_immediate_inputs,
+                                    Vec::new(),
+                                    submitted_user_inputs,
                                 );
                                 let timeline_leading_rows =
                                     usize::from(status_banner != ChatStatusBannerKind::None);
@@ -2085,22 +2079,16 @@ pub fn agent_session_panel(
                         }
                     }
 
-                    let pending_user_inputs = pending_user_input_texts_for_thread(
+                    let submitted_user_inputs = submitted_user_input_texts_for_thread(
                         thread_id,
                         pending_archcar_inputs.as_ref(),
-                        &app_state,
-                        inflight_archcar_actions.as_ref(),
-                        &[],
-                    );
-                    let pending_immediate_inputs = pending_immediate_user_input_texts_for_thread(
-                        thread_id,
                         inflight_archcar_actions.as_ref(),
                         &[],
                     );
                     let status_banner = chat_status_banner_kind(
                         &startup_state,
                         working_elapsed,
-                        !pending_user_inputs.is_empty(),
+                        !submitted_user_inputs.is_empty(),
                     );
                     let signature = chat_render_signature(
                         current_kind,
@@ -2113,7 +2101,7 @@ pub fn agent_session_panel(
                         &[],
                         &[],
                         &[],
-                        &pending_user_inputs,
+                        &submitted_user_inputs,
                         "structured",
                         "empty",
                         runtime_summary.clone(),
@@ -2132,7 +2120,7 @@ pub fn agent_session_panel(
                         &startup_state,
                         working_elapsed,
                     );
-                    if pending_immediate_inputs.is_empty() {
+                    if submitted_user_inputs.is_empty() {
                         let empty = Label::new(Some("No messages yet."));
                         empty.add_css_class("chat-agent-text");
                         empty.set_selectable(true);
@@ -2140,7 +2128,7 @@ pub fn agent_session_panel(
                         empty.set_xalign(0.0);
                         append_chat_refresh_row(&messages, &empty);
                     } else {
-                        for input in pending_immediate_inputs {
+                        for input in submitted_user_inputs {
                             append_chat_refresh_row(&messages, &chat_user_bubble(&input));
                         }
                     }
@@ -2193,7 +2181,6 @@ pub fn agent_session_panel(
                 let context_usage = context_usage.clone();
                 let pending_archcar_inputs = pending_archcar_inputs.clone();
                 let inflight_archcar_actions = inflight_archcar_actions.clone();
-                let app_state = app_state.clone();
                 let last_timeline_render_state = last_timeline_render_state.clone();
                 let toast_manager = toast_manager.clone();
                 let message_refresh_generation = Rc::new(Cell::new(0_u64));
@@ -2213,7 +2200,6 @@ pub fn agent_session_panel(
                     let context_usage = context_usage.clone();
                     let pending_archcar_inputs = pending_archcar_inputs.clone();
                     let inflight_archcar_actions = inflight_archcar_actions.clone();
-                    let app_state = app_state.clone();
                     let last_timeline_render_state = last_timeline_render_state.clone();
                     let toast_manager = toast_manager.clone();
                     let message_refresh_generation = message_refresh_generation.clone();
@@ -2254,19 +2240,12 @@ pub fn agent_session_panel(
                             let thread_events = snapshot.thread_events;
                             let provider_events = snapshot.provider_events;
                             let transcript_display = snapshot.transcript_display;
-                            let pending_user_inputs = pending_user_input_texts_for_thread(
+                            let submitted_user_inputs = submitted_user_input_texts_for_thread(
                                 thread_id,
                                 pending_archcar_inputs.as_ref(),
-                                &app_state,
                                 inflight_archcar_actions.as_ref(),
                                 &thread_messages,
                             );
-                            let pending_immediate_inputs =
-                                pending_immediate_user_input_texts_for_thread(
-                                    thread_id,
-                                    inflight_archcar_actions.as_ref(),
-                                    &thread_messages,
-                                );
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(
                                     &thread_events,
@@ -2278,8 +2257,8 @@ pub fn agent_session_panel(
                                 thread_messages.clone(),
                                 thread_events,
                                 provider_projection.items,
-                                pending_user_inputs,
-                                pending_immediate_inputs,
+                                Vec::new(),
+                                submitted_user_inputs,
                             );
                             let next_state = chat_timeline_render_state(
                                 thread_id,
@@ -7044,10 +7023,9 @@ fn queued_chat_input_visible_text(input: &QueuedChatInputDraft) -> String {
         .to_owned()
 }
 
-fn pending_user_input_texts_for_thread(
+fn submitted_user_input_texts_for_thread(
     thread_id: i64,
     pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
-    app_state: &AppState,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     persisted_messages: &[ChatMessageRecord],
 ) -> Vec<String> {
@@ -7058,9 +7036,6 @@ fn pending_user_input_texts_for_thread(
         .collect::<HashSet<_>>();
     let mut inputs = Vec::new();
 
-    for input in app_state.queued_chat_inputs(thread_id) {
-        inputs.push(queued_chat_input_visible_text(&input));
-    }
     for input in pending_archcar_inputs
         .borrow()
         .get(&thread_id)
@@ -7092,39 +7067,19 @@ fn pending_user_input_texts_for_thread(
         .collect()
 }
 
-fn pending_immediate_user_input_texts_for_thread(
-    thread_id: i64,
+fn clear_inflight_user_sends_for_thread(
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
-    persisted_messages: &[ChatMessageRecord],
-) -> Vec<String> {
-    let persisted = persisted_messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .map(|message| message.content.trim().to_owned())
-        .collect::<HashSet<_>>();
-    let mut seen = HashSet::new();
-    inflight_actions
-        .borrow()
-        .values()
-        .filter_map(|action| match action {
+    thread_id: i64,
+) {
+    inflight_actions.borrow_mut().retain(|_, action| {
+        !matches!(
+            action,
             PendingArchcarAction::UserSend {
                 thread_id: action_thread_id,
-                input,
-                visible_input,
-                delivery: ArchcarInputDelivery::Immediate,
                 ..
-            } if *action_thread_id == thread_id => {
-                let input = visible_input.as_deref().unwrap_or(input).trim().to_owned();
-                if input.is_empty() || persisted.contains(&input) {
-                    None
-                } else {
-                    Some(input)
-                }
-            }
-            _ => None,
-        })
-        .filter(|input| seen.insert(input.clone()))
-        .collect()
+            } if *action_thread_id == thread_id
+        )
+    });
 }
 
 fn queued_chat_inputs_count(app_state: &AppState, thread_id: i64) -> usize {
@@ -9844,6 +9799,7 @@ fn handle_archcar_event(
     ready_cache: &RefCell<HashMap<i64, bool>>,
     startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
     session_threads: &RefCell<HashMap<i64, i64>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     selected_harness: SessionKind,
     selected_thread_id: Option<i64>,
     codex_ready: &RefCell<bool>,
@@ -9906,6 +9862,7 @@ fn handle_archcar_event(
         } => {
             info!(session_id, thread_id, ?status, "archcar turn completed");
             session_threads.borrow_mut().insert(*session_id, *thread_id);
+            clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
             record_queued_auto_drain_turn_completion(
                 queued_auto_drain_holds,
                 *thread_id,
@@ -9955,6 +9912,7 @@ fn handle_archcar_event(
         }
         ArchcarEvent::SessionMessagesUpdated { thread_id } => {
             trace!(thread_id, "archcar session messages updated");
+            clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
         }
         ArchcarEvent::ProviderInteractionRequested { interaction } => {
             trace!(
@@ -9981,6 +9939,7 @@ fn handle_archcar_event(
                 codex_thread_id_for_session(*session_id, session_threads, records)
             {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
+                clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
             }
             clear_archcar_ready(&mut ready_cache.borrow_mut(), *session_id);
             session_threads.borrow_mut().remove(session_id);
@@ -10003,6 +9962,7 @@ fn handle_archcar_event(
                 selected_thread_id,
             ) {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
+                clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
                 toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
@@ -10329,21 +10289,19 @@ fn handle_archcar_response(
                     chars = input.len(),
                     "archcar input accepted"
                 );
-                if delivery == ArchcarInputDelivery::Immediate {
-                    inflight_actions.borrow_mut().insert(
-                        response.token,
-                        PendingArchcarAction::UserSend {
-                            thread_id,
-                            session_id,
-                            input,
-                            visible_input,
-                            kind,
-                            delivery,
-                            checkpoint_id,
-                            session_kind,
-                        },
-                    );
-                }
+                inflight_actions.borrow_mut().insert(
+                    response.token,
+                    PendingArchcarAction::UserSend {
+                        thread_id,
+                        session_id,
+                        input,
+                        visible_input,
+                        kind,
+                        delivery,
+                        checkpoint_id,
+                        session_kind,
+                    },
+                );
             }
             Ok(other) => {
                 warn!(thread_id, session_id, kind = ?kind, delivery = ?delivery, ?other, "unexpected archcar input response");
@@ -12506,7 +12464,7 @@ fix it
     }
 
     #[test]
-    fn pending_user_input_texts_include_local_starting_and_inflight_sends() {
+    fn submitted_user_input_texts_include_starting_and_inflight_sends_only() {
         let app_state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -12546,21 +12504,20 @@ fix it
             },
         );
 
-        let pending =
-            pending_user_input_texts_for_thread(7, &starting_queue, &app_state, &inflight, &[]);
+        let submitted = submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &[]);
 
         assert_eq!(
-            pending,
+            submitted,
             vec![
-                "queued while busy".to_owned(),
                 "queued while starting".to_owned(),
                 "real inflight".to_owned(),
             ]
         );
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
     }
 
     #[test]
-    fn pending_user_input_texts_skip_persisted_messages() {
+    fn submitted_user_input_texts_skip_persisted_messages() {
         let app_state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -12584,15 +12541,11 @@ fix it
             "user_send",
         )];
 
-        let pending = pending_user_input_texts_for_thread(
-            7,
-            &starting_queue,
-            &app_state,
-            &inflight,
-            &persisted,
-        );
+        let submitted =
+            submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &persisted);
 
-        assert!(pending.is_empty());
+        assert!(submitted.is_empty());
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
     }
 
     #[test]
@@ -12610,15 +12563,16 @@ fix it
                 session_kind: SessionKind::Codex,
             },
         )]));
-        let immediate = pending_immediate_user_input_texts_for_thread(7, &inflight, &[]);
-        assert_eq!(immediate, vec!["change course now".to_owned()]);
+        let submitted =
+            submitted_user_input_texts_for_thread(7, &RefCell::new(HashMap::new()), &inflight, &[]);
+        assert_eq!(submitted, vec!["change course now".to_owned()]);
 
         let timeline = chat_structured_items_for_render(
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            immediate,
+            submitted,
         );
         assert_eq!(
             timeline,
@@ -12633,11 +12587,104 @@ fix it
             "change course now",
             "user_send",
         )];
-        assert!(pending_immediate_user_input_texts_for_thread(7, &inflight, &persisted).is_empty());
+        assert!(submitted_user_input_texts_for_thread(
+            7,
+            &RefCell::new(HashMap::new()),
+            &inflight,
+            &persisted
+        )
+        .is_empty());
         assert!(
             inflight.borrow().contains_key(&12),
             "render projection must not remove inflight actions; lifecycle responses own cleanup"
         );
+    }
+
+    #[test]
+    fn submitted_auto_input_renders_as_optimistic_user_boundary() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        queue_archcar_input(
+            &app_state,
+            7,
+            "still only queued locally".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+        let starting_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::from([(
+            12,
+            PendingArchcarAction::UserSend {
+                thread_id: 7,
+                session_id: 9,
+                input: "normal send".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+                checkpoint_id: None,
+                session_kind: SessionKind::Codex,
+            },
+        )]));
+
+        let submitted = submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &[]);
+
+        assert_eq!(submitted, vec!["normal send".to_owned()]);
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
+        let timeline = chat_structured_items_for_render(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            submitted,
+        );
+        assert_eq!(
+            timeline,
+            vec![ChatTimelineItem::OptimisticUserInput(
+                "normal send".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn provider_boundary_clears_inflight_user_sends_for_thread() {
+        let inflight = RefCell::new(HashMap::from([
+            (
+                12,
+                PendingArchcarAction::UserSend {
+                    thread_id: 7,
+                    session_id: 9,
+                    input: "first".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    delivery: ArchcarInputDelivery::Auto,
+                    checkpoint_id: None,
+                    session_kind: SessionKind::Codex,
+                },
+            ),
+            (
+                13,
+                PendingArchcarAction::UserSend {
+                    thread_id: 8,
+                    session_id: 10,
+                    input: "other thread".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    delivery: ArchcarInputDelivery::Auto,
+                    checkpoint_id: None,
+                    session_kind: SessionKind::Claude,
+                },
+            ),
+        ]));
+
+        clear_inflight_user_sends_for_thread(&inflight, 7);
+
+        assert!(!inflight.borrow().contains_key(&12));
+        assert!(inflight.borrow().contains_key(&13));
     }
 
     #[test]
