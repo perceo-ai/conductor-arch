@@ -984,7 +984,8 @@ fn ws_center_panel(
                 return;
             };
             let threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
-            (on_threads_changed)(threads, *selected_thread.borrow());
+            let selected = *selected_thread.borrow();
+            (on_threads_changed)(threads, selected);
         });
     }
     {
@@ -9854,5 +9855,20 @@ mod tests {
         select_thread(Some(42));
 
         assert_eq!(*observed.borrow(), Some(42));
+    }
+
+    #[test]
+    fn chat_tab_refresh_drops_selected_thread_borrow_before_callback_runs() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("workspace command center source should contain production code");
+
+        assert!(
+            !production_source
+                .contains("(on_threads_changed)(threads, *selected_thread.borrow());"),
+            "chat tab refresh must copy selected_thread before invoking on_threads_changed"
+        );
     }
 }
