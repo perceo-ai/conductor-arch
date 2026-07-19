@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +37,132 @@ pub enum RefreshEvent {
 type RefreshHandler = Rc<dyn Fn()>;
 type RefreshEventHandler = Rc<dyn Fn(&RefreshEvent)>;
 
+#[derive(Clone, Copy, Debug)]
+enum RefreshMetricTarget {
+    Sidebar,
+    Dashboard,
+    Projects,
+    History,
+    WorkspaceShell,
+    WorkspaceChatSurface,
+    WorkspaceChatTabs,
+    WorkspaceRuntime,
+    WorkspaceReview,
+}
+
+impl RefreshMetricTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::Dashboard => "dashboard",
+            Self::Projects => "projects",
+            Self::History => "history",
+            Self::WorkspaceShell => "workspace_shell",
+            Self::WorkspaceChatSurface => "workspace_chat_surface",
+            Self::WorkspaceChatTabs => "workspace_chat_tabs",
+            Self::WorkspaceRuntime => "workspace_runtime",
+            Self::WorkspaceReview => "workspace_review",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RefreshMetricSnapshot {
+    total: u64,
+    sidebar: u64,
+    dashboard: u64,
+    projects: u64,
+    history: u64,
+    workspace_shell: u64,
+    workspace_chat_surface: u64,
+    workspace_chat_tabs: u64,
+    workspace_runtime: u64,
+    workspace_review: u64,
+}
+
+#[derive(Default)]
+struct RefreshMetrics {
+    enabled: Cell<Option<bool>>,
+    total: Cell<u64>,
+    sidebar: Cell<u64>,
+    dashboard: Cell<u64>,
+    projects: Cell<u64>,
+    history: Cell<u64>,
+    workspace_shell: Cell<u64>,
+    workspace_chat_surface: Cell<u64>,
+    workspace_chat_tabs: Cell<u64>,
+    workspace_runtime: Cell<u64>,
+    workspace_review: Cell<u64>,
+}
+
+impl RefreshMetrics {
+    fn record(&self, target: RefreshMetricTarget) {
+        self.total.set(self.total.get() + 1);
+        match target {
+            RefreshMetricTarget::Sidebar => self.sidebar.set(self.sidebar.get() + 1),
+            RefreshMetricTarget::Dashboard => self.dashboard.set(self.dashboard.get() + 1),
+            RefreshMetricTarget::Projects => self.projects.set(self.projects.get() + 1),
+            RefreshMetricTarget::History => self.history.set(self.history.get() + 1),
+            RefreshMetricTarget::WorkspaceShell => {
+                self.workspace_shell.set(self.workspace_shell.get() + 1)
+            }
+            RefreshMetricTarget::WorkspaceChatSurface => self
+                .workspace_chat_surface
+                .set(self.workspace_chat_surface.get() + 1),
+            RefreshMetricTarget::WorkspaceChatTabs => self
+                .workspace_chat_tabs
+                .set(self.workspace_chat_tabs.get() + 1),
+            RefreshMetricTarget::WorkspaceRuntime => {
+                self.workspace_runtime.set(self.workspace_runtime.get() + 1)
+            }
+            RefreshMetricTarget::WorkspaceReview => {
+                self.workspace_review.set(self.workspace_review.get() + 1)
+            }
+        }
+        if self.enabled() {
+            let snapshot = self.snapshot();
+            tracing::info!(
+                target = target.label(),
+                total = snapshot.total,
+                sidebar = snapshot.sidebar,
+                dashboard = snapshot.dashboard,
+                projects = snapshot.projects,
+                history = snapshot.history,
+                workspace_shell = snapshot.workspace_shell,
+                workspace_chat_surface = snapshot.workspace_chat_surface,
+                workspace_chat_tabs = snapshot.workspace_chat_tabs,
+                workspace_runtime = snapshot.workspace_runtime,
+                workspace_review = snapshot.workspace_review,
+                "gtk refresh metric"
+            );
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        if let Some(enabled) = self.enabled.get() {
+            return enabled;
+        }
+        let enabled = archductor_core::env_flags::enabled("ARCHDUCTOR_GTK_REFRESH_METRICS");
+        self.enabled.set(Some(enabled));
+        enabled
+    }
+
+    fn snapshot(&self) -> RefreshMetricSnapshot {
+        RefreshMetricSnapshot {
+            total: self.total.get(),
+            sidebar: self.sidebar.get(),
+            dashboard: self.dashboard.get(),
+            projects: self.projects.get(),
+            history: self.history.get(),
+            workspace_shell: self.workspace_shell.get(),
+            workspace_chat_surface: self.workspace_chat_surface.get(),
+            workspace_chat_tabs: self.workspace_chat_tabs.get(),
+            workspace_runtime: self.workspace_runtime.get(),
+            workspace_review: self.workspace_review.get(),
+        }
+    }
+}
+
 /// Dumb UI fanout for page refresh callbacks.
 ///
 /// PER-190: RefreshHub intentionally has no typed error channel; each page owns
@@ -54,6 +180,7 @@ pub struct RefreshHub {
     workspace_chat_tabs: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_runtime: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_review: Rc<RefCell<Option<RefreshEventHandler>>>,
+    metrics: Rc<RefreshMetrics>,
 }
 
 impl RefreshHub {
@@ -145,21 +272,28 @@ impl RefreshHub {
 
     pub fn refresh_workspace(&self, target: WorkspaceRefreshTarget) {
         match target {
-            WorkspaceRefreshTarget::Shell => self.run(&self.workspace_shell),
-            WorkspaceRefreshTarget::ChatSurface => {
-                self.run_event(&self.workspace_chat_surface, &RefreshEvent::Manual)
+            WorkspaceRefreshTarget::Shell => {
+                self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell)
             }
+            WorkspaceRefreshTarget::ChatSurface => self.run_event(
+                RefreshMetricTarget::WorkspaceChatSurface,
+                &self.workspace_chat_surface,
+                &RefreshEvent::Manual,
+            ),
             WorkspaceRefreshTarget::ChatTabs => self.run_event_or_shell(
+                RefreshMetricTarget::WorkspaceChatTabs,
                 &self.workspace_chat_tabs,
                 &RefreshEvent::Manual,
                 &self.workspace_shell,
             ),
             WorkspaceRefreshTarget::Runtime => self.run_event_or_shell(
+                RefreshMetricTarget::WorkspaceRuntime,
                 &self.workspace_runtime,
                 &RefreshEvent::Manual,
                 &self.workspace_shell,
             ),
             WorkspaceRefreshTarget::Review => self.run_event_or_shell(
+                RefreshMetricTarget::WorkspaceReview,
                 &self.workspace_review,
                 &RefreshEvent::Manual,
                 &self.workspace_shell,
@@ -169,18 +303,29 @@ impl RefreshHub {
 
     fn refresh_workspace_event(&self, target: WorkspaceRefreshTarget, event: &RefreshEvent) {
         match target {
-            WorkspaceRefreshTarget::ChatSurface => {
-                self.run_event(&self.workspace_chat_surface, event)
-            }
-            WorkspaceRefreshTarget::ChatTabs => {
-                self.run_event_or_shell(&self.workspace_chat_tabs, event, &self.workspace_shell)
-            }
-            WorkspaceRefreshTarget::Runtime => {
-                self.run_event_or_shell(&self.workspace_runtime, event, &self.workspace_shell)
-            }
-            WorkspaceRefreshTarget::Review => {
-                self.run_event_or_shell(&self.workspace_review, event, &self.workspace_shell)
-            }
+            WorkspaceRefreshTarget::ChatSurface => self.run_event(
+                RefreshMetricTarget::WorkspaceChatSurface,
+                &self.workspace_chat_surface,
+                event,
+            ),
+            WorkspaceRefreshTarget::ChatTabs => self.run_event_or_shell(
+                RefreshMetricTarget::WorkspaceChatTabs,
+                &self.workspace_chat_tabs,
+                event,
+                &self.workspace_shell,
+            ),
+            WorkspaceRefreshTarget::Runtime => self.run_event_or_shell(
+                RefreshMetricTarget::WorkspaceRuntime,
+                &self.workspace_runtime,
+                event,
+                &self.workspace_shell,
+            ),
+            WorkspaceRefreshTarget::Review => self.run_event_or_shell(
+                RefreshMetricTarget::WorkspaceReview,
+                &self.workspace_review,
+                event,
+                &self.workspace_shell,
+            ),
             _ => self.refresh_workspace(target),
         }
     }
@@ -188,46 +333,67 @@ impl RefreshHub {
     pub fn refresh(&self, scope: RefreshScope) {
         match scope {
             RefreshScope::All => {
-                self.run(&self.sidebar);
-                self.run(&self.dashboard);
-                self.run(&self.projects);
-                self.run(&self.history);
-                self.run(&self.workspace_shell);
+                self.run(RefreshMetricTarget::Sidebar, &self.sidebar);
+                self.run(RefreshMetricTarget::Dashboard, &self.dashboard);
+                self.run(RefreshMetricTarget::Projects, &self.projects);
+                self.run(RefreshMetricTarget::History, &self.history);
+                self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell);
             }
-            RefreshScope::Sidebar => self.run(&self.sidebar),
-            RefreshScope::Dashboard => self.run(&self.dashboard),
-            RefreshScope::Projects => self.run(&self.projects),
-            RefreshScope::History => self.run(&self.history),
-            RefreshScope::Workspace => self.run(&self.workspace_shell),
+            RefreshScope::Sidebar => self.run(RefreshMetricTarget::Sidebar, &self.sidebar),
+            RefreshScope::Dashboard => self.run(RefreshMetricTarget::Dashboard, &self.dashboard),
+            RefreshScope::Projects => self.run(RefreshMetricTarget::Projects, &self.projects),
+            RefreshScope::History => self.run(RefreshMetricTarget::History, &self.history),
+            RefreshScope::Workspace => {
+                self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell)
+            }
         }
     }
 
-    fn run(&self, slot: &Rc<RefCell<Option<RefreshHandler>>>) {
+    fn run(&self, target: RefreshMetricTarget, slot: &Rc<RefCell<Option<RefreshHandler>>>) {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
+            self.metrics.record(target);
             handler();
         }
     }
 
     fn run_event_or_shell(
         &self,
+        target: RefreshMetricTarget,
         slot: &Rc<RefCell<Option<RefreshEventHandler>>>,
         event: &RefreshEvent,
         shell: &Rc<RefCell<Option<RefreshHandler>>>,
     ) {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
+            self.metrics.record(target);
             handler(event);
         } else {
-            self.run(shell);
+            self.run(RefreshMetricTarget::WorkspaceShell, shell);
         }
     }
 
-    fn run_event(&self, slot: &Rc<RefCell<Option<RefreshEventHandler>>>, event: &RefreshEvent) {
+    fn run_event(
+        &self,
+        target: RefreshMetricTarget,
+        slot: &Rc<RefCell<Option<RefreshEventHandler>>>,
+        event: &RefreshEvent,
+    ) {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
+            self.metrics.record(target);
             handler(event);
         }
+    }
+
+    #[cfg(test)]
+    fn refresh_metrics_snapshot(&self) -> RefreshMetricSnapshot {
+        self.metrics.snapshot()
+    }
+
+    #[cfg(test)]
+    fn set_refresh_metrics_enabled_for_test(&self, enabled: bool) {
+        self.metrics.enabled.set(Some(enabled));
     }
 }
 
@@ -327,6 +493,7 @@ mod tests {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
+        hub.set_refresh_metrics_enabled_for_test(false);
 
         hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
             workspace: "demo".to_owned(),
@@ -337,7 +504,38 @@ mod tests {
     }
 
     #[test]
+    fn refresh_metrics_count_chat_message_surface_refreshes() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "demo".to_owned(),
+            thread_id: 7,
+        });
+
+        let metrics = hub.refresh_metrics_snapshot();
+        assert_eq!(metrics.total, 1);
+        assert_eq!(metrics.workspace_chat_surface, 1);
+        assert_eq!(metrics.workspace_shell, 0);
+    }
+
+    #[test]
     fn chat_lifecycle_refresh_event_updates_nav_summaries_and_tabs() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+        hub.set_refresh_metrics_enabled_for_test(false);
+
+        hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "demo".to_owned(),
+        });
+
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 1, 1, 0, 0));
+    }
+
+    #[test]
+    fn refresh_metrics_count_lifecycle_fanout_refreshes() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -346,7 +544,13 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 1, 1, 0, 0));
+        let metrics = hub.refresh_metrics_snapshot();
+        assert_eq!(metrics.total, 5);
+        assert_eq!(metrics.sidebar, 1);
+        assert_eq!(metrics.dashboard, 1);
+        assert_eq!(metrics.history, 1);
+        assert_eq!(metrics.workspace_chat_surface, 1);
+        assert_eq!(metrics.workspace_chat_tabs, 1);
     }
 
     #[test]
