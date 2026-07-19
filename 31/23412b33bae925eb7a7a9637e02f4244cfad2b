@@ -1,0 +1,21 @@
+.github/workflows/publish.yml
+  s_c12df3e2d718ea::t_cb5149eb392ec5 482-483
+packaging/homebrew/Formula/archductor.rb
+  s_c12df3e2d718ea::t_beb820a491195b 19-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3123412b33bae925eb7a7a9637e02f4244cfad2b",
+  "prompts": {},
+  "sessions": {
+    "s_c12df3e2d718ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f77dc-dcf1-71f3-b49a-6e7e007f2d53",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
