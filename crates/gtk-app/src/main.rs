@@ -1174,7 +1174,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     if previous.running_threads.is_empty() && next.running_threads.is_empty() {
                         return;
                     }
-                    let events = background_sync::diff_background_sync(&previous, &next);
+                    let events = background_sync::coalesce_refresh_events(
+                        background_sync::diff_background_sync(&previous, &next),
+                    );
                     *previous_background.borrow_mut() = next;
                     for event in events {
                         hub.refresh_event(event);

@@ -140,6 +140,33 @@ pub fn diff_background_sync(
     events
 }
 
+pub(crate) fn coalesce_refresh_events(events: Vec<RefreshEvent>) -> Vec<RefreshEvent> {
+    let mut seen_messages = BTreeSet::new();
+    let mut seen_lifecycle = BTreeSet::new();
+    let mut coalesced = Vec::new();
+
+    for event in events {
+        match &event {
+            RefreshEvent::WorkspaceChatMessagesChanged {
+                workspace,
+                thread_id,
+            } => {
+                if seen_messages.insert((workspace.clone(), *thread_id)) {
+                    coalesced.push(event);
+                }
+            }
+            RefreshEvent::WorkspaceChatLifecycleChanged { workspace } => {
+                if seen_lifecycle.insert(workspace.clone()) {
+                    coalesced.push(event);
+                }
+            }
+            _ => coalesced.push(event),
+        }
+    }
+
+    coalesced
+}
+
 fn snapshot_by_thread(
     snapshot: &BackgroundSyncSnapshot,
 ) -> BTreeMap<(String, i64), &BackgroundThreadSnapshot> {
@@ -267,6 +294,38 @@ mod tests {
                 workspace: "berlin".into(),
             }]
         );
+    }
+
+    #[test]
+    fn coalesces_duplicate_chat_message_events_per_thread() {
+        let events = vec![
+            RefreshEvent::WorkspaceChatMessagesChanged {
+                workspace: "berlin".to_string(),
+                thread_id: 7,
+            },
+            RefreshEvent::WorkspaceChatMessagesChanged {
+                workspace: "berlin".to_string(),
+                thread_id: 7,
+            },
+        ];
+
+        assert_eq!(coalesce_refresh_events(events).len(), 1);
+    }
+
+    #[test]
+    fn preserves_distinct_chat_threads_when_coalescing() {
+        let events = vec![
+            RefreshEvent::WorkspaceChatMessagesChanged {
+                workspace: "berlin".to_string(),
+                thread_id: 7,
+            },
+            RefreshEvent::WorkspaceChatMessagesChanged {
+                workspace: "berlin".to_string(),
+                thread_id: 8,
+            },
+        ];
+
+        assert_eq!(coalesce_refresh_events(events).len(), 2);
     }
 
     #[test]
