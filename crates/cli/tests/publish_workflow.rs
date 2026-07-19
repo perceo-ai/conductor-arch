@@ -9,10 +9,12 @@ fn publish_build_uses_ci_verified_release_packaging() {
     let nfpm = fs::read_to_string(repo_root.join("nfpm.yaml")).unwrap();
     let app_run =
         fs::read_to_string(repo_root.join("packaging/appimage/archductor.AppDir/AppRun")).unwrap();
-    let flatpak = fs::read_to_string(
-        repo_root.join("packaging/flatpak/io.github.pranavkannepalli.archductor.yml"),
-    )
-    .unwrap();
+    let flatpak =
+        fs::read_to_string(repo_root.join("packaging/flatpak/ai.perceo.Archductor.yml")).unwrap();
+    let aur = fs::read_to_string(repo_root.join("packaging/aur/PKGBUILD")).unwrap();
+    let nix = fs::read_to_string(repo_root.join("flake.nix")).unwrap();
+    let homebrew =
+        fs::read_to_string(repo_root.join("packaging/homebrew/Formula/archductor.rb")).unwrap();
 
     assert!(
         publish.contains("Verify Windows GTK pkg-config"),
@@ -63,6 +65,29 @@ fn publish_build_uses_ci_verified_release_packaging() {
         "Windows release should use the PATH-resolved UCRT64 gcc executable"
     );
     assert!(
+        publish.contains("Validate AUR package")
+            && publish.contains("makepkg --noconfirm")
+            && publish.contains("pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*")
+            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
+            && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
+        "publish should build, install, and smoke-test the AUR package before publishing"
+    );
+    assert!(
+        publish.contains("Validate Homebrew formula")
+            && publish.contains("brew audit --strict --online --formula")
+            && publish.contains("brew install --build-from-source packaging/homebrew/Formula/archductor.rb")
+            && publish.contains("brew test archductor")
+            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
+            && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
+        "publish should audit, install, test, and smoke-test the Homebrew formula before publishing"
+    );
+    assert!(
+        aur.contains("export LIBSQLITE3_SYS_USE_PKG_CONFIG=1")
+            && homebrew.contains("ENV[\"LIBSQLITE3_SYS_USE_PKG_CONFIG\"] = \"1\"")
+            && nix.contains("LIBSQLITE3_SYS_USE_PKG_CONFIG = \"1\";"),
+        "source-built package managers should use distro SQLite through pkg-config"
+    );
+    assert!(
         !publish.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe")
             && !ci.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe"),
         "absolute MSYS pkgconf paths failed to spawn in GitHub Actions"
@@ -89,6 +114,18 @@ fn publish_build_uses_ci_verified_release_packaging() {
             &flatpak,
             vec!["install -Dm755 target/release/archductor /app/bin/archductor"],
             vec!["install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk"],
+        ),
+        (
+            "nix",
+            &nix,
+            vec!["install -Dm755 target/release/archductor \"$out/bin/archductor\""],
+            vec!["install -Dm755 target/release/archductor-gtk \"$out/bin/archductor-gtk\""],
+        ),
+        (
+            "homebrew",
+            &homebrew,
+            vec!["bin.install \"target/release/archductor\""],
+            vec!["bin.install \"target/release/archductor-gtk\""],
         ),
         (
             "publish",

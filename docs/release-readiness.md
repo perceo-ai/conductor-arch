@@ -50,6 +50,8 @@ The release workflow must produce:
 - Trivy release-artifact scan result
 - provenance attestations
 - GitHub release attachments for tag runs
+- AUR package update when `AUR_SSH_PRIVATE_KEY` is configured
+- Homebrew tap update when `HOMEBREW_TAP_TOKEN` is configured
 
 ## Manual App Gate
 
@@ -81,13 +83,16 @@ and rollback or yank paths are validated for that channel.
 | Debian/Ubuntu | `.deb` installs with `dpkg` or `apt`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
 | Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
 | AUR | `PKGBUILD` uses the release tag and real checksum, `makepkg -si` passes on Arch, and update/yank process is documented. |
-| Flatpak | Build result is documented. If published, note broad filesystem access for arbitrary repository paths. |
+| Flatpak/Flathub | `packaging/flatpak/ai.perceo.Archductor.yml` builds locally, metadata validates, screenshots are current, Flathub review accepts the broad filesystem access requirement, and the Flathub package launches the GUI. |
+| Nix | `nix build` and `nix run .#archductor -- doctor` pass on Linux, and the flake is referenced from install docs before a nixpkgs submission. |
+| Homebrew | `perceo-ai/homebrew-tap` formula installs on Linuxbrew, `brew test archductor` passes, and tag publish refreshes the formula checksum. |
 | Windows ZIP | Archive contains all GTK runtime files, extracts cleanly, launches GUI and CLI, verifies checksum, upgrades safely, and passes the Windows workflow checklist. Preview until proven on real Windows. |
 
 ## Website Gate
 
 The `perceo.ai` Archductor page must ship before public launch or be a
-required release gate. It needs:
+required release gate. The fuller product, site, video, and marketing launch
+requirements live in `docs/perceo-suite-release-prd.md`. The page needs:
 
 - Archductor product page with the real workflow
 - download/install instructions for supported channels only
@@ -99,13 +104,88 @@ required release gate. It needs:
 
 ## AUR Checksum Update
 
-After the release source tarball checksum is known, update the AUR package:
+The `Publish` workflow updates the AUR package on tag pushes after the Linux
+release package job passes. It expects the repository secret
+`AUR_SSH_PRIVATE_KEY` to contain an SSH private key whose public key is
+registered on the AUR account that owns `archductor`.
+
+For manual updates after the release source tarball checksum is known, update
+the AUR package:
 
 ```bash
 scripts/update-aur-checksum.sh 0.1.0 <64-character-sha256>
 ```
 
-Then run `makepkg -si` from `packaging/aur` on Arch before publishing.
+Then install and smoke the AUR package on Arch before publishing:
+
+```bash
+cd packaging/aur
+makepkg -si
+archductor doctor
+gtk_status=0
+xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
+test "$gtk_status" -eq 0 -o "$gtk_status" -eq 124
+```
+
+AUR publishes from a Git repository at
+`ssh://aur@aur.archlinux.org/archductor.git`; commit `PKGBUILD` and `.SRCINFO`
+to its `master` branch.
+
+## Homebrew Tap
+
+The `Publish` workflow updates `perceo-ai/homebrew-tap` on tag pushes after the
+Linux release package job passes. It expects `HOMEBREW_TAP_TOKEN` to contain a
+GitHub token with write access to the tap repository.
+
+For manual updates:
+
+```bash
+scripts/update-homebrew-formula.sh 0.1.0 <64-character-sha256>
+cp packaging/homebrew/Formula/archductor.rb ../homebrew-tap/Formula/archductor.rb
+```
+
+Then install, audit, test, and smoke the formula on Linuxbrew before publishing:
+
+```bash
+brew audit --strict --online --formula packaging/homebrew/Formula/archductor.rb
+brew install --build-from-source packaging/homebrew/Formula/archductor.rb
+brew test archductor
+archductor doctor
+gtk_status=0
+xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
+test "$gtk_status" -eq 0 -o "$gtk_status" -eq 124
+```
+
+After the checks pass, commit and push the tap repository.
+
+## Nix
+
+The flake exposes:
+
+```bash
+nix build
+nix run .#archductor -- doctor
+nix run .#archductor-gtk
+nix develop
+```
+
+Run these on Linux before advertising Nix as validated.
+
+## Flathub
+
+The upstream Flatpak files use app ID `ai.perceo.Archductor`:
+
+```bash
+appstreamcli validate --explain packaging/flatpak/ai.perceo.Archductor.metainfo.xml
+flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+flatpak-builder --force-clean build-dir packaging/flatpak/ai.perceo.Archductor.yml
+```
+
+Before submitting to Flathub, add current PNG screenshots, verify the
+`perceo.ai` domain/app ID ownership path, document the need for
+`--filesystem=host` because Archductor opens arbitrary repository paths, and
+decide whether Git/GitHub CLI should be bundled or treated as a documented
+Flatpak limitation.
 
 ## Known Launch Limits
 

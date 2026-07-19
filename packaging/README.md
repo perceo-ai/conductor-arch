@@ -98,22 +98,46 @@ cd packaging/aur
 makepkg -si
 ```
 
+### Nix
+
+```bash
+nix build
+nix run .#archductor -- doctor
+nix run .#archductor-gtk
+```
+
+Use `nix develop` for a Rust + GTK development shell.
+
+### Homebrew Tap (Linuxbrew)
+
+```bash
+brew tap perceo-ai/tap
+brew install archductor
+archductor doctor
+```
+
+The formula source lives in `packaging/homebrew/Formula/archductor.rb`; the
+tag-driven publish workflow copies it to `perceo-ai/homebrew-tap`.
+
 ### Flatpak (experimental)
 
-The Flatpak build requires `flatpak-builder`, the GNOME 47 SDK, and the Rust SDK
+The Flatpak build requires `flatpak-builder`, the GNOME 50 SDK, and the Rust SDK
 extension:
 
 ```bash
-flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47
-flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+# Refresh Rust crate sources after Cargo.lock changes
+flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
 
 # Build and install locally
 flatpak-builder --install --user --force-clean \
   build-dir \
-  packaging/flatpak/io.github.pranavkannepalli.archductor.yml
+  packaging/flatpak/ai.perceo.Archductor.yml
 
 # Run
-flatpak run io.github.pranavkannepalli.archductor
+flatpak run ai.perceo.Archductor
 ```
 
 > **Note:** The Flatpak sandbox requires `--filesystem=host` to access arbitrary
@@ -151,9 +175,9 @@ artifacts for inspection.
 Release readiness requires more than attached artifacts. Before a public
 release, add or verify publishing pipelines for every supported Linux package
 channel: AppImage/GitHub releases, `.deb` repositories for APT, `.rpm`
-repositories for DNF or zypper, AUR, and Flatpak. Each channel should be
-tag-driven, publish checksums where supported, and have documented rollback or
-yanking steps.
+repositories for DNF or zypper, AUR, Flatpak, Nix, and Homebrew. Each channel
+should be tag-driven where supported, publish checksums where supported, and
+have documented rollback or yanking steps.
 
 The release pipeline must also build the website as a subset of `perceo.ai`, or
 treat that website build as a required release gate. The site should include

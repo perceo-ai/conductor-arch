@@ -1,9 +1,9 @@
 [Desktop Entry]
 Name=Archductor
 GenericName=Coding Agent Workflow
-Comment=Archductor parallel coding-agent workflow tool built around Git worktrees
+Comment=Parallel coding-agent workflow tool built around Git worktrees
 Exec=archductor-gtk
-Icon=io.github.pranavkannepalli.archductor
+Icon=ai.perceo.Archductor
 Terminal=false
 Type=Application
 Categories=Development;
