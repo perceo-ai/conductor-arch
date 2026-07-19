@@ -13784,12 +13784,9 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
         let run = store.run_workspace("berlin").unwrap();
-        wait_for_path(&workspace.path.join(".context/env-file-result"));
+        let result = wait_for_file_lines(&workspace.path.join(".context/env-file-result"), 1);
 
-        assert_eq!(
-            fs::read_to_string(workspace.path.join(".context/env-file-result")).unwrap(),
-            "from-file:from-settings\n"
-        );
+        assert_eq!(result, "from-file:from-settings\n");
         assert!(!fs::read_to_string(&run.log_path)
             .unwrap()
             .contains("from-file"));
