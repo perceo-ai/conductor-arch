@@ -37,6 +37,16 @@ type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 fn chat_outcome_requires_nav_refresh(outcome: &session_surface::ChatRefreshOutcome) -> bool {
     outcome.requires_nav_refresh()
 }
+
+fn chat_message_event_matches_selected_thread(
+    event_workspace: &str,
+    event_thread_id: i64,
+    selected_workspace: Option<&str>,
+    selected_thread: Option<i64>,
+) -> bool {
+    selected_workspace == Some(event_workspace) && selected_thread == Some(event_thread_id)
+}
+
 type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
@@ -930,6 +940,29 @@ fn ws_center_panel(
                     *current_workspace_name.borrow_mut() = update.workspace_name.clone();
                     branch_label.set_text(&update.branch_name);
                 })
+            },
+            on_chat_surface_refresh_ready: {
+                let state = state.clone();
+                let refresh_hub = refresh_hub.clone();
+                Some(Rc::new(move |refresh_chat_surface| {
+                    let state = state.clone();
+                    refresh_hub.set_workspace_chat_surface(move |event| {
+                        if let RefreshEvent::WorkspaceChatMessagesChanged {
+                            workspace,
+                            thread_id,
+                        } = event
+                        {
+                            if chat_message_event_matches_selected_thread(
+                                workspace,
+                                *thread_id,
+                                state.selected_workspace().as_deref(),
+                                state.selected_chat_thread(),
+                            ) {
+                                refresh_chat_surface();
+                            }
+                        }
+                    });
+                }))
             },
         }),
         toast_manager,
@@ -7932,6 +7965,34 @@ mod tests {
         ] {
             assert!(chat_outcome_requires_nav_refresh(&outcome));
         }
+    }
+
+    #[test]
+    fn chat_message_event_matches_only_selected_workspace_thread() {
+        assert!(chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("berlin"),
+            Some(7),
+        ));
+        assert!(!chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("berlin"),
+            None,
+        ));
+        assert!(!chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("berlin"),
+            Some(8),
+        ));
+        assert!(!chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("tokyo"),
+            Some(7),
+        ));
     }
 
     #[test]

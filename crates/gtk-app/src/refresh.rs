@@ -11,6 +11,15 @@ pub enum RefreshScope {
     Workspace,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceRefreshTarget {
+    Shell,
+    ChatSurface,
+    ChatTabs,
+    Runtime,
+    Review,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshEvent {
     Manual,
@@ -26,6 +35,7 @@ pub enum RefreshEvent {
 }
 
 type RefreshHandler = Rc<dyn Fn()>;
+type RefreshEventHandler = Rc<dyn Fn(&RefreshEvent)>;
 
 /// Dumb UI fanout for page refresh callbacks.
 ///
@@ -39,7 +49,11 @@ pub struct RefreshHub {
     dashboard: Rc<RefCell<Option<RefreshHandler>>>,
     projects: Rc<RefCell<Option<RefreshHandler>>>,
     history: Rc<RefCell<Option<RefreshHandler>>>,
-    workspace: Rc<RefCell<Option<RefreshHandler>>>,
+    workspace_shell: Rc<RefCell<Option<RefreshHandler>>>,
+    workspace_chat_surface: Rc<RefCell<Option<RefreshEventHandler>>>,
+    workspace_chat_tabs: Rc<RefCell<Option<RefreshHandler>>>,
+    workspace_runtime: Rc<RefCell<Option<RefreshHandler>>>,
+    workspace_review: Rc<RefCell<Option<RefreshHandler>>>,
 }
 
 impl RefreshHub {
@@ -60,7 +74,27 @@ impl RefreshHub {
     }
 
     pub fn set_workspace(&self, handler: impl Fn() + 'static) {
-        *self.workspace.borrow_mut() = Some(Rc::new(handler));
+        self.set_workspace_shell(handler);
+    }
+
+    pub fn set_workspace_shell(&self, handler: impl Fn() + 'static) {
+        *self.workspace_shell.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    pub fn set_workspace_chat_surface(&self, handler: impl Fn(&RefreshEvent) + 'static) {
+        *self.workspace_chat_surface.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    pub fn set_workspace_chat_tabs(&self, handler: impl Fn() + 'static) {
+        *self.workspace_chat_tabs.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    pub fn set_workspace_runtime(&self, handler: impl Fn() + 'static) {
+        *self.workspace_runtime.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    pub fn set_workspace_review(&self, handler: impl Fn() + 'static) {
+        *self.workspace_review.borrow_mut() = Some(Rc::new(handler));
     }
 
     pub fn refresh_event(&self, event: RefreshEvent) {
@@ -73,34 +107,59 @@ impl RefreshHub {
             }
             RefreshEvent::SettingsChanged => {
                 self.refresh(RefreshScope::Projects);
-                self.refresh(RefreshScope::Workspace);
+                self.refresh_workspace(WorkspaceRefreshTarget::Shell);
             }
             RefreshEvent::WorkspaceSelectionChanged => {
                 self.refresh(RefreshScope::Sidebar);
-                self.refresh(RefreshScope::Workspace);
+                self.refresh_workspace(WorkspaceRefreshTarget::Shell);
             }
             RefreshEvent::WorkspaceInventoryChanged => {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh(RefreshScope::Workspace);
+                self.refresh_workspace(WorkspaceRefreshTarget::Shell);
             }
-            RefreshEvent::WorkspaceRuntimeChanged { .. }
-            | RefreshEvent::WorkspaceChatLifecycleChanged { .. }
-            | RefreshEvent::TerminalChanged { .. } => {
+            RefreshEvent::WorkspaceRuntimeChanged { .. } | RefreshEvent::TerminalChanged { .. } => {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh(RefreshScope::Workspace);
+                self.refresh_workspace(WorkspaceRefreshTarget::Runtime);
+            }
+            RefreshEvent::WorkspaceChatLifecycleChanged { .. } => {
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Dashboard);
+                self.refresh(RefreshScope::History);
+                self.refresh_workspace(WorkspaceRefreshTarget::ChatTabs);
             }
             RefreshEvent::WorkspaceReviewChanged { .. } => {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh(RefreshScope::Workspace);
+                self.refresh_workspace(WorkspaceRefreshTarget::Review);
             }
             RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
-                self.refresh(RefreshScope::Workspace);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
             }
+        }
+    }
+
+    pub fn refresh_workspace(&self, target: WorkspaceRefreshTarget) {
+        match target {
+            WorkspaceRefreshTarget::Shell => self.run(&self.workspace_shell),
+            WorkspaceRefreshTarget::ChatSurface => {
+                self.run_event(&self.workspace_chat_surface, &RefreshEvent::Manual)
+            }
+            WorkspaceRefreshTarget::ChatTabs => self.run(&self.workspace_chat_tabs),
+            WorkspaceRefreshTarget::Runtime => self.run(&self.workspace_runtime),
+            WorkspaceRefreshTarget::Review => self.run(&self.workspace_review),
+        }
+    }
+
+    fn refresh_workspace_event(&self, target: WorkspaceRefreshTarget, event: &RefreshEvent) {
+        match target {
+            WorkspaceRefreshTarget::ChatSurface => {
+                self.run_event(&self.workspace_chat_surface, event)
+            }
+            _ => self.refresh_workspace(target),
         }
     }
 
@@ -111,13 +170,13 @@ impl RefreshHub {
                 self.run(&self.dashboard);
                 self.run(&self.projects);
                 self.run(&self.history);
-                self.run(&self.workspace);
+                self.run(&self.workspace_shell);
             }
             RefreshScope::Sidebar => self.run(&self.sidebar),
             RefreshScope::Dashboard => self.run(&self.dashboard),
             RefreshScope::Projects => self.run(&self.projects),
             RefreshScope::History => self.run(&self.history),
-            RefreshScope::Workspace => self.run(&self.workspace),
+            RefreshScope::Workspace => self.run(&self.workspace_shell),
         }
     }
 
@@ -125,6 +184,13 @@ impl RefreshHub {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
             handler();
+        }
+    }
+
+    fn run_event(&self, slot: &Rc<RefCell<Option<RefreshEventHandler>>>, event: &RefreshEvent) {
+        let handler = slot.borrow().as_ref().cloned();
+        if let Some(handler) = handler {
+            handler(event);
         }
     }
 }
@@ -141,6 +207,10 @@ mod tests {
         projects: Rc<Cell<u32>>,
         history: Rc<Cell<u32>>,
         workspace: Rc<Cell<u32>>,
+        workspace_chat_surface: Rc<Cell<u32>>,
+        workspace_chat_tabs: Rc<Cell<u32>>,
+        workspace_runtime: Rc<Cell<u32>>,
+        workspace_review: Rc<Cell<u32>>,
     }
 
     impl RefreshCounts {
@@ -159,15 +229,35 @@ mod tests {
 
             let workspace = Rc::clone(&self.workspace);
             hub.set_workspace(move || workspace.set(workspace.get() + 1));
+
+            let workspace_chat_surface = Rc::clone(&self.workspace_chat_surface);
+            hub.set_workspace_chat_surface(move |_| {
+                workspace_chat_surface.set(workspace_chat_surface.get() + 1)
+            });
+
+            let workspace_chat_tabs = Rc::clone(&self.workspace_chat_tabs);
+            hub.set_workspace_chat_tabs(move || {
+                workspace_chat_tabs.set(workspace_chat_tabs.get() + 1)
+            });
+
+            let workspace_runtime = Rc::clone(&self.workspace_runtime);
+            hub.set_workspace_runtime(move || workspace_runtime.set(workspace_runtime.get() + 1));
+
+            let workspace_review = Rc::clone(&self.workspace_review);
+            hub.set_workspace_review(move || workspace_review.set(workspace_review.get() + 1));
         }
 
-        fn values(&self) -> (u32, u32, u32, u32, u32) {
+        fn values(&self) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
             (
                 self.sidebar.get(),
                 self.dashboard.get(),
                 self.projects.get(),
                 self.history.get(),
                 self.workspace.get(),
+                self.workspace_chat_surface.get(),
+                self.workspace_chat_tabs.get(),
+                self.workspace_runtime.get(),
+                self.workspace_review.get(),
             )
         }
     }
@@ -193,11 +283,11 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 1));
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 0, 1, 0));
     }
 
     #[test]
-    fn chat_message_refresh_event_only_refreshes_workspace() {
+    fn chat_message_refresh_event_only_refreshes_chat_surface() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -207,7 +297,33 @@ mod tests {
             thread_id: 7,
         });
 
-        assert_eq!(counts.values(), (0, 0, 0, 0, 1));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn chat_lifecycle_refresh_event_updates_nav_summaries_and_tabs() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "demo".to_owned(),
+        });
+
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 1, 0, 0));
+    }
+
+    #[test]
+    fn review_refresh_event_updates_review_surface_without_shell_rebuild() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+            workspace: "demo".to_owned(),
+        });
+
+        assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1));
     }
 
     #[test]
@@ -218,7 +334,7 @@ mod tests {
 
         hub.refresh_event(RefreshEvent::ProjectInventoryChanged);
 
-        assert_eq!(counts.values(), (1, 1, 1, 0, 0));
+        assert_eq!(counts.values(), (1, 1, 1, 0, 0, 0, 0, 0, 0));
     }
 
     #[test]

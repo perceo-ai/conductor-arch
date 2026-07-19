@@ -319,6 +319,7 @@ pub(crate) struct ExternalChatTabs {
     pub on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
     pub selection_controller: ExternalThreadSelectionController,
     pub on_workspace_metadata_changed: Rc<dyn Fn(&AgentMetadataUiUpdate)>,
+    pub on_chat_surface_refresh_ready: Option<Rc<dyn Fn(Rc<dyn Fn()>)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1907,6 +1908,11 @@ pub fn agent_session_panel(
         }) as Rc<dyn Fn()>
     };
     *refresh_chat_surface.borrow_mut() = Some(refresh_view.clone());
+    if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
+        if let Some(register_refresh) = external_chat_tabs.on_chat_surface_refresh_ready.as_ref() {
+            register_refresh(refresh_view.clone());
+        }
+    }
     install_archcar_wake(&root, &archcar_bridge, refresh_view.clone());
     install_working_indicator_tick(&root, working_threads.clone(), refresh_view.clone());
 
