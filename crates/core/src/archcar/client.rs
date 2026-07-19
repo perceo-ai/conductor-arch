@@ -1,8 +1,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -19,16 +20,23 @@ const ARCHCAR_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(750);
 const ARCHCAR_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const ARCHCAR_STARTUP_ATTEMPTS: usize = 20;
 const ARCHCAR_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ARCHCAR_VALIDATION_CACHE_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct ArchcarClient {
     endpoint_path: PathBuf,
+    last_validated_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ArchcarClient {
     pub fn from_paths(paths: &AppPaths) -> Self {
+        Self::new(paths.archcar_endpoint_path())
+    }
+
+    fn new(endpoint_path: PathBuf) -> Self {
         Self {
-            endpoint_path: paths.archcar_endpoint_path(),
+            endpoint_path,
+            last_validated_at: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -170,9 +178,28 @@ impl ArchcarClient {
     }
 
     fn connect_validated(&self) -> Result<LocalStream> {
-        let stream = transport::connect(&self.endpoint_path)?;
-        validate_sidecar_responsive(&self.endpoint_path, stream)?;
-        transport::connect(&self.endpoint_path).map_err(Into::into)
+        let stream = match transport::connect(&self.endpoint_path) {
+            Ok(stream) => stream,
+            Err(err) => {
+                self.clear_validation_cache();
+                return Err(err.into());
+            }
+        };
+        if self.validation_cache_is_fresh() {
+            return Ok(stream);
+        }
+        if let Err(err) = validate_sidecar_responsive(&self.endpoint_path, stream) {
+            self.clear_validation_cache();
+            return Err(err);
+        }
+        self.mark_sidecar_validated();
+        match transport::connect(&self.endpoint_path) {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                self.clear_validation_cache();
+                Err(err.into())
+            }
+        }
     }
 
     fn spawn_sidecar(&self) -> Result<()> {
@@ -210,6 +237,26 @@ impl ArchcarClient {
         }
         let (candidate, err) = last_err.context("no archcar binary candidate available")?;
         Err(err).with_context(|| format!("spawn archcar binary {}", candidate.display()))
+    }
+
+    fn validation_cache_is_fresh(&self) -> bool {
+        self.last_validated_at
+            .lock()
+            .ok()
+            .and_then(|validated| *validated)
+            .is_some_and(|validated| validated.elapsed() <= ARCHCAR_VALIDATION_CACHE_TTL)
+    }
+
+    fn mark_sidecar_validated(&self) {
+        if let Ok(mut validated) = self.last_validated_at.lock() {
+            *validated = Some(Instant::now());
+        }
+    }
+
+    fn clear_validation_cache(&self) {
+        if let Ok(mut validated) = self.last_validated_at.lock() {
+            *validated = None;
+        }
     }
 }
 
@@ -368,7 +415,11 @@ mod tests {
     use crate::archcar::protocol::{
         ArchcarInputDelivery, ArchcarInputKind, ArchcarRequest, RpcEnvelope,
     };
-    use std::sync::mpsc;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    };
     use std::time::Duration;
 
     #[test]
@@ -409,11 +460,10 @@ mod tests {
             std::thread::sleep(Duration::from_secs(10));
         });
 
+        let _env_guard = archcar_bin_env_lock().lock().unwrap();
         let previous_archcar_bin = std::env::var_os("ARCHDUCTOR_ARCHCAR_BIN");
         std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", "/bin/false");
-        let client = super::ArchcarClient {
-            endpoint_path: endpoint,
-        };
+        let client = super::ArchcarClient::new(endpoint);
         let (tx, rx) = mpsc::channel();
         let _client_thread = std::thread::spawn(move || {
             let result = client.send(ArchcarRequest::GetSessionMessages { thread_id: 1 });
@@ -433,6 +483,84 @@ mod tests {
         } else {
             std::env::remove_var("ARCHDUCTOR_ARCHCAR_BIN");
         }
+    }
+
+    fn archcar_bin_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_reuses_recent_sidecar_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-responsive.sock");
+        let listener = crate::archcar::transport::bind(&endpoint).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let healthchecks = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_endpoint = endpoint.clone();
+        let server_stop = stop.clone();
+        let server_healthchecks = healthchecks.clone();
+        let server_requests = requests.clone();
+        let server = std::thread::spawn(move || {
+            while !server_stop.load(Ordering::SeqCst) {
+                let (mut stream, _) =
+                    match crate::archcar::transport::accept(&listener, &server_endpoint) {
+                        Ok(stream) => stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(err) => panic!("accept archcar test connection: {err}"),
+                    };
+                let mut line = String::new();
+                {
+                    let mut reader = BufReader::new(&mut stream);
+                    reader.read_line(&mut line).unwrap();
+                }
+                let request: RpcEnvelope<ArchcarRequest> = serde_json::from_str(&line).unwrap();
+                let response = match request.payload {
+                    ArchcarRequest::ListProviderInteractions { .. } => {
+                        server_healthchecks.fetch_add(1, Ordering::SeqCst);
+                        super::ArchcarResponse::ProviderInteractions {
+                            interactions: Vec::new(),
+                        }
+                    }
+                    ArchcarRequest::GetSessionMessages { thread_id } => {
+                        server_requests.fetch_add(1, Ordering::SeqCst);
+                        super::ArchcarResponse::SessionMessages {
+                            thread_id,
+                            messages: Vec::new(),
+                        }
+                    }
+                    other => panic!("unexpected archcar test request: {other:?}"),
+                };
+                let response = RpcEnvelope {
+                    id: request.id,
+                    payload: response,
+                };
+                let line = serde_json::to_string(&response).unwrap();
+                stream.write_all(line.as_bytes()).unwrap();
+                stream.write_all(b"\n").unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let client = super::ArchcarClient::new(endpoint);
+
+        client
+            .send(ArchcarRequest::GetSessionMessages { thread_id: 1 })
+            .unwrap();
+        client
+            .send(ArchcarRequest::GetSessionMessages { thread_id: 1 })
+            .unwrap();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(healthchecks.load(Ordering::SeqCst), 1);
     }
 
     #[test]

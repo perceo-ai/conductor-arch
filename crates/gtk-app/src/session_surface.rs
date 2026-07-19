@@ -277,7 +277,14 @@ type ChatRenderRecordSignature = (i64, Option<i64>, ProcessStatus, Option<i32>, 
 type ChatRenderThreadSignature = (i64, String, String, String, String);
 type ChatRenderMessageSignature = (i64, String, Option<i64>, String, String);
 type ChatRenderEventSignature = (i64, String, i64, String, String, usize);
-type ChatRenderProviderEventSignature = (String, i64, ProviderEventKind, ProviderEventPhase, usize);
+type ChatRenderProviderEventSignature = (
+    String,
+    i64,
+    Option<i64>,
+    ProviderEventKind,
+    ProviderEventPhase,
+    usize,
+);
 type ChatRenderPendingInputSignature = (usize, String);
 type ChatThreadNavSignature = (i64, String, String, String, Option<String>);
 
@@ -974,7 +981,6 @@ pub fn agent_session_panel(
                 });
                 let edit_item = Rc::new({
                     let app_state = app_state.clone();
-                    let queued_auto_drain_holds = queued_auto_drain_holds.clone();
                     let buffer = buffer.clone();
                     let refresh_after_action = refresh_after_action.clone();
                     let index = item.index;
@@ -986,11 +992,6 @@ pub fn agent_session_panel(
                             app_state.begin_editing_queued_chat_input(thread_id, index, current)
                         {
                             buffer.set_text(&queued_chat_input_visible_text(&editing.original));
-                            release_queued_auto_drain_if_queue_empty(
-                                queued_auto_drain_holds.as_ref(),
-                                thread_id,
-                                queued_chat_inputs_count(&app_state, thread_id),
-                            );
                         }
                         refresh_after_action();
                     }
@@ -3707,7 +3708,7 @@ fn interrupted_notice_sequence(
     let interrupted = provider_items
         .iter()
         .filter(|item| provider_projection_item_is_interrupted_notice(item))
-        .filter_map(|item| i64::try_from(item.sequence).ok())
+        .filter_map(|item| item.timeline_seq)
         .max()?;
     let latest_user = messages
         .iter()
@@ -3813,6 +3814,7 @@ fn chat_render_signature(
                 (
                     event.identity_key.clone(),
                     event.received_sequence,
+                    event.timeline_seq,
                     event.kind,
                     event.phase,
                     event.normalized_payload.to_string().len() + event.raw_json.to_string().len(),
@@ -10194,6 +10196,7 @@ mod tests {
             provider_subtype: Some("tool_result".to_owned()),
             provider_sequence: Some(1),
             received_sequence: 3,
+            timeline_seq: Some(3),
             occurred_at_ms: 42,
             normalized_payload: serde_json::json!({
                 "title": "Bash",
@@ -11038,6 +11041,19 @@ fix it
         assert!(send_row_body.contains("send_immediate_after_ready_queue"));
         assert!(send_row_body.contains("requeue_pending_input_front(&app_state"));
         assert!(source.contains("icon_button(\"send-symbolic\", \"Steer now\")"));
+    }
+
+    #[test]
+    fn queued_row_edit_does_not_release_auto_drain_hold() {
+        let source = include_str!("session_surface.rs");
+        let edit_row_body = source
+            .split("let edit_item = Rc::new({")
+            .nth(1)
+            .and_then(|tail| tail.split("let send_immediately = Rc::new({").next())
+            .expect("queue row edit callback should be present");
+
+        assert!(edit_row_body.contains("begin_editing_queued_chat_input"));
+        assert!(!edit_row_body.contains("release_queued_auto_drain_if_queue_empty"));
     }
 
     #[test]
@@ -12726,6 +12742,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let provider_item = ProviderProjectionItem {
             id: "codex:thread-7:tool-1".to_owned(),
             sequence: 2,
+            timeline_seq: None,
             category: ProviderProjectionCategory::NativeTool,
             render_class: ProjectionRenderClass::ToolCard,
             title: "Bash".to_owned(),
@@ -12778,6 +12795,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let provider_item = ProviderProjectionItem {
             id: "codex:thread-7:tool-1".to_owned(),
             sequence: 2,
+            timeline_seq: None,
             category: ProviderProjectionCategory::NativeTool,
             render_class: ProjectionRenderClass::ToolCard,
             title: "Bash".to_owned(),
@@ -12820,6 +12838,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let provider_item = ProviderProjectionItem {
             id: "codex:thread-7:tool-1".to_owned(),
             sequence: 2,
+            timeline_seq: None,
             category: ProviderProjectionCategory::NativeTool,
             render_class: ProjectionRenderClass::ToolCard,
             title: "Bash".to_owned(),
@@ -12875,6 +12894,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ProviderProjectionItem {
                 id: "codex:thread-7:input-1".to_owned(),
                 sequence: 1,
+                timeline_seq: None,
                 category: ProviderProjectionCategory::UserMessage,
                 render_class: ProjectionRenderClass::UserChat,
                 title: "User".to_owned(),
@@ -12889,6 +12909,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ProviderProjectionItem {
                 id: "codex:thread-7:tool-1".to_owned(),
                 sequence: 2,
+                timeline_seq: None,
                 category: ProviderProjectionCategory::NativeTool,
                 render_class: ProjectionRenderClass::ToolCard,
                 title: "Bash".to_owned(),
@@ -12903,6 +12924,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ProviderProjectionItem {
                 id: "codex:thread-7:input-2".to_owned(),
                 sequence: 3,
+                timeline_seq: None,
                 category: ProviderProjectionCategory::UserMessage,
                 render_class: ProjectionRenderClass::UserChat,
                 title: "User".to_owned(),
@@ -12917,6 +12939,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ProviderProjectionItem {
                 id: "codex:thread-7:tool-2".to_owned(),
                 sequence: 4,
+                timeline_seq: None,
                 category: ProviderProjectionCategory::NativeTool,
                 render_class: ProjectionRenderClass::ToolCard,
                 title: "Bash".to_owned(),
@@ -12966,6 +12989,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ProviderProjectionItem {
                 id: "codex:thread-7:input-1".to_owned(),
                 sequence: 1,
+                timeline_seq: None,
                 category: ProviderProjectionCategory::UserMessage,
                 render_class: ProjectionRenderClass::UserChat,
                 title: "User".to_owned(),
@@ -12980,6 +13004,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ProviderProjectionItem {
                 id: "codex:thread-7:assistant-1".to_owned(),
                 sequence: 2,
+                timeline_seq: None,
                 category: ProviderProjectionCategory::AssistantMessage,
                 render_class: ProjectionRenderClass::AssistantChat,
                 title: "Assistant".to_owned(),
@@ -13493,6 +13518,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let item = ProviderProjectionItem {
             id: "fallback-1".to_owned(),
             sequence: 1,
+            timeline_seq: None,
             category: ProviderProjectionCategory::Unknown,
             render_class: ProjectionRenderClass::FallbackCard,
             title: "Unknown provider event".to_owned(),
@@ -13646,6 +13672,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let interrupted = ProviderProjectionItem {
             id: "codex:thread-7:turn-1".to_owned(),
             sequence: 2,
+            timeline_seq: Some(2),
             category: ProviderProjectionCategory::Status,
             render_class: ProjectionRenderClass::StatusCard,
             title: "Turn".to_owned(),
@@ -13680,6 +13707,47 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             Some(ChatTimelineItem::InterruptedNotice { .. })
         ));
         assert!(!after_continue
+            .iter()
+            .any(|item| matches!(item, ChatTimelineItem::InterruptedNotice { .. })));
+    }
+
+    #[test]
+    fn interrupted_notice_uses_timeline_order_instead_of_received_sequence() {
+        let interrupted = ProviderProjectionItem {
+            id: "codex:thread-7:turn-1".to_owned(),
+            sequence: 100,
+            timeline_seq: Some(10),
+            category: ProviderProjectionCategory::Status,
+            render_class: ProjectionRenderClass::StatusCard,
+            title: "Turn".to_owned(),
+            body: "Interrupted".to_owned(),
+            status: ProviderProjectionStatus::Canceled,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+        let messages = vec![ChatMessageRecord {
+            id: 3,
+            thread_id: 7,
+            role: "user".to_owned(),
+            content: "continue".to_owned(),
+            source: "user_send".to_owned(),
+            timeline_seq: Some(50),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            vec![interrupted],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(!timeline
             .iter()
             .any(|item| matches!(item, ChatTimelineItem::InterruptedNotice { .. })));
     }
@@ -13729,6 +13797,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let item = ProviderProjectionItem {
             id: "assistant".to_owned(),
             sequence: 1,
+            timeline_seq: None,
             category: ProviderProjectionCategory::AssistantMessage,
             render_class: ProjectionRenderClass::AssistantChat,
             title: "Assistant".to_owned(),
@@ -13753,6 +13822,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let item = ProviderProjectionItem {
             id: "assistant".to_owned(),
             sequence: 1,
+            timeline_seq: None,
             category: ProviderProjectionCategory::AssistantMessage,
             render_class: ProjectionRenderClass::AssistantChat,
             title: "Assistant".to_owned(),

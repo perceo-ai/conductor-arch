@@ -6956,6 +6956,36 @@ mutation($threadId: ID!) {{
         Ok(messages)
     }
 
+    fn recent_chat_messages(&self, thread_id: i64, limit: usize) -> Result<Vec<ChatMessageRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
+             FROM chat_messages
+             WHERE thread_id = ?1
+             ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let mut messages = stmt
+            .query_map(params![thread_id, limit as i64], row_to_chat_message)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    fn recent_chat_events(&self, thread_id: i64, limit: usize) -> Result<Vec<ChatEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+             FROM chat_events
+             WHERE thread_id = ?1
+             ORDER BY timeline_seq DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let mut events = stmt
+            .query_map(params![thread_id, limit as i64], row_to_chat_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        events.reverse();
+        Ok(events)
+    }
+
     pub fn update_chat_thread_native_id(
         &self,
         thread_id: i64,
@@ -7010,10 +7040,10 @@ mutation($threadId: ID!) {{
             thread.provider,
         );
 
-        let messages = self.list_chat_messages(thread_id)?;
+        let messages = self.recent_chat_messages(thread_id, 24)?;
         if !messages.is_empty() {
             append_recovery_context_line(&mut context, "\nPrior visible messages:\n");
-            for message in messages.iter().rev().take(24).rev() {
+            for message in &messages {
                 let line = format!(
                     "- {}: {}\n",
                     message.role,
@@ -7025,10 +7055,10 @@ mutation($threadId: ID!) {{
             }
         }
 
-        let events = self.list_chat_events(thread_id)?;
+        let events = self.recent_chat_events(thread_id, 24)?;
         if !events.is_empty() {
             append_recovery_context_line(&mut context, "\nRecent provider events:\n");
-            for event in events.iter().rev().take(24).rev() {
+            for event in &events {
                 let body = recovery_context_snippet(&event.body);
                 let line = if body.is_empty() {
                     format!(
@@ -21687,6 +21717,27 @@ spotlight_testing = true
         assert!(context.contains("cargo test"));
         assert!(!context.contains("secret-value"));
         assert!(!context.contains("super-secret"));
+    }
+
+    #[test]
+    fn codex_recovery_context_uses_bounded_recent_history_queries() {
+        let source = include_str!("workspace.rs");
+        let body = source
+            .split("pub fn codex_recovery_context_for_thread(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn record_session_process_for_thread")
+                    .next()
+            })
+            .expect("codex recovery context body should be present");
+
+        assert!(source.contains("fn recent_chat_messages("));
+        assert!(source.contains("fn recent_chat_events("));
+        assert!(body.contains("recent_chat_messages(thread_id, 24)"));
+        assert!(body.contains("recent_chat_events(thread_id, 24)"));
+        assert!(!body.contains("list_chat_messages(thread_id)"));
+        assert!(!body.contains("list_chat_events(thread_id)"));
+        assert!(source.matches("LIMIT ?2").count() >= 2);
     }
 
     #[test]
