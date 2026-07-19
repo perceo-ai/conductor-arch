@@ -91,7 +91,8 @@ and rollback or yank paths are validated for that channel.
 ## Website Gate
 
 The `perceo.ai` Archductor page must ship before public launch or be a
-required release gate. It needs:
+required release gate. The fuller product, site, video, and marketing launch
+requirements live in `docs/perceo-suite-release-prd.md`. The page needs:
 
 - Archductor product page with the real workflow
 - download/install instructions for supported channels only
