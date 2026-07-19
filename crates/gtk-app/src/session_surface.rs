@@ -92,6 +92,7 @@ thread_local! {
 
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type RegisterChatSurfaceRefresh = Rc<dyn Fn(Rc<dyn Fn()>)>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 type SendChatTextController = Rc<RefCell<Option<Rc<dyn Fn(String, bool) -> bool>>>>;
 
@@ -319,7 +320,7 @@ pub(crate) struct ExternalChatTabs {
     pub on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
     pub selection_controller: ExternalThreadSelectionController,
     pub on_workspace_metadata_changed: Rc<dyn Fn(&AgentMetadataUiUpdate)>,
-    pub on_chat_surface_refresh_ready: Option<Rc<dyn Fn(Rc<dyn Fn()>)>>,
+    pub on_chat_surface_refresh_ready: Option<RegisterChatSurfaceRefresh>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
