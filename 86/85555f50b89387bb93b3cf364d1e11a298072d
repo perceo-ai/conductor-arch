@@ -1,0 +1,19 @@
+crates/cli/tests/publish_workflow.rs
+  s_c12df3e2d718ea::t_a47ef01c18e1c6 78-81,129-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8685555f50b89387bb93b3cf364d1e11a298072d",
+  "prompts": {},
+  "sessions": {
+    "s_c12df3e2d718ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f77dc-dcf1-71f3-b49a-6e7e007f2d53",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
