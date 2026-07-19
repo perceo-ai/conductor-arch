@@ -1014,7 +1014,7 @@ fn ws_center_panel(
                 }))
             },
         }),
-        toast_manager,
+        toast_manager.clone(),
     );
     content.add_named(&chat_widget, Some("chat"));
     {
@@ -1049,6 +1049,7 @@ fn ws_center_panel(
         let setup_readiness = setup_readiness.clone();
         let add_tab_btn_for_feedback = add_tab_btn.clone();
         let closed_chat_tabs = closed_chat_tabs.clone();
+        let toast_manager = toast_manager.clone();
         add_tab_btn.connect_clicked(move |_| {
             let workspace_name = current_workspace_name.borrow().clone();
             let existing = { known_threads.borrow().clone() };
@@ -1103,6 +1104,7 @@ fn ws_center_panel(
                     closed_chat_tabs: closed_chat_tabs.clone(),
                     external_thread_selection: external_thread_selection.clone(),
                     on_threads_changed: on_threads_changed.clone(),
+                    toast_manager: toast_manager.clone(),
                 },
             );
         });
@@ -1480,6 +1482,7 @@ struct WorkspaceChatCreateUi {
     closed_chat_tabs: Rc<RefCell<HashSet<i64>>>,
     external_thread_selection: session_surface::ExternalThreadSelectionController,
     on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
+    toast_manager: ToastManager,
 }
 
 fn spawn_workspace_chat_thread_create(
@@ -1533,12 +1536,15 @@ fn spawn_workspace_chat_thread_create(
                     });
             }
             Err(message) => {
+                let failure = format!("Create chat thread failed: {message}");
                 ui.state.mark_chat_phase(
                     pending_target,
                     ChatUiPhase::Failed {
-                        message: format!("Create chat thread failed: {message}"),
+                        message: failure.clone(),
                     },
                 );
+                ui.toast_manager.error(failure.clone());
+                error!(workspace = %workspace_name, error = %failure, "failed to create workspace chat thread");
             }
         },
     );
@@ -10053,5 +10059,22 @@ mod tests {
             handler.contains("create_pending_chat_target"),
             "chat creation must select an optimistic pending chat immediately"
         );
+    }
+
+    #[test]
+    fn workspace_chat_create_failure_surfaces_toast_and_log() {
+        let source = include_str!("workspace_command_center.rs");
+        let create_fn = source
+            .split("fn spawn_workspace_chat_thread_create")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("fn default_launchable_chat_provider_for_workspace")
+                    .next()
+            })
+            .expect("workspace chat create helper exists");
+
+        assert!(create_fn.contains("ChatUiPhase::Failed"));
+        assert!(create_fn.contains("toast_manager.error"));
+        assert!(create_fn.contains("failed to create workspace chat thread"));
     }
 }
