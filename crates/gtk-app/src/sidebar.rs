@@ -1,7 +1,9 @@
 use adw::ApplicationWindow;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::repository::RepositoryStore;
-use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
+use archductor_core::workspace::{
+    CreateWorkspace, SessionKind, WorkspaceStore, WorkspaceViewDefaults,
+};
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
@@ -24,6 +26,33 @@ use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
 use crate::toast::{surface_label_error, ToastManager};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarWorkspaceSelection {
+    Ready { default_tab: Option<WorkspaceTab> },
+    Stale,
+}
+
+fn validate_sidebar_workspace_selection<F>(
+    state: &AppState,
+    workspace: &str,
+    load_defaults: F,
+) -> SidebarWorkspaceSelection
+where
+    F: FnOnce(&str) -> anyhow::Result<WorkspaceViewDefaults>,
+{
+    match load_defaults(workspace) {
+        Ok(defaults) => SidebarWorkspaceSelection::Ready {
+            default_tab: defaults
+                .default_visible_tab
+                .and_then(|tab| WorkspaceTab::from_config(&tab)),
+        },
+        Err(_) => {
+            state.remove_workspace_from_navigation(workspace, AppPage::Dashboard);
+            SidebarWorkspaceSelection::Stale
+        }
+    }
+}
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
@@ -517,18 +546,17 @@ pub(crate) fn build_app_sidebar(
             }) else {
                 return;
             };
-            let default_tab = match WorkspaceStore::open_app(db_path_select.clone())
-                .and_then(|store| store.workspace_view_defaults(&name))
-            {
-                Ok(defaults) => defaults
-                    .default_visible_tab
-                    .and_then(|tab| WorkspaceTab::from_config(&tab)),
-                Err(_) => {
-                    state_select.remove_workspace_from_navigation(&name, AppPage::Dashboard);
-                    refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-                    return;
-                }
-            };
+            let default_tab =
+                match validate_sidebar_workspace_selection(&state_select, &name, |workspace| {
+                    WorkspaceStore::open_app(db_path_select.clone())
+                        .and_then(|store| store.workspace_view_defaults(workspace))
+                }) {
+                    SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
+                    SidebarWorkspaceSelection::Stale => {
+                        refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                        return;
+                    }
+                };
             spawn_archcar_request(
                 archcar_paths.clone(),
                 ArchcarRequest::EnsureWorkspaceDefaultSession {
@@ -1603,10 +1631,11 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        workspace_context_actions, workspace_row_selection_should_open_workspace,
-        workspace_status_allows_sidebar_actions,
+        validate_sidebar_workspace_selection, workspace_context_actions,
+        workspace_row_selection_should_open_workspace, workspace_status_allows_sidebar_actions,
+        SidebarWorkspaceSelection,
     };
-    use crate::state::AppPage;
+    use crate::state::{AppPage, AppState, WorkspaceTab};
 
     #[test]
     fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
@@ -1683,27 +1712,20 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_selection_validates_workspace_before_archcar_default_spawn() {
-        let source = include_str!("sidebar.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("sidebar source should contain production code");
-        let handler = production_source
-            .split("list.connect_row_selected")
-            .nth(1)
-            .and_then(|source| source.split("scroll.set_child(Some(&list));").next())
-            .expect("sidebar row selection handler should exist");
-        let default_lookup = handler
-            .find("workspace_view_defaults(&name)")
-            .expect("selection should validate workspace defaults");
-        let archcar_spawn = handler
-            .find("EnsureWorkspaceDefaultSession")
-            .expect("selection should ensure the default session");
-
-        assert!(
-            default_lookup < archcar_spawn,
-            "sidebar selection must prove the workspace still exists before queuing archcar"
+    fn stale_sidebar_workspace_selection_clears_navigation_without_spawn_action() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("deleted".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
         );
+
+        let selection = validate_sidebar_workspace_selection(&state, "deleted", |_| {
+            Err(anyhow::anyhow!("missing"))
+        });
+
+        assert_eq!(selection, SidebarWorkspaceSelection::Stale);
+        assert_eq!(state.snapshot().selected_workspace, None);
+        assert_eq!(state.snapshot().active_page, AppPage::Dashboard);
     }
 }
