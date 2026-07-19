@@ -1,0 +1,34 @@
+flake.nix
+  s_32109acf6d1f93::t_c1c4460cbf3c76 45-53
+  s_32109acf6d1f93::t_b81022d51b7bb7 54-57
+packaging/README.md
+  s_32109acf6d1f93::t_5ff88c99afaa1c 131-132
+  s_32109acf6d1f93::t_ac701ca61a38ac 124,128-129
+  s_32109acf6d1f93::t_ed1074d8ade13d 130
+packaging/homebrew/Formula/archductor.rb
+  s_32109acf6d1f93::t_99b35b02ed707b 14,19-21,28
+docs/release-readiness.md
+  s_32109acf6d1f93::t_5ff88c99afaa1c 180,185-188
+packaging/flatpak/cargo-sources.json
+  s_32109acf6d1f93::t_fd2a2886f08dae 1-2894
+packaging/flatpak/ai.perceo.Archductor.yml
+  s_32109acf6d1f93::t_4697a9f810eab8 49
+  s_32109acf6d1f93::t_f71bd4175fac46 31-32,45
+  s_32109acf6d1f93::t_ac701ca61a38ac 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "5cde9c07ba8c6db75e7714ce7c5829fec93151de",
+  "prompts": {},
+  "sessions": {
+    "s_32109acf6d1f93": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f74f6-6ae2-7ac2-ab69-bc30ca2325bc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
