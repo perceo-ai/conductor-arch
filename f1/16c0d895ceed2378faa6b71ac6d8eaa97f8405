@@ -1,0 +1,25 @@
+crates/gtk-app/src/workspace_command_center.rs
+  s_bc1a2532df9214::t_59ff6275f6daab 981-983
+crates/gtk-app/src/session_surface.rs
+  s_bc1a2532df9214::t_491323bc2b762f 68,96,100-108,112-115
+  s_bc1a2532df9214::t_929d59ce81609c 14199-14217,14222-14223
+  s_bc1a2532df9214::t_e81bc7fe82b578 116
+  s_bc1a2532df9214::t_59ff6275f6daab 109-111,14218-14221
+  s_bc1a2532df9214::t_6c34c9e3e8158e 1932-1933
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f116c0d895ceed2378faa6b71ac6d8eaa97f8405",
+  "prompts": {},
+  "sessions": {
+    "s_bc1a2532df9214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7868-9214-77e2-b880-d5a5d76db626",
+        "model": "gpt-5.5"
+      },
+      "human_author": null
+    }
+  }
+}
