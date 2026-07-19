@@ -211,6 +211,7 @@ pub(crate) fn build_app_sidebar(
         Rc::new(RefCell::new(HashMap::new()));
     let pending_workspace_creates: Rc<RefCell<HashSet<String>>> =
         Rc::new(RefCell::new(HashSet::new()));
+    let restoring_workspace_selection = Rc::new(Cell::new(false));
     let db_path = app_state.workspace_database_path();
     let db_path_populate = db_path.clone();
 
@@ -218,6 +219,7 @@ pub(crate) fn build_app_sidebar(
         let list = list.clone();
         let names = Rc::clone(&names);
         let workspace_rows = Rc::clone(&workspace_rows);
+        let restoring_workspace_selection = restoring_workspace_selection.clone();
         let state = app_state.clone();
         let app_state = app_state.clone();
         let search_entry = search_entry.clone();
@@ -450,7 +452,9 @@ pub(crate) fn build_app_sidebar(
                 drop(names_ref);
                 if let Some(idx) = target_idx {
                     if let Some(row) = list.row_at_index(idx) {
+                        restoring_workspace_selection.set(true);
                         list.select_row(Some(&row));
+                        restoring_workspace_selection.set(false);
                     }
                 }
             }
@@ -497,8 +501,14 @@ pub(crate) fn build_app_sidebar(
 
     let refresh_workspace_select = refresh_workspace.clone();
     let archcar_paths = app_state.paths.clone();
+    let restoring_workspace_selection_select = restoring_workspace_selection.clone();
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
+            if !workspace_row_selection_should_open_workspace(
+                restoring_workspace_selection_select.get(),
+            ) {
+                return;
+            }
             let Some(name) = row.and_then(|r| {
                 names_select
                     .borrow()
@@ -1463,6 +1473,10 @@ fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
     matches!(page, AppPage::Workspace | AppPage::Review)
 }
 
+fn workspace_row_selection_should_open_workspace(restoring_selection: bool) -> bool {
+    !restoring_selection
+}
+
 fn workspace_status_allows_sidebar_actions(status: &str) -> bool {
     matches!(status, "active" | "failed")
 }
@@ -1584,7 +1598,8 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        workspace_context_actions, workspace_status_allows_sidebar_actions,
+        workspace_context_actions, workspace_row_selection_should_open_workspace,
+        workspace_status_allows_sidebar_actions,
     };
     use crate::state::AppPage;
 
@@ -1605,6 +1620,12 @@ mod tests {
         assert!(!sidebar_should_restore_workspace_selection(
             &AppPage::History
         ));
+    }
+
+    #[test]
+    fn restored_workspace_row_selection_does_not_open_workspace_again() {
+        assert!(!workspace_row_selection_should_open_workspace(true));
+        assert!(workspace_row_selection_should_open_workspace(false));
     }
 
     #[test]
