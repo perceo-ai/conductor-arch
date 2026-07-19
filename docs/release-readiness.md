@@ -177,12 +177,15 @@ The upstream Flatpak files use app ID `ai.perceo.Archductor`:
 
 ```bash
 appstreamcli validate --explain packaging/flatpak/ai.perceo.Archductor.metainfo.xml
+flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
 flatpak-builder --force-clean build-dir packaging/flatpak/ai.perceo.Archductor.yml
 ```
 
 Before submitting to Flathub, add current PNG screenshots, verify the
-`perceo.ai` domain/app ID ownership path, and document the need for
-`--filesystem=host` because Archductor opens arbitrary repository paths.
+`perceo.ai` domain/app ID ownership path, document the need for
+`--filesystem=host` because Archductor opens arbitrary repository paths, and
+decide whether Git/GitHub CLI should be bundled or treated as a documented
+Flatpak limitation.
 
 ## Known Launch Limits
 

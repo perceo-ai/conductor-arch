@@ -121,12 +121,15 @@ tag-driven publish workflow copies it to `perceo-ai/homebrew-tap`.
 
 ### Flatpak (experimental)
 
-The Flatpak build requires `flatpak-builder`, the GNOME 47 SDK, and the Rust SDK
+The Flatpak build requires `flatpak-builder`, the GNOME 50 SDK, and the Rust SDK
 extension:
 
 ```bash
-flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47
-flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+# Refresh Rust crate sources after Cargo.lock changes
+flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
 
 # Build and install locally
 flatpak-builder --install --user --force-clean \

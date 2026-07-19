@@ -1,6 +1,6 @@
 app-id: ai.perceo.Archductor
 runtime: org.gnome.Platform
-runtime-version: '47'
+runtime-version: '50'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -28,7 +28,8 @@ modules:
   - name: archductor
     buildsystem: simple
     build-commands:
-      - cargo build --release --locked --workspace
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo build --offline --release --locked --workspace
       - install -Dm755 target/release/archductor /app/bin/archductor
       - install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk
       - install -Dm644 README.md /app/share/doc/archductor/README.md
@@ -41,11 +42,8 @@ modules:
     sources:
       - type: dir
         path: ../..
-      - type: shell
-        commands:
-          - cargo vendor --locked vendor
+      - cargo-sources.json
     build-options:
       env:
         CARGO_NET_OFFLINE: 'true'
-      config-opts:
-        - --replace-deps-source=vendor
+        LIBSQLITE3_SYS_USE_PKG_CONFIG: '1'
