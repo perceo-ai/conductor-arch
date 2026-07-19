@@ -187,6 +187,10 @@ impl AppState {
         f(&self.inner.borrow())
     }
 
+    pub fn request_refresh(&self, event: crate::refresh::RefreshEvent) {
+        self.emit(AppStateEvent::RefreshRequested(event));
+    }
+
     pub fn selected_workspace(&self) -> Option<String> {
         self.inner.borrow().selected_workspace.clone()
     }
@@ -729,6 +733,35 @@ mod tests {
         state.set_selected_workspace(Some("berlin".to_owned()));
 
         assert_eq!(observed.get(), 0);
+    }
+
+    #[test]
+    fn app_state_refresh_request_notifies_with_event() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_sub = observed.clone();
+        let _subscription =
+            state.subscribe(move |event, _| observed_for_sub.borrow_mut().push(event.clone()));
+
+        state.request_refresh(crate::refresh::RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "berlin".to_owned(),
+            thread_id: 7,
+        });
+
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[AppStateEvent::RefreshRequested(
+                crate::refresh::RefreshEvent::WorkspaceChatMessagesChanged {
+                    workspace: "berlin".to_owned(),
+                    thread_id: 7
+                }
+            )]
+        );
     }
 
     #[test]
