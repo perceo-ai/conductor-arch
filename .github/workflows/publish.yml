@@ -377,6 +377,8 @@ jobs:
                 exit "$gtk_status"
               fi
             '
+          sudo chown -R "$(id -u):$(id -g)" aur-package
+          chmod -R u+rwX,go+rX aur-package
 
       - name: Publish to AUR
         env:
