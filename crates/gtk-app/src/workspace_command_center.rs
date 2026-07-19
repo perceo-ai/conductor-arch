@@ -37,6 +37,16 @@ type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 fn chat_outcome_requires_nav_refresh(outcome: &session_surface::ChatRefreshOutcome) -> bool {
     outcome.requires_nav_refresh()
 }
+
+fn chat_message_event_matches_selected_thread(
+    event_workspace: &str,
+    event_thread_id: i64,
+    selected_workspace: Option<&str>,
+    selected_thread: Option<i64>,
+) -> bool {
+    selected_workspace == Some(event_workspace) && selected_thread == Some(event_thread_id)
+}
+
 type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
@@ -50,7 +60,7 @@ use crate::state::{AppState, WorkspaceRightPanelTab, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
-    buttons::{menu_text_button, resolve_icon_name, text_button},
+    buttons::{menu_text_button, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
 };
@@ -707,7 +717,6 @@ fn ws_center_panel(
         let state = state.clone();
         let external_thread_selection = external_thread_selection.clone();
         let content = content.clone();
-        let refresh_hub = refresh_hub.clone();
         Rc::new(move |threads, selected| {
             *known_threads.borrow_mut() = threads.clone();
             if let Some(selected) = selected {
@@ -745,7 +754,6 @@ fn ws_center_panel(
                 let external_thread_selection = external_thread_selection.clone();
                 let content = content.clone();
                 let reopen_popover = reopen_popover.clone();
-                let refresh_hub = refresh_hub.clone();
                 let thread_id = thread.id;
                 item.connect_clicked(move |_| {
                     let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
@@ -766,7 +774,6 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
-                    refresh_hub.refresh(RefreshScope::Workspace);
                     reopen_popover.popdown();
                 });
                 reopen_menu.append(&item);
@@ -814,7 +821,6 @@ fn ws_center_panel(
                 let chat_tab_buttons_for_click = chat_tab_buttons.clone();
                 let file_tab_buttons_for_click = file_tab_buttons.clone();
                 let state_for_click = state.clone();
-                let refresh_hub_for_click = refresh_hub.clone();
                 let thread_id = thread.id;
                 let select_tab: Rc<dyn Fn()> = Rc::new(move || {
                     closed_chat_tabs_for_click.borrow_mut().remove(&thread_id);
@@ -828,7 +834,6 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
-                    refresh_hub_for_click.refresh(RefreshScope::Workspace);
                 });
                 let close_tab: Rc<dyn Fn()> = Rc::new({
                     let db_path = db_path.clone();
@@ -846,7 +851,6 @@ fn ws_center_panel(
                     let content = content.clone();
                     let add_tab_btn = add_tab_btn.clone();
                     let setup_readiness = setup_readiness.clone();
-                    let refresh_hub = refresh_hub.clone();
                     move || {
                         let workspace_name = current_workspace_name.borrow().clone();
                         close_workspace_chat_thread(
@@ -885,7 +889,6 @@ fn ws_center_panel(
                         {
                             select_thread(next);
                         }
-                        refresh_hub.refresh(RefreshScope::Workspace);
                     }
                 });
                 connect_ws_tab_surface_clicks(&tab_shell, select_tab.clone());
@@ -931,10 +934,59 @@ fn ws_center_panel(
                     branch_label.set_text(&update.branch_name);
                 })
             },
+            on_chat_surface_refresh_ready: {
+                let state = state.clone();
+                let refresh_hub = refresh_hub.clone();
+                Some(Rc::new(move |refresh_chat_surface| {
+                    let state = state.clone();
+                    refresh_hub.set_workspace_chat_surface(move |event| {
+                        let selected_workspace = state.selected_workspace();
+                        let should_refresh = match event {
+                            RefreshEvent::WorkspaceChatMessagesChanged {
+                                workspace,
+                                thread_id,
+                            } => chat_message_event_matches_selected_thread(
+                                workspace,
+                                *thread_id,
+                                selected_workspace.as_deref(),
+                                state.selected_chat_thread(),
+                            ),
+                            RefreshEvent::WorkspaceChatLifecycleChanged { workspace } => {
+                                selected_workspace.as_deref() == Some(workspace.as_str())
+                            }
+                            _ => false,
+                        };
+                        if should_refresh {
+                            refresh_chat_surface(session_surface::chat_refresh_kind_for_event(
+                                event,
+                            ));
+                        }
+                    });
+                }))
+            },
         }),
         toast_manager,
     );
     content.add_named(&chat_widget, Some("chat"));
+    {
+        let db_path = db_path.to_path_buf();
+        let current_workspace_name = current_workspace_name.clone();
+        let selected_thread = selected_thread.clone();
+        let on_threads_changed = on_threads_changed.clone();
+        refresh_hub.set_workspace_chat_tabs(move |event| {
+            let workspace_name = current_workspace_name.borrow().clone();
+            if let RefreshEvent::WorkspaceChatLifecycleChanged { workspace } = event {
+                if workspace != &workspace_name {
+                    return;
+                }
+            }
+            let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
+                return;
+            };
+            let threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
+            (on_threads_changed)(threads, *selected_thread.borrow());
+        });
+    }
     {
         let db_path = db_path.to_path_buf();
         let current_workspace_name = current_workspace_name.clone();
@@ -946,7 +998,6 @@ fn ws_center_panel(
         let content = content.clone();
         let setup_readiness = setup_readiness.clone();
         let add_tab_btn_for_feedback = add_tab_btn.clone();
-        let refresh_hub = refresh_hub.clone();
         add_tab_btn.connect_clicked(move |_| {
             let workspace_name = current_workspace_name.borrow().clone();
             let existing = { known_threads.borrow().clone() };
@@ -998,7 +1049,6 @@ fn ws_center_panel(
             {
                 select_thread(Some(thread.id));
             }
-            refresh_hub.refresh(RefreshScope::Workspace);
         });
     }
     // Sync active tab state
@@ -1146,27 +1196,7 @@ fn ws_center_panel(
 }
 
 fn ws_tab_surface(label: &str) -> (GBox, Button) {
-    let shell = GBox::new(Orientation::Horizontal, 6);
-    shell.add_css_class("ws-tab-shell");
-    shell.set_valign(Align::Center);
-
-    let label = Label::new(Some(label));
-    label.add_css_class("ws-tab-label");
-    label.set_valign(Align::Center);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    shell.append(&label);
-
-    let close = Button::new();
-    close.add_css_class("ws-tab-close-button");
-    close.set_valign(Align::Center);
-    close.set_tooltip_text(Some("Close tab"));
-    let close_icon = Image::from_icon_name(resolve_icon_name("window-close-symbolic"));
-    close_icon.add_css_class("ws-tab-close-icon");
-    close_icon.set_valign(Align::Center);
-    close.set_child(Some(&close_icon));
-    shell.append(&close);
-
-    (shell, close)
+    crate::tabs::closable_tab_surface(label)
 }
 
 fn install_horizontal_wheel_scroll(scroll: &ScrolledWindow) {
@@ -1209,10 +1239,38 @@ fn sync_workspace_chat_tabs(buttons: &RefCell<HashMap<i64, GBox>>, selected: Opt
     for (thread_id, button) in buttons.borrow().iter() {
         if Some(*thread_id) == selected {
             button.add_css_class("ws-tab-active");
+            clear_selected_chat_tab_unread_state(button);
         } else {
             button.remove_css_class("ws-tab-active");
         }
     }
+}
+
+fn clear_selected_chat_tab_unread_state(tab: &GBox) {
+    tab.remove_css_class("ws-tab-unread");
+    let Some(label) = workspace_chat_tab_label_widget(tab) else {
+        return;
+    };
+    let text = label.text().to_string();
+    let Some(base) = text.strip_suffix(" *") else {
+        return;
+    };
+    if tab.has_css_class("ws-tab-running") {
+        label.set_text(&format!("{base} ..."));
+    } else {
+        label.set_text(base);
+    }
+}
+
+fn workspace_chat_tab_label_widget(tab: &GBox) -> Option<Label> {
+    let mut child = tab.first_child();
+    while let Some(widget) = child {
+        if widget.has_css_class("ws-tab-label") {
+            return widget.downcast::<Label>().ok();
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 fn sync_workspace_file_tabs(buttons: &RefCell<HashMap<String, GBox>>, selected: Option<&str>) {
@@ -3049,8 +3107,12 @@ fn lifecycle_panel(
             .and_then(|store| store.rename(&current_name, &new_name))
         {
             Ok(workspace) => {
-                state_after_rename.set_selected_workspace(Some(workspace.name.clone()));
+                state_after_rename.rename_workspace_in_navigation(&current_name, &workspace.name);
                 progress_rename.set_text(&format!("Renamed to {}", workspace.name));
+                refresh_after_rename.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
+                    old_workspace: current_name.clone(),
+                    workspace: workspace.name,
+                });
             }
             Err(err) => apply_runtime_action_feedback(
                 &progress_rename,
@@ -3058,7 +3120,6 @@ fn lifecycle_panel(
                 lifecycle_action_failure_feedback("Rename", &err),
             ),
         }
-        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     });
 
     let db_duplicate = db_path.to_path_buf();
@@ -7935,6 +7996,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_message_event_matches_only_selected_workspace_thread() {
+        assert!(chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("berlin"),
+            Some(7),
+        ));
+        assert!(!chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("berlin"),
+            None,
+        ));
+        assert!(!chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("berlin"),
+            Some(8),
+        ));
+        assert!(!chat_message_event_matches_selected_thread(
+            "berlin",
+            7,
+            Some("tokyo"),
+            Some(7),
+        ));
+    }
+
+    #[test]
     fn setup_and_run_prompt_tabs_use_specific_queue_button_labels() {
         assert_eq!(
             workspace_prompt_queue_button_label("Setup Prompt"),
@@ -8614,6 +8703,80 @@ mod tests {
         let mut unread = running;
         unread.unread = true;
         assert_eq!(workspace_chat_nav_label(&unread), "Fix auth *");
+    }
+
+    #[test]
+    fn chat_tab_interactions_do_not_request_workspace_shell_refresh() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("let on_threads_changed")
+            .expect("chat tab refresh closure exists");
+        let end = source[start..]
+            .find("let chat_widget = session_surface::agent_session_panel")
+            .map(|offset| start + offset)
+            .expect("chat widget construction follows chat tabs");
+        let chat_region = &source[start..end];
+
+        assert!(
+            !chat_region.contains("RefreshScope::Workspace"),
+            "chat tab region must not rebuild the workspace shell"
+        );
+    }
+
+    #[test]
+    fn chat_tab_selection_clears_unread_without_duplicate_refresh_events() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("let select_tab: Rc<dyn Fn()>").unwrap();
+        let end = source[start..]
+            .find("let close_tab: Rc<dyn Fn()>")
+            .map(|offset| start + offset)
+            .unwrap();
+        let select_tab_region = &source[start..end];
+
+        assert!(
+            !select_tab_region.contains("WorkspaceChatLifecycleChanged")
+                && !select_tab_region.contains("WorkspaceChatMessagesChanged"),
+            "selecting a chat tab should use the direct thread selection refresh only"
+        );
+        assert!(
+            source.contains("clear_selected_chat_tab_unread_state(button);"),
+            "selected chat tab sync should clear unread label/classes locally"
+        );
+    }
+
+    #[test]
+    fn chat_tab_reopen_close_and_add_do_not_emit_duplicate_refresh_events() {
+        let source = include_str!("workspace_command_center.rs");
+        for (name, start_needle, end_needle) in [
+            (
+                "reopen",
+                "item.connect_clicked(move |_| {",
+                "reopen_menu.append(&item);",
+            ),
+            (
+                "close",
+                "let close_tab: Rc<dyn Fn()>",
+                "connect_ws_tab_surface_clicks(&tab_shell, select_tab.clone());",
+            ),
+            (
+                "add",
+                "add_tab_btn.connect_clicked(move |_| {",
+                "// Sync active tab state",
+            ),
+        ] {
+            let start = source.find(start_needle).unwrap();
+            let end = source[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .unwrap();
+            let region = &source[start..end];
+
+            assert!(
+                !region.contains("WorkspaceChatLifecycleChanged")
+                    && !region.contains("WorkspaceChatMessagesChanged"),
+                "{name} chat tab handler should not emit duplicate refresh hub events"
+            );
+        }
     }
 
     #[test]
@@ -9655,6 +9818,20 @@ mod tests {
                 Some("berlin")
             );
         }
+    }
+
+    #[test]
+    fn workspace_action_rename_uses_metadata_refresh() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("workspace command center source should contain production code");
+
+        assert!(production_source.contains("RefreshEvent::WorkspaceMetadataChanged"));
+        assert!(!production_source.contains(
+            "state_after_rename.set_selected_workspace(Some(workspace.name.clone()));\n                progress_rename.set_text(&format!(\"Renamed to {}\", workspace.name));\n            }\n            Err(err) => apply_runtime_action_feedback(\n                &progress_rename,\n                &toast_rename,\n                lifecycle_action_failure_feedback(\"Rename\", &err),\n            ),\n        }\n        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
+        ));
     }
 
     #[test]

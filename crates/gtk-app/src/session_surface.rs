@@ -64,6 +64,7 @@ use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
+use crate::refresh::RefreshEvent;
 use crate::state::{AppPage, AppState, AppStateSnapshot, QueuedChatInputDraft};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
@@ -91,8 +92,44 @@ thread_local! {
 
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+pub(crate) type RegisterChatSurfaceRefresh = Rc<dyn Fn(Rc<dyn Fn(ChatRefreshKind)>)>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 type SendChatTextController = Rc<RefCell<Option<Rc<dyn Fn(String, bool) -> bool>>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatRefreshKind {
+    Full,
+    Messages { thread_id: i64 },
+    ThreadNav,
+}
+
+pub(crate) fn chat_refresh_kind_for_event(event: &RefreshEvent) -> ChatRefreshKind {
+    match event {
+        RefreshEvent::WorkspaceChatMessagesChanged { thread_id, .. } => ChatRefreshKind::Messages {
+            thread_id: *thread_id,
+        },
+        RefreshEvent::WorkspaceChatLifecycleChanged { .. } => ChatRefreshKind::ThreadNav,
+        _ => ChatRefreshKind::Full,
+    }
+}
+
+fn dispatch_chat_surface_refresh_kind(
+    kind: ChatRefreshKind,
+    selected_thread: Option<i64>,
+    refresh_full: &dyn Fn(),
+    refresh_messages: &dyn Fn(i64),
+    refresh_thread_nav: &dyn Fn(),
+) {
+    match kind {
+        ChatRefreshKind::Full => refresh_full(),
+        ChatRefreshKind::Messages { thread_id } => {
+            if selected_thread == Some(thread_id) {
+                refresh_messages(thread_id);
+            }
+        }
+        ChatRefreshKind::ThreadNav => refresh_thread_nav(),
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ChatRefreshOutcome {
@@ -167,6 +204,29 @@ enum ChatTimelineItem {
     ProviderProjection(ProviderProjectionItem),
     InterruptedNotice { sequence: i64 },
     OptimisticUserInput(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatTimelineItemKey {
+    Message(ChatRenderMessageSignature),
+    Event(ChatRenderEventSignature),
+    Provider(ChatRenderProviderEventSignature),
+    InterruptedNotice(i64),
+    OptimisticUserInput(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatTimelineRenderState {
+    thread_id: i64,
+    transcript_display: String,
+    keys: Vec<ChatTimelineItemKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatTimelineRefreshPlan {
+    Skip,
+    Append { start: usize },
+    RebuildMessages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +386,7 @@ pub(crate) struct ExternalChatTabs {
     pub on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
     pub selection_controller: ExternalThreadSelectionController,
     pub on_workspace_metadata_changed: Rc<dyn Fn(&AgentMetadataUiUpdate)>,
+    pub on_chat_surface_refresh_ready: Option<RegisterChatSurfaceRefresh>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1036,6 +1097,7 @@ pub fn agent_session_panel(
     refresh_queue_overlay_fn();
 
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
+    let last_timeline_render_state = Rc::new(RefCell::new(None::<ChatTimelineRenderState>));
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
         let placeholder = placeholder.clone();
@@ -1153,6 +1215,7 @@ pub fn agent_session_panel(
         let selected_session = selected_session.clone();
         let selected_thread = selected_thread.clone();
         let last_render_signature = last_render_signature.clone();
+        let last_timeline_render_state = last_timeline_render_state.clone();
         let selected_harness = selected_harness.clone();
         let selected_model = selected_model.clone();
         let reasoning_mode = reasoning_mode.clone();
@@ -1268,6 +1331,7 @@ pub fn agent_session_panel(
                         error!(workspace = %workspace, error = %err, "chat refresh_view failed to load workspace state");
                         clear_box(&thread_row);
                         clear_box(&messages);
+                        *last_timeline_render_state.borrow_mut() = None;
                         apply_context_usage_state(&context_usage, None);
                         let message = session_refresh_error_text("load sessions", &err);
                         toast_manager.error(message.clone());
@@ -1740,6 +1804,7 @@ pub fn agent_session_panel(
                                         label.set_wrap(true);
                                         label.set_xalign(0.0);
                                         clear_box(&messages);
+                                        *last_timeline_render_state.borrow_mut() = None;
                                         *last_render_signature.borrow_mut() = None;
                                         apply_context_usage_state(&context_usage, None);
                                         append_chat_refresh_row(&messages, &label);
@@ -1868,43 +1933,21 @@ pub fn agent_session_panel(
                                     pending_user_inputs.clone(),
                                     pending_immediate_inputs,
                                 );
-                                for item in timeline {
-                                    match item {
-                                        ChatTimelineItem::Message(message) => {
-                                            if let Some(widget) = chat_message_widget(
-                                                &message,
-                                                render_raw_message_content(&transcript_display),
-                                                render_legacy_inline_events,
-                                            ) {
-                                                append_chat_refresh_row(&messages, &widget);
-                                            }
-                                        }
-                                        ChatTimelineItem::Event(event) => {
-                                            append_chat_refresh_row(
-                                                &messages,
-                                                &chat_event_widget(&event),
-                                            );
-                                        }
-                                        ChatTimelineItem::ProviderProjection(item) => {
-                                            append_chat_refresh_row(
-                                                &messages,
-                                                &provider_projection_item_widget(&item),
-                                            );
-                                        }
-                                        ChatTimelineItem::InterruptedNotice { .. } => {
-                                            append_chat_refresh_row(
-                                                &messages,
-                                                &chat_interrupted_notice_widget(),
-                                            );
-                                        }
-                                        ChatTimelineItem::OptimisticUserInput(input) => {
-                                            append_chat_refresh_row(
-                                                &messages,
-                                                &chat_user_bubble(&input),
-                                            );
-                                        }
+                                for item in &timeline {
+                                    if let Some(widget) = chat_timeline_item_widget(
+                                        item,
+                                        render_raw_message_content(&transcript_display),
+                                        render_legacy_inline_events,
+                                    ) {
+                                        append_chat_refresh_row(&messages, &widget);
                                     }
                                 }
+                                *last_timeline_render_state.borrow_mut() =
+                                    Some(chat_timeline_render_state(
+                                        thread_id,
+                                        &transcript_display,
+                                        &timeline,
+                                    ));
                                 debug!(?outcome, "chat refresh_view outcome");
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
@@ -1950,6 +1993,8 @@ pub fn agent_session_panel(
                     }
                     outcome.messages_changed = true;
                     clear_box(&messages);
+                    *last_timeline_render_state.borrow_mut() =
+                        Some(chat_timeline_render_state(thread_id, "structured", &[]));
                     apply_context_usage_state(&context_usage, None);
                     append_chat_status_banner(
                         &messages,
@@ -1992,6 +2037,7 @@ pub fn agent_session_panel(
                         return;
                     }
                     clear_box(&messages);
+                    *last_timeline_render_state.borrow_mut() = None;
                     apply_context_usage_state(&context_usage, None);
                     let prompt = format!(
                         "No {} chat yet. Create one or send a message to start one.",
@@ -2005,6 +2051,135 @@ pub fn agent_session_panel(
         }) as Rc<dyn Fn()>
     };
     *refresh_chat_surface.borrow_mut() = Some(refresh_view.clone());
+    if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
+        if let Some(register_refresh) = external_chat_tabs.on_chat_surface_refresh_ready.as_ref() {
+            let refresh_view_for_external = refresh_view.clone();
+            let refresh_messages_for_external: Rc<dyn Fn(i64)> = {
+                let database_path = database_path.clone();
+                let current_workspace_name = current_workspace_name.clone();
+                let selected_thread = selected_thread.clone();
+                let messages = messages.clone();
+                let scroll = scroll.clone();
+                let context_usage = context_usage.clone();
+                let pending_archcar_inputs = pending_archcar_inputs.clone();
+                let inflight_archcar_actions = inflight_archcar_actions.clone();
+                let app_state = app_state.clone();
+                let last_timeline_render_state = last_timeline_render_state.clone();
+                let toast_manager = toast_manager.clone();
+                Rc::new(move |thread_id| {
+                    if *selected_thread.borrow() != Some(thread_id) {
+                        return;
+                    }
+                    let workspace = current_workspace_name.borrow().clone();
+                    let chat_scroll = capture_chat_scroll(&scroll);
+                    let (thread_messages, thread_events, provider_events) =
+                        match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
+                            let messages = store.list_chat_messages(thread_id)?;
+                            let events = store.list_chat_events(thread_id)?;
+                            let provider_events = ProviderEventStore::new(database_path.clone())
+                                .list_for_chat_thread(thread_id)?;
+                            Ok((messages, events, provider_events))
+                        }) {
+                            Ok(timeline) => timeline,
+                            Err(err) => {
+                                error!(workspace = %workspace, thread_id, error = %err, "chat message refresh failed to load thread timeline");
+                                let message =
+                                    session_refresh_error_text("load chat timeline", &err);
+                                toast_manager.error(message.clone());
+                                let label = Label::new(Some(&message));
+                                label.add_css_class("chat-agent-text");
+                                label.set_selectable(true);
+                                label.set_wrap(true);
+                                label.set_xalign(0.0);
+                                clear_box(&messages);
+                                *last_timeline_render_state.borrow_mut() = None;
+                                apply_context_usage_state(&context_usage, None);
+                                append_chat_refresh_row(&messages, &label);
+                                restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                return;
+                            }
+                        };
+                    let transcript_display =
+                        transcript_display_for_workspace(&database_path, &workspace);
+                    let pending_user_inputs = pending_user_input_texts_for_thread(
+                        thread_id,
+                        pending_archcar_inputs.as_ref(),
+                        &app_state,
+                        inflight_archcar_actions.as_ref(),
+                        &thread_messages,
+                    );
+                    let pending_immediate_inputs = pending_immediate_user_input_texts_for_thread(
+                        thread_id,
+                        inflight_archcar_actions.as_ref(),
+                        &thread_messages,
+                    );
+                    let render_legacy_inline_events =
+                        render_legacy_inline_events_for_thread(&thread_events, &transcript_display);
+                    let provider_projection = provider_projection_from_records(&provider_events);
+                    let timeline = chat_structured_items_for_render(
+                        thread_messages.clone(),
+                        thread_events,
+                        provider_projection.items,
+                        pending_user_inputs,
+                        pending_immediate_inputs,
+                    );
+                    let next_state =
+                        chat_timeline_render_state(thread_id, &transcript_display, &timeline);
+                    let plan = chat_timeline_refresh_plan(
+                        last_timeline_render_state.borrow().as_ref(),
+                        &next_state,
+                    );
+                    match plan {
+                        ChatTimelineRefreshPlan::Skip => return,
+                        ChatTimelineRefreshPlan::Append { start } => {
+                            apply_context_usage_state(
+                                &context_usage,
+                                latest_context_usage_from_messages(&thread_messages),
+                            );
+                            for item in &timeline[start..] {
+                                if let Some(widget) = chat_timeline_item_widget(
+                                    item,
+                                    render_raw_message_content(&transcript_display),
+                                    render_legacy_inline_events,
+                                ) {
+                                    append_chat_refresh_row(&messages, &widget);
+                                }
+                            }
+                        }
+                        ChatTimelineRefreshPlan::RebuildMessages => {
+                            clear_box(&messages);
+                            apply_context_usage_state(
+                                &context_usage,
+                                latest_context_usage_from_messages(&thread_messages),
+                            );
+                            for item in &timeline {
+                                if let Some(widget) = chat_timeline_item_widget(
+                                    item,
+                                    render_raw_message_content(&transcript_display),
+                                    render_legacy_inline_events,
+                                ) {
+                                    append_chat_refresh_row(&messages, &widget);
+                                }
+                            }
+                        }
+                    }
+                    *last_timeline_render_state.borrow_mut() = Some(next_state);
+                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                })
+            };
+            let refresh_thread_nav_for_external = refresh_view.clone();
+            let selected_thread_for_external = selected_thread.clone();
+            register_refresh(Rc::new(move |kind| {
+                dispatch_chat_surface_refresh_kind(
+                    kind,
+                    *selected_thread_for_external.borrow(),
+                    refresh_view_for_external.as_ref(),
+                    refresh_messages_for_external.as_ref(),
+                    refresh_thread_nav_for_external.as_ref(),
+                );
+            }));
+        }
+    }
     install_archcar_wake(&root, &archcar_bridge, refresh_view.clone());
     install_working_indicator_tick(&root, working_threads.clone(), refresh_view.clone());
 
@@ -3726,6 +3901,79 @@ fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
     message.role != "user" || !message.content.trim().is_empty()
 }
 
+fn chat_timeline_item_key(item: &ChatTimelineItem) -> ChatTimelineItemKey {
+    match item {
+        ChatTimelineItem::Message(message) => ChatTimelineItemKey::Message((
+            message.id,
+            message.role.clone(),
+            message.timeline_seq,
+            message.updated_at.clone(),
+            message.content.clone(),
+        )),
+        ChatTimelineItem::Event(event) => ChatTimelineItemKey::Event((
+            event.id,
+            event.kind.clone(),
+            event.timeline_seq,
+            event.title.clone(),
+            event.updated_at.clone(),
+            event.body.len() + event.payload_json.len(),
+        )),
+        ChatTimelineItem::ProviderProjection(item) => ChatTimelineItemKey::Provider((
+            item.id.clone(),
+            i64::try_from(item.sequence).unwrap_or(i64::MAX),
+            item.timeline_seq,
+            ProviderEventKind::Unknown,
+            ProviderEventPhase::Unknown,
+            item.title.len() + item.body.len() + item.raw_payload.as_deref().unwrap_or("").len(),
+        )),
+        ChatTimelineItem::InterruptedNotice { sequence } => {
+            ChatTimelineItemKey::InterruptedNotice(*sequence)
+        }
+        ChatTimelineItem::OptimisticUserInput(input) => {
+            ChatTimelineItemKey::OptimisticUserInput(input.clone())
+        }
+    }
+}
+
+fn chat_timeline_render_state(
+    thread_id: i64,
+    transcript_display: &str,
+    items: &[ChatTimelineItem],
+) -> ChatTimelineRenderState {
+    ChatTimelineRenderState {
+        thread_id,
+        transcript_display: transcript_display.to_owned(),
+        keys: items.iter().map(chat_timeline_item_key).collect(),
+    }
+}
+
+fn chat_timeline_refresh_plan(
+    previous: Option<&ChatTimelineRenderState>,
+    next: &ChatTimelineRenderState,
+) -> ChatTimelineRefreshPlan {
+    let Some(previous) = previous else {
+        return ChatTimelineRefreshPlan::RebuildMessages;
+    };
+    if previous.thread_id != next.thread_id
+        || previous.transcript_display != next.transcript_display
+        || previous.keys.len() > next.keys.len()
+    {
+        return ChatTimelineRefreshPlan::RebuildMessages;
+    }
+    if !next.keys.starts_with(&previous.keys) {
+        return ChatTimelineRefreshPlan::RebuildMessages;
+    }
+    if previous.keys.len() == next.keys.len() {
+        return ChatTimelineRefreshPlan::Skip;
+    }
+    if previous.keys.is_empty() {
+        return ChatTimelineRefreshPlan::RebuildMessages;
+    }
+    ChatTimelineRefreshPlan::Append {
+        start: previous.keys.len(),
+    }
+}
+
 fn chat_render_is_unchanged(
     last: &RefCell<Option<ChatRenderSignature>>,
     next: ChatRenderSignature,
@@ -3863,6 +4111,24 @@ fn chat_message_widget(
             }
             Some(chat_text_label(&content).upcast())
         }
+    }
+}
+
+fn chat_timeline_item_widget(
+    item: &ChatTimelineItem,
+    render_raw_message_content: bool,
+    render_legacy_inline_events: bool,
+) -> Option<Widget> {
+    match item {
+        ChatTimelineItem::Message(message) => chat_message_widget(
+            message,
+            render_raw_message_content,
+            render_legacy_inline_events,
+        ),
+        ChatTimelineItem::Event(event) => Some(chat_event_widget(event)),
+        ChatTimelineItem::ProviderProjection(item) => Some(provider_projection_item_widget(item)),
+        ChatTimelineItem::InterruptedNotice { .. } => Some(chat_interrupted_notice_widget()),
+        ChatTimelineItem::OptimisticUserInput(input) => Some(chat_user_bubble(input).upcast()),
     }
 }
 
@@ -14706,6 +14972,143 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*selected_thread.borrow(), Some(7));
         assert_eq!(*app_state.borrow(), None);
         assert_eq!(*composer_updates.borrow(), 0);
+    }
+
+    #[test]
+    fn message_event_maps_to_message_refresh_kind() {
+        let event = RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "berlin".to_owned(),
+            thread_id: 42,
+        };
+
+        assert_eq!(
+            chat_refresh_kind_for_event(&event),
+            ChatRefreshKind::Messages { thread_id: 42 }
+        );
+    }
+
+    #[test]
+    fn lifecycle_event_maps_to_thread_nav_refresh_kind() {
+        let event = RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "berlin".to_owned(),
+        };
+
+        assert_eq!(
+            chat_refresh_kind_for_event(&event),
+            ChatRefreshKind::ThreadNav
+        );
+    }
+
+    #[test]
+    fn chat_surface_refresh_dispatch_uses_kind_specific_paths() {
+        let full = Cell::new(0);
+        let messages = RefCell::new(Vec::new());
+        let thread_nav = Cell::new(0);
+
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::Messages { thread_id: 42 },
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::Messages { thread_id: 99 },
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::ThreadNav,
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::Full,
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+
+        assert_eq!(*messages.borrow(), vec![42]);
+        assert_eq!(thread_nav.get(), 1);
+        assert_eq!(full.get(), 1);
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_appends_only_new_suffix_rows() {
+        let old_items = vec![ChatTimelineItem::Message(chat_message_record(
+            1,
+            "user",
+            "hello",
+            "user_send",
+        ))];
+        let new_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "hello", "user_send")),
+            ChatTimelineItem::Message(chat_message_record(2, "agent", "hi", "agent")),
+        ];
+        let old = chat_timeline_render_state(7, "structured", &old_items);
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::Append { start: 1 }
+        );
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_rebuilds_message_list_for_mutations() {
+        let old_items = vec![ChatTimelineItem::Message(chat_message_record(
+            1, "agent", "partial", "agent",
+        ))];
+        let new_items = vec![ChatTimelineItem::Message(chat_message_record(
+            1,
+            "agent",
+            "partial plus more",
+            "agent",
+        ))];
+        let old = chat_timeline_render_state(7, "structured", &old_items);
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::RebuildMessages
+        );
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_rebuilds_message_list_after_empty_placeholder() {
+        let old = chat_timeline_render_state(7, "structured", &[]);
+        let new_items = vec![ChatTimelineItem::Message(chat_message_record(
+            1, "agent", "first", "agent",
+        ))];
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::RebuildMessages
+        );
+    }
+
+    #[test]
+    fn external_chat_surface_refresh_callback_uses_received_kind() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("let refresh_messages_for_external: Rc<dyn Fn(i64)>")
+            .expect("external message refresh closure exists");
+        let end = source[start..]
+            .find("let refresh_thread_nav_for_external")
+            .map(|offset| start + offset)
+            .expect("thread nav refresh follows message refresh");
+        let callback_region = &source[start..end];
+
+        assert!(callback_region.contains("ChatTimelineRefreshPlan::Append"));
+        assert!(callback_region.contains("ChatTimelineRefreshPlan::RebuildMessages"));
+        assert!(!callback_region.contains("refresh_view();"));
     }
 
     #[test]
