@@ -31,6 +31,16 @@ use crate::toast::{surface_label_error, ToastManager};
 enum SidebarWorkspaceSelection {
     Ready { default_tab: Option<WorkspaceTab> },
     Stale,
+    Unavailable { message: String },
+}
+
+fn sidebar_workspace_lookup_returned_no_rows(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::QueryReturnedNoRows)
+        )
+    })
 }
 
 fn validate_sidebar_workspace_selection<F>(
@@ -47,10 +57,13 @@ where
                 .default_visible_tab
                 .and_then(|tab| WorkspaceTab::from_config(&tab)),
         },
-        Err(_) => {
+        Err(err) if sidebar_workspace_lookup_returned_no_rows(&err) => {
             state.remove_workspace_from_navigation(workspace, AppPage::Dashboard);
             SidebarWorkspaceSelection::Stale
         }
+        Err(err) => SidebarWorkspaceSelection::Unavailable {
+            message: err.to_string(),
+        },
     }
 }
 
@@ -531,6 +544,7 @@ pub(crate) fn build_app_sidebar(
     let refresh_workspace_select = refresh_workspace.clone();
     let archcar_paths = app_state.paths.clone();
     let restoring_workspace_selection_select = restoring_workspace_selection.clone();
+    let toast_select = toast_manager.clone();
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
             if !workspace_row_selection_should_open_workspace(
@@ -554,6 +568,10 @@ pub(crate) fn build_app_sidebar(
                     SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
                     SidebarWorkspaceSelection::Stale => {
                         refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                        return;
+                    }
+                    SidebarWorkspaceSelection::Unavailable { message } => {
+                        toast_select.error(format!("Open workspace failed: {message}"));
                         return;
                     }
                 };
@@ -1721,11 +1739,35 @@ mod tests {
         );
 
         let selection = validate_sidebar_workspace_selection(&state, "deleted", |_| {
-            Err(anyhow::anyhow!("missing"))
+            Err(anyhow::Error::new(rusqlite::Error::QueryReturnedNoRows))
         });
 
         assert_eq!(selection, SidebarWorkspaceSelection::Stale);
         assert_eq!(state.snapshot().selected_workspace, None);
         assert_eq!(state.snapshot().active_page, AppPage::Dashboard);
+    }
+
+    #[test]
+    fn sidebar_workspace_selection_operational_error_preserves_navigation_without_spawn_action() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        let selection = validate_sidebar_workspace_selection(&state, "berlin", |_| {
+            Err(anyhow::anyhow!("database is locked"))
+        });
+
+        assert!(matches!(
+            selection,
+            SidebarWorkspaceSelection::Unavailable { .. }
+        ));
+        assert_eq!(
+            state.snapshot().selected_workspace.as_deref(),
+            Some("berlin")
+        );
+        assert_eq!(state.snapshot().active_page, AppPage::Workspace);
     }
 }

@@ -10806,6 +10806,8 @@ where
                     .to_owned(),
             },
         );
+        app_state.mark_chat_phase(ChatUiTarget::Thread(thread_id), ChatUiPhase::Ready);
+        update_composer_state();
         EagerChatAgentStartOutcome::RequestUnavailable
     }
 }
@@ -13428,6 +13430,52 @@ fix it
                 provider: SessionKind::Codex,
             })
         );
+    }
+
+    #[test]
+    fn eager_chat_agent_start_request_failure_releases_starting_phase() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let ready_cache = RefCell::new(HashMap::new());
+        let inflight = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let codex_ready = RefCell::new(true);
+        let composer_updates = Cell::new(0);
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &[],
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| composer_updates.set(composer_updates.get() + 1),
+            "berlin".to_owned(),
+            7,
+            SessionKind::Codex,
+            |_, _, _| false,
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::RequestUnavailable);
+        assert_eq!(
+            app_state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::Ready)
+        );
+        assert_eq!(
+            startup_states.borrow().get(&7),
+            Some(&CodexStartupState::Error {
+                message: "Request channel is closed. Reopen the workspace or restart the app."
+                    .to_owned(),
+            })
+        );
+        assert!(!*codex_ready.borrow());
+        assert_eq!(composer_updates.get(), 2);
     }
 
     #[test]
