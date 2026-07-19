@@ -6970,6 +6970,21 @@ mutation($threadId: ID!) {{
         self.get_chat_thread(thread_id)
     }
 
+    pub fn clear_chat_thread_native_id(&self, thread_id: i64) -> Result<ChatThreadRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET native_thread_id = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now, thread_id],
+        )?;
+        self.get_chat_thread(thread_id)
+    }
+
+    pub fn codex_native_thread_id_has_rollout(&self, native_thread_id: &str) -> Result<bool> {
+        codex_rollout_session_id_exists(native_thread_id)
+    }
+
     pub fn record_session_process_for_thread(
         &self,
         name: &str,
@@ -7985,6 +8000,39 @@ fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<
     }
     candidates.sort_by_key(|candidate| candidate.0);
     Ok(candidates.into_iter().next().map(|candidate| candidate.1))
+}
+
+fn codex_rollout_session_id_exists(session_id: &str) -> Result<bool> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(false);
+    }
+    let Some(home) = crate::platform::home_dir() else {
+        return Ok(false);
+    };
+    let root = home.join(".codex/sessions");
+    if !root.exists() {
+        return Ok(false);
+    }
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy();
+        if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+            continue;
+        }
+        let Some(meta) = read_codex_rollout_session_meta(entry.path())? else {
+            continue;
+        };
+        if meta.session_id == session_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 struct CodexRolloutMeta {

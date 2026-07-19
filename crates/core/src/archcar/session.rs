@@ -794,13 +794,29 @@ fn codex_app_server_session_launch(
         .map(|arg| (*arg).to_owned())
         .collect();
     launch.harness_metadata = non_interactive_harness_metadata("codex-app-server", &harness);
-    launch.session_resume_id = thread_record.native_thread_id.clone();
+    launch.session_resume_id =
+        valid_codex_resume_id_for_thread(store, thread_record.id, thread_record)?;
     let provider_port_reservation =
         assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
     Ok(ThreadSessionLaunch {
         launch,
         provider_port_reservation: Some(provider_port_reservation),
     })
+}
+
+fn valid_codex_resume_id_for_thread(
+    store: &WorkspaceStore,
+    thread_id: i64,
+    thread_record: &ChatThreadRecord,
+) -> Result<Option<String>> {
+    let Some(native_thread_id) = thread_record.native_thread_id.as_deref() else {
+        return Ok(None);
+    };
+    if store.codex_native_thread_id_has_rollout(native_thread_id)? {
+        return Ok(Some(native_thread_id.to_owned()));
+    }
+    let _ = store.clear_chat_thread_native_id(thread_id)?;
+    Ok(None)
 }
 
 fn claude_stream_session_launch(
@@ -4246,9 +4262,30 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
     #[test]
     fn codex_thread_launch_with_native_id_resumes_that_session() {
+        let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::Codex);
+        let fake_home = temp.path().join("home");
+        let rollout_dir = fake_home.join(".codex/sessions/2026/07/18");
+        fs::create_dir_all(&rollout_dir).unwrap();
+        fs::write(
+            rollout_dir.join("rollout-valid.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"codex-native-thread\",\"cwd\":\"{}\"}}}}\n",
+                store
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .find(|workspace| workspace.name == "berlin")
+                    .unwrap()
+                    .path
+                    .display()
+            ),
+        )
+        .unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &fake_home);
 
         let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
@@ -4270,6 +4307,52 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             launch.session_resume_id.as_deref(),
             Some("codex-native-thread")
         );
+
+        if let Some(previous) = previous_home {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn codex_thread_launch_clears_native_id_when_rollout_is_missing() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let controller = controller_for_kind(SessionKind::Codex);
+        let fake_home = temp.path().join("home");
+        fs::create_dir_all(fake_home.join(".codex/sessions")).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &fake_home);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .and_then(|thread| store.update_chat_thread_native_id(thread.id, "missing-rollout"))
+            .unwrap();
+
+        let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
+            &store,
+            "berlin",
+            &thread,
+            SessionKind::Codex,
+            SessionHarnessOptions::default(),
+            controller.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(launch.args, vec!["app-server"]);
+        assert!(launch.session_resume_id.is_none());
+        assert!(store
+            .get_chat_thread_record(thread.id)
+            .unwrap()
+            .native_thread_id
+            .is_none());
+
+        if let Some(previous) = previous_home {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 
     #[test]
