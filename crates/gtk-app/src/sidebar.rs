@@ -517,6 +517,18 @@ pub(crate) fn build_app_sidebar(
             }) else {
                 return;
             };
+            let default_tab = match WorkspaceStore::open_app(db_path_select.clone())
+                .and_then(|store| store.workspace_view_defaults(&name))
+            {
+                Ok(defaults) => defaults
+                    .default_visible_tab
+                    .and_then(|tab| WorkspaceTab::from_config(&tab)),
+                Err(_) => {
+                    state_select.remove_workspace_from_navigation(&name, AppPage::Dashboard);
+                    refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                    return;
+                }
+            };
             spawn_archcar_request(
                 archcar_paths.clone(),
                 ArchcarRequest::EnsureWorkspaceDefaultSession {
@@ -525,11 +537,6 @@ pub(crate) fn build_app_sidebar(
                     harness: None,
                 },
             );
-            let default_tab = WorkspaceStore::open_app(db_path_select.clone())
-                .and_then(|store| store.workspace_view_defaults(&name))
-                .ok()
-                .and_then(|defaults| defaults.default_visible_tab)
-                .and_then(|tab| WorkspaceTab::from_config(&tab));
             state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
             refresh_view_preferences_select();
             refresh_workspace_select();
@@ -1673,5 +1680,30 @@ mod tests {
         assert!(!production_source.contains(
             "state.remove_workspace_from_navigation(\n                                                &workspace_name,\n                                                AppPage::Dashboard,\n                                            );\n                                            if was_selected_workspace {\n                                                stack.set_visible_child_name(\"dashboard\");\n                                            }\n                                            if let Some(list) =\n                                                row.parent().and_downcast::<ListBox>()\n                                            {\n                                                list.remove(&row);\n                                            }\n                                            refresh_view_preferences();\n                                            refresh_workspace();"
         ));
+    }
+
+    #[test]
+    fn sidebar_selection_validates_workspace_before_archcar_default_spawn() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+        let handler = production_source
+            .split("list.connect_row_selected")
+            .nth(1)
+            .and_then(|source| source.split("scroll.set_child(Some(&list));").next())
+            .expect("sidebar row selection handler should exist");
+        let default_lookup = handler
+            .find("workspace_view_defaults(&name)")
+            .expect("selection should validate workspace defaults");
+        let archcar_spawn = handler
+            .find("EnsureWorkspaceDefaultSession")
+            .expect("selection should ensure the default session");
+
+        assert!(
+            default_lookup < archcar_spawn,
+            "sidebar selection must prove the workspace still exists before queuing archcar"
+        );
     }
 }

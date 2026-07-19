@@ -3316,6 +3316,7 @@ fn lifecycle_panel(
         let toast_action = toast_overlay.clone();
         let state_after_action = state.clone();
         button.connect_clicked(move |_| {
+            let workspace = current_workspace_action_target(&state_after_action, &workspace);
             if matches!(action, "archive" | "discard" | "delete") && !confirm_action.is_active() {
                 progress_action.set_text("Check confirm before archive/discard/delete.");
                 return;
@@ -7314,6 +7315,12 @@ fn workspace_delete_feedback(result: anyhow::Result<Workspace>) -> String {
     }
 }
 
+fn current_workspace_action_target(state: &crate::state::AppState, fallback: &str) -> String {
+    state
+        .selected_workspace()
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
 fn workspace_delete_navigation_target(
     result: &std::result::Result<Workspace, String>,
 ) -> Option<&str> {
@@ -9989,6 +9996,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_action_target_prefers_current_selection_after_metadata_rename() {
+        let state = crate::state::AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("renamed-workspace".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            crate::state::AppPage::Workspace,
+        );
+
+        assert_eq!(
+            current_workspace_action_target(&state, "1"),
+            "renamed-workspace"
+        );
+    }
+
+    #[test]
     fn workspace_action_rename_uses_metadata_refresh() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
@@ -10000,6 +10022,25 @@ mod tests {
         assert!(!production_source.contains(
             "state_after_rename.set_selected_workspace(Some(workspace.name.clone()));\n                progress_rename.set_text(&format!(\"Renamed to {}\", workspace.name));\n            }\n            Err(err) => apply_runtime_action_feedback(\n                &progress_rename,\n                &toast_rename,\n                lifecycle_action_failure_feedback(\"Rename\", &err),\n            ),\n        }\n        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
         ));
+    }
+
+    #[test]
+    fn workspace_lifecycle_actions_use_current_selected_workspace_name() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("workspace command center source should contain production code");
+        let action_handler = production_source
+            .split("for (button, action) in [")
+            .nth(1)
+            .and_then(|source| source.split("let result =").next())
+            .expect("workspace lifecycle action handler should exist");
+
+        assert!(
+            action_handler.contains("current_workspace_action_target(&state_after_action, &workspace)"),
+            "workspace lifecycle actions must use the current selected workspace after agent metadata renames"
+        );
     }
 
     #[test]
