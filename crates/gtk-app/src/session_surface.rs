@@ -2196,6 +2196,16 @@ pub fn agent_session_panel(
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
+                    let pending_chat_phase = app_state.selected_chat_target().and_then(|target| {
+                        matches!(target, ChatUiTarget::Pending { .. })
+                            .then(|| app_state.chat_phase(&target))
+                            .flatten()
+                    });
+                    let render_state = if pending_chat_phase.is_some() {
+                        "pending_thread"
+                    } else {
+                        "no_thread"
+                    };
                     let signature = chat_render_signature(
                         current_kind,
                         None,
@@ -2209,7 +2219,7 @@ pub fn agent_session_panel(
                         &[],
                         &[],
                         "structured",
-                        "no_thread",
+                        render_state,
                         None,
                     );
                     if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
@@ -2218,10 +2228,8 @@ pub fn agent_session_panel(
                     clear_box(&messages);
                     *last_timeline_render_state.borrow_mut() = None;
                     apply_context_usage_state(&context_usage, None);
-                    let prompt = format!(
-                        "No {} chat yet. Create one or send a message to start one.",
-                        session_kind_name(current_kind)
-                    );
+                    let prompt =
+                        pending_chat_placeholder_text(pending_chat_phase.as_ref(), current_kind);
                     append_chat_refresh_row(&messages, &chat_user_bubble(&prompt));
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
@@ -2943,12 +2951,19 @@ pub fn agent_session_panel(
         let app_state_for_switch = app_state.clone();
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
+        let selected_harness_for_switch = selected_harness.clone();
+        let reasoning_mode_for_switch = reasoning_mode.clone();
         let update_composer_for_switch = update_composer_state.clone();
         let restore_composer_draft_for_switch = restore_composer_draft.clone();
         let refresh_queue_overlay_for_switch = refresh_queue_overlay.clone();
         let toast_for_switch = toast_manager.clone();
         let eager_start_chat_agent_for_switch = eager_start_chat_agent.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
+            apply_provider_switch_state(
+                selected_harness_for_switch.as_ref(),
+                reasoning_mode_for_switch.as_ref(),
+                next_kind,
+            );
             let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
             let (records, threads) =
                 match WorkspaceStore::open_app(db_for_switch.clone()).map(|store| {
@@ -3430,10 +3445,8 @@ pub fn agent_session_panel(
                     }
                 }
             });
-            update_composer_state();
-            if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
-                refresh();
-            }
+            select_pending_chat_target_for_creation(selected_thread.as_ref(), on_selected.as_ref());
+            refresh_view();
             spawn_session_chat_thread_create(
                 database_path.clone(),
                 workspace_name,
@@ -6985,10 +6998,7 @@ fn select_harness_and_dispatch(
     refresh_chat_surface: Option<&Rc<dyn Fn()>>,
     update_composer_state: Option<&Rc<dyn Fn()>>,
 ) {
-    *selected_harness.borrow_mut() = kind;
-    if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
-        *reasoning_mode.borrow_mut() = Some("high".to_owned());
-    }
+    apply_provider_switch_state(selected_harness, reasoning_mode, kind);
     if let Some(switch_harness) = switch_chat_harness {
         switch_harness(kind);
         if let Some(update) = update_composer_state {
@@ -7001,6 +7011,49 @@ fn select_harness_and_dispatch(
     }
     if let Some(update) = update_composer_state {
         update();
+    }
+}
+
+fn apply_provider_switch_state(
+    selected_harness: &RefCell<SessionKind>,
+    reasoning_mode: &RefCell<Option<String>>,
+    kind: SessionKind,
+) {
+    *selected_harness.borrow_mut() = kind;
+    if matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+        *reasoning_mode.borrow_mut() = Some("high".to_owned());
+    }
+}
+
+fn select_pending_chat_target_for_creation(
+    selected_thread: &RefCell<Option<i64>>,
+    update_pending_view_state: &dyn Fn(),
+) {
+    *selected_thread.borrow_mut() = None;
+    update_pending_view_state();
+}
+
+fn pending_chat_placeholder_text(
+    phase: Option<&ChatUiPhase>,
+    fallback_kind: SessionKind,
+) -> String {
+    match phase {
+        Some(ChatUiPhase::Creating { provider }) => {
+            format!("Creating new {} chat...", session_kind_name(*provider))
+        }
+        Some(ChatUiPhase::StartingAgent { provider }) => {
+            format!("Starting {} for new chat...", session_kind_name(*provider))
+        }
+        Some(ChatUiPhase::WaitingForInputDrain { provider }) => {
+            format!(
+                "Sending queued message to new {} chat...",
+                session_kind_name(*provider)
+            )
+        }
+        _ => format!(
+            "No {} chat yet. Create one or send a message to start one.",
+            session_kind_name(fallback_kind)
+        ),
     }
 }
 
@@ -11072,6 +11125,43 @@ mod tests {
         assert_eq!(*selected_harness.borrow(), SessionKind::Claude);
         assert_eq!(reasoning_mode.borrow().as_deref(), Some("high"));
         assert_eq!(*observed.borrow(), Some(SessionKind::Claude));
+    }
+
+    #[test]
+    fn provider_switch_state_updates_selected_harness_immediately() {
+        let selected_harness = RefCell::new(SessionKind::Claude);
+        let reasoning_mode = RefCell::new(Some("medium".to_owned()));
+
+        apply_provider_switch_state(&selected_harness, &reasoning_mode, SessionKind::Codex);
+
+        assert_eq!(*selected_harness.borrow(), SessionKind::Codex);
+        assert_eq!(reasoning_mode.borrow().as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn pending_chat_creation_clears_local_thread_selection_immediately() {
+        let selected_thread = RefCell::new(Some(7));
+        let updates = Cell::new(0);
+
+        select_pending_chat_target_for_creation(&selected_thread, &|| {
+            updates.set(updates.get() + 1)
+        });
+
+        assert_eq!(*selected_thread.borrow(), None);
+        assert_eq!(updates.get(), 1);
+    }
+
+    #[test]
+    fn pending_chat_placeholder_names_provider_being_created() {
+        assert_eq!(
+            pending_chat_placeholder_text(
+                Some(&ChatUiPhase::Creating {
+                    provider: SessionKind::Codex
+                }),
+                SessionKind::Claude,
+            ),
+            "Creating new Codex chat..."
+        );
     }
 
     #[test]
