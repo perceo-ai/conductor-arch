@@ -4329,9 +4329,19 @@ fn matching_persisted_user_message_index(items: &[ChatTimelineItem], body: &str)
         matches!(
             item,
             ChatTimelineItem::Message(message)
-                if message.role == "user" && message.content.trim() == body.trim()
+                if message.role == "user"
+                    && provider_user_body_matches_persisted_message(body, &message.content)
         )
     })
+}
+
+fn provider_user_body_matches_persisted_message(provider_body: &str, persisted: &str) -> bool {
+    let provider_body = provider_body.trim();
+    let persisted = persisted.trim();
+    if persisted.is_empty() {
+        return provider_body.is_empty();
+    }
+    provider_body == persisted || provider_body.ends_with(&format!("\n\n{persisted}"))
 }
 
 fn interrupted_notice_sequence(
@@ -4756,7 +4766,10 @@ fn provider_projection_item_has_persisted_message(
     item.render_class == ProjectionRenderClass::UserChat
         && messages.iter().any(|message| {
             message.role == "user"
-                && message.content.trim() == provider_projection_user_body_for_render(item)
+                && provider_user_body_matches_persisted_message(
+                    &provider_projection_user_body_for_render(item),
+                    &message.content,
+                )
         })
 }
 
@@ -15775,6 +15788,30 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             provider_projection_user_body_for_render(&item),
             "what's up?"
         );
+    }
+
+    #[test]
+    fn prefixed_provider_user_echo_anchors_to_visible_user_message() {
+        let mut user_event =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
+        user_event.provider_item_id = Some("claude-user-replay".to_owned());
+        user_event.normalized_payload = serde_json::json!({
+            "title": "User",
+            "body": "Prefer small, reviewable changes. Explain verification clearly.\n\nwhat's up?\n\n<archductor_hidden_instruction>\nsecret metadata prompt\n</archductor_hidden_instruction>"
+        });
+        let projection = provider_projection_from_records(&[user_event]);
+        let messages = vec![chat_message_record(1, "user", "what's up?", "user_send")];
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            projection.items,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(timeline.len(), 1);
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
     }
 
     #[test]
