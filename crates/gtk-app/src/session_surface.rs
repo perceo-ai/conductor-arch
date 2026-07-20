@@ -617,14 +617,9 @@ pub fn agent_session_panel(
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_vexpand(true);
     scroll.set_propagate_natural_width(false);
+    scroll.add_css_class("chat-timeline-scroll");
     scroll.set_child(Some(&messages));
-
-    let chat_overlay = Overlay::new();
-    chat_overlay.add_css_class("chat-content-overlay");
-    chat_overlay.set_vexpand(true);
-    chat_overlay.set_hexpand(true);
-    chat_overlay.set_child(Some(&scroll));
-    root.append(&chat_overlay);
+    root.append(&scroll);
 
     // ── Composer ─────────────────────────────────────────────────────
     let composer_wrap = GBox::new(Orientation::Vertical, 0);
@@ -1049,8 +1044,7 @@ pub fn agent_session_panel(
     composer_box.append(&toolbar);
     composer_wrap.append(&queue_overlay);
     composer_wrap.append(&composer_box);
-    chat_overlay.add_overlay(&composer_wrap);
-    chat_overlay.set_measure_overlay(&composer_wrap, false);
+    root.append(&composer_wrap);
 
     let last_queue_overlay_signature = Rc::new(RefCell::new(None::<QueueOverlaySignature>));
     let refresh_queue_overlay_fn: Rc<dyn Fn()> = Rc::new({
@@ -14847,6 +14841,18 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             "working timer must be a transcript item after the latest chat message"
         );
         assert!(source.contains("ChatTimelineItem::WorkingIndicator"));
+    }
+
+    #[test]
+    fn chat_timeline_scroll_is_separate_from_floating_composer() {
+        let source = include_str!("session_surface.rs");
+        assert!(source.contains("scroll.add_css_class(\"chat-timeline-scroll\")"));
+        assert!(source.contains("root.append(&scroll);"));
+        assert!(source.contains("root.append(&composer_wrap);"));
+        let removed_overlay_add = concat!("chat_overlay.", "add_overlay(&composer_wrap)");
+        let removed_overlay_measure = concat!("set_measure", "_overlay(&composer_wrap");
+        assert!(!source.contains(removed_overlay_add));
+        assert!(!source.contains(removed_overlay_measure));
     }
 
     #[test]
