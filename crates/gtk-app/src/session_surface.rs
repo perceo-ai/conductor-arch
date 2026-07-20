@@ -4761,7 +4761,8 @@ fn provider_projection_item_has_persisted_message(
 }
 
 fn provider_projection_user_body_for_render(item: &ProviderProjectionItem) -> String {
-    recovered_current_user_message(&item.body).unwrap_or_else(|| item.body.trim().to_owned())
+    let body = recovered_current_user_message(&item.body).unwrap_or_else(|| item.body.to_owned());
+    strip_archductor_metadata_block(&body)
 }
 
 fn recovered_current_user_message(body: &str) -> Option<String> {
@@ -15750,6 +15751,30 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert_eq!(timeline.len(), 1);
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn provider_user_body_strips_archductor_hidden_instruction_block() {
+        let item = ProviderProjectionItem {
+            id: "claude:user".to_owned(),
+            sequence: 1,
+            timeline_seq: Some(1),
+            category: ProviderProjectionCategory::UserMessage,
+            render_class: ProjectionRenderClass::UserChat,
+            title: "User".to_owned(),
+            body: "what's up?\n\n<archductor_hidden_instruction>\nsecret metadata prompt\n<archductor_metadata>{\"workspace_name\":\"secret\"}</archductor_metadata>\n</archductor_hidden_instruction>".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        assert_eq!(
+            provider_projection_user_body_for_render(&item),
+            "what's up?"
+        );
     }
 
     #[test]

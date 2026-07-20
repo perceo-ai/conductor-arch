@@ -72,6 +72,7 @@ pub(crate) struct ClaudeManagedAdapter {
 struct TrackedClaudeInput {
     local_input_id: String,
     content: String,
+    visible_content: Option<String>,
     turn_id: u64,
     acknowledged: bool,
     started: bool,
@@ -95,11 +96,17 @@ impl ClaudeTurnTracker {
         self.initialized = true;
     }
 
-    fn note_input_written(&mut self, local_input_id: String, content: String) {
+    fn note_input_written(
+        &mut self,
+        local_input_id: String,
+        content: String,
+        visible_content: Option<String>,
+    ) {
         self.next_local_turn = self.next_local_turn.saturating_add(1);
         self.written_inputs.push_back(TrackedClaudeInput {
             local_input_id,
             content,
+            visible_content,
             turn_id: self.next_local_turn,
             acknowledged: false,
             started: false,
@@ -144,6 +151,19 @@ impl ClaudeTurnTracker {
                 local_input_id: active.local_input_id.clone(),
             });
         }
+    }
+
+    fn visible_content_for_replayed_user(&self, text: &str) -> Option<&str> {
+        self.active_turn
+            .as_ref()
+            .filter(|active| active.content == text)
+            .and_then(|active| active.visible_content.as_deref())
+            .or_else(|| {
+                self.written_inputs
+                    .front()
+                    .filter(|pending| pending.content == text)
+                    .and_then(|pending| pending.visible_content.as_deref())
+            })
     }
 
     fn note_provider_turn_started(&mut self, effects: &mut Vec<HarnessEffect>) {
@@ -244,8 +264,11 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
         let mut native_payload =
             serde_json::to_vec(&payload).context("serialize Claude stream-json input")?;
         native_payload.push(b'\n');
-        self.tracker
-            .note_input_written(input.local_input_id.clone(), input.content);
+        self.tracker.note_input_written(
+            input.local_input_id.clone(),
+            input.content,
+            input.visible_content,
+        );
 
         Ok(NativeWrite {
             provider_key: CLAUDE_PROVIDER_NAME,
@@ -282,18 +305,38 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 &lifecycle_signal,
                 Some(ClaudeLifecycleSignal::UserInputReplayed { .. })
             );
+            let visible_replayed_input = if let Some(ClaudeLifecycleSignal::UserInputReplayed {
+                text,
+            }) = &lifecycle_signal
+            {
+                self.tracker.visible_content_for_replayed_user(text)
+            } else {
+                None
+            }
+            .map(str::to_owned);
             let retry_message = string_at(&event.raw_json, &["error"]);
             let retry_delay_ms = number_at(&event.raw_json, &["retry_delay_ms"]);
             let limit_message = rate_limit_message(&event.raw_json);
             let limit_retry_after_ms = rate_limit_retry_after_ms(&event.raw_json);
+            let limit_is_allowed = rate_limit_is_allowed(&event.raw_json);
             let limit_is_terminal = rate_limit_is_terminal(&event.raw_json);
-            effects.extend(
-                event
-                    .clone()
-                    .into_provider_event_drafts(self.provider_context())
-                    .into_iter()
-                    .map(HarnessEffect::ProviderEvent),
-            );
+            let mut provider_event_drafts = event
+                .clone()
+                .into_provider_event_drafts(self.provider_context());
+            if let Some(visible_input) = visible_replayed_input.as_deref() {
+                for draft in provider_event_drafts.iter_mut() {
+                    if draft.kind == ProviderEventKind::UserInput {
+                        draft.normalized_payload["body"] = json!(visible_input);
+                    }
+                }
+            }
+            if !(event_kind == ClaudeProviderEventKind::RateLimit && limit_is_allowed) {
+                effects.extend(
+                    provider_event_drafts
+                        .into_iter()
+                        .map(HarnessEffect::ProviderEvent),
+                );
+            }
 
             match lifecycle_signal {
                 Some(ClaudeLifecycleSignal::Initialized(init)) => {
@@ -348,7 +391,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                     message: retry_message.unwrap_or_else(|| "Claude API retry".to_owned()),
                     delay_ms: retry_delay_ms,
                 });
-            } else if event_kind == ClaudeProviderEventKind::RateLimit {
+            } else if event_kind == ClaudeProviderEventKind::RateLimit && !limit_is_allowed {
                 effects.push(HarnessEffect::RateLimited {
                     message: limit_message,
                     retry_after_ms: limit_retry_after_ms,
@@ -1244,9 +1287,13 @@ fn rate_limit_retry_after_ms(value: &Value) -> Option<u64> {
         .or_else(|| number_at(value, &["retry_after_ms"]))
 }
 
+fn rate_limit_is_allowed(value: &Value) -> bool {
+    string_at(value, &["rate_limit_info", "status"])
+        .is_some_and(|status| status.eq_ignore_ascii_case("allowed"))
+}
+
 fn rate_limit_is_terminal(value: &Value) -> bool {
-    !string_at(value, &["rate_limit_info", "status"])
-        .is_some_and(|status| status.contains("allowed"))
+    !rate_limit_is_allowed(value)
 }
 
 fn claude_result_status_from_json(value: &Value) -> ClaudeResultStatus {
@@ -2279,6 +2326,58 @@ mod tests {
     }
 
     #[test]
+    fn claude_replayed_user_event_uses_visible_input_body() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-test","capabilities":[]}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "active-input".to_owned(),
+                content:
+                    "what's up?\n\n<archductor_hidden_instruction>secret</archductor_hidden_instruction>"
+                        .to_owned(),
+                visible_content: Some("what's up?".to_owned()),
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let replay = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"what's up?\n\n<archductor_hidden_instruction>secret</archductor_hidden_instruction>"}]}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+        let user_event = replay
+            .iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::ProviderEvent(event)
+                    if event.kind == ProviderEventKind::UserInput =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(user_event.normalized_payload["body"], "what's up?");
+    }
+
+    #[test]
     fn claude_fixture_terminal_rate_limit_finishes_active_turn_once() {
         let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
             session_id: 7,
@@ -2325,6 +2424,34 @@ mod tests {
         assert!(effects
             .iter()
             .any(|effect| matches!(effect, HarnessEffect::Ready)));
+    }
+
+    #[test]
+    fn claude_allowed_rate_limit_event_stays_hidden() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: CLAUDE_PROVIDER_NAME,
+                payload: br#"{"type":"rate_limit_event","session_id":"s1","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::RateLimited { .. })));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::ProviderEvent(event) if event.kind == ProviderEventKind::LimitFailure
+        )));
     }
 
     #[test]
