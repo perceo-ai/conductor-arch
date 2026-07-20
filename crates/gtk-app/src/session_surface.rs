@@ -334,6 +334,7 @@ struct SessionChatCreateUi {
     app_state: AppState,
     selected_thread: Rc<RefCell<Option<i64>>>,
     thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
+    pending_archcar_inputs: Rc<RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
     refresh_view: Rc<dyn Fn()>,
     eager_start: Rc<dyn Fn(String, i64, SessionKind)>,
@@ -369,6 +370,11 @@ fn spawn_session_chat_thread_create(
                 ui.thread_state.borrow_mut().insert(0, thread.clone());
                 ui.app_state
                     .resolve_pending_chat_target(pending_target.clone(), thread.id);
+                move_queued_chat_inputs_to_pending_archcar_inputs(
+                    &ui.app_state,
+                    ui.pending_archcar_inputs.as_ref(),
+                    thread.id,
+                );
                 *ui.selected_thread.borrow_mut() = Some(thread.id);
                 (ui.on_selected)();
                 if let Some(external_chat_tabs) = ui.external_chat_tabs.as_ref() {
@@ -2951,6 +2957,7 @@ pub fn agent_session_panel(
         let app_state_for_switch = app_state.clone();
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
+        let pending_archcar_inputs_for_switch = pending_archcar_inputs.clone();
         let external_chat_tabs_for_switch = external_chat_tabs.clone();
         let selected_harness_for_switch = selected_harness.clone();
         let reasoning_mode_for_switch = reasoning_mode.clone();
@@ -3060,6 +3067,7 @@ pub fn agent_session_panel(
                             app_state: app_state_for_switch.clone(),
                             selected_thread: selected_thread_for_switch.clone(),
                             thread_state: thread_state_for_switch.clone(),
+                            pending_archcar_inputs: pending_archcar_inputs_for_switch.clone(),
                             external_chat_tabs: external_chat_tabs_for_switch.clone(),
                             refresh_view: refresh_view_for_switch.clone(),
                             eager_start: eager_start_chat_agent_for_switch.clone(),
@@ -3544,6 +3552,7 @@ pub fn agent_session_panel(
                     app_state: app_state.clone(),
                     selected_thread: selected_thread.clone(),
                     thread_state: thread_state.clone(),
+                    pending_archcar_inputs: pending_archcar_inputs.clone(),
                     external_chat_tabs: external_chat_tabs.clone(),
                     refresh_view: refresh_view.clone(),
                     eager_start: eager_start_chat_agent.clone(),
@@ -7563,6 +7572,25 @@ fn queue_pending_archcar_input(
         .entry(thread_id)
         .or_default()
         .push(input);
+}
+
+fn move_queued_chat_inputs_to_pending_archcar_inputs(
+    app_state: &AppState,
+    pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    thread_id: i64,
+) {
+    while let Some(input) = pop_next_queued_chat_input(app_state, thread_id) {
+        queue_pending_archcar_input(
+            pending,
+            thread_id,
+            QueuedArchcarInput {
+                input: input.input,
+                visible_input: input.visible_input,
+                kind: input.kind,
+                session_kind: input.session_kind,
+            },
+        );
+    }
 }
 
 fn pop_next_pending_archcar_input(
@@ -12517,6 +12545,36 @@ fix it
         let queued = pop_next_queued_chat_input(&state, 42).unwrap();
         assert_eq!(queued.input, "first message in new chat");
         assert_eq!(state.selected_chat_thread(), Some(42));
+    }
+
+    #[test]
+    fn pending_chat_resolve_moves_first_message_to_archcar_start_queue() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Claude);
+        queue_archcar_input_for_target(
+            &state,
+            pending.clone(),
+            "first message in new claude chat".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Claude,
+        );
+        state.resolve_pending_chat_target(pending, 42);
+        let pending_archcar_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+
+        move_queued_chat_inputs_to_pending_archcar_inputs(&state, &pending_archcar_inputs, 42);
+
+        assert_eq!(state.queued_chat_inputs_count(42), 0);
+        let pending = pending_archcar_inputs.borrow();
+        let queued = pending.get(&42).expect("queued first input");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].input, "first message in new claude chat");
+        assert_eq!(queued[0].session_kind, SessionKind::Claude);
     }
 
     #[test]
