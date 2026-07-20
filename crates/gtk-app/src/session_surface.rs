@@ -1192,7 +1192,6 @@ pub fn agent_session_panel(
     let last_timeline_render_state = Rc::new(RefCell::new(None::<ChatTimelineRenderState>));
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
-        let database_path = database_path.clone();
         let placeholder = placeholder.clone();
         let send_btn = send_btn.clone();
         let input_view = input_view.clone();
@@ -1213,15 +1212,11 @@ pub fn agent_session_panel(
             let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
             let current_harness = *selected_harness.borrow();
             let has_active_generation = action_thread_id.is_some_and(|thread_id| {
-                let has_visible_history =
-                    thread_has_visible_chat_history(&database_path, thread_id);
-                managed_active_generation_for_thread(
+                active_generation_for_thread(
                     &record_state.borrow(),
                     &working_threads,
-                    archcar_ready_cache.as_ref(),
                     thread_id,
                     current_harness,
-                    has_visible_history,
                 )
             });
             let latest_status = action_thread_id.and_then(|thread_id| {
@@ -1886,27 +1881,7 @@ pub fn agent_session_panel(
                     } else {
                         CodexStartupState::Idle
                     };
-                    let has_visible_history =
-                        thread_has_visible_chat_history(&database_path, thread_id);
-                    if managed_active_generation_for_thread(
-                        &current,
-                        &working_threads,
-                        archcar_ready_cache.as_ref(),
-                        thread_id,
-                        current_kind,
-                        has_visible_history,
-                    ) && working_elapsed_for_thread(&working_threads, thread_id).is_none()
-                    {
-                        mark_thread_working(&working_threads, thread_id);
-                    }
-                    let working_elapsed = managed_generation_elapsed_for_thread(
-                        &current,
-                        &working_threads,
-                        archcar_ready_cache.as_ref(),
-                        thread_id,
-                        current_kind,
-                        has_visible_history,
-                    );
+                    let working_elapsed = working_elapsed_for_thread(&working_threads, thread_id);
                     update_working_status_row(
                         &working_status_row,
                         &working_status_label,
@@ -3290,7 +3265,6 @@ pub fn agent_session_panel(
         }
     });
     let submit_composer_action = Rc::new({
-        let database_path = database_path.clone();
         let buffer = buffer.clone();
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
@@ -3332,15 +3306,11 @@ pub fn agent_session_panel(
             }
             let current_harness = *selected_harness.borrow();
             let has_active_generation = thread_id.is_some_and(|thread_id| {
-                let has_visible_history =
-                    thread_has_visible_chat_history(&database_path, thread_id);
-                managed_active_generation_for_thread(
+                active_generation_for_thread(
                     &record_state.borrow(),
                     &working_threads,
-                    archcar_ready_cache.as_ref(),
                     thread_id,
                     current_harness,
-                    has_visible_history,
                 )
             });
             let latest_status = action_thread_id.and_then(|thread_id| {
@@ -7944,53 +7914,6 @@ fn active_generation_for_thread(
     working_threads.borrow().contains_key(&thread_id)
 }
 
-fn managed_active_generation_for_thread(
-    records: &[ProcessRecord],
-    working_threads: &RefCell<HashMap<i64, Instant>>,
-    ready_cache: &RefCell<HashMap<i64, bool>>,
-    thread_id: i64,
-    kind: SessionKind,
-    has_visible_history: bool,
-) -> bool {
-    managed_generation_elapsed_for_thread(
-        records,
-        working_threads,
-        ready_cache,
-        thread_id,
-        kind,
-        has_visible_history,
-    )
-    .is_some()
-}
-
-fn managed_generation_elapsed_for_thread(
-    records: &[ProcessRecord],
-    working_threads: &RefCell<HashMap<i64, Instant>>,
-    ready_cache: &RefCell<HashMap<i64, bool>>,
-    thread_id: i64,
-    kind: SessionKind,
-    has_visible_history: bool,
-) -> Option<Duration> {
-    running_session_for_thread(records, thread_id, kind)?;
-    if let Some(elapsed) = working_elapsed_for_thread(working_threads, thread_id) {
-        return Some(elapsed);
-    }
-    if managed_harness_for_kind(kind).is_some()
-        && has_visible_history
-        && !thread_has_ready_managed_session(records, thread_id, kind, ready_cache)
-    {
-        return Some(Duration::ZERO);
-    }
-    None
-}
-
-fn thread_has_visible_chat_history(database_path: &Path, thread_id: i64) -> bool {
-    WorkspaceStore::open_app(database_path)
-        .and_then(|store| store.list_chat_messages(thread_id))
-        .map(|messages| messages.iter().any(chat_message_is_renderable))
-        .unwrap_or(false)
-}
-
 fn running_session_for_thread(
     records: &[ProcessRecord],
     thread_id: i64,
@@ -12272,81 +12195,6 @@ fix it
             8,
             SessionKind::Codex
         ));
-    }
-
-    #[test]
-    fn managed_active_generation_infers_not_ready_claude_with_history() {
-        let records = vec![process_record_with_thread(
-            13,
-            ProcessStatus::Running,
-            Some(9),
-            "claude",
-        )];
-        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
-        let working_threads = RefCell::new(HashMap::new());
-
-        assert!(managed_active_generation_for_thread(
-            &records,
-            &working_threads,
-            &ready_cache,
-            9,
-            SessionKind::Claude,
-            true,
-        ));
-    }
-
-    #[test]
-    fn managed_active_generation_does_not_block_first_claude_input() {
-        let records = vec![process_record_with_thread(
-            13,
-            ProcessStatus::Running,
-            Some(9),
-            "claude",
-        )];
-        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
-        let working_threads = RefCell::new(HashMap::new());
-
-        assert!(!managed_active_generation_for_thread(
-            &records,
-            &working_threads,
-            &ready_cache,
-            9,
-            SessionKind::Claude,
-            false,
-        ));
-    }
-
-    #[test]
-    fn default_enter_queues_when_claude_generation_is_inferred() {
-        let records = vec![process_record_with_thread(
-            13,
-            ProcessStatus::Running,
-            Some(9),
-            "claude",
-        )];
-        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
-        let working_threads = RefCell::new(HashMap::new());
-        let has_active_generation = managed_active_generation_for_thread(
-            &records,
-            &working_threads,
-            &ready_cache,
-            9,
-            SessionKind::Claude,
-            true,
-        );
-        let action =
-            composer_action_for_startup_state(true, has_active_generation, false, 0, false);
-
-        assert_eq!(
-            composer_action_for_submit_intent(
-                action,
-                ComposerSubmitIntent::Default,
-                true,
-                SessionKind::Claude,
-                false,
-            ),
-            ComposerAction::Queue,
-        );
     }
 
     #[test]
