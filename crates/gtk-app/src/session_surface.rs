@@ -2951,6 +2951,7 @@ pub fn agent_session_panel(
         let app_state_for_switch = app_state.clone();
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
+        let external_chat_tabs_for_switch = external_chat_tabs.clone();
         let selected_harness_for_switch = selected_harness.clone();
         let reasoning_mode_for_switch = reasoning_mode.clone();
         let update_composer_for_switch = update_composer_state.clone();
@@ -3000,11 +3001,67 @@ pub fn agent_session_panel(
                 current.extend(threads.clone());
             }
 
-            let next_thread = preferred_thread_for_kind(
+            persist_selected_provider(
+                &db_for_switch,
+                &workspace_for_switch,
+                session_kind_provider(next_kind),
+            );
+
+            let target = provider_switch_thread_target(
                 &threads,
                 *selected_thread_for_switch.borrow(),
                 next_kind,
             );
+            let next_thread = match target {
+                ProviderSwitchThreadTarget::Existing(thread_id) => Some(thread_id),
+                ProviderSwitchThreadTarget::CreateNew => {
+                    let title = default_chat_thread_title(next_kind, &threads);
+                    let pending_target = app_state_for_switch
+                        .create_pending_chat_target(workspace_for_switch.clone(), next_kind);
+                    let on_selected: Rc<dyn Fn()> = Rc::new({
+                        let restore_composer_draft_for_switch =
+                            restore_composer_draft_for_switch.clone();
+                        let update_composer_for_switch = update_composer_for_switch.clone();
+                        let refresh_queue_overlay_for_switch =
+                            refresh_queue_overlay_for_switch.clone();
+                        move || {
+                            restore_composer_draft_for_switch();
+                            update_composer_for_switch();
+                            if let Some(refresh) =
+                                refresh_queue_overlay_for_switch.borrow().as_ref().cloned()
+                            {
+                                refresh();
+                            }
+                        }
+                    });
+                    select_pending_chat_target_for_creation(
+                        selected_thread_for_switch.as_ref(),
+                        on_selected.as_ref(),
+                    );
+                    *selected_session_for_switch.borrow_mut() = None;
+                    app_state_for_switch.set_selected_agent_session(None);
+                    refresh_view_for_switch();
+                    spawn_session_chat_thread_create(
+                        db_for_switch.clone(),
+                        workspace_for_switch.clone(),
+                        next_kind,
+                        title,
+                        None,
+                        pending_target,
+                        SessionChatCreateUi {
+                            app_state: app_state_for_switch.clone(),
+                            selected_thread: selected_thread_for_switch.clone(),
+                            thread_state: thread_state_for_switch.clone(),
+                            external_chat_tabs: external_chat_tabs_for_switch.clone(),
+                            refresh_view: refresh_view_for_switch.clone(),
+                            eager_start: eager_start_chat_agent_for_switch.clone(),
+                            on_selected,
+                            toast_manager: toast_for_switch.clone(),
+                        },
+                    );
+                    return;
+                }
+            };
             apply_thread_selection(
                 selected_thread_for_switch.as_ref(),
                 next_thread,
@@ -6761,6 +6818,12 @@ enum ModelSelectionRoute {
     CrossProvider(SessionKind),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderSwitchThreadTarget {
+    Existing(i64),
+    CreateNew,
+}
+
 impl ProviderModelChoice {
     fn provider_label(&self) -> &'static str {
         provider_display_name(&self.provider)
@@ -6974,6 +7037,16 @@ fn selected_provider_model_choice_index(
                 .position(|choice| choice.provider == provider)
         })
         .unwrap_or(0)
+}
+
+fn provider_switch_thread_target(
+    threads: &[ChatThreadRecord],
+    preferred: Option<i64>,
+    kind: SessionKind,
+) -> ProviderSwitchThreadTarget {
+    preferred_thread_for_kind(threads, preferred, kind)
+        .map(ProviderSwitchThreadTarget::Existing)
+        .unwrap_or(ProviderSwitchThreadTarget::CreateNew)
 }
 
 fn provider_display_name(provider: &str) -> &'static str {
@@ -11200,6 +11273,62 @@ mod tests {
         assert_eq!(
             model_selection_route(SessionKind::Codex, &current),
             ModelSelectionRoute::CrossProvider(SessionKind::Claude)
+        );
+    }
+
+    #[test]
+    fn provider_switch_without_target_provider_thread_creates_new_chat() {
+        let threads = vec![ChatThreadRecord {
+            id: 8,
+            workspace_id: 1,
+            provider: "claude".to_owned(),
+            title: "Claude".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        }];
+
+        assert_eq!(
+            provider_switch_thread_target(&threads, Some(8), SessionKind::Codex),
+            ProviderSwitchThreadTarget::CreateNew
+        );
+    }
+
+    #[test]
+    fn provider_switch_reuses_existing_target_provider_thread() {
+        let threads = vec![
+            ChatThreadRecord {
+                id: 7,
+                workspace_id: 1,
+                provider: "codex".to_owned(),
+                title: "Codex".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+            ChatThreadRecord {
+                id: 8,
+                workspace_id: 1,
+                provider: "claude".to_owned(),
+                title: "Claude".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+        ];
+
+        assert_eq!(
+            provider_switch_thread_target(&threads, Some(8), SessionKind::Codex),
+            ProviderSwitchThreadTarget::Existing(7)
         );
     }
 
