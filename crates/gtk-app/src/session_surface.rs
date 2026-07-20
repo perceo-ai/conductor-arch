@@ -4307,12 +4307,21 @@ fn chat_timeline_items_anchored_to_provider_user_events(
     provider_items: Vec<ProviderProjectionItem>,
 ) -> Vec<ChatTimelineItem> {
     let mut items = Vec::new();
+    let mut anchored_user_bodies = Vec::<String>::new();
     for provider_item in provider_items {
         if provider_item.render_class == ProjectionRenderClass::UserChat {
             let user_body = provider_projection_user_body_for_render(&provider_item);
             if let Some(index) = matching_persisted_user_message_index(&persisted_items, &user_body)
             {
+                if let ChatTimelineItem::Message(message) = &persisted_items[index] {
+                    anchored_user_bodies.push(message.content.trim().to_owned());
+                }
                 items.push(persisted_items.remove(index));
+            } else if anchored_user_bodies
+                .iter()
+                .any(|anchored| provider_user_body_matches_persisted_message(&user_body, anchored))
+            {
+                continue;
             } else if !user_body.is_empty() {
                 items.push(ChatTimelineItem::ProviderProjection(provider_item));
             }
@@ -15801,6 +15810,46 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         });
         let projection = provider_projection_from_records(&[user_event]);
         let messages = vec![chat_message_record(1, "user", "what's up?", "user_send")];
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            projection.items,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(timeline.len(), 1);
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn duplicate_provider_user_echo_after_synthetic_send_is_suppressed() {
+        let mut synthetic =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Started);
+        synthetic.provider_item_id = Some("synthetic-user-send".to_owned());
+        synthetic.provider_subtype = Some("user_send".to_owned());
+        synthetic.received_sequence = 1;
+        synthetic.normalized_payload = serde_json::json!({
+            "title": "User input",
+            "body": "queue message 1"
+        });
+        let mut replay =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Started);
+        replay.provider_item_id = Some("claude-native-replay".to_owned());
+        replay.provider_subtype = Some("user".to_owned());
+        replay.received_sequence = 2;
+        replay.normalized_payload = serde_json::json!({
+            "title": "User input",
+            "body": "queue message 1"
+        });
+        let projection = provider_projection_from_records(&[synthetic, replay]);
+        let messages = vec![chat_message_record(
+            1,
+            "user",
+            "queue message 1",
+            "user_send",
+        )];
 
         let timeline = chat_structured_items_for_render(
             messages,
