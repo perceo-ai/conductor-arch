@@ -3001,12 +3001,6 @@ pub fn agent_session_panel(
                 current.extend(threads.clone());
             }
 
-            persist_selected_provider(
-                &db_for_switch,
-                &workspace_for_switch,
-                session_kind_provider(next_kind),
-            );
-
             let target = if explicit_switch {
                 provider_switch_thread_target(
                     &threads,
@@ -3024,6 +3018,11 @@ pub fn agent_session_panel(
                 ProviderSwitchThreadTarget::Existing(thread_id) => Some(thread_id),
                 ProviderSwitchThreadTarget::NoSelection => None,
                 ProviderSwitchThreadTarget::CreateNew => {
+                    persist_selected_provider(
+                        &db_for_switch,
+                        &workspace_for_switch,
+                        session_kind_provider(next_kind),
+                    );
                     let title = default_chat_thread_title(next_kind, &threads);
                     let pending_target = app_state_for_switch
                         .create_pending_chat_target(workspace_for_switch.clone(), next_kind);
@@ -3071,6 +3070,23 @@ pub fn agent_session_panel(
                     return;
                 }
             };
+            let effective_kind = if explicit_switch {
+                next_kind
+            } else {
+                provider_switch_initial_effective_kind(&threads, next_thread, next_kind)
+            };
+            if effective_kind != next_kind {
+                apply_provider_switch_state(
+                    selected_harness_for_switch.as_ref(),
+                    reasoning_mode_for_switch.as_ref(),
+                    effective_kind,
+                );
+            }
+            persist_selected_provider(
+                &db_for_switch,
+                &workspace_for_switch,
+                session_kind_provider(effective_kind),
+            );
             apply_thread_selection(
                 selected_thread_for_switch.as_ref(),
                 next_thread,
@@ -3089,7 +3105,7 @@ pub fn agent_session_panel(
                 eager_start_chat_agent_for_switch(
                     workspace_for_switch.clone(),
                     thread_id,
-                    next_kind,
+                    effective_kind,
                 );
             }
             let next_process = next_thread.and_then(|thread_id| {
@@ -3101,7 +3117,7 @@ pub fn agent_session_panel(
                 preferred_session_for_kind(
                     &thread_records,
                     *selected_session_for_switch.borrow(),
-                    next_kind,
+                    effective_kind,
                 )
             });
             *selected_session_for_switch.borrow_mut() = next_process;
@@ -7064,11 +7080,43 @@ fn provider_switch_thread_target(
 fn provider_switch_initial_thread_target(
     threads: &[ChatThreadRecord],
     preferred: Option<i64>,
-    kind: SessionKind,
+    _kind: SessionKind,
 ) -> ProviderSwitchThreadTarget {
-    preferred_thread_for_kind(threads, preferred, kind)
+    preferred
+        .filter(|id| {
+            threads.iter().any(|thread| {
+                thread.id == *id
+                    && thread.status == "active"
+                    && launchable_provider_key(&thread.provider).is_some()
+            })
+        })
+        .or_else(|| {
+            threads
+                .iter()
+                .find(|thread| {
+                    thread.status == "active" && launchable_provider_key(&thread.provider).is_some()
+                })
+                .map(|thread| thread.id)
+        })
         .map(ProviderSwitchThreadTarget::Existing)
         .unwrap_or(ProviderSwitchThreadTarget::NoSelection)
+}
+
+fn provider_switch_initial_effective_kind(
+    threads: &[ChatThreadRecord],
+    selected_thread: Option<i64>,
+    fallback: SessionKind,
+) -> SessionKind {
+    selected_thread
+        .and_then(|id| {
+            threads.iter().find(|thread| {
+                thread.id == id
+                    && thread.status == "active"
+                    && launchable_provider_key(&thread.provider).is_some()
+            })
+        })
+        .map(|thread| session_kind_from_provider(&thread.provider))
+        .unwrap_or(fallback)
 }
 
 fn provider_display_name(provider: &str) -> &'static str {
@@ -11355,7 +11403,42 @@ mod tests {
     }
 
     #[test]
-    fn initial_provider_sync_reuses_existing_target_provider_thread() {
+    fn initial_provider_sync_without_selected_thread_uses_leftmost_thread() {
+        let threads = vec![
+            ChatThreadRecord {
+                id: 7,
+                workspace_id: 1,
+                provider: "codex".to_owned(),
+                title: "Codex".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+            ChatThreadRecord {
+                id: 8,
+                workspace_id: 1,
+                provider: "claude".to_owned(),
+                title: "Claude".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+        ];
+
+        assert_eq!(
+            provider_switch_initial_thread_target(&threads, None, SessionKind::Codex),
+            ProviderSwitchThreadTarget::Existing(7)
+        );
+    }
+
+    #[test]
+    fn initial_provider_sync_preserves_selected_leftmost_thread_across_provider() {
         let threads = vec![
             ChatThreadRecord {
                 id: 7,
@@ -11385,12 +11468,12 @@ mod tests {
 
         assert_eq!(
             provider_switch_initial_thread_target(&threads, Some(8), SessionKind::Codex),
-            ProviderSwitchThreadTarget::Existing(7)
+            ProviderSwitchThreadTarget::Existing(8)
         );
     }
 
     #[test]
-    fn initial_provider_sync_without_target_provider_thread_selects_none() {
+    fn initial_provider_sync_uses_selected_thread_provider_for_startup_side_effects() {
         let threads = vec![ChatThreadRecord {
             id: 8,
             workspace_id: 1,
@@ -11405,7 +11488,42 @@ mod tests {
         }];
 
         assert_eq!(
-            provider_switch_initial_thread_target(&threads, Some(8), SessionKind::Codex),
+            provider_switch_initial_effective_kind(&threads, Some(8), SessionKind::Codex),
+            SessionKind::Claude
+        );
+    }
+
+    #[test]
+    fn initial_provider_sync_without_active_launchable_thread_selects_none() {
+        let threads = vec![
+            ChatThreadRecord {
+                id: 8,
+                workspace_id: 1,
+                provider: "claude".to_owned(),
+                title: "Claude".to_owned(),
+                status: "closed".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: Some("now".to_owned()),
+            },
+            ChatThreadRecord {
+                id: 9,
+                workspace_id: 1,
+                provider: "shell".to_owned(),
+                title: "Shell".to_owned(),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            },
+        ];
+
+        assert_eq!(
+            provider_switch_initial_thread_target(&threads, None, SessionKind::Codex),
             ProviderSwitchThreadTarget::NoSelection
         );
     }

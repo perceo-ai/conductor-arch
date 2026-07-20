@@ -717,13 +717,10 @@ fn ws_center_panel(
         store.list_chat_threads(&ws.name).unwrap_or_default(),
     ));
     let current_workspace_name = Rc::new(RefCell::new(ws.name.clone()));
-    let selected_thread = Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
-        known_threads
-            .borrow()
-            .iter()
-            .find(|thread| workspace_chat_thread_is_visible(thread))
-            .map(|thread| thread.id)
-    })));
+    let selected_thread =
+        Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
+            startup_chat_thread_selection(&known_threads.borrow())
+        })));
     if state.selected_chat_thread().is_none() {
         state.set_selected_chat_thread(*selected_thread.borrow());
     }
@@ -1439,6 +1436,13 @@ fn workspace_chat_nav_label(item: &crate::background_sync::WorkspaceChatNavItem)
 
 fn workspace_chat_thread_is_visible(thread: &ChatThreadRecord) -> bool {
     workspace_chat_thread_is_supported(thread) && thread.status == "active"
+}
+
+fn startup_chat_thread_selection(threads: &[ChatThreadRecord]) -> Option<i64> {
+    threads
+        .iter()
+        .find(|thread| workspace_chat_thread_is_visible(thread))
+        .map(|thread| thread.id)
 }
 
 fn workspace_chat_thread_is_reopenable(thread: &ChatThreadRecord) -> bool {
@@ -9000,6 +9004,51 @@ mod tests {
         assert!(!workspace_chat_thread_is_visible(&closed));
         assert!(workspace_chat_thread_is_reopenable(&closed));
         assert_eq!(workspace_chat_default_title(&[shell, closed]), "New Chat");
+    }
+
+    #[test]
+    fn startup_chat_selection_uses_leftmost_visible_thread() {
+        let closed = ChatThreadRecord {
+            id: 1,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "Closed".to_owned(),
+            status: "closed".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: Some("now".to_owned()),
+        };
+        let leftmost = ChatThreadRecord {
+            id: 2,
+            workspace_id: 2,
+            provider: "claude".to_owned(),
+            title: "Claude".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let next = ChatThreadRecord {
+            id: 3,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "Codex".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+
+        assert_eq!(
+            startup_chat_thread_selection(&[closed, leftmost, next]),
+            Some(2)
+        );
     }
 
     #[test]
