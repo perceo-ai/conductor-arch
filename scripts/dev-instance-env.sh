@@ -81,10 +81,16 @@ fi
 export ARCHDUCTOR_DEV_INSTANCE="$slug"
 if [[ "${CARGO_BUILD_TARGET:-}" == "x86_64-pc-windows-gnu" ]]; then
     default_archcar_bin="$repo_root/target/$CARGO_BUILD_TARGET/debug/archcar.exe"
+    default_gtk_bin="$repo_root/target/$CARGO_BUILD_TARGET/debug/archductor-gtk.exe"
+    default_dev_runner_bin="$repo_root/target/$CARGO_BUILD_TARGET/debug/archductor-dev.exe"
 else
     default_archcar_bin="$repo_root/target/debug/archcar"
+    default_gtk_bin="$repo_root/target/debug/archductor-gtk"
+    default_dev_runner_bin="$repo_root/target/debug/archductor-dev"
 fi
 export ARCHDUCTOR_ARCHCAR_BIN="${ARCHDUCTOR_ARCHCAR_BIN:-$default_archcar_bin}"
+export ARCHDUCTOR_GTK_BIN="${ARCHDUCTOR_GTK_BIN:-$default_gtk_bin}"
+export ARCHDUCTOR_DEV_RUNNER_BIN="${ARCHDUCTOR_DEV_RUNNER_BIN:-$default_dev_runner_bin}"
 export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$default_gh_config_dir}"
 export XDG_CONFIG_HOME="$base/config"
 export XDG_DATA_HOME="$base/data"
@@ -100,6 +106,10 @@ if [[ "${1:-}" == "--print" ]]; then
     printf 'XDG_STATE_HOME=%s\n' "$XDG_STATE_HOME"
     printf 'XDG_CACHE_HOME=%s\n' "$XDG_CACHE_HOME"
     exit 0
+fi
+
+if [[ "${1:-}" == "--run-dev" ]]; then
+    exec "$ARCHDUCTOR_DEV_RUNNER_BIN"
 fi
 
 exec "$@"
