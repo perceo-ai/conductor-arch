@@ -26,7 +26,7 @@ mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow};
+use adw::Application;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::paths::AppPaths;
 use archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
@@ -35,8 +35,8 @@ use command_palette::{
     ShortcutAction,
 };
 use gtk::{
-    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overflow, Overlay, ScrolledWindow,
-    Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, ApplicationWindow, Box as GBox, CssProvider, Entry, Label, Orientation, Overflow,
+    Overlay, ScrolledWindow, Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshEvent, RefreshHub, RefreshScope};
@@ -727,6 +727,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         .default_width(1280)
         .default_height(800)
         .build();
+    configure_window_chrome(&window);
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: window built"
@@ -1016,7 +1017,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             );
         })
     };
-    window.set_content(Some(&split));
+    window.set_child(Some(&split));
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -1792,6 +1793,21 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 
 // ── STYLES ────────────────────────────────────────────────────────────────
 
+fn configure_window_chrome(window: &ApplicationWindow) {
+    #[cfg(windows)]
+    {
+        window.set_titlebar(None::<&gtk::Widget>);
+        window.set_decorated(true);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let header_bar = gtk::HeaderBar::builder().show_title_buttons(true).build();
+        header_bar.add_css_class("app-titlebar");
+        window.set_titlebar(Some(&header_bar));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1801,6 +1817,36 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn app_window_chrome_is_platform_appropriate() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(
+            production.contains("configure_window_chrome(&window);"),
+            "the main window should explicitly configure platform chrome"
+        );
+        assert!(
+            production.contains("use adw::Application;")
+                && production.contains("ApplicationWindow,")
+                && !production.contains("use adw::{Application, ApplicationWindow};"),
+            "custom title bars require GTK ApplicationWindow rather than AdwApplicationWindow"
+        );
+        assert!(
+            production.contains("window.set_titlebar(None::<&gtk::Widget>)")
+                && production.contains("window.set_decorated(true)"),
+            "Windows should use native decorated window chrome"
+        );
+        assert!(
+            production.contains("gtk::HeaderBar::builder()")
+                && production.contains(".show_title_buttons(true)"),
+            "Linux should use a draggable GTK header bar with title buttons"
+        );
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
