@@ -1,6 +1,11 @@
 VERSION ?= 0.1.0
 DEV_ENV := scripts/dev-instance-env.sh
 
+ifeq ($(OS),Windows_NT)
+SHELL := C:/msys64/usr/bin/bash.exe
+DEV_ENV := C:/msys64/usr/bin/bash.exe scripts/dev-instance-env.sh
+endif
+
 .PHONY: help dev dev-env archcar gtk cli run build build-release check release tag publish-tag
 
 help:
@@ -19,7 +24,7 @@ help:
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION'
 
 dev:
-	@cargo build --workspace
+	@$(DEV_ENV) cargo build --workspace
 	@cleanup_dev() { \
 		status=$$?; \
 		trap - INT TERM EXIT; \

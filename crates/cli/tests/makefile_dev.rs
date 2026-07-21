@@ -34,3 +34,28 @@ fn make_dev_watch_avoids_generated_build_state() {
         "make dev should not let cargo-watch default to watching the whole repo"
     );
 }
+
+#[test]
+fn make_dev_build_uses_the_platform_dev_environment() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let makefile = fs::read_to_string(repo_root.join("Makefile")).expect("read root Makefile");
+
+    assert!(
+        makefile.contains("$(DEV_ENV) cargo build --workspace"),
+        "make dev must configure the Windows GNU/GTK environment before its initial build"
+    );
+}
+
+#[test]
+fn make_uses_msys2_bash_for_windows_dev_recipes() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let makefile = fs::read_to_string(repo_root.join("Makefile")).expect("read root Makefile");
+
+    assert!(
+        makefile.contains("ifeq ($(OS),Windows_NT)")
+            && makefile.contains("SHELL := C:/msys64/usr/bin/bash.exe")
+            && makefile
+                .contains("DEV_ENV := C:/msys64/usr/bin/bash.exe scripts/dev-instance-env.sh"),
+        "Windows make targets should use the Bash installed with the required MSYS2 toolchain"
+    );
+}
