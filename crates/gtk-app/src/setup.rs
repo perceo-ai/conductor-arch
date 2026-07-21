@@ -1,9 +1,8 @@
-use adw::ApplicationWindow;
 use archductor_core::doctor::{
     refresh_process_environment, setup_blockers, SetupBlocker, SetupCheck, SetupReadiness,
 };
 use gtk::prelude::*;
-use gtk::{Box as GBox, Label, LinkButton, Orientation};
+use gtk::{ApplicationWindow, Box as GBox, Label, LinkButton, Orientation};
 
 use crate::buttons::text_button;
 
