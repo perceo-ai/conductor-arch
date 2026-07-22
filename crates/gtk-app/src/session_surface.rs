@@ -10,6 +10,10 @@ use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
 };
 use archductor_core::archcar::session::CODEX_RECOVERY_CURRENT_USER_MESSAGE_HEADER;
+use archductor_core::chat_attachments::{
+    parse_attachment_token, replace_long_paste_with_attachment, save_chat_attachment,
+    AttachmentKind, ChatAttachment,
+};
 use archductor_core::codex_tui::{
     parse_codex_context_usage, parse_codex_file_change_block, parse_codex_inline_event,
     CodexFileChangeAction as CoreCodexFileChangeAction,
@@ -86,6 +90,7 @@ const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
 const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;
 const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
+const LONG_PASTE_ATTACHMENT_THRESHOLD: usize = 2_000;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -3417,8 +3422,29 @@ pub fn agent_session_panel(
     let composer_keybind = EventControllerKey::new();
     composer_keybind.connect_key_pressed({
         let submit_composer_action = submit_composer_action.clone();
+        let database_path = database_path.clone();
+        let current_workspace_name = current_workspace_name.clone();
+        let selected_thread = selected_thread.clone();
+        let app_state = app_state.clone();
+        let buffer = buffer.clone();
+        let input_view = input_view.clone();
+        let update_composer_state = update_composer_state.clone();
+        let toast_manager = toast_manager.clone();
         move |_, keyval, _, modifiers| {
             guarded_gtk_callback(gtk::glib::Propagation::Proceed, || {
+                if should_handle_composer_paste(keyval, modifiers) {
+                    handle_composer_paste(
+                        database_path.clone(),
+                        current_workspace_name.borrow().clone(),
+                        *selected_thread.borrow(),
+                        app_state.selected_chat_target(),
+                        buffer.clone(),
+                        input_view.clone(),
+                        update_composer_state.clone(),
+                        toast_manager.clone(),
+                    );
+                    return gtk::glib::Propagation::Stop;
+                }
                 if !should_send_composer_message(keyval, modifiers) {
                     return gtk::glib::Propagation::Proceed;
                 }
@@ -3585,22 +3611,104 @@ pub(crate) fn session_header_row_with_branch_label(
     (header, branch_label)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UserMessagePart {
+    Text(String),
+    Attachment(ChatAttachment),
+}
+
 fn chat_user_bubble(text: &str) -> GBox {
     let row = GBox::new(Orientation::Horizontal, 0);
     row.set_halign(gtk::Align::Fill);
     row.set_hexpand(true);
     row.add_css_class("chat-user-row");
 
-    let bubble = Label::new(None);
-    bubble.set_markup(&chat_text_markup(text));
+    let parts = user_message_attachment_parts(text);
+    if parts.len() == 1 && matches!(parts.first(), Some(UserMessagePart::Text(_))) {
+        let bubble = Label::new(None);
+        bubble.set_markup(&chat_text_markup(text));
+        bubble.add_css_class("chat-user-bubble");
+        bubble.set_selectable(true);
+        bubble.set_wrap(true);
+        bubble.set_xalign(0.0);
+        bubble.set_hexpand(true);
+        bubble.set_halign(gtk::Align::Fill);
+        row.append(&bubble);
+        return row;
+    }
+
+    let bubble = GBox::new(Orientation::Vertical, 6);
     bubble.add_css_class("chat-user-bubble");
-    bubble.set_selectable(true);
-    bubble.set_wrap(true);
-    bubble.set_xalign(0.0);
     bubble.set_hexpand(true);
     bubble.set_halign(gtk::Align::Fill);
+    for part in parts {
+        match part {
+            UserMessagePart::Text(text) if text.trim().is_empty() => {}
+            UserMessagePart::Text(text) => {
+                let label = Label::new(None);
+                label.set_markup(&chat_text_markup(text.trim()));
+                label.set_selectable(true);
+                label.set_wrap(true);
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+                bubble.append(&label);
+            }
+            UserMessagePart::Attachment(attachment) => {
+                bubble.append(&user_attachment_chip(&attachment));
+            }
+        }
+    }
     row.append(&bubble);
     row
+}
+
+fn user_attachment_chip(attachment: &ChatAttachment) -> Label {
+    let label = Label::new(Some(&format!(
+        "{}: {}",
+        match attachment.kind {
+            AttachmentKind::Image => "Image",
+            AttachmentKind::Text => "Text",
+        },
+        attachment.label
+    )));
+    label.add_css_class("chat-inline-event-chip");
+    label.add_css_class("chat-inline-event-file");
+    label.set_tooltip_text(Some(&attachment.path));
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Start);
+    label
+}
+
+fn user_message_attachment_parts(text: &str) -> Vec<UserMessagePart> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find("<archductor_attachment ") {
+        if start > 0 {
+            parts.push(UserMessagePart::Text(rest[..start].to_owned()));
+        }
+        let candidate = &rest[start..];
+        let Some(end) = candidate.find(" />") else {
+            parts.push(UserMessagePart::Text(candidate.to_owned()));
+            return parts;
+        };
+        let token = &candidate[..end + 3];
+        if let Some(attachment) = parse_attachment_token(token) {
+            parts.push(UserMessagePart::Attachment(attachment));
+            rest = &candidate[end + 3..];
+        } else {
+            parts.push(UserMessagePart::Text(candidate[..end + 3].to_owned()));
+            rest = &candidate[end + 3..];
+        }
+    }
+
+    if !rest.is_empty() {
+        parts.push(UserMessagePart::Text(rest.to_owned()));
+    }
+    if parts.is_empty() {
+        parts.push(UserMessagePart::Text(String::new()));
+    }
+    parts
 }
 
 fn queued_composer_overlay_row(
@@ -9051,6 +9159,129 @@ fn should_send_composer_message(key: gtk::gdk::Key, modifiers: gtk::gdk::Modifie
         && !modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK)
 }
 
+fn should_handle_composer_paste(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    ctrl && key
+        .to_unicode()
+        .is_some_and(|ch| ch.eq_ignore_ascii_case(&'v'))
+}
+
+fn chat_attachment_id_for_target(
+    selected_thread_id: Option<i64>,
+    chat_target: Option<&ChatUiTarget>,
+) -> String {
+    if let Some(thread_id) = selected_thread_id {
+        return thread_id.to_string();
+    }
+    match chat_target {
+        Some(ChatUiTarget::Thread(thread_id)) => thread_id.to_string(),
+        Some(ChatUiTarget::Pending { local_id, .. }) => format!("pending-{local_id}"),
+        None => "draft".to_owned(),
+    }
+}
+
+fn handle_composer_paste(
+    database_path: PathBuf,
+    workspace_name: String,
+    selected_thread_id: Option<i64>,
+    chat_target: Option<ChatUiTarget>,
+    buffer: TextBuffer,
+    input_view: TextView,
+    update_composer_state: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
+) {
+    let workspace_root = match WorkspaceStore::open_app(database_path)
+        .and_then(|store| store.get_workspace_record_by_name(&workspace_name))
+        .map(|workspace| workspace.path)
+    {
+        Ok(path) => path,
+        Err(err) => {
+            toast_manager.error(format!("Paste attachment failed: {err:#}"));
+            return;
+        }
+    };
+    let attachment_id = chat_attachment_id_for_target(selected_thread_id, chat_target.as_ref());
+    let clipboard = input_view.clipboard();
+    let clipboard_for_text = clipboard.clone();
+    let buffer_for_image = buffer.clone();
+    let buffer_for_text = buffer.clone();
+    let update_for_image = update_composer_state.clone();
+    let update_for_text = update_composer_state.clone();
+    let toast_for_image = toast_manager.clone();
+    let toast_for_text = toast_manager.clone();
+    let root_for_image = workspace_root.clone();
+    let root_for_text = workspace_root;
+    let id_for_image = attachment_id.clone();
+    let id_for_text = attachment_id;
+
+    clipboard.read_texture_async(None::<&gtk::gio::Cancellable>, move |texture_result| {
+        match texture_result {
+            Ok(Some(texture)) => {
+                match save_chat_attachment(
+                    &root_for_image,
+                    &id_for_image,
+                    AttachmentKind::Image,
+                    "pasted image",
+                    &[],
+                ) {
+                    Ok(saved) => {
+                        let target_path = root_for_image.join(&saved.relative_path);
+                        match texture.save_to_png(&target_path) {
+                            Ok(()) => {
+                                insert_composer_text(&buffer_for_image, &saved.token);
+                                update_for_image();
+                            }
+                            Err(err) => {
+                                let _ = stdfs::remove_file(&target_path);
+                                toast_for_image
+                                    .error(format!("Paste image attachment failed: {err}"));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        toast_for_image.error(format!("Paste image attachment failed: {err:#}"));
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {
+                clipboard_for_text.read_text_async(
+                    None::<&gtk::gio::Cancellable>,
+                    move |text_result| match text_result {
+                        Ok(Some(text)) => {
+                            let text = text.to_string();
+                            match replace_long_paste_with_attachment(
+                                &root_for_text,
+                                &id_for_text,
+                                &text,
+                                LONG_PASTE_ATTACHMENT_THRESHOLD,
+                            ) {
+                                Ok(Some(saved)) => {
+                                    insert_composer_text(&buffer_for_text, &saved.token)
+                                }
+                                Ok(None) => insert_composer_text(&buffer_for_text, &text),
+                                Err(err) => {
+                                    toast_for_text
+                                        .error(format!("Paste text attachment failed: {err:#}"));
+                                    insert_composer_text(&buffer_for_text, &text);
+                                }
+                            }
+                            update_for_text();
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            toast_for_text.error(format!("Read clipboard failed: {err}"));
+                        }
+                    },
+                );
+            }
+        }
+    });
+}
+
+fn insert_composer_text(buffer: &TextBuffer, text: &str) {
+    buffer.insert_at_cursor(text);
+}
+
 fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
 where
     F: FnOnce() -> T,
@@ -12063,6 +12294,33 @@ fix it
         assert_eq!(
             composer_send_button_submit_intent(),
             ComposerSubmitIntent::Default
+        );
+    }
+
+    #[test]
+    fn user_attachment_tokens_are_split_for_chip_rendering() {
+        let parts = user_message_attachment_parts(
+            "Please inspect <archductor_attachment path=\".context/archductor/42/pasted-text-a1b2c3.md\" label=\"pasted text\" kind=\"text\" /> now",
+        );
+
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(parts[0], UserMessagePart::Text(_)));
+        assert!(matches!(parts[1], UserMessagePart::Attachment(_)));
+        assert!(matches!(parts[2], UserMessagePart::Text(_)));
+    }
+
+    #[test]
+    fn pending_chat_attachment_id_is_stable_and_path_safe() {
+        assert_eq!(chat_attachment_id_for_target(Some(42), None), "42");
+        assert_eq!(
+            chat_attachment_id_for_target(
+                None,
+                Some(&ChatUiTarget::Pending {
+                    workspace: "Demo Workspace".to_owned(),
+                    local_id: 7,
+                })
+            ),
+            "pending-7"
         );
     }
 

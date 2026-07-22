@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-07-16.
+Current as of 2026-07-22.
 
 ## Current State
 
@@ -110,6 +110,9 @@ paths and known rough edges.
   visible, and Claude hides unsupported goals.
 - Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
   queue-row reconciliation isolated from streaming chat refreshes.
+- GTK composer Ctrl+V paste saves images and long text under
+  `.context/archductor/{chatId}/`, inserts a shared Archductor attachment token,
+  and renders persisted user-message tokens as compact attachment chips.
 - GTK keeps hot workspace/chat UI state in watched AppState slices for
   selection, refresh requests, pending workspace phases, pending chat targets,
   and queued composer input. Workspace and chat creation publish optimistic
