@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tracing::error;
 
+use crate::app_bar::PageSurface;
 use crate::detail_row;
 use crate::history_data::{
     history_recent_sessions, history_recent_workspaces, history_session_messages, HistoryTab,
@@ -29,32 +30,41 @@ pub(crate) fn build_history_page(
     paths: &AppPaths,
     open_workspace: Rc<dyn Fn(String)>,
     toast_manager: ToastManager,
-) -> (GBox, impl Fn() + Clone + 'static) {
+) -> PageSurface<impl Fn() + Clone + 'static> {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
 
-    let header = GBox::new(Orientation::Vertical, 8);
+    let header = GBox::new(Orientation::Horizontal, 8);
     header.add_css_class("dashboard-header");
     header.add_css_class("page-header");
+    header.set_hexpand(true);
+    let heading = GBox::new(Orientation::Vertical, 2);
+    heading.set_hexpand(true);
     let title = Label::new(Some("History"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_vexpand(false);
     let subtitle = Label::new(Some(HISTORY_SUBTITLE));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
-    header.append(&title);
-    header.append(&subtitle);
+    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    subtitle.set_vexpand(false);
+    heading.append(&title);
+    heading.append(&subtitle);
+    header.append(&heading);
 
     let (tabs_scroll, tabs) = standard_tab_strip();
     tabs_scroll.add_css_class("history-tabs");
+    tabs_scroll.set_halign(gtk::Align::End);
+    tabs_scroll.set_vexpand(false);
     let workspaces_tab = standard_tab("Workspaces");
     let chats_tab = standard_tab("Chats");
     set_standard_tab_active(&workspaces_tab, true);
     tabs.append(&workspaces_tab);
     tabs.append(&chats_tab);
     header.append(&tabs_scroll);
-    root.append(&header);
 
     let (workspaces_view, refresh_workspaces) =
         build_workspace_history_view(paths.database_path.clone(), open_workspace, toast_manager);
@@ -93,7 +103,11 @@ pub(crate) fn build_history_page(
         refresh_chats();
     };
     refresh();
-    (root, refresh)
+    PageSurface {
+        body: root,
+        header,
+        refresh,
+    }
 }
 
 fn build_workspace_history_view(

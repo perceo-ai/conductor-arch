@@ -208,7 +208,7 @@ struct PromptEditor {
 pub(crate) fn build_settings_page(
     paths: &AppPaths,
     toast_manager: ToastManager,
-) -> (GBox, impl Fn() + Clone + 'static) {
+) -> crate::app_bar::PageSurface<impl Fn() + Clone + 'static> {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
@@ -220,14 +220,17 @@ pub(crate) fn build_settings_page(
     let title = Label::new(Some("Settings"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_vexpand(false);
     let subtitle = Label::new(Some(
         "Choose defaults for every project or customize one project.",
     ));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
+    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    subtitle.set_vexpand(false);
     header.append(&title);
     header.append(&subtitle);
-    root.append(&header);
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
@@ -1749,7 +1752,11 @@ pub(crate) fn build_settings_page(
         }
     });
 
-    (root, || {})
+    crate::app_bar::PageSurface {
+        body: root,
+        header,
+        refresh: || {},
+    }
 }
 
 fn settings_sections() -> Vec<SettingsSection> {

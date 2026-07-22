@@ -28,7 +28,7 @@ mod workspace_command_center;
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
 use adw::Application;
-use app_bar::AppBar;
+use app_bar::{AppBar, PageSurface};
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -851,8 +851,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building dashboard"
     );
-    let (dashboard, refresh_dashboard) =
-        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
+    let PageSurface {
+        body: dashboard,
+        header: dashboard_header,
+        refresh: refresh_dashboard,
+    } = dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
+    app_bar.set_page_header("dashboard", dashboard_header.upcast_ref());
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
     tracing::info!(
@@ -863,7 +867,11 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
-    let (projects_page, refresh_projects) = projects::build_projects_page(
+    let PageSurface {
+        body: projects_page,
+        header: projects_header,
+        refresh: refresh_projects,
+    } = projects::build_projects_page(
         &app_state.paths,
         app_state.clone(),
         refresh_dashboard.clone(),
@@ -878,6 +886,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         navigate_workspace.clone(),
         toast_manager.clone(),
     );
+    app_bar.set_page_header("projects", projects_header.upcast_ref());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: projects page built"
@@ -886,8 +895,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building settings page"
     );
-    let (settings_page, refresh_settings) =
-        settings::build_settings_page(&app_state.paths, toast_manager.clone());
+    let PageSurface {
+        body: settings_page,
+        header: settings_header,
+        refresh: refresh_settings,
+    } = settings::build_settings_page(&app_state.paths, toast_manager.clone());
+    app_bar.set_page_header("settings", settings_header.upcast_ref());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: settings page built"
@@ -896,8 +909,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building history page"
     );
-    let (history_page, refresh_history) =
-        history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
+    let PageSurface {
+        body: history_page,
+        header: history_header,
+        refresh: refresh_history,
+    } = history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
+    app_bar.set_page_header("history", history_header.upcast_ref());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: history page built"
@@ -1929,6 +1946,22 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn page_headers_are_registered_with_the_app_bar_not_appended_to_pages() {
+        for source in [
+            include_str!("dashboard.rs"),
+            include_str!("projects.rs"),
+            include_str!("settings.rs"),
+            include_str!("history.rs"),
+        ] {
+            assert!(!source.contains("root.append(&header);"));
+        }
+        let main = include_str!("main.rs");
+        for key in ["dashboard", "projects", "settings", "history"] {
+            assert!(main.contains(&format!("set_page_header(\"{key}\"")));
+        }
+    }
 
     #[test]
     fn app_window_chrome_is_platform_appropriate() {

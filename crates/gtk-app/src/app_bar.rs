@@ -13,6 +13,12 @@ use std::rc::Rc;
 
 pub(crate) const APP_BAR_HEIGHT: i32 = 56;
 
+pub(crate) struct PageSurface<T> {
+    pub(crate) body: GBox,
+    pub(crate) header: GBox,
+    pub(crate) refresh: T,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AppBarContext {
     pub(crate) stack_key: &'static str,
