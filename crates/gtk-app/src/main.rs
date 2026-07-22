@@ -6,6 +6,7 @@ mod background_sync;
 mod buttons;
 mod command_palette;
 mod dashboard;
+mod font_assets;
 mod history;
 mod history_data;
 mod logger;
@@ -22,6 +23,7 @@ mod terminal;
 mod text;
 mod theme;
 mod toast;
+mod window_chrome;
 mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
@@ -56,6 +58,7 @@ use toast::{ToastManager, ToastMessage};
 
 const APP_ID: &str = "io.github.pranavkannepalli.archductor";
 const APP_SIDEBAR_DEFAULT_WIDTH_PX: f64 = 320.0;
+pub(crate) const COLUMN_HEADER_HEIGHT: i32 = 52;
 static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +197,7 @@ impl Default for LaunchTarget {
 }
 
 fn main() {
+    font_assets::register_bundled_fonts();
     let paths = AppPaths::from_env();
     if std::env::args().any(|arg| arg == "--archcar-serve") {
         if let Err(err) = reconcile_managed_sessions_on_startup(&paths)
@@ -1022,7 +1026,17 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             );
         })
     };
-    window.set_child(Some(&split));
+    let window_content = gtk::Overlay::new();
+    window_content.set_child(Some(&split));
+    let window_controls = gtk::WindowControls::new(gtk::PackType::Start);
+    window_controls.set_decoration_layout(Some("close,minimize,maximize:"));
+    window_controls.add_css_class("integrated-window-controls");
+    window_controls.set_halign(gtk::Align::Start);
+    window_controls.set_valign(gtk::Align::Start);
+    window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
+    window_controls.set_overflow(gtk::Overflow::Hidden);
+    window_content.add_overlay(&window_controls);
+    window.set_child(Some(&window_content));
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -1889,18 +1903,8 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 // ── STYLES ────────────────────────────────────────────────────────────────
 
 fn configure_window_chrome(window: &ApplicationWindow) {
-    #[cfg(windows)]
-    {
-        window.set_titlebar(None::<&gtk::Widget>);
-        window.set_decorated(true);
-    }
-
-    #[cfg(not(windows))]
-    {
-        let header_bar = gtk::HeaderBar::builder().show_title_buttons(true).build();
-        header_bar.add_css_class("app-titlebar");
-        window.set_titlebar(Some(&header_bar));
-    }
+    window.set_titlebar(None::<&gtk::Widget>);
+    window.set_decorated(false);
 }
 
 #[cfg(test)]
@@ -1933,14 +1937,30 @@ mod tests {
         );
         assert!(
             production.contains("window.set_titlebar(None::<&gtk::Widget>)")
-                && production.contains("window.set_decorated(true)"),
-            "Windows should use native decorated window chrome"
+                && production.contains("window.set_decorated(false)"),
+            "the integrated column headers should replace duplicate native chrome"
         );
-        assert!(
-            production.contains("gtk::HeaderBar::builder()")
-                && production.contains(".show_title_buttons(true)"),
-            "Linux should use a draggable GTK header bar with title buttons"
-        );
+        assert!(!production.contains("gtk::HeaderBar::builder()"));
+    }
+
+    #[test]
+    fn workspace_column_headers_share_fixed_draggable_chrome() {
+        assert_eq!(COLUMN_HEADER_HEIGHT, 52);
+        let sidebar = include_str!("sidebar.rs");
+        let session = include_str!("session_surface.rs");
+        let workspace = include_str!("workspace_command_center.rs");
+        for source in [sidebar, session, workspace] {
+            assert!(source.contains("configure_column_header("));
+        }
+        let drag_source = include_str!("window_chrome.rs");
+        assert!(drag_source.contains("compute_point"));
+        let production = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production.contains("gtk::WindowControls::new(gtk::PackType::Start)"));
+        assert!(production
+            .contains("window_controls.set_decoration_layout(Some(\"close,minimize,maximize:\"))"));
     }
 
     fn env_lock() -> &'static Mutex<()> {
@@ -2062,19 +2082,25 @@ mod tests {
             .unwrap();
         fs::remove_file(repo_path.join(".archductor/settings.toml")).unwrap();
 
-        let config_home = temp.path().join("xdg/config");
-        let settings_path = config_home.join("archductor/settings.toml");
+        let config_home = temp.path().join("app-config");
+        #[cfg(windows)]
+        let (config_env, settings_path) = ("APPDATA", config_home.join("Archductor/settings.toml"));
+        #[cfg(not(windows))]
+        let (config_env, settings_path) = (
+            "XDG_CONFIG_HOME",
+            config_home.join("archductor/settings.toml"),
+        );
         fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         fs::write(settings_path, "[customization.view]\ntheme = \"light\"\n").unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let previous_config_home = std::env::var_os(config_env);
+        std::env::set_var(config_env, &config_home);
 
         let preferences = resolve_view_preferences(db_path, Some("berlin"));
 
         if let Some(previous) = previous_config_home {
-            std::env::set_var("XDG_CONFIG_HOME", previous);
+            std::env::set_var(config_env, previous);
         } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var(config_env);
         }
         assert_eq!(preferences.theme, Some(ViewTheme::Light));
     }

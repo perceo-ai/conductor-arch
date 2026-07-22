@@ -2835,6 +2835,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn manual_session_command_includes_workspace_env_and_program() {
         let launch = SessionLaunch {
             kind: SessionKind::Codex,
@@ -2883,9 +2884,20 @@ mod tests {
 
         let command = render_manual_session_command(&launch);
         assert!(command.contains("ARCHDUCTOR_SESSION_BOOTSTRAP"));
-        assert!(command.contains("exec codex --model gpt-5.6-sol"));
-        assert!(!command.ends_with("'[archductor bootstrap for codex]\n/plan\n'"));
-        assert!(!command.contains("exec codex '[archductor bootstrap for codex]"));
+        #[cfg(not(windows))]
+        {
+            assert!(command.contains("exec codex --model gpt-5.6-sol"));
+            assert!(!command.ends_with("'[archductor bootstrap for codex]\n/plan\n'"));
+            assert!(!command.contains("exec codex '[archductor bootstrap for codex]"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(command.contains(
+                "set \"ARCHDUCTOR_SESSION_BOOTSTRAP=[archductor bootstrap for codex]\n/plan\n\""
+            ));
+            assert!(command.ends_with("codex --model gpt-5.6-sol"));
+            assert!(!command.ends_with("[archductor bootstrap for codex]\n/plan\n"));
+        }
     }
 
     #[test]

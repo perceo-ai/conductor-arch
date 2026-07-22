@@ -3545,6 +3545,7 @@ pub(crate) fn session_header_row_with_branch_label(
     let header = GBox::new(Orientation::Horizontal, 10);
     header.add_css_class("chat-header-row");
     header.set_hexpand(true);
+    crate::window_chrome::configure_column_header(&header);
 
     let breadcrumb = GBox::new(Orientation::Horizontal, 8);
     breadcrumb.set_hexpand(true);
@@ -4076,14 +4077,29 @@ fn shell_command_tokens(command: &str) -> Vec<String> {
     let mut quote = None::<char>;
     let mut escaped = false;
 
-    for ch in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
             current.push(ch);
             escaped = false;
             continue;
         }
         if ch == '\\' {
-            escaped = true;
+            let escapes_next = match quote {
+                Some('\'') => false,
+                Some('"') => chars
+                    .peek()
+                    .is_some_and(|next| matches!(next, '"' | '\\' | '$' | '`')),
+                None => chars
+                    .peek()
+                    .is_some_and(|next| next.is_whitespace() || matches!(next, '"' | '\'' | '\\')),
+                Some(_) => false,
+            };
+            if escapes_next {
+                escaped = true;
+            } else {
+                current.push(ch);
+            }
             continue;
         }
         if let Some(active_quote) = quote {
@@ -9552,7 +9568,7 @@ fn provider_status_text(status: &archductor_core::mcp::McpStatus) -> String {
 fn collect_session_harness_options(
     plan_mode: &CheckButton,
     fast_mode: &CheckButton,
-    approval_mode: &ComboBoxText,
+    _approval_mode: &ComboBoxText,
     reasoning_mode: &ComboBoxText,
     effort_mode: &ComboBoxText,
     codex_personality: &ComboBoxText,
@@ -9563,7 +9579,7 @@ fn collect_session_harness_options(
         plan_mode: plan_mode.is_active(),
         fast_mode: fast_mode.is_active(),
         model: None,
-        approval_mode: combo_active_value_or_none(approval_mode, Some("default")),
+        approval_mode: Some(archductor_core::harness::FORCED_APPROVAL_MODE.to_owned()),
         reasoning_mode: combo_active_value_or_none(reasoning_mode, Some("default")),
         effort_mode: combo_active_value_or_none(effort_mode, Some("default")),
         codex_personality: combo_active_value_or_none(codex_personality, Some("default")),
@@ -12597,12 +12613,13 @@ fix it
 
     #[test]
     fn new_chat_button_does_not_create_thread_sync_in_click_handler() {
-        let source = include_str!("session_surface.rs");
+        let normalized_source = include_str!("session_surface.rs").replace("\r\n", "\n");
+        let source = normalized_source.as_str();
         let start = source
             .find("new_chat_btn.connect_clicked")
             .expect("new chat button handler exists");
         let end = source[start..]
-            .find("root\n}")
+            .find("\n    root\n}\n\npub(crate) fn session_header_row")
             .map(|offset| start + offset)
             .expect("new chat handler end exists");
         let handler = &source[start..end];

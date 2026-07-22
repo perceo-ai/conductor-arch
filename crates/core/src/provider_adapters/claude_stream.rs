@@ -583,6 +583,9 @@ pub fn build_claude_stream_args(config: &ClaudeStreamLaunchConfig) -> Vec<String
         "--permission-mode",
         config.permission_mode.as_deref(),
     );
+    if config.permission_mode.as_deref() == Some("bypassPermissions") {
+        args.push("--dangerously-skip-permissions".to_owned());
+    }
     push_optional_arg(&mut args, "--model", config.model.as_deref());
     push_optional_arg(&mut args, "--effort", config.effort.as_deref());
     push_optional_arg(

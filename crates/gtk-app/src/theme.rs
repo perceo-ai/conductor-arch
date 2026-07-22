@@ -232,11 +232,18 @@ textview,
 .sidebar {
     background-color: @lc-surface-raised;
     border-right: 1px solid @lc-border;
-    padding-top: 10px;
+    padding-top: 0;
 }
 
 .sidebar-chrome {
-    padding: 0 10px 8px 10px;
+    padding: 10px;
+    background-color: #181818;
+    border-bottom: 1px solid #232323;
+}
+
+.integrated-window-controls {
+    padding: 0 8px;
+    background: transparent;
 }
 
 .sidebar-icon-button,
@@ -1768,12 +1775,16 @@ button.ws-tab-shell {
     background-color: #232323;
     color: #e8e8e8;
 }
-.chat-header-row,
 .ws-pr-nav,
 .ws-changes-header,
 .ws-run-header {
     min-height: 42px;
     padding: 10px 12px;
+    background-color: #181818;
+    border-bottom: 1px solid #232323;
+}
+.chat-header-row {
+    padding: 0 12px;
     background-color: #181818;
     border-bottom: 1px solid #232323;
 }
@@ -1821,8 +1832,7 @@ button.ws-tab-shell {
     color: #a8a8a8;
 }
 .ws-pr-compact-panel {
-    min-height: 42px;
-    padding: 10px 12px;
+    padding: 0 12px;
     border-bottom: 1px solid #232323;
     background-color: #181818;
 }

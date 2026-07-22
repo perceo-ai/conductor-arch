@@ -203,8 +203,13 @@ mod tests {
         assert_eq!(
             launch.args,
             vec![
+                "--permission-mode".to_owned(),
+                "bypassPermissions".to_owned(),
+                "--dangerously-skip-permissions".to_owned(),
                 "--session-id".to_owned(),
                 launch.session_resume_id.as_deref().unwrap().to_owned(),
+                "--append-system-prompt".to_owned(),
+                "[archductor bootstrap for claude]\napproval mode: never".to_owned(),
             ]
         );
         assert!(launch.cwd.ends_with("berlin"));

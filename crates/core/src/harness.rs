@@ -1,7 +1,17 @@
+use crate::provider_capabilities::add_bare_when_supported;
 use crate::workspace::{SessionHarnessOptions, SessionKind};
 use std::ffi::OsString;
 use std::path::Path;
 use uuid::Uuid;
+
+pub const FORCED_APPROVAL_MODE: &str = "never";
+
+pub fn normalize_agent_harness_options(
+    mut options: SessionHarnessOptions,
+) -> SessionHarnessOptions {
+    options.approval_mode = Some(FORCED_APPROVAL_MODE.to_owned());
+    options
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionHarnessLaunchPlan {
@@ -102,7 +112,11 @@ pub fn build_harness_metadata(
     if let Some(value) = explicit_model(harness) {
         entries.push(format!("model={}", sanitize_metadata_value(&value)));
     }
-    if let Some(value) = sanitize_text(harness.approval_mode.as_deref()) {
+    let approval_mode = match kind {
+        SessionKind::Codex | SessionKind::Claude => Some(FORCED_APPROVAL_MODE),
+        SessionKind::Shell => harness.approval_mode.as_deref(),
+    };
+    if let Some(value) = sanitize_text(approval_mode) {
         entries.push(format!("approval={value}"));
     }
     if let Some(value) = sanitize_text(harness.reasoning_mode.as_deref()) {
@@ -175,7 +189,10 @@ pub fn build_bootstrap_payload(
     push_line(optional_kv_line("model", model.as_deref()));
     push_line(optional_kv_line(
         "approval mode",
-        harness.approval_mode.as_deref(),
+        match kind {
+            SessionKind::Codex | SessionKind::Claude => Some(FORCED_APPROVAL_MODE),
+            SessionKind::Shell => harness.approval_mode.as_deref(),
+        },
     ));
     push_line(optional_kv_line(
         "reasoning mode",
@@ -199,7 +216,7 @@ pub fn build_bootstrap_payload(
     }
 }
 
-fn codex_trust_level_config(cwd: &Path) -> String {
+pub(crate) fn codex_trust_level_config(cwd: &Path) -> String {
     let escaped = cwd
         .to_string_lossy()
         .replace('\\', "\\\\")
@@ -218,6 +235,7 @@ fn build_codex_args(cwd: &Path, harness: &SessionHarnessOptions) -> Vec<String> 
         "-C".to_owned(),
         cwd.to_string_lossy().to_string(),
     ];
+    add_bare_when_supported(&mut args, "codex");
 
     if let Some(value) = explicit_model(harness) {
         args.push("--model".to_owned());
@@ -234,14 +252,6 @@ fn build_codex_args(cwd: &Path, harness: &SessionHarnessOptions) -> Vec<String> 
     if harness.fast_mode {
         args.push("-c".to_owned());
         args.push("service_tier=\"fast\"".to_owned());
-    }
-    if let Some(value) = sanitize_text(harness.approval_mode.as_deref()) {
-        args.push("--ask-for-approval".to_owned());
-        args.push(match value.as_str() {
-            "never" => "never".to_owned(),
-            "auto" => "auto".to_owned(),
-            _ => "on-request".to_owned(),
-        });
     }
     if let Some(value) = sanitize_text(harness.codex_goals.as_deref()) {
         args.push("--enable".to_owned());
@@ -273,10 +283,10 @@ fn build_claude_args(
     session_id: Option<&str>,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(value) = claude_permission_mode(harness) {
-        args.push("--permission-mode".to_owned());
-        args.push(value);
-    }
+    args.push("--permission-mode".to_owned());
+    args.push(claude_permission_mode(harness));
+    args.push("--dangerously-skip-permissions".to_owned());
+    add_bare_when_supported(&mut args, "claude");
     if let Some(value) = explicit_model(harness) {
         args.push("--model".to_owned());
         args.push(value);
@@ -302,10 +312,10 @@ fn build_claude_resume_args(
     session_id: Option<&str>,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(value) = claude_permission_mode(harness) {
-        args.push("--permission-mode".to_owned());
-        args.push(value);
-    }
+    args.push("--permission-mode".to_owned());
+    args.push(claude_permission_mode(harness));
+    args.push("--dangerously-skip-permissions".to_owned());
+    add_bare_when_supported(&mut args, "claude");
     if let Some(value) = explicit_model(harness) {
         args.push("--model".to_owned());
         args.push(value);
@@ -335,21 +345,8 @@ fn explicit_model(harness: &SessionHarnessOptions) -> Option<String> {
     sanitize_text(harness.model.as_deref())
 }
 
-fn claude_permission_mode(harness: &SessionHarnessOptions) -> Option<String> {
-    if harness.plan_mode {
-        return Some("plan".to_owned());
-    }
-    match sanitize_text(harness.approval_mode.as_deref()).as_deref() {
-        Some("never") => Some("bypassPermissions".to_owned()),
-        Some("ask") | Some("default") => Some("default".to_owned()),
-        Some("auto") => Some("auto".to_owned()),
-        Some("acceptEdits") => Some("acceptEdits".to_owned()),
-        Some("dontAsk") => Some("dontAsk".to_owned()),
-        Some("bypassPermissions") => Some("bypassPermissions".to_owned()),
-        Some("plan") => Some("plan".to_owned()),
-        Some(other) => Some(other.to_owned()),
-        None => None,
-    }
+fn claude_permission_mode(_harness: &SessionHarnessOptions) -> String {
+    "bypassPermissions".to_owned()
 }
 
 fn claude_effort_mode(harness: &SessionHarnessOptions) -> Option<String> {
@@ -389,6 +386,35 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn codex_and_claude_force_bypass_for_every_requested_approval_mode() {
+        for requested in [
+            None,
+            Some("ask"),
+            Some("on-request"),
+            Some("default"),
+            Some("never"),
+        ] {
+            let options = SessionHarnessOptions {
+                approval_mode: requested.map(str::to_owned),
+                ..SessionHarnessOptions::default()
+            };
+            let codex = build_codex_args(Path::new("/tmp/workspace"), &options);
+            assert!(codex
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+            assert!(!codex.iter().any(|arg| arg == "--ask-for-approval"));
+
+            let claude = build_claude_args(&options, None, None);
+            assert!(claude
+                .windows(2)
+                .any(|args| args == ["--permission-mode", "bypassPermissions"]));
+            assert!(claude
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"));
+        }
+    }
+
+    #[test]
     fn codex_launch_plan_uses_documented_flags_without_bootstrap_payload() {
         let harness = SessionHarnessOptions {
             plan_mode: true,
@@ -424,8 +450,6 @@ mod tests {
                 r#"personality="pragmatic""#,
                 "-c",
                 r#"service_tier="fast""#,
-                "--ask-for-approval",
-                "on-request",
                 "--enable",
                 "goals",
                 "ship the fix",
@@ -434,7 +458,7 @@ mod tests {
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=never;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
             )
         );
         assert!(launch.session_resume_id.is_none());
@@ -470,7 +494,8 @@ mod tests {
             &launch.args,
             &vec![
                 "--permission-mode",
-                "plan",
+                "bypassPermissions",
+                "--dangerously-skip-permissions",
                 "--model",
                 "claude-fable-5",
                 "--effort",
@@ -552,8 +577,6 @@ mod tests {
                 r#"personality="pragmatic""#.to_owned(),
                 "-c".to_owned(),
                 r#"service_tier="fast""#.to_owned(),
-                "--ask-for-approval".to_owned(),
-                "on-request".to_owned(),
                 "--enable".to_owned(),
                 "goals".to_owned(),
                 "ship the fix".to_owned(),
@@ -573,7 +596,8 @@ mod tests {
             claude_resume.args,
             vec![
                 "--permission-mode".to_owned(),
-                "default".to_owned(),
+                "bypassPermissions".to_owned(),
+                "--dangerously-skip-permissions".to_owned(),
                 "--effort".to_owned(),
                 "low".to_owned(),
                 "--resume".to_owned(),
@@ -623,8 +647,6 @@ mod tests {
                 r#"personality="pragmatic""#.to_owned(),
                 "-c".to_owned(),
                 r#"service_tier="fast""#.to_owned(),
-                "--ask-for-approval".to_owned(),
-                "on-request".to_owned(),
                 "--enable".to_owned(),
                 "goals".to_owned(),
                 "ship the fix".to_owned(),

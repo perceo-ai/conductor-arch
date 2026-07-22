@@ -1,6 +1,6 @@
 use anyhow::Result;
 use archductor_dev_runner::process::{CommandSpec, DevCommands, DevSession};
-use archductor_dev_runner::{action_for_key, DevAction, DevKey};
+use archductor_dev_runner::{action_for_key, reload_gtk_after_build, DevAction, DevKey};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, BufReader, IsTerminal, Read};
@@ -86,13 +86,15 @@ fn run_action(session: &mut DevSession, character: char) -> Result<bool> {
             println!("Reloading GTK...");
             let archcar_pid = session.archcar_pid();
             let previous_gtk_pid = session.gtk_pid();
-            let status = Command::new("cargo")
-                .args(["build", "--bin", "archductor-gtk"])
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("GTK rebuild failed");
-            }
-            session.reload_gtk()?;
+            reload_gtk_after_build(session, || {
+                let status = Command::new("cargo")
+                    .args(["build", "--bin", "archductor-gtk"])
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("GTK rebuild failed");
+                }
+                Ok(())
+            })?;
             println!(
                 "Archcar PID {} unchanged | GTK PID {} -> {}",
                 archcar_pid,

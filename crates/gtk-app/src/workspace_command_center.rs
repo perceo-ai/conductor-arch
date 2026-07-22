@@ -5537,6 +5537,7 @@ fn workspace_pr_status_panel(
     let action = workspace_pr_primary_action(&snapshot);
     let panel = GBox::new(Orientation::Horizontal, 8);
     panel.add_css_class("ws-pr-compact-panel");
+    crate::window_chrome::configure_column_header(&panel);
     panel.add_css_class(
         action
             .as_ref()
