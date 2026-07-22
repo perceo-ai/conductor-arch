@@ -4,7 +4,7 @@ set -euo pipefail
 case "${OSTYPE:-}" in
     msys*|cygwin*)
         windows_host=1
-        export PATH="/usr/bin:/ucrt64/bin:$PATH"
+        export PATH="/usr/bin:$PATH"
         ;;
 esac
 
