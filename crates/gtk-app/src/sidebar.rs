@@ -1,12 +1,11 @@
-use adw::ApplicationWindow;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::repository::RepositoryStore;
 use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
-    Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Spinner, Stack,
+    Align, ApplicationWindow, Box as GBox, Button, Entry, EventControllerKey,
+    EventControllerMotion, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
+    PolicyType, Popover, Revealer, RevealerTransitionType, ScrolledWindow, Spinner, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -78,39 +77,9 @@ pub(crate) fn build_app_sidebar(
     let chrome_row = GBox::new(Orientation::Horizontal, 4);
     chrome_row.add_css_class("sidebar-chrome");
 
-    let chrome_left = GBox::new(Orientation::Horizontal, 4);
-    chrome_left.set_hexpand(true);
+    let chrome_spacer = GBox::new(Orientation::Horizontal, 0);
+    chrome_spacer.set_hexpand(true);
     let chrome_right = GBox::new(Orientation::Horizontal, 4);
-
-    let close_btn = sidebar_window_button("window-close-symbolic", "Close window");
-    {
-        let window = window.clone();
-        close_btn.connect_clicked(move |_| window.close());
-    }
-    chrome_left.append(&close_btn);
-
-    let minimize_btn = sidebar_window_button("window-minimize-symbolic", "Minimize window");
-    {
-        let window = window.clone();
-        minimize_btn.connect_clicked(move |_| {
-            window.minimize();
-        });
-    }
-    chrome_left.append(&minimize_btn);
-
-    let expand_btn =
-        sidebar_window_button("window-maximize-symbolic", "Maximize or restore window");
-    {
-        let window = window.clone();
-        expand_btn.connect_clicked(move |_| {
-            if window.is_maximized() {
-                window.unmaximize();
-            } else {
-                window.maximize();
-            }
-        });
-    }
-    chrome_left.append(&expand_btn);
 
     let sidebar_toggle_btn = sidebar_icon_button("sidebar-show-symbolic", "Hide sidebar");
     {
@@ -125,7 +94,7 @@ pub(crate) fn build_app_sidebar(
     let forward_btn = sidebar_arrow_button("go-next-symbolic", "Forward");
     chrome_right.append(&back_btn);
     chrome_right.append(&forward_btn);
-    chrome_row.append(&chrome_left);
+    chrome_row.append(&chrome_spacer);
     chrome_row.append(&chrome_right);
     sidebar_box.append(&chrome_row);
 
@@ -445,6 +414,9 @@ pub(crate) fn build_app_sidebar(
                             SidebarWorkspaceRow {
                                 name: Rc::clone(&workspace_name),
                                 name_label: row.name_label.clone(),
+                                meta_label: row.meta_label.clone(),
+                                status: ws.status.clone(),
+                                updated_at: ws.updated_at.clone(),
                             },
                         );
                         if workspace_status_allows_sidebar_actions(&ws.status) {
@@ -504,6 +476,7 @@ pub(crate) fn build_app_sidebar(
             let RefreshEvent::WorkspaceMetadataChanged {
                 old_workspace,
                 workspace,
+                branch,
             } = event
             else {
                 return;
@@ -512,6 +485,13 @@ pub(crate) fn build_app_sidebar(
             let row = { workspace_rows.borrow_mut().remove(old_workspace) };
             if let Some(row) = row {
                 row.name_label.set_text(&title_case_workspace(workspace));
+                if let Some(branch) = branch {
+                    row.meta_label.set_text(&workspace_row_meta_text(
+                        branch,
+                        &row.status,
+                        &row.updated_at,
+                    ));
+                }
                 *row.name.borrow_mut() = workspace.clone();
                 workspace_rows.borrow_mut().insert(workspace.clone(), row);
             }
@@ -711,10 +691,6 @@ fn sidebar_arrow_button(icon: &str, tooltip: &str) -> Button {
     sidebar_button(icon, tooltip, "sidebar-arrow-button")
 }
 
-fn sidebar_window_button(icon: &str, tooltip: &str) -> Button {
-    sidebar_button(icon, tooltip, "sidebar-window-button")
-}
-
 fn sidebar_button(icon: &str, tooltip: &str, class_name: &str) -> Button {
     let button = icon_button(icon, tooltip);
     button.add_css_class(class_name);
@@ -764,11 +740,15 @@ where
 struct SidebarWorkspaceRow {
     name: Rc<RefCell<String>>,
     name_label: Label,
+    meta_label: Label,
+    status: String,
+    updated_at: String,
 }
 
 struct BuiltWorkspaceRow {
     row: ListBoxRow,
     name_label: Label,
+    meta_label: Label,
 }
 
 fn build_workspace_row(
@@ -805,20 +785,7 @@ fn build_workspace_row(
     text_box.append(&top_row);
 
     // Second row: branch · time ago
-    let mut meta_parts: Vec<String> = Vec::new();
-    if !branch.is_empty() {
-        meta_parts.push(branch.to_string());
-    }
-    if status == "creating" {
-        meta_parts.push("Creating workspace...".to_owned());
-    } else if status == "failed" {
-        meta_parts.push("Creation failed".to_owned());
-    }
-    let ts = relative_time(updated_at);
-    if !ts.is_empty() {
-        meta_parts.push(ts);
-    }
-    let meta_text = meta_parts.join(" · ");
+    let meta_text = workspace_row_meta_text(branch, status, updated_at);
     let meta_label = Label::new(Some(&meta_text));
     meta_label.add_css_class("workspace-row-timestamp");
     meta_label.add_css_class("workspace-meta");
@@ -849,7 +816,28 @@ fn build_workspace_row(
         row.set_selectable(false);
         row.set_activatable(false);
     }
-    BuiltWorkspaceRow { row, name_label }
+    BuiltWorkspaceRow {
+        row,
+        name_label,
+        meta_label,
+    }
+}
+
+fn workspace_row_meta_text(branch: &str, status: &str, updated_at: &str) -> String {
+    let mut meta_parts: Vec<String> = Vec::new();
+    if !branch.is_empty() {
+        meta_parts.push(branch.to_string());
+    }
+    if status == "creating" {
+        meta_parts.push("Creating workspace...".to_owned());
+    } else if status == "failed" {
+        meta_parts.push("Creation failed".to_owned());
+    }
+    let ts = relative_time(updated_at);
+    if !ts.is_empty() {
+        meta_parts.push(ts);
+    }
+    meta_parts.join(" · ")
 }
 
 fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
@@ -930,6 +918,7 @@ fn attach_workspace_row_context_menu(
                         refresh_hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
                             old_workspace: old_name,
                             workspace: workspace.name,
+                            branch: None,
                         });
                         Ok(())
                     }
@@ -1651,11 +1640,25 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        validate_sidebar_workspace_selection, workspace_context_actions,
+        validate_sidebar_workspace_selection, workspace_context_actions, workspace_row_meta_text,
         workspace_row_selection_should_open_workspace, workspace_status_allows_sidebar_actions,
         SidebarWorkspaceLookup, SidebarWorkspaceSelection,
     };
     use crate::state::{AppPage, AppState, WorkspaceTab};
+
+    #[test]
+    fn sidebar_does_not_duplicate_operating_system_window_controls() {
+        let source = include_str!("sidebar.rs");
+        let chrome = source
+            .split("let chrome_row")
+            .nth(1)
+            .and_then(|source| source.split("sidebar_box.append(&chrome_row)").next())
+            .expect("sidebar chrome construction exists");
+
+        assert!(!chrome.contains("window-close-symbolic"));
+        assert!(!chrome.contains("window-minimize-symbolic"));
+        assert!(!chrome.contains("window-maximize-symbolic"));
+    }
 
     #[test]
     fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
@@ -1698,6 +1701,14 @@ mod tests {
         assert_eq!(
             workspace_context_actions("active"),
             vec![("Archive", false, "archive"), ("Delete", true, "delete")]
+        );
+    }
+
+    #[test]
+    fn workspace_row_meta_text_starts_with_current_branch() {
+        assert!(
+            workspace_row_meta_text("lc/new-branch", "active", "2026-07-20T00:00:00Z")
+                .starts_with("lc/new-branch")
         );
     }
 

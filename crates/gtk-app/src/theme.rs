@@ -239,7 +239,6 @@ textview,
     padding: 0 10px 8px 10px;
 }
 
-.sidebar-chrome-button,
 .sidebar-icon-button,
 .sidebar-reopen-button,
 .sidebar-arrow-button {
@@ -254,7 +253,6 @@ textview,
     color: #8a8a8a;
 }
 
-.sidebar-chrome-button:hover,
 .sidebar-icon-button:hover,
 .sidebar-reopen-button:hover,
 .sidebar-arrow-button:hover {
@@ -1590,18 +1588,6 @@ separator {
     min-height: 24px;
 }
 
-.sidebar-window-button {
-    min-width: 12px;
-    min-height: 12px;
-    padding: 0;
-    border-radius: 999px;
-    color: #7a7a7a;
-}
-
-.sidebar-window-button:hover {
-    color: #7a7a7a;
-}
-
 .sidebar-arrow-button {
     min-width: 24px;
     min-height: 24px;
@@ -1611,18 +1597,6 @@ separator {
 .sidebar-arrow-button:hover {
     background-color: #2c2c2c;
     color: #e4e4e4;
-}
-
-.sidebar-chrome .sidebar-window-button:nth-child(1):hover {
-    background-color: #ff5f57;
-}
-
-.sidebar-chrome .sidebar-window-button:nth-child(2):hover {
-    background-color: #febc2e;
-}
-
-.sidebar-chrome .sidebar-window-button:nth-child(3):hover {
-    background-color: #28c840;
 }
 
 /* ── Workspace empty state ── */
@@ -2357,11 +2331,19 @@ popover.context-menu-popover arrow {
     font-size: 11px;
     font-weight: 700;
 }
-.chat-content-overlay {
+.chat-timeline-scroll {
     background-color: #151515;
 }
 .chat-messages {
-    padding: 22px 24px 180px;
+    padding: 22px 24px 24px;
+}
+.chat-working-indicator {
+    margin: 2px 24px 12px;
+    padding: 6px 0;
+    color: #b8c7de;
+}
+.chat-working-indicator .card-meta {
+    color: #b8c7de;
 }
 .chat-user-row {
     margin-top: 12px;
@@ -2480,7 +2462,7 @@ button.chat-inline-event-chip:checked {
 }
 .chat-composer {
     padding: 0 16px 16px;
-    background-color: transparent;
+    background-color: #151515;
 }
 .chat-queue-overlay {
     margin: 0 8px 6px;
@@ -2862,7 +2844,6 @@ window,
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 
-.sidebar-chrome-button,
 .sidebar-icon-button,
 .sidebar-reopen-button,
 .sidebar-arrow-button,
@@ -2881,7 +2862,6 @@ window,
     border-color: transparent;
 }
 
-.sidebar-chrome-button:hover,
 .sidebar-icon-button:hover,
 .sidebar-reopen-button:hover,
 .sidebar-arrow-button:hover,
@@ -2974,10 +2954,6 @@ combobox box,
     background-color: #0d0d0d;
     border-color: #343434;
     color: #f8fafc;
-}
-
-.chat-composer {
-    background-color: transparent;
 }
 
 .chat-composer-box .chat-input-scroll,
@@ -3312,6 +3288,20 @@ mod tests {
     #[test]
     fn queued_chat_overlay_floats_above_composer_with_hover_actions() {
         let css = app_css();
+        let timeline_scroll = selector_block(css, ".chat-timeline-scroll");
+        assert!(timeline_scroll.contains("background-color: #151515;"));
+
+        let composer = selector_block(css, ".chat-composer");
+        assert!(composer.contains("background-color: #151515;"));
+        assert_eq!(css.matches(".chat-composer {").count(), 1);
+
+        let working_meta = selector_block(css, ".chat-working-indicator .card-meta");
+        assert!(working_meta.contains("color: #b8c7de;"));
+
+        let messages = selector_block(css, ".chat-messages");
+        assert!(messages.contains("padding: 22px 24px 24px;"));
+        assert!(!messages.contains("180px"));
+
         let queue_overlay = selector_block(css, ".chat-queue-overlay");
         assert!(queue_overlay.contains("background-color: rgba(18, 18, 18, 0.96);"));
         assert!(queue_overlay.contains("margin: 0 8px 6px;"));
