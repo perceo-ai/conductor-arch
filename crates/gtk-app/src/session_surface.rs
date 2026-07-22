@@ -4232,6 +4232,7 @@ fn chat_structured_items_for_render(
             .into_iter()
             .filter(|item| match item {
                 ChatTimelineItem::Message(message) => chat_message_is_renderable(message),
+                ChatTimelineItem::Event(event) => chat_event_is_renderable(event),
                 _ => true,
             })
             .partition(|item| {
@@ -4351,6 +4352,10 @@ fn interrupted_notice_sequence(
 
 fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
     message.role != "user" || !message.content.trim().is_empty()
+}
+
+fn chat_event_is_renderable(event: &ChatEventRecord) -> bool {
+    !stored_chat_event_is_parser_noise(event)
 }
 
 fn chat_timeline_item_key(item: &ChatTimelineItem) -> ChatTimelineItemKey {
@@ -5498,8 +5503,18 @@ fn transcript_display_for_workspace(database_path: &Path, workspace_name: &str) 
 }
 
 fn stored_chat_event_inline_event(event: &ChatEventRecord) -> Option<CodexInlineEvent> {
+    if stored_chat_event_is_parser_noise(event) {
+        return None;
+    }
     let transcript_event = codex_transcript_event_from_payload_json(&event.payload_json)?;
     codex_inline_event_from_transcript_event(&transcript_event)
+}
+
+fn stored_chat_event_is_parser_noise(event: &ChatEventRecord) -> bool {
+    matches!(
+        codex_transcript_event_from_payload_json(&event.payload_json),
+        Some(CodexTranscriptEvent::Skill { .. } | CodexTranscriptEvent::FileChange(_))
+    )
 }
 
 fn codex_inline_event_from_transcript_event(
@@ -10879,8 +10894,8 @@ fn archcar_message_refresh_intent(message: &AsyncArchcarMessage) -> ArchcarRefre
             },
             ArchcarEvent::SessionMessagesUpdated { .. } => ArchcarRefreshIntent {
                 chat_surface: true,
-                workspace_nav: true,
-                global_summary: true,
+                workspace_nav: false,
+                global_summary: false,
             },
             ArchcarEvent::SessionReady { .. }
             | ArchcarEvent::SessionCapabilitiesChanged { .. }
@@ -16219,7 +16234,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
-    fn stored_chat_event_inline_event_reconstructs_tool_and_file_change_payloads() {
+    fn stored_chat_event_inline_event_reconstructs_tool_payloads() {
         let tool_event = ChatEventRecord {
             id: 100,
             thread_id: 7,
@@ -16233,40 +16248,12 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
         };
-        let file_change_event = ChatEventRecord {
-            id: 101,
-            thread_id: 7,
-            process_id: Some(5),
-            kind: "file_change".to_owned(),
-            title: "edited src/lib.rs".to_owned(),
-            body: "updated".to_owned(),
-            path: Some("src/lib.rs".to_owned()),
-            payload_json: r#"{"type":"file_change","action":"edited","path":"src/lib.rs","additions":2,"deletions":1,"lines":[{"kind":"context","old_line":10,"new_line":10,"content":"fn old() {}"},{"kind":"added","old_line":null,"new_line":11,"content":"fn new() {}"},{"kind":"deleted","old_line":12,"new_line":null,"content":"fn removed() {}"}]}"#.to_owned(),
-            timeline_seq: 2,
-            created_at: "now".to_owned(),
-            updated_at: "now".to_owned(),
-        };
 
         let tool_inline = stored_chat_event_inline_event(&tool_event).unwrap();
-        let file_change_inline = stored_chat_event_inline_event(&file_change_event).unwrap();
 
         assert_eq!(tool_inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(tool_inline.title, "cargo test");
         assert_eq!(tool_inline.body.as_deref(), Some("ok"));
-
-        assert_eq!(file_change_inline.kind, CodexInlineEventKind::Tool);
-        assert_eq!(file_change_inline.title, "Edited src/lib.rs");
-        assert_eq!(
-            file_change_inline.path.as_deref(),
-            Some(Path::new("src/lib.rs"))
-        );
-        assert_eq!(file_change_inline.status, CodexInlineEventStatus::Complete);
-        assert_eq!(file_change_inline.subtitle.as_deref(), Some("+2 -1"));
-        assert!(file_change_inline
-            .body
-            .as_deref()
-            .unwrap()
-            .contains("fn new() {}"));
     }
 
     #[test]
@@ -16293,6 +16280,48 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
         assert_eq!(inline.path.as_deref(), Some(Path::new("README.md")));
         assert_eq!(inline.body.as_deref(), Some("# Project"));
+    }
+
+    #[test]
+    fn stored_chat_event_inline_event_hides_parser_noise_payloads() {
+        let skill_event = ChatEventRecord {
+            id: 103,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "skill".to_owned(),
+            title: "superpowers:test-driven-development".to_owned(),
+            body: "Read SKILL.md".to_owned(),
+            path: None,
+            payload_json: r#"{"type":"skill","title":"superpowers:test-driven-development","body":"Read SKILL.md"}"#.to_owned(),
+            timeline_seq: 4,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        let file_change_event = ChatEventRecord {
+            id: 104,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "file_change".to_owned(),
+            title: "edited src/lib.rs".to_owned(),
+            body: "updated".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
+            payload_json: r#"{"type":"file_change","action":"edited","path":"src/lib.rs","additions":2,"deletions":1,"lines":[]}"#.to_owned(),
+            timeline_seq: 5,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+
+        assert!(stored_chat_event_inline_event(&skill_event).is_none());
+        assert!(stored_chat_event_inline_event(&file_change_event).is_none());
+        assert!(chat_structured_items_for_render(
+            Vec::new(),
+            vec![skill_event, file_change_event],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .is_empty());
     }
 
     #[test]
@@ -16753,7 +16782,7 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn session_message_updates_refresh_metadata_targets_immediately() {
+    fn session_message_updates_refresh_only_chat_surface() {
         let intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::SessionMessagesUpdated { thread_id: 4 },
         ));
@@ -16762,8 +16791,8 @@ Schema confirms the app moved CRM around businesses.";
             intent,
             ArchcarRefreshIntent {
                 chat_surface: true,
-                workspace_nav: true,
-                global_summary: true,
+                workspace_nav: false,
+                global_summary: false,
             }
         );
     }
