@@ -117,7 +117,15 @@ impl DevSession {
     }
 
     pub fn reload_gtk(&mut self) -> Result<()> {
-        self.gtk.stop()?;
+        self.stop_gtk()?;
+        self.start_gtk()
+    }
+
+    pub fn stop_gtk(&mut self) -> Result<()> {
+        self.gtk.stop()
+    }
+
+    pub fn start_gtk(&mut self) -> Result<()> {
         self.gtk = OwnedChild::spawn(&self.commands.gtk)?;
         Ok(())
     }
