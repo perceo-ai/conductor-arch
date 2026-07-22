@@ -44,29 +44,27 @@ pub(crate) fn build_dashboard_panel(
     root.add_css_class("page-shell");
 
     let header = GBox::new(Orientation::Horizontal, 10);
-    header.add_css_class("dashboard-header");
-    header.add_css_class("page-header");
+    header.add_css_class("app-bar-page-header");
     header.set_hexpand(true);
-
-    let heading = GBox::new(Orientation::Vertical, 2);
-    heading.set_hexpand(true);
 
     let title = Label::new(Some("Dashboard"));
     title.add_css_class("dashboard-title");
+    title.add_css_class("app-bar-page-title");
     title.set_xalign(0.0);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     title.set_vexpand(false);
-    heading.append(&title);
+    header.append(&title);
 
     let subtitle = Label::new(Some(
         "See what is ready, running, under review, or archived across your projects.",
     ));
     subtitle.add_css_class("dashboard-subtitle");
+    subtitle.add_css_class("app-bar-page-subtitle");
     subtitle.set_xalign(0.0);
     subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    subtitle.set_hexpand(true);
     subtitle.set_vexpand(false);
-    heading.append(&subtitle);
-    header.append(&heading);
+    header.append(&subtitle);
 
     let (project_tabs_scroll, project_tabs) = standard_tab_strip();
     project_tabs_scroll.add_css_class("project-tabs");

@@ -1960,6 +1960,31 @@ mod tests {
         let main = include_str!("main.rs");
         for key in ["dashboard", "projects", "settings", "history"] {
             assert!(main.contains(&format!("set_page_header(\"{key}\"")));
+            assert!(main.contains(&format!("main_stack.add_named(&{key}")));
+        }
+        assert!(main.contains("let PageSurface {"));
+        assert!(main.contains("body: dashboard,"));
+        assert!(main.contains("header: dashboard_header,"));
+        assert!(main.contains("body: projects_page,"));
+        assert!(main.contains("header: projects_header,"));
+        assert!(main.contains("body: settings_page,"));
+        assert!(main.contains("header: settings_header,"));
+        assert!(main.contains("body: history_page,"));
+        assert!(main.contains("header: history_header,"));
+    }
+
+    #[test]
+    fn page_headers_use_compact_single_row_app_bar_layout() {
+        for source in [
+            include_str!("dashboard.rs"),
+            include_str!("projects.rs"),
+            include_str!("settings.rs"),
+            include_str!("history.rs"),
+        ] {
+            assert!(source.contains("header.add_css_class(\"app-bar-page-header\");"));
+            assert!(source.contains("GBox::new(Orientation::Horizontal"));
+            assert!(!source.contains("header.add_css_class(\"dashboard-header\");"));
+            assert!(!source.contains("header.add_css_class(\"page-header\");"));
         }
     }
 

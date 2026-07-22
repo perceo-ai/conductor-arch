@@ -3138,6 +3138,26 @@ textview:focus,
     padding: 0;
 }
 
+.app-bar-page-header {
+    min-height: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+.app-bar-page-title {
+    min-width: 0;
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.app-bar-page-subtitle {
+    min-width: 0;
+    margin: 0;
+    font-size: 12px;
+}
+
 .app-bar-title {
     min-width: 0;
     margin-top: 0;
@@ -3198,6 +3218,17 @@ mod tests {
         assert!(title.contains("min-width: 0;"));
         assert!(title.contains("margin-top: 0;"));
         assert!(title.contains("margin-bottom: 0;"));
+    }
+
+    #[test]
+    fn app_bar_page_headers_remove_body_header_spacing() {
+        let css = app_css();
+        let page_header = selector_block(css, ".app-bar-page-header");
+
+        assert!(page_header.contains("min-height: 0;"));
+        assert!(page_header.contains("padding: 0;"));
+        assert!(page_header.contains("border: none;"));
+        assert!(page_header.contains("background: transparent;"));
     }
 
     #[test]

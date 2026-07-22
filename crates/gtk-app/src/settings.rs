@@ -214,11 +214,12 @@ pub(crate) fn build_settings_page(
     root.add_css_class("page-shell");
     root.add_css_class("settings-page");
 
-    let header = GBox::new(Orientation::Vertical, 8);
-    header.add_css_class("dashboard-header");
-    header.add_css_class("page-header");
+    let header = GBox::new(Orientation::Horizontal, 10);
+    header.add_css_class("app-bar-page-header");
+    header.set_hexpand(true);
     let title = Label::new(Some("Settings"));
     title.add_css_class("dashboard-title");
+    title.add_css_class("app-bar-page-title");
     title.set_xalign(0.0);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     title.set_vexpand(false);
@@ -226,8 +227,10 @@ pub(crate) fn build_settings_page(
         "Choose defaults for every project or customize one project.",
     ));
     subtitle.add_css_class("card-meta");
+    subtitle.add_css_class("app-bar-page-subtitle");
     subtitle.set_xalign(0.0);
     subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    subtitle.set_hexpand(true);
     subtitle.set_vexpand(false);
     header.append(&title);
     header.append(&subtitle);

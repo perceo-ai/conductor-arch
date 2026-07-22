@@ -36,24 +36,23 @@ pub(crate) fn build_history_page(
     root.add_css_class("page-shell");
 
     let header = GBox::new(Orientation::Horizontal, 8);
-    header.add_css_class("dashboard-header");
-    header.add_css_class("page-header");
+    header.add_css_class("app-bar-page-header");
     header.set_hexpand(true);
-    let heading = GBox::new(Orientation::Vertical, 2);
-    heading.set_hexpand(true);
     let title = Label::new(Some("History"));
     title.add_css_class("dashboard-title");
+    title.add_css_class("app-bar-page-title");
     title.set_xalign(0.0);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     title.set_vexpand(false);
     let subtitle = Label::new(Some(HISTORY_SUBTITLE));
     subtitle.add_css_class("card-meta");
+    subtitle.add_css_class("app-bar-page-subtitle");
     subtitle.set_xalign(0.0);
     subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    subtitle.set_hexpand(true);
     subtitle.set_vexpand(false);
-    heading.append(&title);
-    heading.append(&subtitle);
-    header.append(&heading);
+    header.append(&title);
+    header.append(&subtitle);
 
     let (tabs_scroll, tabs) = standard_tab_strip();
     tabs_scroll.add_css_class("history-tabs");
