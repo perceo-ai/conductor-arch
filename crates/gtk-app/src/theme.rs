@@ -241,6 +241,12 @@ textview,
     border-bottom: 1px solid #232323;
 }
 
+.integrated-window-controls {
+    min-height: 31px;
+    padding: 10px 8px;
+    background: transparent;
+}
+
 .sidebar-icon-button,
 .sidebar-reopen-button,
 .sidebar-arrow-button {

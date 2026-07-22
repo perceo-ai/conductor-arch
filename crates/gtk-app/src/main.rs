@@ -22,6 +22,7 @@ mod terminal;
 mod text;
 mod theme;
 mod toast;
+mod window_chrome;
 mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
@@ -1023,7 +1024,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             );
         })
     };
-    window.set_child(Some(&split));
+    let window_content = gtk::Overlay::new();
+    window_content.set_child(Some(&split));
+    let window_controls = gtk::WindowControls::new(gtk::PackType::End);
+    window_controls.add_css_class("integrated-window-controls");
+    window_controls.set_halign(gtk::Align::End);
+    window_controls.set_valign(gtk::Align::Start);
+    window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
+    window_content.add_overlay(&window_controls);
+    window.set_child(Some(&window_content));
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -1890,18 +1899,8 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 // ── STYLES ────────────────────────────────────────────────────────────────
 
 fn configure_window_chrome(window: &ApplicationWindow) {
-    #[cfg(windows)]
-    {
-        window.set_titlebar(None::<&gtk::Widget>);
-        window.set_decorated(true);
-    }
-
-    #[cfg(not(windows))]
-    {
-        let header_bar = gtk::HeaderBar::builder().show_title_buttons(true).build();
-        header_bar.add_css_class("app-titlebar");
-        window.set_titlebar(Some(&header_bar));
-    }
+    window.set_titlebar(None::<&gtk::Widget>);
+    window.set_decorated(false);
 }
 
 #[cfg(test)]
@@ -1934,14 +1933,26 @@ mod tests {
         );
         assert!(
             production.contains("window.set_titlebar(None::<&gtk::Widget>)")
-                && production.contains("window.set_decorated(true)"),
-            "Windows should retain native draggable window chrome"
+                && production.contains("window.set_decorated(false)"),
+            "the integrated column headers should replace duplicate native chrome"
         );
-        assert!(
-            production.contains("gtk::HeaderBar::builder()")
-                && production.contains(".show_title_buttons(true)"),
-            "Linux should use a draggable GTK header bar with title buttons"
-        );
+        assert!(!production.contains("gtk::HeaderBar::builder()"));
+    }
+
+    #[test]
+    fn workspace_column_headers_share_fixed_draggable_chrome() {
+        assert_eq!(COLUMN_HEADER_HEIGHT, 52);
+        let sidebar = include_str!("sidebar.rs");
+        let session = include_str!("session_surface.rs");
+        let workspace = include_str!("workspace_command_center.rs");
+        for source in [sidebar, session, workspace] {
+            assert!(source.contains("configure_column_header("));
+        }
+        let production = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production.contains("gtk::WindowControls::new(gtk::PackType::End)"));
     }
 
     fn env_lock() -> &'static Mutex<()> {
