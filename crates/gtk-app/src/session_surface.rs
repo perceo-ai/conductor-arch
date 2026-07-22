@@ -9567,7 +9567,7 @@ fn provider_status_text(status: &archductor_core::mcp::McpStatus) -> String {
 fn collect_session_harness_options(
     plan_mode: &CheckButton,
     fast_mode: &CheckButton,
-    approval_mode: &ComboBoxText,
+    _approval_mode: &ComboBoxText,
     reasoning_mode: &ComboBoxText,
     effort_mode: &ComboBoxText,
     codex_personality: &ComboBoxText,
@@ -9578,7 +9578,7 @@ fn collect_session_harness_options(
         plan_mode: plan_mode.is_active(),
         fast_mode: fast_mode.is_active(),
         model: None,
-        approval_mode: combo_active_value_or_none(approval_mode, Some("default")),
+        approval_mode: Some(archductor_core::harness::FORCED_APPROVAL_MODE.to_owned()),
         reasoning_mode: combo_active_value_or_none(reasoning_mode, Some("default")),
         effort_mode: combo_active_value_or_none(effort_mode, Some("default")),
         codex_personality: combo_active_value_or_none(codex_personality, Some("default")),
