@@ -1,10 +1,9 @@
 use crate::buttons::icon_button;
 use crate::state::{AppPage, AppState, AppStateSnapshot, AppStateSubscription};
 use crate::workspace_command_center::{
-    workspace_pull_request_status_summary, PullRequestStatusSummary,
+    workspace_pull_request_status_summary, workspace_repository_name, PullRequestStatusSummary,
 };
-use archductor_core::repository::RepositoryStore;
-use archductor_core::workspace::WorkspaceStore;
+use archductor_core::workspace::{Workspace, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{Align, Box as GBox, HeaderBar, Label, Orientation, Stack, Widget};
 use std::cell::RefCell;
@@ -110,7 +109,11 @@ pub(crate) struct AppBar {
 }
 
 impl AppBar {
-    pub(crate) fn new(state: &AppState, database_path: PathBuf) -> Self {
+    pub(crate) fn new(
+        state: &AppState,
+        database_path: PathBuf,
+        collapse_sidebar: Rc<dyn Fn()>,
+    ) -> Self {
         let header_bar = HeaderBar::builder().show_title_buttons(true).build();
         header_bar.add_css_class("app-bar");
         header_bar.set_height_request(APP_BAR_HEIGHT);
@@ -143,6 +146,7 @@ impl AppBar {
         workspace_context.append(&repository_name);
         workspace_context.append(&branch_name);
         workspace_context.append(&pr_label);
+        workspace_context.append(&workspace_header_actions(collapse_sidebar));
         stack.add_named(&workspace_context, Some("workspace"));
 
         let content = GBox::new(Orientation::Horizontal, 10);
@@ -230,27 +234,7 @@ impl AppBar {
         let name = snapshot.selected_workspace.as_deref()?;
         let store = WorkspaceStore::open_app(self.database_path.clone()).ok()?;
         let workspace = store.get_workspace_record_by_name(name).ok()?;
-        let repository = RepositoryStore::open(&self.database_path)
-            .ok()?
-            .list()
-            .ok()?
-            .into_iter()
-            .find(|repository| repository.id == workspace.repository_id)?;
-        let pr = store.pull_request(name).ok().flatten().map(|pr| {
-            let status: PullRequestStatusSummary =
-                workspace_pull_request_status_summary(&store, name, &pr);
-            (
-                format!("PR #{} {}", pr.number, status.label),
-                status.css_class,
-            )
-        });
-        AppBarContext::workspace(
-            &workspace.name,
-            &repository.name,
-            &workspace.branch,
-            pr.as_ref().map(|(label, css)| (label.as_str(), *css)),
-        )
-        .into()
+        Some(build_workspace_app_bar_context(&store, &workspace))
     }
 
     fn apply_context(&self, context: AppBarContext) {
@@ -337,25 +321,49 @@ fn workspace_context(
     let name = snapshot.selected_workspace.as_deref()?;
     let store = WorkspaceStore::open_app(database_path.clone()).ok()?;
     let workspace = store.get_workspace_record_by_name(name).ok()?;
-    let repository = RepositoryStore::open(database_path)
-        .ok()?
-        .list()
-        .ok()?
-        .into_iter()
-        .find(|repository| repository.id == workspace.repository_id)?;
-    let pr = store.pull_request(name).ok().flatten().map(|pr| {
-        let status = workspace_pull_request_status_summary(&store, name, &pr);
-        (
-            format!("PR #{} {}", pr.number, status.label),
-            status.css_class,
-        )
-    });
-    Some(AppBarContext::workspace(
-        &workspace.name,
-        &repository.name,
+    Some(build_workspace_app_bar_context(&store, &workspace))
+}
+
+pub(crate) fn build_workspace_app_bar_context(
+    store: &WorkspaceStore,
+    workspace: &Workspace,
+) -> AppBarContext {
+    let status = store
+        .pull_request(&workspace.name)
+        .ok()
+        .flatten()
+        .map(|pr| {
+            let summary: PullRequestStatusSummary =
+                workspace_pull_request_status_summary(store, &workspace.name, &pr);
+            (
+                format!("PR #{} {}", pr.number, summary.label),
+                summary.css_class,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                crate::title_case_workspace(&workspace.status),
+                "ws-pr-status-muted",
+            )
+        });
+    AppBarContext::workspace(
+        &crate::title_case_workspace(&workspace.name),
+        &workspace_repository_name(store, &workspace.name),
         &workspace.branch,
-        pr.as_ref().map(|(label, css)| (label.as_str(), *css)),
-    ))
+        Some((&status.0, status.1)),
+    )
+}
+
+fn workspace_header_actions(collapse_sidebar: Rc<dyn Fn()>) -> GBox {
+    let actions = GBox::new(Orientation::Horizontal, 6);
+    actions.set_halign(Align::End);
+    actions.append(&crate::session_surface::editor_picker_button());
+    let sidebar = icon_button("sidebar-hide-symbolic", "Collapse right sidebar");
+    sidebar.add_css_class("chat-focus-btn");
+    sidebar.set_tooltip_text(Some("Collapse right sidebar"));
+    sidebar.connect_clicked(move |_| collapse_sidebar());
+    actions.append(&sidebar);
+    actions
 }
 
 fn page_title(title: &str) -> GBox {
@@ -380,6 +388,82 @@ fn compact_label(css_class: &str) -> Label {
 mod tests {
     use super::*;
     use crate::state::AppPage;
+    use archductor_core::repository::{AddRepository, RepositoryStore};
+    use archductor_core::workspace::{CreateWorkspace, WorkspaceStore};
+    use std::process::Command;
+
+    #[test]
+    fn workspace_app_bar_projects_persisted_workspace_and_pr_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository_path = temp.path().join("demo");
+        std::fs::create_dir_all(&repository_path).unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("--initial-branch=main")
+            .arg(&repository_path)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repository_path.join("README.md"), "demo\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repository_path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repository_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .status()
+            .unwrap()
+            .success());
+
+        let database_path = temp.path().join("state.db");
+        RepositoryStore::open(&database_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repository_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&database_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "equal-height".to_owned(),
+                branch: "feature/equal-height".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO pull_requests (workspace_id, provider, number, url, state, created_at, updated_at) VALUES (?1, 'github', 42, 'https://github.com/example/demo/pull/42', 'open', 'then', 'now')",
+                [workspace.id],
+            )
+            .unwrap();
+
+        let context = build_workspace_app_bar_context(&store, &workspace);
+
+        assert_eq!(context.workspace_name.as_deref(), Some("Equal Height"));
+        assert_eq!(context.repository_name.as_deref(), Some("demo"));
+        assert_eq!(context.branch_name.as_deref(), Some("feature/equal-height"));
+        assert_eq!(context.pr_label.as_deref(), Some("PR #42 open"));
+        assert_eq!(context.pr_css_class, Some("ws-pr-status-muted"));
+    }
 
     #[test]
     fn non_workspace_pages_project_their_header_stack_keys() {

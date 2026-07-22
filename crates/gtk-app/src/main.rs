@@ -734,12 +734,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         .default_width(1280)
         .default_height(800)
         .build();
-    let app_bar = Rc::new(AppBar::new(&app_state, paths.database_path.clone()));
-    let app_bar_in_content = configure_window_chrome(&window, &app_bar);
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: window built"
-    );
     let initial_view_preferences = resolve_view_preferences(
         paths.database_path.clone(),
         launch_target.workspace.as_deref(),
@@ -781,6 +775,16 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let split = split.clone();
         Rc::new(move || split.set_collapsed(true))
     };
+    let app_bar = Rc::new(AppBar::new(
+        &app_state,
+        paths.database_path.clone(),
+        collapse_sidebar.clone(),
+    ));
+    let app_bar_in_content = configure_window_chrome(&window, &app_bar);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: window built"
+    );
 
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
@@ -800,6 +804,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             refresh_hub.clone(),
             toast_overlay.clone(),
             collapse_sidebar.clone(),
+            {
+                let app_bar = Rc::clone(&app_bar);
+                Rc::new(move || app_bar.refresh_workspace())
+            },
         );
     let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
     workspace_preference_scope.set_hexpand(true);
