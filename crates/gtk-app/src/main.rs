@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
+mod app_bar;
 mod archcar_async;
 mod background_sync;
 mod buttons;
@@ -27,6 +28,7 @@ mod workspace_command_center;
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
 use adw::Application;
+use app_bar::AppBar;
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -732,7 +734,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         .default_width(1280)
         .default_height(800)
         .build();
-    configure_window_chrome(&window);
+    let app_bar = AppBar::new(&app_state, paths.database_path.clone());
+    let app_bar_in_content = configure_window_chrome(&window, &app_bar);
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: window built"
@@ -1022,7 +1025,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             );
         })
     };
-    window.set_child(Some(&split));
+    if app_bar_in_content {
+        let window_content = GBox::new(Orientation::Vertical, 0);
+        window_content.append(&app_bar.content_widget());
+        window_content.append(&split);
+        window.set_child(Some(&window_content));
+    } else {
+        window.set_child(Some(&split));
+    }
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -1888,18 +1898,19 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 
 // ── STYLES ────────────────────────────────────────────────────────────────
 
-fn configure_window_chrome(window: &ApplicationWindow) {
+fn configure_window_chrome(window: &ApplicationWindow, app_bar: &AppBar) -> bool {
     #[cfg(windows)]
     {
+        let _ = app_bar;
         window.set_titlebar(None::<&gtk::Widget>);
         window.set_decorated(true);
+        true
     }
 
     #[cfg(not(windows))]
     {
-        let header_bar = gtk::HeaderBar::builder().show_title_buttons(true).build();
-        header_bar.add_css_class("app-titlebar");
-        window.set_titlebar(Some(&header_bar));
+        window.set_titlebar(Some(&app_bar.widget()));
+        false
     }
 }
 
@@ -1922,7 +1933,7 @@ mod tests {
             .expect("production source exists");
 
         assert!(
-            production.contains("configure_window_chrome(&window);"),
+            production.contains("configure_window_chrome(&window, &app_bar);"),
             "the main window should explicitly configure platform chrome"
         );
         assert!(
@@ -1937,9 +1948,8 @@ mod tests {
             "Windows should use native decorated window chrome"
         );
         assert!(
-            production.contains("gtk::HeaderBar::builder()")
-                && production.contains(".show_title_buttons(true)"),
-            "Linux should use a draggable GTK header bar with title buttons"
+            production.contains("window.set_titlebar(Some(&app_bar.widget()))"),
+            "Linux should install the persistent app bar as its draggable titlebar"
         );
     }
 
