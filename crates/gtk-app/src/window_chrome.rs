@@ -3,6 +3,8 @@ use gtk::prelude::*;
 pub(crate) fn configure_column_header<W: IsA<gtk::Widget>>(header: &W) {
     header.set_height_request(crate::COLUMN_HEADER_HEIGHT);
     header.set_vexpand(false);
+    header.set_valign(gtk::Align::Center);
+    header.set_overflow(gtk::Overflow::Hidden);
 
     let gesture = gtk::GestureClick::new();
     gesture.set_button(1);

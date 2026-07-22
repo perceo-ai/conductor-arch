@@ -242,8 +242,7 @@ textview,
 }
 
 .integrated-window-controls {
-    min-height: 31px;
-    padding: 10px 8px;
+    padding: 0 8px;
     background: transparent;
 }
 
@@ -1785,8 +1784,7 @@ button.ws-tab-shell {
     border-bottom: 1px solid #232323;
 }
 .chat-header-row {
-    min-height: 39px;
-    padding: 6px 12px;
+    padding: 0 12px;
     background-color: #181818;
     border-bottom: 1px solid #232323;
 }
@@ -1834,8 +1832,7 @@ button.ws-tab-shell {
     color: #a8a8a8;
 }
 .ws-pr-compact-panel {
-    min-height: 39px;
-    padding: 6px 12px;
+    padding: 0 12px;
     border-bottom: 1px solid #232323;
     background-color: #181818;
 }
