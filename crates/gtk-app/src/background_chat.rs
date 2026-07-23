@@ -730,6 +730,7 @@ fn sync_queued_inputs_cache(db_path: PathBuf, app_state: AppState, thread_id: i6
                     inputs
                         .into_iter()
                         .map(|input| QueuedChatInputDraft {
+                            id: Some(input.id),
                             input: input.input,
                             visible_input: input.visible_input,
                             kind: input.input_kind,
@@ -1082,6 +1083,7 @@ mod tests {
                 thread_id: 7,
                 session_id: 11,
                 draft: QueuedChatInputDraft {
+                    id: None,
                     input: "run tests".to_owned(),
                     visible_input: None,
                     kind: ArchcarInputKind::User,
@@ -1120,6 +1122,7 @@ mod tests {
         );
         let state = Rc::new(RefCell::new(BackgroundChatRunnerState::default()));
         let draft = QueuedChatInputDraft {
+            id: None,
             input: "run tests".to_owned(),
             visible_input: None,
             kind: ArchcarInputKind::User,

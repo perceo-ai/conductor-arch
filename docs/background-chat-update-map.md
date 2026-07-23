@@ -78,6 +78,8 @@ Archcar owns queued input durability and delivery. Queue rows live in
 the same SQLite-backed queue. Archcar deletes a row only after the matching
 ready session accepts the input command. `ChatQueueUpdated` is emitted whenever
 the queue changes, and GTK refreshes its local composer cache from that event.
+The selected chat surface also reconciles queue add/remove/list responses so
+optimistic GTK rows are quickly replaced by durable Archcar queue ids.
 
 The GTK runner owns hidden-chat UI state that must continue while the user is looking
 elsewhere:
@@ -300,7 +302,9 @@ Readiness and queue side effects are split by visibility:
 
 ## Composer And Queue Background Behavior
 
-Queued composer input is stored in `AppState`, not in the background sampler.
+Queued composer input is stored durably by Archcar. `AppState` keeps a
+per-thread composer cache for immediate GTK rendering and reconciles it from
+Archcar queue responses/events.
 
 When a background event makes a managed session ready, the selected surface may:
 
@@ -313,7 +317,7 @@ The queue overlay is refreshed separately from full timeline rendering.
 
 For hidden chats, `background_chat.rs` performs the corresponding drain:
 
-- reads only queued thread ids from `AppState`
+- reads only durable queued thread ids from `chat_queued_inputs`
 - skips the visible selected chat thread to avoid duplicate sends
 - loads the queued thread record, branch prefix, process markers, provider
   active-work marker, and message list in a background job
@@ -357,6 +361,8 @@ sends, and CLI sends aligned even when they run at the same time.
 - background chat queue scans use an in-flight flag to avoid overlapping queue
   candidate loads
 - hidden queue drain skips the visible selected chat thread
+- GTK queue caches carry durable Archcar queue ids whenever the row has been
+  persisted, so delete/edit actions can target the shared queue
 - tab snapshots use generations to drop stale async results
 - message timeline refreshes use per-thread generations
 - message timeline DB loads do not run synchronously in GTK callbacks
@@ -414,9 +420,9 @@ Notable assertions:
   selected-workspace paths
 - background sync keeps only in-memory previous snapshot state, so app restart
   starts from an empty comparison
-- the selected visible chat still has local queue/readiness state in
-  `session_surface.rs`; the background runner intentionally skips it to avoid
-  duplicate sends
+- the selected visible chat still has local readiness/render cache state in
+  `session_surface.rs`; the background runner intentionally skips delivery for
+  it to avoid duplicate sends
 
 ## Branch Focus Recommendation
 

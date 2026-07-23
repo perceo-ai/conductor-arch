@@ -113,8 +113,9 @@ paths and known rough edges.
   provider/model/thinking are baseline controls, Codex-only goals remain
   visible, and Claude hides unsupported goals.
 - Plain Enter follow-up queueing goes through the Archcar durable queue,
-  Ctrl+Enter immediate Codex delivery steers active turns, and queue-row
-  reconciliation is isolated from streaming chat refreshes.
+  Ctrl+Enter immediate Codex delivery steers active turns, and GTK queue-row
+  reconciliation follows Archcar queue responses/events without broad streaming
+  chat refreshes.
 - GTK composer Ctrl+V paste saves images and long text under
   `.context/archductor/{chatId}/`, inserts a shared Archductor attachment token,
   and renders persisted user-message tokens as compact attachment chips.

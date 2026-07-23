@@ -90,6 +90,7 @@ pub struct AppStateSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedChatInputDraft {
+    pub id: Option<i64>,
     pub input: String,
     pub visible_input: Option<String>,
     pub kind: ArchcarInputKind,
@@ -614,6 +615,7 @@ impl AppState {
         let replacement_text = replacement_text.trim().to_owned();
         if !replacement_text.is_empty() {
             let mut replacement = editing.original;
+            replacement.id = None;
             replacement.input = replacement_text;
             replacement.visible_input = None;
             self.insert_queued_chat_input(thread_id, editing.index, replacement);
@@ -1036,6 +1038,7 @@ mod tests {
         state.queue_chat_input_for_target(
             pending.clone(),
             QueuedChatInputDraft {
+                id: None,
                 input: "fix auth".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
@@ -1230,6 +1233,7 @@ mod tests {
 
     fn queued_chat_input(text: &str) -> QueuedChatInputDraft {
         QueuedChatInputDraft {
+            id: None,
             input: text.to_owned(),
             visible_input: None,
             kind: ArchcarInputKind::User,

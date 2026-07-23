@@ -51,8 +51,9 @@ layers stay independent of GTK UI state.
 - session selection: `selected_agent_session`
 - staged prompt text: `staged_review_prompt`, `pending_chat_prompt`
 - composer queues: per-thread `queued_chat_inputs` as a cache of Archcar queue
-  rows, pending-target `queued_pending_chat_inputs` before a real thread exists,
-  and `editing_queued_chat_inputs`
+  rows including durable queue ids, pending-target
+  `queued_pending_chat_inputs` before a real thread exists, and
+  `editing_queued_chat_inputs`
 - optimistic phases: per-workspace `workspace_phases`, per-target
   `chat_phases`
 - pending target id allocation: `next_pending_chat_id`
@@ -219,10 +220,13 @@ Composer send logic uses `selected_chat_target_for_submit`:
 - Ctrl+Enter uses immediate delivery for managed harnesses
 
 Archcar queue mutations emit `ChatQueueUpdated`; GTK reloads the cache and then
-emits `ComposerQueueChanged`. Pending-target mutations still emit
-`ComposerTargetQueueChanged` because no durable thread id exists yet. The
-overlay renders queued items, supports delete/edit from the cache, and avoids
-rebuilding when its signature has not changed.
+emits `ComposerQueueChanged`. Queue add responses replace optimistic GTK cache
+rows with the durable Archcar queue id; remove/list responses and
+`ChatQueueUpdated` events reconcile the visible overlay from SQLite-backed
+Archcar state. Pending-target mutations still emit `ComposerTargetQueueChanged`
+because no durable thread id exists yet. The overlay renders queued items,
+supports delete/edit from the cache, and avoids rebuilding when its signature
+has not changed.
 
 ### Queue Drain And Archcar Readiness
 
@@ -328,8 +332,8 @@ This path does not mutate `AppState`.
 - Metadata refresh updates only the visible nav row.
 - Background sync samples ids and sequence markers instead of full chat
   timelines.
-- Background chat scans only queued thread ids and skips the visible selected
-  chat thread to avoid duplicate sends.
+- Background chat scans only durable queued thread ids and skips the visible
+  selected chat thread to avoid duplicate sends.
 - Chat timeline loads run in `spawn_background_job`.
 - Message refreshes use per-thread generations so stale background results are
   dropped.

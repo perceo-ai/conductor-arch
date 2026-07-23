@@ -8,6 +8,7 @@ use archductor_core::archcar::harness_contract::{
 };
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
+    QueuedArchcarInput as ProtocolQueuedArchcarInput,
 };
 use archductor_core::archcar::session::CODEX_RECOVERY_CURRENT_USER_MESSAGE_HEADER;
 use archductor_core::chat_attachments::{
@@ -63,7 +64,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::archcar_async::{
     clear_archcar_ready, note_archcar_ready, spawn_background_job, AsyncArchcarBridge,
-    AsyncArchcarMessage, AsyncArchcarResponse,
+    AsyncArchcarMessage, AsyncArchcarRequestKind, AsyncArchcarResponse,
 };
 use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
@@ -1091,6 +1092,7 @@ pub fn agent_session_panel(
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
         let app_state = app_state.clone();
+        let archcar_bridge = archcar_bridge.clone();
         let queued_auto_drain_holds = queued_auto_drain_holds.clone();
         let buffer = buffer.clone();
         let refresh_chat_surface = refresh_chat_surface.clone();
@@ -1170,11 +1172,18 @@ pub fn agent_session_panel(
                 });
                 let delete_item = Rc::new({
                     let app_state = app_state.clone();
+                    let archcar_bridge = archcar_bridge.clone();
                     let queued_auto_drain_holds = queued_auto_drain_holds.clone();
                     let refresh_after_action = refresh_after_action.clone();
                     let index = item.index;
                     move || {
-                        let _ = remove_queued_chat_input_at(&app_state, thread_id, index);
+                        if let Some(removed) =
+                            remove_queued_chat_input_at(&app_state, thread_id, index)
+                        {
+                            if let Some(queue_id) = removed.id {
+                                let _ = archcar_bridge.remove_queued_chat_input(queue_id);
+                            }
+                        }
                         release_queued_auto_drain_if_queue_empty(
                             queued_auto_drain_holds.as_ref(),
                             thread_id,
@@ -1620,6 +1629,7 @@ pub fn agent_session_panel(
                             response,
                             &database_path,
                             &workspace,
+                            &app_state,
                             archcar_bridge.clone(),
                             archcar_ready_cache.as_ref(),
                             inflight_archcar_actions.as_ref(),
@@ -3292,11 +3302,24 @@ pub fn agent_session_panel(
             let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
             let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
             if let Some(thread_id) = action_thread_id {
-                if app_state.editing_queued_chat_input(thread_id).is_some() {
+                if let Some(editing) = app_state.editing_queued_chat_input(thread_id) {
                     if has_text {
                         if let Some(previous) =
                             app_state.save_editing_queued_chat_input(thread_id, command.clone())
                         {
+                            if let Some(queue_id) = editing.original.id {
+                                let _ = archcar_bridge.remove_queued_chat_input(queue_id);
+                            }
+                            let replacement = command.trim().to_owned();
+                            if !replacement.is_empty() {
+                                let _ = archcar_bridge.queue_chat_input(
+                                    thread_id,
+                                    replacement,
+                                    None,
+                                    editing.original.kind,
+                                    editing.original.session_kind,
+                                );
+                            }
                             buffer.set_text(&previous);
                             refresh_view();
                         }
@@ -8351,6 +8374,7 @@ fn queue_archcar_input(
     app_state.queue_chat_input(
         thread_id,
         QueuedChatInputDraft {
+            id: None,
             input,
             visible_input,
             kind,
@@ -8368,21 +8392,32 @@ fn queue_archcar_input_with_bridge(
     kind: ArchcarInputKind,
     session_kind: SessionKind,
 ) {
-    queue_archcar_input(
-        app_state,
-        thread_id,
-        input.clone(),
-        visible_input.clone(),
-        kind.clone(),
-        session_kind,
-    );
+    let input = input.trim().to_owned();
+    if input.is_empty() {
+        return;
+    }
     if bridge
-        .queue_chat_input(thread_id, input, visible_input, kind, session_kind)
-        .is_none()
+        .queue_chat_input(
+            thread_id,
+            input.clone(),
+            visible_input.clone(),
+            kind.clone(),
+            session_kind,
+        )
+        .is_some()
     {
+        queue_archcar_input(
+            app_state,
+            thread_id,
+            input,
+            visible_input,
+            kind,
+            session_kind,
+        );
+    } else {
         warn!(
             thread_id,
-            "could not submit queued chat input to archcar; GTK cache will retry from local state"
+            "could not submit queued chat input to archcar; GTK cache was left unchanged"
         );
     }
 }
@@ -8402,6 +8437,7 @@ fn queue_archcar_input_for_target(
     app_state.queue_chat_input_for_target(
         target,
         QueuedChatInputDraft {
+            id: None,
             input,
             visible_input,
             kind,
@@ -11634,6 +11670,7 @@ fn handle_archcar_event(
         ArchcarEvent::ChatQueueUpdated { thread_id } => {
             trace!(thread_id, "archcar chat queue updated");
             clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
+            sync_session_surface_queued_inputs_cache(app_state.clone(), *thread_id);
         }
         ArchcarEvent::ProviderInteractionRequested { interaction } => {
             trace!(
@@ -11703,6 +11740,7 @@ fn handle_archcar_response(
     response: AsyncArchcarResponse,
     database_path: &Path,
     workspace: &str,
+    app_state: &AppState,
     bridge: AsyncArchcarBridge,
     ready_cache: &RefCell<HashMap<i64, bool>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
@@ -11717,6 +11755,9 @@ fn handle_archcar_response(
 ) -> bool {
     let mut changed = false;
     let Some(action) = inflight_actions.borrow_mut().remove(&response.token) else {
+        if apply_untracked_queue_response(app_state, &response) {
+            return true;
+        }
         debug!(token = response.token, ?response.request, "archcar response had no tracked GTK action");
         return false;
     };
@@ -12099,6 +12140,104 @@ fn handle_archcar_response(
         },
     }
     changed
+}
+
+fn apply_untracked_queue_response(app_state: &AppState, response: &AsyncArchcarResponse) -> bool {
+    match (&response.request, &response.result) {
+        (
+            AsyncArchcarRequestKind::QueueChatInput { thread_id, .. },
+            Ok(ArchcarResponse::QueuedChatInput { input }),
+        ) => {
+            let mut inputs = app_state.queued_chat_inputs(*thread_id);
+            if let Some(existing) = inputs
+                .iter_mut()
+                .find(|draft| queued_chat_draft_matches_archcar_input(draft, input))
+            {
+                *existing = queued_chat_draft_from_archcar_input(input);
+            } else {
+                inputs.push(queued_chat_draft_from_archcar_input(input));
+            }
+            app_state.replace_queued_chat_inputs(*thread_id, inputs);
+            true
+        }
+        (
+            AsyncArchcarRequestKind::RemoveQueuedChatInput { .. },
+            Ok(ArchcarResponse::QueuedChatInput { input }),
+        ) => {
+            let mut inputs = app_state.queued_chat_inputs(input.thread_id);
+            inputs.retain(|draft| draft.id != Some(input.id));
+            app_state.replace_queued_chat_inputs(input.thread_id, inputs);
+            true
+        }
+        (
+            AsyncArchcarRequestKind::ListQueuedChatInputs { thread_id },
+            Ok(ArchcarResponse::QueuedChatInputs { inputs, .. }),
+        ) => {
+            app_state.replace_queued_chat_inputs(
+                *thread_id,
+                inputs
+                    .iter()
+                    .map(queued_chat_draft_from_archcar_input)
+                    .collect(),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn queued_chat_draft_from_archcar_input(
+    input: &ProtocolQueuedArchcarInput,
+) -> QueuedChatInputDraft {
+    QueuedChatInputDraft {
+        id: Some(input.id),
+        input: input.input.clone(),
+        visible_input: input.visible_input.clone(),
+        kind: input.kind.clone(),
+        session_kind: input.session_kind,
+    }
+}
+
+fn queued_chat_draft_matches_archcar_input(
+    draft: &QueuedChatInputDraft,
+    input: &ProtocolQueuedArchcarInput,
+) -> bool {
+    draft.id == Some(input.id)
+        || (draft.id.is_none()
+            && draft.input.trim() == input.input.trim()
+            && draft.visible_input == input.visible_input
+            && draft.kind == input.kind
+            && draft.session_kind == input.session_kind)
+}
+
+fn sync_session_surface_queued_inputs_cache(app_state: AppState, thread_id: i64) {
+    let db_path = app_state.paths.database_path.clone();
+    spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_queued_chat_inputs(thread_id))
+                .map(|inputs| {
+                    inputs
+                        .into_iter()
+                        .map(|input| QueuedChatInputDraft {
+                            id: Some(input.id),
+                            input: input.input,
+                            visible_input: input.visible_input,
+                            kind: input.input_kind,
+                            session_kind: input.session_kind,
+                        })
+                        .collect::<Vec<_>>()
+                })
+        },
+        move |result| match result {
+            Ok(inputs) => app_state.replace_queued_chat_inputs(thread_id, inputs),
+            Err(err) => warn!(
+                thread_id,
+                error = %format!("{err:#}"),
+                "failed to sync visible chat queue cache"
+            ),
+        },
+    );
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -13789,6 +13928,7 @@ fix it
         state.queue_chat_input_for_target(
             target.clone(),
             QueuedChatInputDraft {
+                id: None,
                 input: "start once ready".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
@@ -13838,6 +13978,7 @@ fix it
         state.queue_chat_input(
             7,
             QueuedChatInputDraft {
+                id: None,
                 input: "old queued input".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
@@ -18263,6 +18404,93 @@ Schema confirms the app moved CRM around businesses.";
 
         assert!(!changed);
         assert!(!working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn queue_response_replaces_optimistic_cache_row_with_archcar_id() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.queue_chat_input(
+            7,
+            QueuedChatInputDraft {
+                id: None,
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+        );
+        let response = AsyncArchcarResponse {
+            token: 1,
+            request: AsyncArchcarRequestKind::QueueChatInput {
+                thread_id: 7,
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+            result: Ok(ArchcarResponse::QueuedChatInput {
+                input: ProtocolQueuedArchcarInput {
+                    id: 99,
+                    thread_id: 7,
+                    input: "run tests".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    session_kind: SessionKind::Codex,
+                    created_at: "1".to_owned(),
+                    updated_at: "1".to_owned(),
+                },
+            }),
+        };
+
+        assert!(apply_untracked_queue_response(&state, &response));
+
+        let queued = state.queued_chat_inputs(7);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, Some(99));
+    }
+
+    #[test]
+    fn queue_remove_response_deletes_cached_archcar_row() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.queue_chat_input(
+            7,
+            QueuedChatInputDraft {
+                id: Some(99),
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+        );
+        let response = AsyncArchcarResponse {
+            token: 1,
+            request: AsyncArchcarRequestKind::RemoveQueuedChatInput { queue_id: 99 },
+            result: Ok(ArchcarResponse::QueuedChatInput {
+                input: ProtocolQueuedArchcarInput {
+                    id: 99,
+                    thread_id: 7,
+                    input: "run tests".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    session_kind: SessionKind::Codex,
+                    created_at: "1".to_owned(),
+                    updated_at: "1".to_owned(),
+                },
+            }),
+        };
+
+        assert!(apply_untracked_queue_response(&state, &response));
+        assert_eq!(state.queued_chat_inputs_count(7), 0);
     }
 
     #[test]
