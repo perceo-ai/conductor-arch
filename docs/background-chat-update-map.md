@@ -7,7 +7,7 @@ workspace, another chat thread, or another page.
 
 ## Short Version
 
-Background chat updates have three paths:
+Background chat updates use four coordinated mechanisms:
 
 - a two-second GTK sampler reads lightweight running-chat markers from SQLite
 - Archcar owns the durable chat input queue and drains it from session
@@ -17,7 +17,7 @@ Background chat updates have three paths:
 - the Archcar async bridge wakes the selected chat surface when the sidecar
   emits session events, responses, or bridge errors
 
-Both paths avoid loading every hidden timeline. Routine background work emits
+These mechanisms avoid loading every hidden timeline. Routine background work emits
 typed refresh events, updates summaries and tab state, and loads a full
 timeline only when the affected thread needs to render.
 

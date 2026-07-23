@@ -3294,6 +3294,7 @@ pub fn agent_session_panel(
         let send_immediate_input = send_immediate_input.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let inflight_archcar_actions = inflight_archcar_actions.clone();
+        let toast_manager = toast_manager.clone();
         move |intent: ComposerSubmitIntent| {
             let command = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), true)
@@ -3305,22 +3306,46 @@ pub fn agent_session_panel(
             if let Some(thread_id) = action_thread_id {
                 if let Some(editing) = app_state.editing_queued_chat_input(thread_id) {
                     if has_text {
+                        let replacement = command.trim().to_owned();
+                        let replacement_tracked = track_archcar_queue_chat_input_with_bridge(
+                            &archcar_bridge,
+                            inflight_archcar_actions.as_ref(),
+                            thread_id,
+                            replacement,
+                            None,
+                            editing.original.kind.clone(),
+                            editing.original.session_kind,
+                            false,
+                        );
+                        if replacement_tracked {
+                            let removal_tracked = queue_archcar_remove_queued_chat_input(
+                                &archcar_bridge,
+                                inflight_archcar_actions.as_ref(),
+                                thread_id,
+                                editing.original.clone(),
+                            );
+                            if !removal_tracked {
+                                toast_manager.error(
+                                    "Could not remove the original queued message because archcar is unavailable."
+                                        .to_owned(),
+                                );
+                            }
+                        } else {
+                            toast_manager.error(
+                                "Could not save the edited queued message because archcar is unavailable."
+                                    .to_owned(),
+                            );
+                            update_composer_state();
+                            if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned()
+                            {
+                                refresh();
+                            }
+                            return;
+                        }
+
                         if let Some(previous) =
                             app_state.save_editing_queued_chat_input(thread_id, command.clone())
                         {
-                            if let Some(queue_id) = editing.original.id {
-                                let _ = archcar_bridge.remove_queued_chat_input(queue_id);
-                            }
-                            let replacement = command.trim().to_owned();
-                            if !replacement.is_empty() {
-                                let _ = archcar_bridge.queue_chat_input(
-                                    thread_id,
-                                    replacement,
-                                    None,
-                                    editing.original.kind,
-                                    editing.original.session_kind,
-                                );
-                            }
                             buffer.set_text(&previous);
                             refresh_view();
                         }
@@ -8583,10 +8608,47 @@ fn queue_archcar_input_with_bridge(
     visible_input: Option<String>,
     kind: ArchcarInputKind,
     session_kind: SessionKind,
-) {
+) -> bool {
     let input = input.trim().to_owned();
     if input.is_empty() {
-        return;
+        return true;
+    }
+    let tracked = track_archcar_queue_chat_input_with_bridge(
+        bridge,
+        inflight_actions,
+        thread_id,
+        input.clone(),
+        visible_input.clone(),
+        kind.clone(),
+        session_kind,
+        true,
+    );
+    if tracked {
+        ensure_optimistic_queued_chat_input(
+            app_state,
+            thread_id,
+            input,
+            visible_input.clone(),
+            kind,
+            session_kind,
+        );
+    }
+    tracked
+}
+
+fn track_archcar_queue_chat_input_with_bridge(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+    input: String,
+    visible_input: Option<String>,
+    kind: ArchcarInputKind,
+    session_kind: SessionKind,
+    warn_on_failure: bool,
+) -> bool {
+    let input = input.trim().to_owned();
+    if input.is_empty() {
+        return true;
     }
     if let Some(token) = bridge.queue_chat_input(
         thread_id,
@@ -8605,19 +8667,39 @@ fn queue_archcar_input_with_bridge(
                 session_kind,
             },
         );
-        ensure_optimistic_queued_chat_input(
-            app_state,
-            thread_id,
-            input,
-            visible_input,
-            kind,
-            session_kind,
+        true
+    } else {
+        if warn_on_failure {
+            warn!(
+                thread_id,
+                "could not submit queued chat input to archcar; GTK cache was left unchanged"
+            );
+        }
+        false
+    }
+}
+
+fn queue_archcar_remove_queued_chat_input(
+    bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    thread_id: i64,
+    input: QueuedChatInputDraft,
+) -> bool {
+    let Some(queue_id) = input.id else {
+        return true;
+    };
+    if let Some(token) = bridge.remove_queued_chat_input(queue_id) {
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::RemoveQueuedChatInput { thread_id, input },
         );
+        true
     } else {
         warn!(
             thread_id,
-            "could not submit queued chat input to archcar; GTK cache was left unchanged"
+            queue_id, "could not submit queued chat input removal to archcar"
         );
+        false
     }
 }
 
@@ -11356,6 +11438,10 @@ enum PendingArchcarAction {
         kind: ArchcarInputKind,
         session_kind: SessionKind,
     },
+    RemoveQueuedChatInput {
+        thread_id: i64,
+        input: QueuedChatInputDraft,
+    },
     UserSend {
         thread_id: i64,
         session_id: i64,
@@ -12316,6 +12402,46 @@ fn handle_archcar_response(
                 changed = true;
             }
         },
+        PendingArchcarAction::RemoveQueuedChatInput { thread_id, input } => match response.result {
+            Ok(ArchcarResponse::QueuedChatInput { input: queued }) => {
+                remove_queued_chat_input_from_archcar(app_state, queued.thread_id, queued.id);
+                changed = true;
+            }
+            Ok(other) => {
+                warn!(
+                    thread_id,
+                    queue_id = ?input.id,
+                    ?other,
+                    "unexpected archcar queue removal response"
+                );
+                ensure_cached_queued_chat_input(app_state, thread_id, input);
+                let message = format!("Unexpected archcar queue removal response: {other:?}");
+                toast_manager.error(message.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error { thread_id, message },
+                );
+                changed = true;
+            }
+            Err(err) => {
+                warn!(
+                    thread_id,
+                    queue_id = ?input.id,
+                    error = %err,
+                    "archcar queue removal failed"
+                );
+                ensure_cached_queued_chat_input(app_state, thread_id, input);
+                toast_manager.error(err.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message: err,
+                    },
+                );
+                changed = true;
+            }
+        },
         PendingArchcarAction::UserSend {
             thread_id,
             session_id,
@@ -12437,9 +12563,7 @@ fn apply_untracked_queue_response(app_state: &AppState, response: &AsyncArchcarR
             AsyncArchcarRequestKind::RemoveQueuedChatInput { .. },
             Ok(ArchcarResponse::QueuedChatInput { input }),
         ) => {
-            let mut inputs = app_state.queued_chat_inputs(input.thread_id);
-            inputs.retain(|draft| draft.id != Some(input.id));
-            app_state.replace_queued_chat_inputs(input.thread_id, inputs);
+            remove_queued_chat_input_from_archcar(app_state, input.thread_id, input.id);
             true
         }
         (
@@ -12476,6 +12600,27 @@ fn replace_queued_chat_input_from_archcar(
     app_state.replace_queued_chat_inputs(thread_id, inputs);
 }
 
+fn remove_queued_chat_input_from_archcar(app_state: &AppState, thread_id: i64, queue_id: i64) {
+    let mut inputs = app_state.queued_chat_inputs(thread_id);
+    inputs.retain(|draft| draft.id != Some(queue_id));
+    app_state.replace_queued_chat_inputs(thread_id, inputs);
+}
+
+fn ensure_cached_queued_chat_input(
+    app_state: &AppState,
+    thread_id: i64,
+    input: QueuedChatInputDraft,
+) {
+    let mut inputs = app_state.queued_chat_inputs(thread_id);
+    if !inputs
+        .iter()
+        .any(|existing| queued_chat_drafts_match(existing, &input))
+    {
+        inputs.push(input);
+        app_state.replace_queued_chat_inputs(thread_id, inputs);
+    }
+}
+
 fn ensure_optimistic_queued_chat_input(
     app_state: &AppState,
     thread_id: i64,
@@ -12491,14 +12636,7 @@ fn ensure_optimistic_queued_chat_input(
         kind,
         session_kind,
     };
-    let mut inputs = app_state.queued_chat_inputs(thread_id);
-    if !inputs
-        .iter()
-        .any(|existing| queued_chat_drafts_match(existing, &draft))
-    {
-        inputs.push(draft);
-        app_state.replace_queued_chat_inputs(thread_id, inputs);
-    }
+    ensure_cached_queued_chat_input(app_state, thread_id, draft);
 }
 
 fn queued_chat_draft_from_archcar_input(
@@ -14447,6 +14585,36 @@ fix it
         assert!(
             !helper.contains("queue_archcar_input("),
             "bridge queue submissions must not bypass tracked response handling"
+        );
+    }
+
+    #[test]
+    fn editing_queued_message_save_routes_replacement_through_tracked_bridge_actions() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("if let Some(editing) = app_state.editing_queued_chat_input(thread_id)")
+            .expect("queued edit save branch exists");
+        let end = source[start..]
+            .find("let current_harness = *selected_harness.borrow();")
+            .map(|offset| start + offset)
+            .expect("queued edit save branch returns before normal submit flow");
+        let edit_save_body = &source[start..end];
+
+        assert!(
+            edit_save_body.contains("queue_archcar_remove_queued_chat_input("),
+            "queued edit replacement must track remove_queued_chat_input responses"
+        );
+        assert!(
+            edit_save_body.contains("track_archcar_queue_chat_input_with_bridge("),
+            "queued edit replacement must track queue_chat_input responses"
+        );
+        assert!(
+            !edit_save_body.contains("archcar_bridge.remove_queued_chat_input("),
+            "queued edit replacement must not bypass tracked remove response handling"
+        );
+        assert!(
+            !edit_save_body.contains("archcar_bridge.queue_chat_input("),
+            "queued edit replacement must not bypass tracked queue response handling"
         );
     }
 
