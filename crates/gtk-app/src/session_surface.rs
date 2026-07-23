@@ -1636,7 +1636,37 @@ pub fn agent_session_panel(
                     inflight_archcar_actions.as_ref(),
                     &app_state,
                 );
-                if !flushed_pending {
+                let staged_queued = if !flushed_pending {
+                    stage_ready_background_queued_chat_inputs(
+                        &database_path,
+                        &workspace,
+                        &app_state,
+                        &thread_state.borrow(),
+                        &record_state.borrow(),
+                        archcar_ready_cache.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        pending_archcar_inputs.as_ref(),
+                        queued_auto_drain_holds.as_ref(),
+                        &working_threads,
+                    )
+                } else {
+                    false
+                };
+                if staged_queued {
+                    if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                        refresh();
+                    }
+                    let _ = flush_pending_archcar_inputs(
+                        &archcar_bridge,
+                        &database_path,
+                        &workspace,
+                        pending_commands.as_ref(),
+                        pending_archcar_inputs.as_ref(),
+                        archcar_ready_cache.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        &app_state,
+                    );
+                } else if !flushed_pending {
                     if let Some(thread_id) = selected_thread_id {
                         let can_send_next = queued_chat_auto_drain_ready(
                             current_kind,
@@ -7771,6 +7801,86 @@ fn move_queued_chat_inputs_to_pending_archcar_inputs(
     }
 }
 
+fn stage_ready_background_queued_chat_inputs(
+    database_path: &Path,
+    workspace: &str,
+    app_state: &AppState,
+    threads: &[ChatThreadRecord],
+    records: &[ProcessRecord],
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    holds: &RefCell<HashSet<i64>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+) -> bool {
+    let branch_prefix = WorkspaceStore::open_app(database_path)
+        .and_then(|store| store.workspace_branch_prefix(workspace))
+        .unwrap_or_else(|err| {
+            warn!(
+                workspace = %workspace,
+                error = %err,
+                "failed to load workspace branch prefix for queued background drain"
+            );
+            "lc".to_owned()
+        });
+    let mut staged_any = false;
+    for thread in threads {
+        let kind = session_kind_from_provider(&thread.provider);
+        if !queued_chat_auto_drain_ready(
+            kind,
+            records,
+            thread.id,
+            ready_cache,
+            inflight_actions,
+            pending_inputs,
+            holds,
+            working_threads,
+        ) {
+            continue;
+        }
+        let Some(queued_input) = pop_next_queued_chat_input(app_state, thread.id) else {
+            continue;
+        };
+        let thread_messages = match WorkspaceStore::open_app(database_path)
+            .and_then(|store| store.list_chat_messages(thread.id))
+        {
+            Ok(messages) => messages,
+            Err(err) => {
+                warn!(
+                    workspace = %workspace,
+                    thread_id = thread.id,
+                    error = %err,
+                    "failed to load chat messages for queued background drain"
+                );
+                requeue_pending_input_front(app_state, thread.id, queued_input);
+                continue;
+            }
+        };
+        let staged_review = matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
+        let prepared = prepare_session_send_input(
+            &queued_input.input,
+            workspace,
+            &branch_prefix,
+            staged_review,
+            queued_input.session_kind,
+            thread,
+            &thread_messages,
+        );
+        queue_pending_archcar_input(
+            pending_inputs,
+            thread.id,
+            QueuedArchcarInput {
+                input: prepared.input,
+                visible_input: prepared.visible_input.or(queued_input.visible_input),
+                kind: queued_input.kind,
+                session_kind: queued_input.session_kind,
+            },
+        );
+        staged_any = true;
+    }
+    staged_any
+}
+
 fn pop_next_pending_archcar_input(
     pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     thread_id: i64,
@@ -13187,6 +13297,104 @@ fix it
             &holds,
             &working_threads,
         ));
+    }
+
+    #[test]
+    fn background_queue_drain_moves_one_ready_non_selected_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO repositories (
+                id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+             ) VALUES (1, 'repo', ?1, 'main', 'origin', ?2, '1', '1')",
+            rusqlite::params![
+                temp.path().join("repo").display().to_string(),
+                temp.path().join("workspaces").display().to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (
+                id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at
+             ) VALUES (1, 1, 'berlin', ?1, 'feature/berlin', 'main', 3000, 'active', '1', '1')",
+            [temp.path().join("workspaces/berlin").display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (7, 1, 'codex', 'New Chat', 'active', '1', '1')",
+            [],
+        )
+        .unwrap();
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        queue_archcar_input(
+            &app_state,
+            7,
+            " first ".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+        queue_archcar_input(
+            &app_state,
+            7,
+            "second".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(11, true)]));
+        let inflight_actions = RefCell::new(HashMap::new());
+        let pending_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let holds = RefCell::new(HashSet::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let threads = vec![ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: "New Chat".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "1".to_owned(),
+            updated_at: "1".to_owned(),
+            archived_at: None,
+        }];
+
+        assert!(stage_ready_background_queued_chat_inputs(
+            &db_path,
+            "berlin",
+            &app_state,
+            &threads,
+            &records,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
+
+        assert_eq!(queued_chat_inputs_count(&app_state, 7), 1);
+        assert_eq!(app_state.queued_chat_inputs(7)[0].input, "second");
+        let pending = pending_inputs.borrow();
+        let pending = pending.get(&7).expect("one pending archcar input");
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].input.contains("<archductor_hidden_instruction>"));
+        assert_eq!(pending[0].visible_input.as_deref(), Some("first"));
     }
 
     #[test]
