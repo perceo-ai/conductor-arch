@@ -93,7 +93,7 @@ const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
-const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;
+const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 32;
 const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
 const LONG_PASTE_ATTACHMENT_THRESHOLD: usize = 2_000;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
@@ -17460,12 +17460,10 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
-    fn chat_refresh_wake_debounce_limits_streaming_repaint_churn() {
-        let source = include_str!("session_surface.rs");
-
-        assert!(
-            source.contains("const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;"),
-            "streaming provider events must not trigger near-frame-rate full chat refreshes"
+    fn archcar_wake_debounce_stays_almost_instant() {
+        assert_eq!(
+            CHAT_REFRESH_WAKE_DELAY_MS, 32,
+            "selected chat Archcar events should reflect in the UI within a frame-ish delay"
         );
     }
 

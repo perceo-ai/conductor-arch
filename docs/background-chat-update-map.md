@@ -91,8 +91,9 @@ elsewhere:
 - held queue wakeups after failed/interrupted/deferred turns
 - working markers for hidden turns
 
-The runner wakes on Archcar events with a 150 ms debounce and also ticks once
-per second. Each tick:
+The runner wakes on Archcar events with a 32 ms debounce and also ticks once per
+second. The 32 ms path is event wake debounce, not polling; it keeps UI state
+nearly instant while still collapsing same-burst updates. Each tick:
 
 1. drains pending Archcar events/responses from the runner bridge
 2. emits scoped typed refresh events for affected chat threads/workspaces
@@ -262,7 +263,7 @@ callback.
 `session_surface.rs` installs that wake callback with `install_archcar_wake`:
 
 - each chat surface gets a wake id in `CHAT_WAKE_REGISTRY`
-- wake calls are debounced with `CHAT_REFRESH_WAKE_DELAY_MS = 150`
+- wake calls are debounced with `CHAT_REFRESH_WAKE_DELAY_MS = 32`
 - the scheduled GTK callback drops itself if the owning surface was destroyed
 - otherwise it runs the registered chat surface refresh
 
@@ -367,9 +368,9 @@ sends, and CLI sends aligned even when they run at the same time.
 - message timeline refreshes use per-thread generations
 - message timeline DB loads do not run synchronously in GTK callbacks
 - nonselected message refreshes warm cache before skipping render
-- Archcar wake is debounced at 150 ms
+- Archcar wake is debounced at 32 ms
 - wake registry entries are removed when the chat surface is destroyed
-- background chat Archcar wake is debounced at 150 ms and lives for the app
+- background chat Archcar wake is debounced at 32 ms and lives for the app
   lifetime
 - selected workspace filtering prevents off-workspace events from repainting
   the visible chat surface

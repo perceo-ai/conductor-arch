@@ -277,8 +277,10 @@ without loading hidden full chat timelines.
 ### Background Chat Runner
 
 `background_chat.rs` has its own Archcar bridge and wakes on Archcar events with
-the same 150 ms debounce used by the selected chat surface. It drains events for
-hidden chats even when no chat surface is focused.
+the same 32 ms debounce used by the selected chat surface. This is event wake
+debounce, not polling; it keeps GTK reflection nearly instant while still
+collapsing same-burst provider updates. It drains events for hidden chats even
+when no chat surface is focused.
 
 The runner emits narrow events only:
 
@@ -338,7 +340,7 @@ This path does not mutate `AppState`.
 - Message refreshes use per-thread generations so stale background results are
   dropped.
 - Nonselected message refreshes warm cache but skip rendering.
-- Archcar wake uses a one-shot 150 ms debounce to collapse event bursts.
+- Archcar wake uses a one-shot 32 ms debounce to collapse event bursts.
 - Queue overlay render is signature-based to avoid churn during streaming.
 - Sidebar workspace selection uses a generation counter so stale async lookup
   results are ignored.

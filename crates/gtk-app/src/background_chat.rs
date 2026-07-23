@@ -26,7 +26,7 @@ use crate::refresh::RefreshEvent;
 use crate::state::{AppState, QueuedChatInputDraft};
 
 const BACKGROUND_CHAT_TICK_SECONDS: u32 = 1;
-const BACKGROUND_CHAT_WAKE_DELAY_MS: u64 = 150;
+const BACKGROUND_CHAT_WAKE_DELAY_MS: u64 = 32;
 
 static NEXT_BACKGROUND_CHAT_WAKE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1161,5 +1161,13 @@ mod tests {
         assert_eq!(app_state.queued_chat_inputs_count(7), 1);
         assert_eq!(app_state.queued_chat_inputs(7)[0].input, "run tests");
         assert!(state.borrow().held_threads.contains(&7));
+    }
+
+    #[test]
+    fn background_chat_wake_debounce_stays_almost_instant() {
+        assert_eq!(
+            BACKGROUND_CHAT_WAKE_DELAY_MS, 32,
+            "background chat Archcar events should update state with the same frame-ish delay"
+        );
     }
 }
