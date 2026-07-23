@@ -282,6 +282,12 @@ It scans only queued thread ids from `AppState`, loads queue candidates in a
 background job, and sends one queued input when the hidden thread is managed,
 idle, and ready.
 
+CLI and GTK use the same Archcar delivery contract. Default sends use
+`ArchcarInputDelivery::Auto`, which Archcar rejects for not-ready managed
+Codex/Claude sessions before provider enqueue. Ctrl+Enter and CLI
+`--immediate` use `ArchcarInputDelivery::Immediate`, which is the only path that
+may steer an active turn.
+
 ### Runtime And Terminal
 
 Runtime reconciliation runs on startup, focus, close, file-watch events, and a

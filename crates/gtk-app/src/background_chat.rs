@@ -1105,4 +1105,54 @@ mod tests {
 
         assert!(has_inflight_user_send_for_thread(&state.borrow(), 7));
     }
+
+    #[test]
+    fn user_send_error_requeues_hidden_input_for_later_background_drain() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Changes,
+            crate::state::AppPage::Workspace,
+        );
+        let state = Rc::new(RefCell::new(BackgroundChatRunnerState::default()));
+        let draft = QueuedChatInputDraft {
+            input: "run tests".to_owned(),
+            visible_input: None,
+            kind: ArchcarInputKind::User,
+            session_kind: SessionKind::Codex,
+        };
+        state.borrow_mut().inflight_actions.insert(
+            9,
+            BackgroundChatAction::UserSend {
+                workspace: "berlin".to_owned(),
+                thread_id: 7,
+                session_id: 11,
+                draft,
+                checkpoint_id: None,
+            },
+        );
+
+        handle_background_archcar_response(
+            &app_state,
+            &state,
+            AsyncArchcarResponse {
+                token: 9,
+                request: AsyncArchcarRequestKind::SendInput {
+                    session_id: 11,
+                    input: "run tests".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
+                },
+                result: Err(
+                    "codex session 11 is not ready for automatic input; use immediate delivery"
+                        .to_owned(),
+                ),
+            },
+        );
+
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
+        assert_eq!(app_state.queued_chat_inputs(7)[0].input, "run tests");
+        assert!(state.borrow().held_threads.contains(&7));
+    }
 }

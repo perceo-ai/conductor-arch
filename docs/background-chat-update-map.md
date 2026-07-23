@@ -310,6 +310,9 @@ For hidden chats, `background_chat.rs` performs the corresponding drain:
 - preserves first-message metadata injection by reusing the same send
   preparation function as the focused surface
 - sends one queued input with automatic delivery
+- relies on Archcar's shared automatic-send readiness gate, so GTK background
+  queue drain and CLI default sends cannot both write into an active managed
+  turn
 - records a turn checkpoint before send and discards it if Archcar rejects the
   input
 - keeps the send in-flight after Ack until a message/update/turn boundary
@@ -320,6 +323,23 @@ For hidden chats, `background_chat.rs` performs the corresponding drain:
 Turn completion also schedules a background pull-request state refresh and then
 emits `WorkspaceReviewChanged` for the affected workspace. That keeps PR/GitHub
 status surfaces current without repainting unrelated chat or shell UI.
+
+## CLI And GTK Parallel Use
+
+CLI and GTK both write through Archcar and read the same SQLite sources:
+
+- session state comes from Archcar `GetSessionStatus` and persisted process rows
+- chat messages come from persisted chat messages plus provider events
+- provider interactions come from the shared interaction store
+- GTK queued background sends and CLI default sends both use
+  `ArchcarInputDelivery::Auto`
+- Ctrl+Enter and CLI `--immediate` both use `ArchcarInputDelivery::Immediate`
+
+Archcar is the concurrency boundary. It rejects automatic sends for managed
+Codex/Claude sessions whose snapshot is not ready, before enqueueing the input
+to the provider loop. Only immediate delivery may enter a not-ready session to
+steer the active turn. This keeps GTK background queue drain, visible composer
+sends, and CLI sends aligned even when they run at the same time.
 
 ## Safety Guards
 
@@ -363,6 +383,9 @@ Notable assertions:
 - hidden queued chats send only when ready, idle, and not selected-visible
 - failed hidden turns hold queue drain; successful turns release it
 - background send Ack stays in-flight until an event boundary
+- Archcar rejects automatic sends to not-ready managed sessions before enqueue
+- Archcar still accepts immediate sends to not-ready managed sessions for
+  explicit steering
 - idle running process is not enough to mark active provider work
 - active provider turn marks nav item running
 - chat message refresh maps to `ChatRefreshKind::Messages`

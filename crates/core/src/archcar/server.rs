@@ -12,7 +12,7 @@ use anyhow::{anyhow, Context, Result};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::archcar::harness::managed_harness_for_kind;
+use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
@@ -288,6 +288,11 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             delivery,
         } => match load_or_restore_session_handle(state, session_id) {
             Ok(Some(handle)) => {
+                if let Err(err) = validate_send_input_delivery(&handle, delivery) {
+                    return ArchcarResponse::Error {
+                        message: err.to_string(),
+                    };
+                }
                 match handle
                     .command_tx
                     .send(crate::archcar::session::SessionCommand::SendInput {
@@ -542,6 +547,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             message: "subscribe must use a persistent connection".to_owned(),
         },
     }
+}
+
+fn validate_send_input_delivery(
+    handle: &SessionHandle,
+    delivery: crate::archcar::protocol::ArchcarInputDelivery,
+) -> Result<()> {
+    if delivery == crate::archcar::protocol::ArchcarInputDelivery::Immediate {
+        return Ok(());
+    }
+    let snapshot = handle.snapshot.lock().unwrap();
+    if matches!(snapshot.kind, SessionKind::Codex | SessionKind::Claude) && !snapshot.ready {
+        anyhow::bail!(
+            "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn",
+            provider_name(snapshot.kind),
+            snapshot.session_id
+        );
+    }
+    Ok(())
 }
 
 fn send_session_control(
@@ -2118,6 +2141,113 @@ mod tests {
                 kind: SessionKind::Codex,
             }
         );
+    }
+
+    #[test]
+    fn auto_send_rejects_not_ready_managed_session_before_enqueue() {
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: 4,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: crate::workspace::ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::SendInput {
+                session_id: 9,
+                input: "queued follow-up".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            },
+            &state,
+        );
+
+        assert!(matches!(
+            response,
+            ArchcarResponse::Error { ref message }
+                if message.contains("not ready for automatic input")
+        ));
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn immediate_send_allows_not_ready_managed_session_for_steering() {
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: 4,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: crate::workspace::ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::SendInput {
+                session_id: 9,
+                input: "steer now".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+            },
+            &state,
+        );
+
+        assert_eq!(response, ArchcarResponse::Ack);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(crate::archcar::session::SessionCommand::SendInput {
+                input,
+                delivery: ArchcarInputDelivery::Immediate,
+                ..
+            }) if input == "steer now"
+        ));
     }
 
     #[test]
