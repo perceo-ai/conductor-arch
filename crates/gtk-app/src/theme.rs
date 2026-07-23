@@ -3299,22 +3299,25 @@ mod tests {
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
         let chip_block = selector_block(css, ".chat-inline-event-chip");
-        assert!(chip_block.contains("background-color: rgba(134, 239, 172, 0.1);"));
-        assert!(chip_block.contains("border: 1px solid rgba(134, 239, 172, 0.22);"));
-        assert!(chip_block.contains("border-radius: 6px;"));
-        assert!(chip_block.contains("font-size: 11px;"));
-        assert!(chip_block.contains("min-height: 18px;"));
-        assert!(chip_block.contains("padding: 1px 6px;"));
+        assert!(chip_block.contains("background-color: #191919;"));
+        assert!(chip_block.contains("border: 1px solid #343434;"));
+        assert!(chip_block.contains("border-radius: 2px;"));
+        assert!(chip_block.contains("font-size: 10px;"));
+        assert!(chip_block.contains("min-height: 0;"));
+        assert!(chip_block.contains("padding: 0 4px;"));
         assert!(chip_block.contains("min-width: 0;"));
         assert!(css.contains("button.chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-chip label"));
         assert!(css.contains("margin: 0;"));
         let expander_block = selector_block(css, ".chat-inline-event-expander");
-        assert!(expander_block.contains("border-radius: 6px;"));
-        assert!(expander_block.contains("font-size: 11px;"));
-        assert!(expander_block.contains("min-height: 18px;"));
-        assert!(expander_block.contains("min-width: 18px;"));
-        assert!(expander_block.contains("padding: 1px 0;"));
+        assert!(expander_block.contains("border-radius: 2px;"));
+        assert!(expander_block.contains("font-size: 10px;"));
+        assert!(expander_block.contains("min-height: 0;"));
+        assert!(expander_block.contains("min-width: 14px;"));
+        assert!(expander_block.contains("padding: 0 3px;"));
+        let action_block = selector_block(css, ".chat-inline-event-action");
+        assert!(action_block.contains("font-size: 10px;"));
+        assert!(action_block.contains("color: #8f8f8f;"));
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-top: 12px;\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
@@ -3436,10 +3439,10 @@ mod tests {
 
         for selector in [".ws-tab-add-btn", ".ws-run-tab-add-btn"] {
             let block = selector_block(css, selector);
-            assert!(block.contains("font-size: 13px;"));
-            assert!(block.contains("min-height: 22px;"));
-            assert!(block.contains("min-width: 22px;"));
-            assert!(block.contains("padding: 0 6px;"));
+            assert!(block.contains("font-size: 11px;"));
+            assert!(block.contains("min-height: 0;"));
+            assert!(block.contains("min-width: 16px;"));
+            assert!(block.contains("padding: 0 4px;"));
         }
     }
 
