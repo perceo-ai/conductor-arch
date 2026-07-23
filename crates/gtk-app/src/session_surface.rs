@@ -9476,7 +9476,7 @@ fn seed_chat_running_sessions(
     database_path: &Path,
     workspace_name: &str,
     active_sessions: &Rc<RefCell<HashSet<i64>>>,
-    last_output: &Rc<RefCell<HashMap<i64, Instant>>>,
+    _last_output: &Rc<RefCell<HashMap<i64, Instant>>>,
 ) {
     let Ok(store) = WorkspaceStore::open_app(database_path) else {
         return;
@@ -9491,7 +9491,6 @@ fn seed_chat_running_sessions(
             continue;
         }
         sessions.insert(record.id);
-        last_output.borrow_mut().insert(record.id, Instant::now());
     }
 }
 
@@ -10630,6 +10629,7 @@ fn derive_codex_startup_state(
             CodexStartupState::Idle
         }
         Some(CodexStartupState::Loading { message }) => CodexStartupState::Loading { message },
+        None if has_live_codex_session => codex_startup_state_ready(),
         _ => default_codex_loading_state(),
     }
 }
@@ -13970,6 +13970,52 @@ fix it
             8,
             SessionKind::Codex
         ));
+    }
+
+    #[test]
+    fn reload_seed_attaches_running_sessions_without_marking_recent_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO repositories (
+                id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+             ) VALUES (1, 'repo', ?1, 'main', 'origin', ?2, '1', '1')",
+            rusqlite::params![
+                temp.path().join("repo").display().to_string(),
+                temp.path().join("workspaces").display().to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (
+                id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at
+             ) VALUES (1, 1, 'berlin', ?1, 'feature/berlin', 'main', 3000, 'active', '1', '1')",
+            [temp.path().join("workspaces/berlin").display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (7, 1, 'codex', 'Fix spinner', 'active', '1', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processes (
+                id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             ) VALUES (11, 1, 7, 'session', 'codex', 1234, ?1, 'running', '1', NULL, NULL, NULL, NULL)",
+            [temp.path().join("session.log").display().to_string()],
+        )
+        .unwrap();
+        let active_sessions = Rc::new(RefCell::new(HashSet::new()));
+        let last_output = Rc::new(RefCell::new(HashMap::new()));
+
+        seed_chat_running_sessions(&db_path, "berlin", &active_sessions, &last_output);
+
+        assert!(active_sessions.borrow().contains(&11));
+        assert!(!last_output.borrow().contains_key(&11));
     }
 
     #[test]
@@ -18759,7 +18805,7 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn codex_startup_state_for_thread_ignores_ready_session_from_other_thread() {
+    fn codex_startup_state_for_thread_ignores_other_thread_ready_without_blocking_reload() {
         let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
         selected.chat_thread_id = Some(7);
         let mut other = session_record(22, "codex", ProcessStatus::Running, None);
@@ -18768,12 +18814,18 @@ Schema confirms the app moved CRM around businesses.";
 
         let state = codex_startup_state_for_thread(7, &[selected, other], &ready_cache, None);
 
-        assert_eq!(
-            state,
-            CodexStartupState::Loading {
-                message: "Starting agent...".to_owned(),
-            }
-        );
+        assert_eq!(state, CodexStartupState::Ready);
+    }
+
+    #[test]
+    fn codex_startup_state_for_thread_defaults_reloaded_running_thread_to_ready() {
+        let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
+        selected.chat_thread_id = Some(7);
+        let ready_cache = RefCell::new(HashMap::new());
+
+        let state = codex_startup_state_for_thread(7, &[selected], &ready_cache, None);
+
+        assert_eq!(state, CodexStartupState::Ready);
     }
 
     #[test]
