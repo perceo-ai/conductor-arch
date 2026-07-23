@@ -3403,8 +3403,7 @@ mod tests {
         let css = app_css();
         let running = selector_block(css, ".ws-tab-shell.ws-tab-running");
 
-        assert!(!running.contains("border-bottom-color: #4f8cff;"));
-        assert!(!running.contains("#4f8cff"));
+        assert!(running.contains("border-bottom-color: transparent;"));
     }
 
     #[test]

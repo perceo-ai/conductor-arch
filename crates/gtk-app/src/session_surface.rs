@@ -10243,7 +10243,8 @@ fn handle_composer_paste(
                 ) {
                     Ok(saved) => {
                         let target_path = root_for_image.join(&saved.relative_path);
-                        match texture.save_to_png(&target_path) {
+                        let png_bytes = texture.save_to_png_bytes();
+                        match stdfs::write(&target_path, png_bytes.as_ref()) {
                             Ok(()) => {
                                 insert_composer_text(&buffer_for_image, &saved.token);
                                 update_for_image();
@@ -10296,6 +10297,9 @@ fn handle_composer_paste(
 }
 
 fn insert_composer_text(buffer: &TextBuffer, text: &str) {
+    if let Some((mut start, mut end)) = buffer.selection_bounds() {
+        buffer.delete(&mut start, &mut end);
+    }
     buffer.insert_at_cursor(text);
 }
 
@@ -13339,6 +13343,43 @@ fix it
             ),
             "pending-7"
         );
+    }
+
+    #[test]
+    fn insert_composer_text_deletes_selection_before_insert() {
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let insert_body = source
+            .split("fn insert_composer_text(")
+            .nth(1)
+            .and_then(|body| body.split("\n}\n\n").next())
+            .expect("insert helper body exists");
+
+        let selection_index = insert_body.find("selection_bounds()").unwrap();
+        let delete_index = insert_body.find("buffer.delete(").unwrap();
+        let insert_index = insert_body.find("buffer.insert_at_cursor(text)").unwrap();
+
+        assert!(selection_index < delete_index);
+        assert!(delete_index < insert_index);
+    }
+
+    #[test]
+    fn image_paste_writes_png_bytes_to_attachment_path() {
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let paste_body = source
+            .split("fn handle_composer_paste(")
+            .nth(1)
+            .and_then(|body| body.split("fn insert_composer_text(").next())
+            .expect("paste handler body exists");
+
+        assert!(!paste_body.contains(".save_to_png("));
+        assert!(paste_body.contains("texture.save_to_png_bytes()"));
+        assert!(paste_body.contains("stdfs::write(&target_path, png_bytes.as_ref())"));
     }
 
     #[test]
