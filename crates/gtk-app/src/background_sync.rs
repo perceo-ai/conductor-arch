@@ -3,7 +3,14 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use archductor_core::workspace::{ChatThreadRecord, ProcessStatus, WorkspaceStore};
+use archductor_core::provider_events::{
+    ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
+};
+use archductor_core::provider_projection::{
+    provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
+    ProviderProjectionStatus,
+};
+use archductor_core::workspace::{ChatThreadRecord, WorkspaceStore};
 
 use crate::refresh::RefreshEvent;
 
@@ -61,17 +68,87 @@ pub(crate) fn load_workspace_chat_nav(
     workspace: &str,
     selected_thread: Option<i64>,
 ) -> Result<Vec<WorkspaceChatNavItem>> {
-    let running_threads = store
-        .list_sessions(workspace)?
+    let threads = store.list_chat_threads(workspace)?;
+    let provider_store = ProviderEventStore::new(store.db_path());
+    let working_threads = threads
+        .iter()
+        .filter_map(|thread| {
+            let events = match provider_store.list_for_chat_thread(thread.id) {
+                Ok(events) => events,
+                Err(err) => return Some(Err(err)),
+            };
+            provider_events_have_active_work(&events).then_some(Ok(thread.id))
+        })
+        .collect::<Result<HashSet<_>>>()?;
+    Ok(threads
         .into_iter()
-        .filter(|record| record.status == ProcessStatus::Running)
-        .filter_map(|record| record.chat_thread_id)
-        .collect::<HashSet<_>>();
-    Ok(store
-        .list_chat_threads(workspace)?
-        .into_iter()
-        .map(|thread| workspace_chat_nav_item(&thread, &running_threads, selected_thread))
+        .map(|thread| workspace_chat_nav_item(&thread, &working_threads, selected_thread))
         .collect())
+}
+
+pub(crate) fn provider_events_have_active_work(events: &[ProviderEventRecord]) -> bool {
+    let terminal_keys = events
+        .iter()
+        .filter(|event| provider_event_phase_is_terminal(event.phase))
+        .map(provider_event_activity_key)
+        .collect::<HashSet<_>>();
+    if events.iter().any(|event| {
+        event.kind == ProviderEventKind::Turn
+            && provider_event_phase_is_active(event.phase)
+            && !terminal_keys.contains(&provider_event_activity_key(event))
+    }) {
+        return true;
+    }
+
+    provider_projection_from_records(events)
+        .items
+        .iter()
+        .any(|item| {
+            item.status == ProviderProjectionStatus::Running
+                && provider_projection_item_is_relevant_chat_event(item)
+        })
+}
+
+fn provider_event_phase_is_active(phase: ProviderEventPhase) -> bool {
+    matches!(
+        phase,
+        ProviderEventPhase::Started | ProviderEventPhase::Delta | ProviderEventPhase::Progress
+    )
+}
+
+fn provider_event_phase_is_terminal(phase: ProviderEventPhase) -> bool {
+    matches!(
+        phase,
+        ProviderEventPhase::Completed
+            | ProviderEventPhase::Failed
+            | ProviderEventPhase::Declined
+            | ProviderEventPhase::Interrupted
+    )
+}
+
+fn provider_event_activity_key(event: &ProviderEventRecord) -> String {
+    if let Some(item_id) = event.provider_item_id.as_deref() {
+        return format!(
+            "{}:{}:item:{item_id}",
+            event.provider,
+            event.provider_thread_id.as_deref().unwrap_or("-")
+        );
+    }
+    if let Some(turn_id) = event.provider_turn_id.as_deref() {
+        return format!(
+            "{}:{}:turn:{turn_id}",
+            event.provider,
+            event.provider_thread_id.as_deref().unwrap_or("-")
+        );
+    }
+    if let Some(event_id) = event.provider_event_id.as_deref() {
+        return format!(
+            "{}:{}:event:{event_id}",
+            event.provider,
+            event.provider_thread_id.as_deref().unwrap_or("-")
+        );
+    }
+    event.identity_key.clone()
 }
 
 fn workspace_chat_nav_item(
@@ -178,6 +255,12 @@ fn snapshot_by_thread(
 
 #[cfg(test)]
 mod tests {
+    use archductor_core::provider_events::{
+        ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
+    };
+    use rusqlite::{params, Connection};
+    use serde_json::json;
+
     use super::*;
 
     fn thread_snapshot() -> BackgroundThreadSnapshot {
@@ -191,6 +274,71 @@ mod tests {
             latest_provider_sequence: Some(99),
             running_session_id: Some(22),
             updated_at: "2026-07-18T12:00:00Z".into(),
+        }
+    }
+
+    fn create_nav_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let now = "1";
+        conn.execute(
+            "INSERT INTO repositories (
+                id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+             ) VALUES (1, 'repo', ?1, 'main', 'origin', ?2, ?3, ?3)",
+            params![
+                temp.path().join("repo").display().to_string(),
+                temp.path().join("workspaces").display().to_string(),
+                now
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (
+                id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at
+             ) VALUES (1, 1, 'berlin', ?1, 'feature/berlin', 'main', 3000, 'active', ?2, ?2)",
+            params![temp.path().join("workspaces/berlin").display().to_string(), now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (7, 1, 'codex', 'Fix auth', 'active', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processes (
+                id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at
+             ) VALUES (11, 1, 7, 'session', 'codex', 1000, '/tmp/session.log', 'running', ?1)",
+            [now],
+        )
+        .unwrap();
+        (temp, db_path)
+    }
+
+    fn provider_event_draft(thread_id: i64, phase: ProviderEventPhase) -> ProviderEventDraft {
+        ProviderEventDraft {
+            provider: "codex".to_owned(),
+            provider_event_id: Some("event-1".to_owned()),
+            provider_item_id: Some("turn-1".to_owned()),
+            provider_thread_id: Some("native-thread-1".to_owned()),
+            provider_turn_id: Some("turn-1".to_owned()),
+            parent_provider_item_id: None,
+            parent_provider_thread_id: None,
+            workspace_id: Some(1),
+            chat_thread_id: Some(thread_id),
+            process_id: Some(11),
+            phase,
+            kind: ProviderEventKind::Turn,
+            provider_subtype: Some("turn".to_owned()),
+            provider_sequence: Some(1),
+            occurred_at_ms: 42,
+            normalized_payload: json!({"title": "Turn", "body": "working"}),
+            raw_json: json!({"method": "turn/started"}),
+            schema_version: 1,
+            adapter_version: "test".to_owned(),
         }
     }
 
@@ -347,6 +495,52 @@ mod tests {
 
         assert!(item.running);
         assert!(!item.unread);
+    }
+
+    #[test]
+    fn workspace_chat_nav_does_not_mark_idle_running_session_as_working() {
+        let (_temp, db_path) = create_nav_fixture();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+
+        let items = load_workspace_chat_nav(&store, "berlin", Some(7)).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].running);
+        assert!(!items[0].unread);
+    }
+
+    #[test]
+    fn workspace_chat_nav_marks_active_provider_turn_as_working() {
+        let (_temp, db_path) = create_nav_fixture();
+        ProviderEventStore::new(&db_path)
+            .upsert_event(&provider_event_draft(7, ProviderEventPhase::Started))
+            .unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].running);
+        assert!(items[0].unread);
+    }
+
+    #[test]
+    fn workspace_chat_nav_clears_working_after_terminal_provider_turn() {
+        let (_temp, db_path) = create_nav_fixture();
+        let provider_store = ProviderEventStore::new(&db_path);
+        provider_store
+            .upsert_event(&provider_event_draft(7, ProviderEventPhase::Started))
+            .unwrap();
+        provider_store
+            .upsert_event(&provider_event_draft(7, ProviderEventPhase::Completed))
+            .unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].running);
+        assert!(!items[0].unread);
     }
 
     #[test]

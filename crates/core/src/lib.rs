@@ -1,5 +1,6 @@
 pub mod agent_tools;
 pub mod archcar;
+pub mod chat_attachments;
 pub mod chat_store;
 pub mod codex_tui;
 pub mod doctor;
