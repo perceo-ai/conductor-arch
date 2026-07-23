@@ -21,6 +21,7 @@ pub struct BackgroundThreadSnapshot {
     pub title: String,
     pub provider: String,
     pub status: String,
+    pub active_work: bool,
     pub latest_message_id: Option<i64>,
     pub latest_provider_sequence: Option<i64>,
     pub running_session_id: Option<i64>,
@@ -45,21 +46,25 @@ pub(crate) struct WorkspaceChatNavItem {
 
 pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSnapshot> {
     let store = WorkspaceStore::open_app(db_path)?;
-    let running_threads = store
-        .list_running_chat_thread_summaries()?
-        .into_iter()
-        .map(|summary| BackgroundThreadSnapshot {
+    let provider_store = ProviderEventStore::new(db_path);
+    let mut running_threads = Vec::new();
+    for summary in store.list_running_chat_thread_summaries()? {
+        let active_work = provider_events_have_active_work(
+            &provider_store.list_for_chat_thread(summary.thread_id)?,
+        );
+        running_threads.push(BackgroundThreadSnapshot {
             workspace: summary.workspace,
             thread_id: summary.thread_id,
             title: summary.title,
             provider: summary.provider,
             status: summary.status,
+            active_work,
             latest_message_id: summary.latest_message_id,
             latest_provider_sequence: summary.latest_provider_sequence,
             running_session_id: summary.running_session_id,
             updated_at: summary.updated_at,
-        })
-        .collect();
+        });
+    }
     Ok(BackgroundSyncSnapshot { running_threads })
 }
 
@@ -225,6 +230,7 @@ pub fn diff_background_sync(
         if previous_thread.title != next_thread.title
             || previous_thread.provider != next_thread.provider
             || previous_thread.status != next_thread.status
+            || previous_thread.active_work != next_thread.active_work
             || previous_thread.running_session_id != next_thread.running_session_id
         {
             lifecycle_workspaces.insert(next_thread.workspace.clone());
@@ -309,6 +315,7 @@ mod tests {
             title: "Fix auth".into(),
             provider: "codex".into(),
             status: "running".into(),
+            active_work: false,
             latest_message_id: Some(11),
             latest_provider_sequence: Some(99),
             running_session_id: Some(22),
@@ -434,6 +441,27 @@ mod tests {
         };
         let mut changed = thread_snapshot();
         changed.title = "Fix login".into();
+        let next = BackgroundSyncSnapshot {
+            running_threads: vec![changed],
+        };
+
+        let events = diff_background_sync(&previous, &next);
+
+        assert_eq!(
+            events,
+            vec![RefreshEvent::WorkspaceChatLifecycleChanged {
+                workspace: "berlin".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_reports_active_work_change_as_lifecycle_change() {
+        let previous = BackgroundSyncSnapshot {
+            running_threads: vec![thread_snapshot()],
+        };
+        let mut changed = thread_snapshot();
+        changed.active_work = true;
         let next = BackgroundSyncSnapshot {
             running_threads: vec![changed],
         };

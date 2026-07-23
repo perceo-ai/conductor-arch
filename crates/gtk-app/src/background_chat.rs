@@ -50,7 +50,6 @@ struct BackgroundQueueCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BackgroundQueuePlan {
     Ensure,
-    ProbeStatus { session_id: i64 },
     Send { session_id: i64 },
 }
 
@@ -60,10 +59,6 @@ enum BackgroundChatAction {
         workspace: String,
         thread_id: i64,
         kind: SessionKind,
-    },
-    StatusProbe {
-        thread_id: i64,
-        session_id: i64,
     },
     UserSend {
         workspace: String,
@@ -237,9 +232,6 @@ fn drive_background_queue_candidates(
                     candidate.queued_session_kind,
                 );
             }
-            Some(BackgroundQueuePlan::ProbeStatus { session_id }) => {
-                request_background_status_probe(bridge, state, thread_id, session_id);
-            }
             Some(BackgroundQueuePlan::Send { session_id }) => {
                 send_background_queued_input(bridge, app_state, state, candidate, session_id);
             }
@@ -282,8 +274,7 @@ fn plan_background_queue_drain(
     {
         return Some(BackgroundQueuePlan::Send { session_id });
     }
-    (!has_inflight_status_probe_for_session(state, session_id))
-        .then_some(BackgroundQueuePlan::ProbeStatus { session_id })
+    (!has_inflight_ensure_for_thread(state, thread_id)).then_some(BackgroundQueuePlan::Ensure)
 }
 
 fn request_background_ensure(
@@ -303,24 +294,6 @@ fn request_background_ensure(
             workspace: workspace.to_owned(),
             thread_id,
             kind: session_kind,
-        },
-    );
-}
-
-fn request_background_status_probe(
-    bridge: &AsyncArchcarBridge,
-    state: &Rc<RefCell<BackgroundChatRunnerState>>,
-    thread_id: i64,
-    session_id: i64,
-) {
-    let Some(token) = bridge.get_session_status(session_id) else {
-        return;
-    };
-    state.borrow_mut().inflight_actions.insert(
-        token,
-        BackgroundChatAction::StatusProbe {
-            thread_id,
-            session_id,
         },
     );
 }
@@ -495,25 +468,6 @@ fn handle_background_archcar_response(
                 state.borrow_mut().held_threads.insert(thread_id);
                 app_state
                     .request_refresh(RefreshEvent::WorkspaceChatLifecycleChanged { workspace });
-            }
-        },
-        BackgroundChatAction::StatusProbe {
-            thread_id,
-            session_id,
-        } => match response.result {
-            Ok(ArchcarResponse::SessionStatus { ready, .. }) => {
-                note_archcar_ready(&mut state.borrow_mut().ready_sessions, session_id, ready);
-            }
-            Ok(other) => {
-                warn!(
-                    thread_id,
-                    session_id,
-                    ?other,
-                    "unexpected background chat status response"
-                );
-            }
-            Err(err) => {
-                warn!(thread_id, session_id, error = %err, "background chat status probe failed");
             }
         },
         BackgroundChatAction::UserSend {
@@ -830,21 +784,6 @@ fn has_inflight_ensure_for_thread(state: &BackgroundChatRunnerState, thread_id: 
     })
 }
 
-fn has_inflight_status_probe_for_session(
-    state: &BackgroundChatRunnerState,
-    session_id: i64,
-) -> bool {
-    state.inflight_actions.values().any(|action| {
-        matches!(
-            action,
-            BackgroundChatAction::StatusProbe {
-                session_id: action_session_id,
-                ..
-            } if *action_session_id == session_id
-        )
-    })
-}
-
 fn archcar_turn_completion_allows_queue_drain(status: Option<&str>) -> bool {
     !matches!(
         status.map(|status| status.trim().to_ascii_lowercase()),
@@ -967,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn background_queue_probes_running_session_until_ready() {
+    fn background_queue_reasks_archcar_to_drain_running_session() {
         let state = BackgroundChatRunnerState::default();
         let plan = plan_background_queue_drain(
             &candidate(Some(11), false),
@@ -977,10 +916,7 @@ mod tests {
             SessionKind::Codex,
         );
 
-        assert_eq!(
-            plan,
-            Some(BackgroundQueuePlan::ProbeStatus { session_id: 11 })
-        );
+        assert_eq!(plan, Some(BackgroundQueuePlan::Ensure));
     }
 
     #[test]
@@ -1168,6 +1104,27 @@ mod tests {
         assert_eq!(
             BACKGROUND_CHAT_WAKE_DELAY_MS, 32,
             "background chat Archcar events should update state with the same frame-ish delay"
+        );
+    }
+
+    #[test]
+    fn background_chat_does_not_probe_archcar_readiness_from_gtk() {
+        let source = include_str!("background_chat.rs");
+        let status_probe = concat!("Status", "Probe");
+        let probe_status = concat!("Probe", "Status");
+        let get_status = concat!("get", "_session", "_status(");
+
+        assert!(
+            !source.contains(status_probe),
+            "GTK background chat must not own Archcar readiness probing"
+        );
+        assert!(
+            !source.contains(probe_status),
+            "GTK background chat must not plan Archcar readiness probes"
+        );
+        assert!(
+            !source.contains(get_status),
+            "GTK background chat must not call Archcar GetSessionStatus"
         );
     }
 }
