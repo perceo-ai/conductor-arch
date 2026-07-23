@@ -6603,27 +6603,20 @@ fn inline_event_chip_label(event: &CodexInlineEvent, _expanded: bool) -> String 
 }
 
 fn inline_event_chip_markup(event: &CodexInlineEvent, _expanded: bool) -> String {
-    let name = inline_event_chip_name(event);
-    let (verb, rest) = inline_event_chip_name_parts(&name);
-    let accent = inline_event_type_color(event);
-    let icon = pango_escape_text(inline_event_type_icon(event));
-    let verb = pango_escape_text(verb);
-    let rest = pango_escape_text(rest);
-    let icon_markup = format!(
-        "<span font_family=\"Commit Mono\" foreground=\"{accent}\" weight=\"700\">{icon}</span>"
-    );
-
-    if rest.is_empty() {
-        format!("{icon_markup} <span foreground=\"{accent}\" weight=\"700\">{verb}</span>")
-    } else {
-        format!(
-            "{icon_markup} <span foreground=\"{accent}\" weight=\"700\">{verb}</span> <span foreground=\"#e7e7e7\">{rest}</span>"
-        )
-    }
+    pango_escape_text(&inline_event_chip_name(event))
 }
 
 fn inline_event_chip_name_parts(name: &str) -> (&str, &str) {
     name.split_once(' ').unwrap_or((name, ""))
+}
+
+fn inline_event_action_label(event: &CodexInlineEvent) -> String {
+    let name = if inline_event_title_is_action_label(&event.title) {
+        event.title.as_str()
+    } else {
+        inline_event_kind_label(event.kind)
+    };
+    inline_event_chip_name_parts(name).0.to_owned()
 }
 
 fn inline_event_type_css_class(event: &CodexInlineEvent) -> &'static str {
@@ -6684,15 +6677,26 @@ fn inline_event_chip_label_width_chars(label: &str) -> i32 {
 
 fn configure_inline_event_chip_label(label: &Label, text: &str) {
     label.set_xalign(0.0);
-    label.set_wrap(true);
-    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_wrap(false);
     label.set_width_chars(inline_event_chip_label_width_chars(text));
     label.set_max_width_chars(inline_event_chip_label_max_width_chars());
 }
 
 fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
     if inline_event_title_is_action_label(&event.title) {
-        return event.title.clone();
+        let (_, target) = inline_event_chip_name_parts(&event.title);
+        if let Some(file_name) = event
+            .path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+        {
+            return file_name.to_owned();
+        }
+        if !target.is_empty() {
+            return target.to_owned();
+        }
     }
     event
         .path
@@ -7000,6 +7004,12 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
     expander.set_margin_bottom(1);
     expander.set_tooltip_text(Some("Show details"));
     header.append(&expander);
+
+    let action_label = Label::new(Some(&inline_event_action_label(event)));
+    action_label.add_css_class("chat-inline-event-action");
+    action_label.set_halign(Align::Start);
+    action_label.set_xalign(0.0);
+    header.append(&action_label);
 
     let chip = Button::new();
     chip.add_css_class("chat-inline-event-chip");
@@ -15089,7 +15099,9 @@ fix it
     #[test]
     fn inline_event_header_renders_action_label_outside_file_chip() {
         let source = include_str!("session_surface.rs");
-        let start = source.find("fn inline_event_widget(").expect("widget exists");
+        let start = source
+            .find("fn inline_event_widget(")
+            .expect("widget exists");
         let end = source[start..]
             .find("fn set_inline_event_body_widget(")
             .map(|offset| start + offset)
@@ -15173,15 +15185,14 @@ fix it
         assert_eq!(tool.kind, CodexInlineEventKind::Tool);
         assert_eq!(tool.title, "Read result.txt");
         assert_eq!(tool.path.as_deref(), Some(tool_path.as_path()));
-        assert_eq!(inline_event_chip_label(&tool, false), "Read result.txt");
+        assert_eq!(inline_event_action_label(&tool), "Read");
+        assert_eq!(inline_event_chip_label(&tool, false), "result.txt");
         assert!(!inline_event_body_text(&tool).contains("tool file contents"));
         assert_eq!(skill.kind, CodexInlineEventKind::Skill);
         assert_eq!(skill.title, "Read SKILL.md for graphify");
         assert_eq!(skill.path.as_deref(), Some(skill_path.as_path()));
-        assert_eq!(
-            inline_event_chip_label(&skill, false),
-            "Read SKILL.md for graphify"
-        );
+        assert_eq!(inline_event_action_label(&skill), "Read");
+        assert_eq!(inline_event_chip_label(&skill, false), "SKILL.md");
         assert!(!inline_event_body_text(&skill).contains("name: graphify"));
     }
 
@@ -15202,10 +15213,8 @@ fix it
         assert_eq!(read.title, "Read session_surface.rs");
         assert_eq!(read.subtitle.as_deref(), Some("File preview"));
         assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
-        assert_eq!(
-            inline_event_chip_label(&read, false),
-            "Read session_surface.rs"
-        );
+        assert_eq!(inline_event_action_label(&read), "Read");
+        assert_eq!(inline_event_chip_label(&read, false), "session_surface.rs");
     }
 
     #[test]
@@ -15262,10 +15271,8 @@ fix it
         assert_eq!(read.title, "Read session_surface.rs");
         assert_eq!(read.subtitle.as_deref(), Some("File preview"));
         assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
-        assert_eq!(
-            inline_event_chip_label(&read, false),
-            "Read session_surface.rs"
-        );
+        assert_eq!(inline_event_action_label(&read), "Read");
+        assert_eq!(inline_event_chip_label(&read, false), "session_surface.rs");
     }
 
     #[test]
@@ -15287,10 +15294,8 @@ fix it
         assert_eq!(read.title, "Read SKILL.md for graphify");
         assert_eq!(read.subtitle.as_deref(), Some("Skill"));
         assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
-        assert_eq!(
-            inline_event_chip_label(&read, false),
-            "Read SKILL.md for graphify"
-        );
+        assert_eq!(inline_event_action_label(&read), "Read");
+        assert_eq!(inline_event_chip_label(&read, false), "SKILL.md");
     }
 
     #[test]
@@ -15322,10 +15327,8 @@ fix it
         );
         assert_eq!(read.subtitle.as_deref(), Some("Skill"));
         assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
-        assert_eq!(
-            inline_event_chip_label(&read, false),
-            "Read SKILL.md for verification-before-completion"
-        );
+        assert_eq!(inline_event_action_label(&read), "Read");
+        assert_eq!(inline_event_chip_label(&read, false), "SKILL.md");
     }
 
     #[test]
@@ -17532,10 +17535,8 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Used get_wiki_page");
-        assert_eq!(
-            inline_event_chip_label(&inline, false),
-            "Used get_wiki_page"
-        );
+        assert_eq!(inline_event_action_label(&inline), "Used");
+        assert_eq!(inline_event_chip_label(&inline, false), "get_wiki_page");
         let body = inline_event_body_text(&inline);
         assert!(body.contains("Project Context"));
         assert!(!body.contains("\"method\""));
@@ -17658,7 +17659,9 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             let projection = provider_projection_from_records(&[record]);
             let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
 
-            assert_eq!(inline_event_chip_label(&inline, false), label);
+            let (action, target) = inline_event_chip_name_parts(label);
+            assert_eq!(inline_event_action_label(&inline), action);
+            assert_eq!(inline_event_chip_label(&inline, false), target);
             assert!(!inline_event_expands_body_by_default(&inline));
         }
     }
@@ -17680,9 +17683,10 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Read session_surface.rs");
         assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(inline_event_action_label(&inline), "Read");
         assert_eq!(
             inline_event_chip_label(&inline, false),
-            "Read session_surface.rs"
+            "session_surface.rs"
         );
     }
 
@@ -17703,9 +17707,10 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Read session_surface.rs");
         assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(inline_event_action_label(&inline), "Read");
         assert_eq!(
             inline_event_chip_label(&inline, false),
-            "Read session_surface.rs"
+            "session_surface.rs"
         );
     }
 
@@ -17741,7 +17746,8 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Edited main.rs");
         assert_eq!(inline.subtitle.as_deref(), Some("+1 -1"));
-        assert_eq!(inline_event_chip_label(&inline, false), "Edited main.rs");
+        assert_eq!(inline_event_action_label(&inline), "Edited");
+        assert_eq!(inline_event_chip_label(&inline, false), "main.rs");
         assert!(inline_event_body_text(&inline).contains("-old"));
         assert!(inline_event_body_text(&inline).contains("+new"));
     }
@@ -17763,7 +17769,8 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Ran Review agent");
         assert_eq!(inline.subtitle.as_deref(), Some("Subagent"));
-        assert_eq!(inline_event_chip_label(&inline, false), "Ran Review agent");
+        assert_eq!(inline_event_action_label(&inline), "Ran");
+        assert_eq!(inline_event_chip_label(&inline, false), "Review agent");
         assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
     }
 

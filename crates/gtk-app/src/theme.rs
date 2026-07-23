@@ -2130,12 +2130,12 @@ row:hover .ws-folder-name {
 .ws-run-tab-add-btn {
     background: transparent;
     border: none;
-    border-radius: 5px;
+    border-radius: 2px;
     color: #5a5a5a;
-    font-size: 13px;
-    min-height: 22px;
-    min-width: 22px;
-    padding: 0 6px;
+    font-size: 11px;
+    min-height: 0;
+    min-width: 16px;
+    padding: 0 4px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -2469,51 +2469,58 @@ popover.context-menu-popover arrow {
     padding: 0;
 }
 .chat-inline-event-chip {
-    background-color: rgba(134, 239, 172, 0.1);
-    border: 1px solid rgba(134, 239, 172, 0.22);
-    border-radius: 6px;
+    background-color: #191919;
+    border: 1px solid #343434;
+    border-radius: 2px;
     box-shadow: none;
-    color: #e7e7e7;
+    color: #bdbdbd;
     font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
-    font-size: 11px;
-    font-weight: 600;
-    min-height: 18px;
+    font-size: 10px;
+    font-weight: 500;
+    min-height: 0;
     min-width: 0;
-    padding: 1px 6px;
+    padding: 0 4px;
+}
+.chat-inline-event-action {
+    color: #8f8f8f;
+    font-size: 10px;
+    font-weight: 600;
+    margin: 0;
+    padding: 0;
 }
 .chat-inline-event-expander {
-    background-color: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 6px;
+    background-color: #171717;
+    border: 1px solid #303030;
+    border-radius: 2px;
     box-shadow: none;
     color: #8f8f8f;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    min-height: 18px;
-    min-width: 18px;
-    padding: 1px 0;
+    min-height: 0;
+    min-width: 14px;
+    padding: 0 3px;
 }
 .chat-inline-event-expander:hover,
 .chat-inline-event-expander:checked {
-    background-color: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.14);
+    background-color: #202020;
+    border-color: #424242;
     box-shadow: none;
     color: #e7e7e7;
 }
 button.chat-inline-event-chip {
-    background-color: rgba(134, 239, 172, 0.1);
-    border: 1px solid rgba(134, 239, 172, 0.22);
+    background-color: #191919;
+    border: 1px solid #343434;
     box-shadow: none;
     margin: 0;
-    min-height: 18px;
+    min-height: 0;
     min-width: 0;
-    padding: 1px 6px;
+    padding: 0 4px;
 }
 button.chat-inline-event-chip:hover,
 button.chat-inline-event-chip:checked {
-    background-color: rgba(134, 239, 172, 0.16);
-    border-color: rgba(134, 239, 172, 0.32);
+    background-color: #232323;
+    border-color: #4a4a4a;
     box-shadow: none;
 }
 .chat-inline-event-chip label {
@@ -2791,12 +2798,12 @@ button.chat-inline-event-chip:checked {
 .ws-tab-add-btn {
     background: transparent;
     border: none;
-    border-radius: 5px;
+    border-radius: 2px;
     color: #555555;
-    font-size: 13px;
-    min-height: 22px;
-    min-width: 22px;
-    padding: 0 6px;
+    font-size: 11px;
+    min-height: 0;
+    min-width: 16px;
+    padding: 0 4px;
     box-shadow: none;
     text-shadow: none;
 }
