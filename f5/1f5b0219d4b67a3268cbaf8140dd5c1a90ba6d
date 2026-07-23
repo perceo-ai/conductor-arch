@@ -1,0 +1,33 @@
+docs/background-chat-update-map.md
+  s_656c29af62c73c::t_5d39bbeedeee6d 10,20
+crates/gtk-app/src/session_surface.rs
+  s_656c29af62c73c::t_a1a1d7efe6f1a1 11441-11444
+  s_656c29af62c73c::t_d19b3dda8d10a0 3309-3310,3312-3321,3323-3345
+  s_656c29af62c73c::t_deb2e7cde139b9 8621
+  s_656c29af62c73c::t_53aed8efcff494 12566,12603-12623,12639
+  s_656c29af62c73c::t_a86b6057b22ed9 8614-8616,8620,8622,8625-8636
+  s_656c29af62c73c::t_a1a38c7dab1fac 14592-14607,14609-14620
+  s_656c29af62c73c::t_b55b9f4a3c1fbd 3311,3322
+  s_656c29af62c73c::t_487e4ae5645947 14608
+  s_656c29af62c73c::t_0fae77e895c00c 8694,8700
+  s_656c29af62c73c::t_1986623ee16b84 3297
+  s_656c29af62c73c::t_891c63e1c0616e 8611,8617-8619,8623-8624,8637-8651,8670-8693,8696,8702
+  s_656c29af62c73c::t_06b8e4903b4634 12405-12444
+  s_656c29af62c73c::t_7f80a1b7e78707 14591
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f51f5b0219d4b67a3268cbaf8140dd5c1a90ba6d",
+  "prompts": {},
+  "sessions": {
+    "s_656c29af62c73c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e0e-6df8-7430-a89f-25ffefe726a8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
