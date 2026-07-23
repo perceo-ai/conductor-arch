@@ -2403,6 +2403,7 @@ pub fn agent_session_panel(
         &active_sessions,
         &last_output,
     );
+    seed_active_provider_working_threads(&database_path, _workspace_name, working_threads.as_ref());
     let refresh_session_surface = refresh_view.clone();
     refresh_session_surface();
 
@@ -8329,6 +8330,28 @@ fn seed_chat_running_sessions(
     }
 }
 
+fn seed_active_provider_working_threads(
+    database_path: &Path,
+    workspace_name: &str,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+) {
+    let Ok(store) = WorkspaceStore::open_app(database_path) else {
+        return;
+    };
+    let Ok(threads) = store.list_chat_threads(workspace_name) else {
+        return;
+    };
+    let provider_store = ProviderEventStore::new(database_path);
+    for thread in threads {
+        let Ok(events) = provider_store.list_for_chat_thread(thread.id) else {
+            continue;
+        };
+        if crate::background_sync::provider_events_have_active_work(&events) {
+            mark_thread_working(working_threads, thread.id);
+        }
+    }
+}
+
 fn icon_text_button(text: &str, class_name: &str) -> Button {
     let button = text_button(text);
     button.add_css_class(class_name);
@@ -13065,6 +13088,96 @@ fix it
         clear_thread_working(&working_threads, 7);
 
         assert!(queued_chat_auto_drain_ready(
+            SessionKind::Codex,
+            &records,
+            7,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
+    }
+
+    #[test]
+    fn restored_active_provider_work_blocks_ready_queue_drain_after_navigation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO repositories (
+                id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+             ) VALUES (1, 'repo', ?1, 'main', 'origin', ?2, '1', '1')",
+            rusqlite::params![
+                temp.path().join("repo").display().to_string(),
+                temp.path().join("workspaces").display().to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (
+                id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at
+             ) VALUES (1, 1, 'berlin', ?1, 'feature/berlin', 'main', 3000, 'active', '1', '1')",
+            [temp.path().join("workspaces/berlin").display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (7, 1, 'codex', 'Fix queue', 'active', '1', '1')",
+            [],
+        )
+        .unwrap();
+        ProviderEventStore::new(&db_path)
+            .upsert_event(&archductor_core::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-1".to_owned()),
+                provider_item_id: Some("turn-1".to_owned()),
+                provider_thread_id: Some("native-thread-1".to_owned()),
+                provider_turn_id: Some("turn-1".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(1),
+                chat_thread_id: Some(7),
+                process_id: None,
+                phase: ProviderEventPhase::Started,
+                kind: ProviderEventKind::Turn,
+                provider_subtype: Some("turn".to_owned()),
+                provider_sequence: Some(1),
+                occurred_at_ms: 42,
+                normalized_payload: serde_json::json!({"title": "Turn", "body": "working"}),
+                raw_json: serde_json::json!({"method": "turn/started"}),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(11, true)]));
+        let inflight_actions = RefCell::new(HashMap::new());
+        let pending_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let holds = RefCell::new(HashSet::new());
+        let working_threads = RefCell::new(HashMap::new());
+
+        assert!(queued_chat_auto_drain_ready(
+            SessionKind::Codex,
+            &records,
+            7,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
+
+        seed_active_provider_working_threads(&db_path, "berlin", &working_threads);
+
+        assert!(!queued_chat_auto_drain_ready(
             SessionKind::Codex,
             &records,
             7,

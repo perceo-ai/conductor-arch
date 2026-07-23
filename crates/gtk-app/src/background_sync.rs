@@ -87,7 +87,7 @@ pub(crate) fn load_workspace_chat_nav(
         .collect())
 }
 
-fn provider_events_have_active_work(events: &[ProviderEventRecord]) -> bool {
+pub(crate) fn provider_events_have_active_work(events: &[ProviderEventRecord]) -> bool {
     let terminal_keys = events
         .iter()
         .filter(|event| provider_event_phase_is_terminal(event.phase))
