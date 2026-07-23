@@ -552,9 +552,9 @@ button.ui-button-xs,
 button.text-button.ui-button-xs {
     font-size: 10px;
     line-height: 1;
-    min-height: 0;
-    min-width: 12px;
-    padding: 0 2px;
+    min-height: 18px;
+    min-width: 18px;
+    padding: 1px 4px;
 }
 
 button.icon-button,
@@ -2139,8 +2139,10 @@ row:hover .ws-folder-name {
 .ws-run-tab-add-btn {
     background: transparent;
     border: none;
-    border-radius: 2px;
+    border-radius: 4px;
     color: #5a5a5a;
+    margin-left: 4px;
+    margin-right: 4px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -2803,8 +2805,10 @@ button.chat-inline-event-expander {
 .ws-tab-add-btn {
     background: transparent;
     border: none;
-    border-radius: 2px;
+    border-radius: 4px;
     color: #555555;
+    margin-left: 4px;
+    margin-right: 4px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -3454,12 +3458,15 @@ mod tests {
         let xs_block = selector_block(css, "button.ui-button-xs,\nbutton.text-button.ui-button-xs");
         assert!(xs_block.contains("font-size: 10px;"));
         assert!(xs_block.contains("line-height: 1;"));
-        assert!(xs_block.contains("min-height: 0;"));
-        assert!(xs_block.contains("min-width: 12px;"));
-        assert!(xs_block.contains("padding: 0 2px;"));
+        assert!(xs_block.contains("min-height: 18px;"));
+        assert!(xs_block.contains("min-width: 18px;"));
+        assert!(xs_block.contains("padding: 1px 4px;"));
 
         for selector in [".ws-tab-add-btn", ".ws-run-tab-add-btn"] {
             let block = selector_block(css, selector);
+            assert!(block.contains("border-radius: 4px;"));
+            assert!(block.contains("margin-left: 4px;"));
+            assert!(block.contains("margin-right: 4px;"));
             assert!(!block.contains("min-height: 30px;"));
             assert!(!block.contains("min-height: 34px;"));
         }
