@@ -43,8 +43,34 @@ struct ServerState {
     shutting_down: bool,
     queued_defaults: HashSet<String>,
     queued_threads: HashSet<i64>,
+    draining_threads: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
     subscribers: Vec<Sender<ArchcarEvent>>,
+}
+
+struct QueueDrainGuard {
+    state: Arc<Mutex<ServerState>>,
+    thread_id: i64,
+}
+
+impl QueueDrainGuard {
+    fn begin(state: &Arc<Mutex<ServerState>>, thread_id: i64) -> Option<Self> {
+        if !state.lock().ok()?.draining_threads.insert(thread_id) {
+            return None;
+        }
+        Some(Self {
+            state: Arc::clone(state),
+            thread_id,
+        })
+    }
+}
+
+impl Drop for QueueDrainGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.draining_threads.remove(&self.thread_id);
+        }
+    }
 }
 
 pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
@@ -99,6 +125,7 @@ impl ArchcarServer {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -661,6 +688,9 @@ fn queue_chat_input(
 }
 
 fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
+    let Some(_guard) = QueueDrainGuard::begin(state, thread_id) else {
+        return;
+    };
     let db_path = state.lock().unwrap().db_path.clone();
     let store = match WorkspaceStore::open_app(&db_path) {
         Ok(store) => store,
@@ -669,8 +699,8 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
             return;
         }
     };
-    let queued = match store.peek_next_queued_chat_input(thread_id) {
-        Ok(Some(queued)) => queued,
+    let session_kind = match store.peek_next_queued_chat_input(thread_id) {
+        Ok(Some(queued)) => queued.session_kind,
         Ok(None) => return,
         Err(err) => {
             warn!(thread_id, error = %format!("{err:#}"), "archcar could not read queued chat input");
@@ -678,10 +708,8 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
         }
     };
 
-    let handle =
-        ready_session_handle_for_thread(state, thread_id, queued.session_kind).or_else(|| {
-            restore_ready_session_handle_for_queue(state, &store, thread_id, queued.session_kind)
-        });
+    let handle = ready_session_handle_for_thread(state, thread_id, session_kind)
+        .or_else(|| restore_ready_session_handle_for_queue(state, &store, thread_id, session_kind));
     let Some(handle) = handle else {
         return;
     };
@@ -692,6 +720,14 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
         warn!(thread_id, error = %format!("{err:#}"), "archcar queued chat input waited for session readiness");
         return;
     }
+    let queued = match store.claim_next_queued_chat_input(thread_id) {
+        Ok(Some(queued)) => queued,
+        Ok(None) => return,
+        Err(err) => {
+            warn!(thread_id, error = %format!("{err:#}"), "archcar could not claim queued chat input");
+            return;
+        }
+    };
 
     match handle
         .command_tx
@@ -701,34 +737,36 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
             kind: queued.input_kind.clone(),
             delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
         }) {
-        Ok(()) => match store.delete_queued_chat_input(queued.id) {
-            Ok(_) => {
-                broadcast(
-                    &mut state.lock().unwrap(),
-                    ArchcarEvent::ChatQueueUpdated { thread_id },
-                );
-                if store
-                    .peek_next_queued_chat_input(thread_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    note_session_not_ready_for_queue(&handle);
-                }
+        Ok(()) => {
+            broadcast(
+                &mut state.lock().unwrap(),
+                ArchcarEvent::ChatQueueUpdated { thread_id },
+            );
+            if store
+                .peek_next_queued_chat_input(thread_id)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                note_session_not_ready_for_queue(&handle);
             }
-            Err(err) => warn!(
+        }
+        Err(err) => {
+            if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
+                warn!(
+                    thread_id,
+                    queue_id = queued.id,
+                    error = %format!("{restore_err:#}"),
+                    "archcar could not restore claimed queued chat input after send failure"
+                );
+            }
+            warn!(
                 thread_id,
                 queue_id = queued.id,
-                error = %format!("{err:#}"),
-                "archcar sent queued chat input but could not delete queue row"
-            ),
-        },
-        Err(err) => warn!(
-            thread_id,
-            queue_id = queued.id,
-            error = %err,
-            "archcar could not send queued chat input"
-        ),
+                error = %err,
+                "archcar could not send queued chat input"
+            );
+        }
     }
 }
 
@@ -1119,6 +1157,10 @@ fn ensure_chat_thread_session(
                 },
             );
         }
+        drop(guard);
+        if ready {
+            drain_queued_input_for_thread(state, thread_id);
+        }
         return ArchcarResponse::SessionSpawned {
             session_id,
             thread_id,
@@ -1372,6 +1414,10 @@ fn restore_thread_session_from_store(
                             thread_id: snapshot.thread_id,
                         },
                     );
+                }
+                drop(guard);
+                if snapshot.ready {
+                    drain_queued_input_for_thread(state, snapshot.thread_id);
                 }
                 info!(
                     workspace,
@@ -1738,6 +1784,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -1823,6 +1870,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
         }));
@@ -1933,6 +1981,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions,
             subscribers: vec![subscriber_tx],
         }));
@@ -1976,6 +2025,110 @@ mod tests {
     }
 
     #[test]
+    fn ensure_existing_ready_thread_session_drains_one_archcar_queued_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::EnsureChatThreadSession {
+                workspace: "berlin".to_owned(),
+                thread_id: thread.id,
+                kind: SessionKind::Codex,
+                harness: None,
+            },
+            &state,
+        );
+
+        assert!(matches!(
+            response,
+            ArchcarResponse::SessionSpawned {
+                session_id: 9,
+                thread_id,
+                ..
+            } if thread_id == thread.id
+        ));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(crate::archcar::session::SessionCommand::SendInput {
+                input,
+                delivery: ArchcarInputDelivery::Auto,
+                ..
+            }) if input == "run tests"
+        ));
+        assert!(
+            WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+                .unwrap()
+                .list_queued_chat_inputs(thread.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(queued.input, "run tests");
+    }
+
+    #[test]
     fn ensure_default_session_debounces_repeat_requests() {
         let state = Arc::new(Mutex::new(ServerState {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
@@ -1983,6 +2136,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -2023,6 +2177,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::Codex)]),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![event_tx],
         }));
@@ -2061,6 +2216,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -2278,6 +2434,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -2336,6 +2493,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::from([
                 (
                     9,
@@ -2393,6 +2551,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
         }));
@@ -2453,6 +2612,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions: HashMap::from([(
                 process.id,
                 crate::archcar::session::SessionHandle {
@@ -2536,6 +2696,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -2586,6 +2747,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -2638,6 +2800,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -2706,6 +2869,7 @@ mod tests {
             shutting_down: false,
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::from([requested_thread.id]),
+            draining_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));

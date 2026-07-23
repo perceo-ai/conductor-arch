@@ -6449,6 +6449,57 @@ mutation($threadId: ID!) {{
             .map_err(Into::into)
     }
 
+    pub fn claim_next_queued_chat_input(
+        &self,
+        thread_id: i64,
+    ) -> Result<Option<QueuedChatInputRecord>> {
+        self.conn
+            .query_row(
+                "DELETE FROM chat_queued_inputs
+                 WHERE id = (
+                   SELECT id
+                   FROM chat_queued_inputs
+                   WHERE thread_id = ?1
+                   ORDER BY id ASC
+                   LIMIT 1
+                 )
+                 RETURNING id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at",
+                [thread_id],
+                row_to_queued_chat_input,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn requeue_claimed_chat_input_front(&self, input: &QueuedChatInputRecord) -> Result<()> {
+        let restore_id = self.conn.query_row(
+            "SELECT CASE
+                   WHEN NOT EXISTS (SELECT 1 FROM chat_queued_inputs WHERE id = ?1) THEN ?1
+                   ELSE COALESCE((SELECT MIN(id) FROM chat_queued_inputs), ?1) - 1
+                 END",
+            params![input.id, input.thread_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO chat_queued_inputs (
+                id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                restore_id,
+                input.thread_id,
+                &input.input,
+                input.visible_input.as_deref(),
+                archcar_input_kind_as_str(input.input_kind.clone()),
+                session_kind_as_str(input.session_kind),
+                &input.created_at,
+                now
+            ],
+        )?;
+        self.touch_chat_thread(input.thread_id, &now)?;
+        Ok(())
+    }
+
     pub fn delete_queued_chat_input(&self, id: i64) -> Result<Option<QueuedChatInputRecord>> {
         let existing = self.get_queued_chat_input_optional(id)?;
         if existing.is_some() {
@@ -11940,6 +11991,38 @@ branch_prefix = "team"
             reopened.list_queued_chat_thread_ids().unwrap(),
             vec![thread.id]
         );
+    }
+
+    #[test]
+    fn claim_next_queued_chat_input_removes_row_before_delivery() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .expect("queued row should be claimed");
+
+        assert_eq!(claimed.id, queued.id);
+        assert!(store
+            .peek_next_queued_chat_input(thread.id)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

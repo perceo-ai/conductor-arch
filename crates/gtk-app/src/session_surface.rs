@@ -371,7 +371,7 @@ struct SessionChatCreateUi {
     archcar_bridge: AsyncArchcarBridge,
     selected_thread: Rc<RefCell<Option<i64>>>,
     thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
-    pending_archcar_inputs: Rc<RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>>,
+    inflight_archcar_actions: Rc<RefCell<HashMap<u64, PendingArchcarAction>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
     refresh_view: Rc<dyn Fn()>,
     eager_start: Rc<dyn Fn(String, i64, SessionKind)>,
@@ -410,7 +410,7 @@ fn spawn_session_chat_thread_create(
                 move_queued_chat_inputs_to_archcar_queue(
                     &ui.app_state,
                     &ui.archcar_bridge,
-                    ui.pending_archcar_inputs.as_ref(),
+                    ui.inflight_archcar_actions.as_ref(),
                     thread.id,
                 );
                 *ui.selected_thread.borrow_mut() = Some(thread.id);
@@ -2924,7 +2924,7 @@ pub fn agent_session_panel(
         let app_state_for_switch = app_state.clone();
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
-        let pending_archcar_inputs_for_switch = pending_archcar_inputs.clone();
+        let inflight_archcar_actions_for_switch = inflight_archcar_actions.clone();
         let archcar_bridge_for_switch = archcar_bridge.clone();
         let external_chat_tabs_for_switch = external_chat_tabs.clone();
         let selected_harness_for_switch = selected_harness.clone();
@@ -3036,7 +3036,7 @@ pub fn agent_session_panel(
                             archcar_bridge: archcar_bridge_for_switch.clone(),
                             selected_thread: selected_thread_for_switch.clone(),
                             thread_state: thread_state_for_switch.clone(),
-                            pending_archcar_inputs: pending_archcar_inputs_for_switch.clone(),
+                            inflight_archcar_actions: inflight_archcar_actions_for_switch.clone(),
                             external_chat_tabs: external_chat_tabs_for_switch.clone(),
                             refresh_view: refresh_view_for_switch.clone(),
                             eager_start: eager_start_chat_agent_for_switch.clone(),
@@ -3606,7 +3606,7 @@ pub fn agent_session_panel(
                     archcar_bridge: archcar_bridge.clone(),
                     selected_thread: selected_thread.clone(),
                     thread_state: thread_state.clone(),
-                    pending_archcar_inputs: pending_archcar_inputs.clone(),
+                    inflight_archcar_actions: inflight_archcar_actions.clone(),
                     external_chat_tabs: external_chat_tabs.clone(),
                     refresh_view: refresh_view.clone(),
                     eager_start: eager_start_chat_agent.clone(),
@@ -8627,31 +8627,33 @@ fn queue_pending_archcar_input(
 fn move_queued_chat_inputs_to_archcar_queue(
     app_state: &AppState,
     bridge: &AsyncArchcarBridge,
-    pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     thread_id: i64,
 ) {
-    while let Some(input) = pop_next_queued_chat_input(app_state, thread_id) {
-        if bridge
-            .queue_chat_input(
+    for input in app_state
+        .queued_chat_inputs(thread_id)
+        .into_iter()
+        .filter(|input| input.id.is_none())
+    {
+        let Some(token) = bridge.queue_chat_input(
+            thread_id,
+            input.input.clone(),
+            input.visible_input.clone(),
+            input.kind.clone(),
+            input.session_kind,
+        ) else {
+            return;
+        };
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::QueueChatInput {
                 thread_id,
-                input.input.clone(),
-                input.visible_input.clone(),
-                input.kind.clone(),
-                input.session_kind,
-            )
-            .is_none()
-        {
-            queue_pending_archcar_input(
-                pending,
-                thread_id,
-                QueuedArchcarInput {
-                    input: input.input,
-                    visible_input: input.visible_input,
-                    kind: input.kind,
-                    session_kind: input.session_kind,
-                },
-            );
-        }
+                input: input.input,
+                visible_input: input.visible_input,
+                kind: input.kind,
+                session_kind: input.session_kind,
+            },
+        );
     }
 }
 
@@ -11130,6 +11132,13 @@ enum PendingArchcarAction {
         effort: Option<String>,
         session_kind: SessionKind,
     },
+    QueueChatInput {
+        thread_id: i64,
+        input: String,
+        visible_input: Option<String>,
+        kind: ArchcarInputKind,
+        session_kind: SessionKind,
+    },
     UserSend {
         thread_id: i64,
         session_id: i64,
@@ -12034,6 +12043,62 @@ fn handle_archcar_response(
                 );
             }
         },
+        PendingArchcarAction::QueueChatInput {
+            thread_id,
+            input,
+            visible_input,
+            kind,
+            session_kind,
+        } => match response.result {
+            Ok(ArchcarResponse::QueuedChatInput { input: queued }) => {
+                replace_queued_chat_input_from_archcar(app_state, thread_id, &queued);
+                changed = true;
+            }
+            Ok(other) => {
+                warn!(
+                    thread_id,
+                    ?kind,
+                    ?session_kind,
+                    ?other,
+                    "unexpected archcar queue persistence response"
+                );
+                ensure_optimistic_queued_chat_input(
+                    app_state,
+                    thread_id,
+                    input,
+                    visible_input,
+                    kind,
+                    session_kind,
+                );
+                let message = format!("Unexpected archcar queue response: {other:?}");
+                toast_manager.error(message.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error { thread_id, message },
+                );
+                changed = true;
+            }
+            Err(err) => {
+                warn!(thread_id, ?kind, ?session_kind, error = %err, "archcar queue persistence failed");
+                ensure_optimistic_queued_chat_input(
+                    app_state,
+                    thread_id,
+                    input,
+                    visible_input,
+                    kind,
+                    session_kind,
+                );
+                toast_manager.error(err.clone());
+                apply_codex_startup_signal(
+                    &mut startup_states.borrow_mut(),
+                    CodexStartupSignal::Error {
+                        thread_id,
+                        message: err,
+                    },
+                );
+                changed = true;
+            }
+        },
         PendingArchcarAction::UserSend {
             thread_id,
             session_id,
@@ -12148,16 +12213,7 @@ fn apply_untracked_queue_response(app_state: &AppState, response: &AsyncArchcarR
             AsyncArchcarRequestKind::QueueChatInput { thread_id, .. },
             Ok(ArchcarResponse::QueuedChatInput { input }),
         ) => {
-            let mut inputs = app_state.queued_chat_inputs(*thread_id);
-            if let Some(existing) = inputs
-                .iter_mut()
-                .find(|draft| queued_chat_draft_matches_archcar_input(draft, input))
-            {
-                *existing = queued_chat_draft_from_archcar_input(input);
-            } else {
-                inputs.push(queued_chat_draft_from_archcar_input(input));
-            }
-            app_state.replace_queued_chat_inputs(*thread_id, inputs);
+            replace_queued_chat_input_from_archcar(app_state, *thread_id, input);
             true
         }
         (
@@ -12186,6 +12242,48 @@ fn apply_untracked_queue_response(app_state: &AppState, response: &AsyncArchcarR
     }
 }
 
+fn replace_queued_chat_input_from_archcar(
+    app_state: &AppState,
+    thread_id: i64,
+    input: &ProtocolQueuedArchcarInput,
+) {
+    let mut inputs = app_state.queued_chat_inputs(thread_id);
+    if let Some(existing) = inputs
+        .iter_mut()
+        .find(|draft| queued_chat_draft_matches_archcar_input(draft, input))
+    {
+        *existing = queued_chat_draft_from_archcar_input(input);
+    } else {
+        inputs.push(queued_chat_draft_from_archcar_input(input));
+    }
+    app_state.replace_queued_chat_inputs(thread_id, inputs);
+}
+
+fn ensure_optimistic_queued_chat_input(
+    app_state: &AppState,
+    thread_id: i64,
+    input: String,
+    visible_input: Option<String>,
+    kind: ArchcarInputKind,
+    session_kind: SessionKind,
+) {
+    let draft = QueuedChatInputDraft {
+        id: None,
+        input,
+        visible_input,
+        kind,
+        session_kind,
+    };
+    let mut inputs = app_state.queued_chat_inputs(thread_id);
+    if !inputs
+        .iter()
+        .any(|existing| queued_chat_drafts_match(existing, &draft))
+    {
+        inputs.push(draft);
+        app_state.replace_queued_chat_inputs(thread_id, inputs);
+    }
+}
+
 fn queued_chat_draft_from_archcar_input(
     input: &ProtocolQueuedArchcarInput,
 ) -> QueuedChatInputDraft {
@@ -12208,6 +12306,14 @@ fn queued_chat_draft_matches_archcar_input(
             && draft.visible_input == input.visible_input
             && draft.kind == input.kind
             && draft.session_kind == input.session_kind)
+}
+
+fn queued_chat_drafts_match(left: &QueuedChatInputDraft, right: &QueuedChatInputDraft) -> bool {
+    left.id.is_some() && left.id == right.id
+        || (left.input.trim() == right.input.trim()
+            && left.visible_input == right.visible_input
+            && left.kind == right.kind
+            && left.session_kind == right.session_kind)
 }
 
 fn sync_session_surface_queued_inputs_cache(app_state: AppState, thread_id: i64) {
@@ -14025,7 +14131,7 @@ fix it
     }
 
     #[test]
-    fn pending_chat_resolve_moves_first_message_to_archcar_start_queue() {
+    fn pending_chat_resolve_tracks_first_message_until_archcar_persists_queue() {
         let state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -14042,13 +14148,21 @@ fix it
             SessionKind::Claude,
         );
         state.resolve_pending_chat_target(pending, 42);
-        let pending_archcar_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::<u64, PendingArchcarAction>::new());
         let bridge = AsyncArchcarBridge::new(state.paths.clone());
 
-        move_queued_chat_inputs_to_archcar_queue(&state, &bridge, &pending_archcar_inputs, 42);
+        move_queued_chat_inputs_to_archcar_queue(&state, &bridge, &inflight, 42);
 
-        assert_eq!(state.queued_chat_inputs_count(42), 0);
-        assert!(pending_archcar_inputs.borrow().get(&42).is_none());
+        assert_eq!(state.queued_chat_inputs_count(42), 1);
+        assert!(inflight.borrow().values().any(|action| matches!(
+            action,
+            PendingArchcarAction::QueueChatInput {
+                thread_id: 42,
+                input,
+                session_kind: SessionKind::Claude,
+                ..
+            } if input == "first message in new claude chat"
+        )));
     }
 
     #[test]
@@ -18450,6 +18564,32 @@ Schema confirms the app moved CRM around businesses.";
         let queued = state.queued_chat_inputs(7);
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, Some(99));
+    }
+
+    #[test]
+    fn pending_chat_queue_requests_are_tracked_until_archcar_confirms_persistence() {
+        let source = include_str!("session_surface.rs");
+        let move_body = source
+            .split("fn move_queued_chat_inputs_to_archcar_queue(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn stage_ready_background_queued_chat_inputs")
+                    .next()
+            })
+            .expect("move_queued_chat_inputs_to_archcar_queue body should be present");
+
+        assert!(
+            move_body.contains("PendingArchcarAction::QueueChatInput"),
+            "pending-chat drafts must keep a tracked action until QueueChatInput succeeds or fails"
+        );
+        assert!(
+            !move_body.contains("while let Some(input) = pop_next_queued_chat_input"),
+            "pending-chat drafts must not be popped before async archcar persistence succeeds"
+        );
+        assert!(
+            !move_body.contains("remove_queued_chat_input_at("),
+            "pending-chat drafts should stay in the UI cache until archcar returns the durable queue id"
+        );
     }
 
     #[test]
