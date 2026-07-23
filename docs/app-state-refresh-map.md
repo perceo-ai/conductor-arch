@@ -30,6 +30,7 @@ The speed model is:
 | `crates/gtk-app/src/state.rs`                    | Owns `AppState`, snapshots, events, queue APIs, optimistic phases, and navigation history.                                                                                                                    |
 | `crates/gtk-app/src/refresh.rs`                  | Owns `RefreshHub`, typed `RefreshEvent`s, refresh scopes, granular workspace refresh slots, and refresh metrics.                                                                                              |
 | `crates/gtk-app/src/main.rs`                     | Creates the singleton `AppState`, bridges `AppStateEvent::RefreshRequested` into `RefreshHub`, installs global refresh/timer paths.                                                                           |
+| `crates/gtk-app/src/background_chat.rs`          | Owns app-lifetime hidden chat Archcar events, queued input auto-drain, and scoped chat/review refresh events.                                                                                                 |
 | `crates/gtk-app/src/sidebar.rs`                  | Reads/mutates navigation state for page/workspace selection, stale workspace cleanup, rename/delete/archive navigation, and nav-row updates.                                                                  |
 | `crates/gtk-app/src/projects.rs`                 | Marks optimistic workspace creation phases and navigates to the inserted workspace while creation continues.                                                                                                  |
 | `crates/gtk-app/src/workspace_command_center.rs` | Reads selected workspace/tab/thread, wires workspace tabs, watches workspace phases, creates pending chat targets, queues prompts, and routes workspace action refreshes.                                     |
@@ -219,10 +220,11 @@ when its signature has not changed.
 
 ### Queue Drain And Archcar Readiness
 
-`session_surface.rs` tracks Archcar readiness outside `AppState` in small local
-maps (`archcar_ready_cache`, `inflight_archcar_actions`,
-`pending_archcar_inputs`, `working_threads`). `AppState` only owns durable UI
-queue intent and optimistic chat phases.
+`session_surface.rs` tracks visible-chat Archcar readiness outside `AppState` in
+small local maps (`archcar_ready_cache`, `inflight_archcar_actions`,
+`pending_archcar_inputs`, `working_threads`). `background_chat.rs` tracks the
+same class of readiness/in-flight/held queue state for hidden chats. `AppState`
+only owns durable UI queue intent and optimistic chat phases.
 
 When Archcar events/responses arrive:
 
@@ -232,7 +234,8 @@ When Archcar events/responses arrive:
 - send rejection requeues the input and retries ensure/startup
 
 Queued input is popped one turn at a time. If send fails, it is requeued at the
-front.
+front. The background runner skips the currently visible selected chat thread,
+so the composer and instant-send override remain owned by the visible surface.
 
 ### Chat Message Refresh
 
@@ -260,6 +263,24 @@ coalesced by workspace/thread before being sent through
 
 This keeps sidebar/dashboard/history/chat tabs current for off-focus work
 without loading hidden full chat timelines.
+
+### Background Chat Runner
+
+`background_chat.rs` has its own Archcar bridge and wakes on Archcar events with
+the same 150 ms debounce used by the selected chat surface. It drains events for
+hidden chats even when no chat surface is focused.
+
+The runner emits narrow events only:
+
+- `WorkspaceChatMessagesChanged` for message/provider-interaction updates
+- `WorkspaceChatLifecycleChanged` for session starts/completions/errors,
+  title/status/count/queue-visible changes, and hidden send state
+- `WorkspaceReviewChanged` after turn completion triggers a background
+  pull-request state refresh
+
+It scans only queued thread ids from `AppState`, loads queue candidates in a
+background job, and sends one queued input when the hidden thread is managed,
+idle, and ready.
 
 ### Runtime And Terminal
 
@@ -295,6 +316,8 @@ This path does not mutate `AppState`.
 - Metadata refresh updates only the visible nav row.
 - Background sync samples ids and sequence markers instead of full chat
   timelines.
+- Background chat scans only queued thread ids and skips the visible selected
+  chat thread to avoid duplicate sends.
 - Chat timeline loads run in `spawn_background_job`.
 - Message refreshes use per-thread generations so stale background results are
   dropped.

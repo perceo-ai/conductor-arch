@@ -2,6 +2,7 @@
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
 mod archcar_async;
+mod background_chat;
 mod background_sync;
 mod buttons;
 mod command_palette;
@@ -757,6 +758,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             }
         })
     };
+    background_chat::install_background_chat_runner(&app_state);
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Archductor")

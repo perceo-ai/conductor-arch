@@ -280,6 +280,10 @@ impl AsyncArchcarBridge {
         })
     }
 
+    pub fn get_session_status(&self, session_id: i64) -> Option<u64> {
+        self.submit(ArchcarRequest::GetSessionStatus { session_id })
+    }
+
     pub fn list_provider_interactions(
         &self,
         thread_id: Option<i64>,

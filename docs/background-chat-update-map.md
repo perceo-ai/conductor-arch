@@ -7,9 +7,11 @@ workspace, another chat thread, or another page.
 
 ## Short Version
 
-Background chat updates have two paths:
+Background chat updates have three paths:
 
 - a two-second GTK sampler reads lightweight running-chat markers from SQLite
+- a GTK-level background chat runner owns Archcar events and queued input for
+  chats that are not currently visible in the chat surface
 - the Archcar async bridge wakes the selected chat surface when the sidecar
   emits session events, responses, or bridge errors
 
@@ -22,6 +24,7 @@ timeline only when the affected thread needs to render.
 | File                                             | Role                                                                                                               |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `crates/gtk-app/src/main.rs`                     | Installs the two-second background sync timer and forwards diffed events through `AppState::request_refresh`.      |
+| `crates/gtk-app/src/background_chat.rs`          | Runs the app-lifetime hidden chat event reducer, queued input drain planner, and PR refresh trigger.               |
 | `crates/gtk-app/src/background_sync.rs`          | Loads lightweight running-thread snapshots, diffs them, coalesces refresh events, and builds chat tab nav items.   |
 | `crates/core/src/workspace.rs`                   | Provides `list_running_chat_thread_summaries`, the SQLite query behind the sampler.                                |
 | `crates/gtk-app/src/refresh.rs`                  | Routes `WorkspaceChatMessagesChanged` and `WorkspaceChatLifecycleChanged` to granular chat handlers.               |
@@ -61,6 +64,35 @@ Flow:
 
 The previous snapshot is stored in GTK memory. If both previous and next
 snapshots have no running threads, the timer returns without emitting events.
+
+## Background Chat Runner
+
+`background_chat.rs` installs an app-lifetime `AsyncArchcarBridge` separate
+from the selected chat surface bridge.
+
+It owns hidden-chat state that must continue while the user is looking
+elsewhere:
+
+- Archcar session readiness cache
+- session id to chat thread mapping
+- chat thread to workspace mapping
+- in-flight hidden sends, ensures, and status probes
+- held queues after failed/interrupted/deferred turns
+- working markers for hidden queued sends
+
+The runner wakes on Archcar events with a 150 ms debounce and also ticks once
+per second. Each tick:
+
+1. drains pending Archcar events/responses from the runner bridge
+2. emits scoped typed refresh events for affected chat threads/workspaces
+3. scans only `AppState` threads that currently have queued composer input
+4. loads lightweight queue candidates in a background job
+5. ensures a managed session, probes session readiness, or sends one queued
+   input when the hidden thread is idle and ready
+
+The runner skips the currently visible selected chat thread. The mounted chat
+surface continues to own visible optimistic UI, interrupt controls, and
+immediate sends.
 
 ## Diff Rules
 
@@ -224,6 +256,10 @@ callback.
 
 During refresh, `archcar_bridge.try_recv()` drains all available messages.
 
+`background_chat.rs` installs the same style of debounced wake for its own
+bridge. That wake drains hidden-chat events even when no chat surface is
+mounted or the selected workspace is not the affected workspace.
+
 ## Archcar Event Effects
 
 Archcar messages are reduced into `ArchcarRefreshIntent`.
@@ -246,12 +282,11 @@ These events request chat surface only:
 - responses
 - bridge errors
 
-Readiness and queue side effects are local to the session surface:
+Readiness and queue side effects are split by visibility:
 
-- `SessionReady` marks the thread ready
-- `TurnCompleted` may release one queued input
-- failed/interrupted turns hold queue drain
-- send failures requeue input and request ensure/startup again
+- the selected visible chat surface owns visible send state and instant sends
+- the background chat runner owns the same readiness, turn completion, failed
+  turn hold, requeue, ensure, and status-probe behavior for hidden chats
 
 ## Composer And Queue Background Behavior
 
@@ -266,15 +301,40 @@ When a background event makes a managed session ready, the selected surface may:
 
 The queue overlay is refreshed separately from full timeline rendering.
 
+For hidden chats, `background_chat.rs` performs the corresponding drain:
+
+- reads only queued thread ids from `AppState`
+- skips the visible selected chat thread to avoid duplicate sends
+- loads the queued thread record, branch prefix, process markers, provider
+  active-work marker, and message list in a background job
+- preserves first-message metadata injection by reusing the same send
+  preparation function as the focused surface
+- sends one queued input with automatic delivery
+- records a turn checkpoint before send and discards it if Archcar rejects the
+  input
+- keeps the send in-flight after Ack until a message/update/turn boundary
+  arrives
+- clears staged review prompt state after a review prompt is submitted
+- emits `WorkspaceChatLifecycleChanged` for queue/count/working state changes
+
+Turn completion also schedules a background pull-request state refresh and then
+emits `WorkspaceReviewChanged` for the affected workspace. That keeps PR/GitHub
+status surfaces current without repainting unrelated chat or shell UI.
+
 ## Safety Guards
 
 - background sync uses an in-flight flag to avoid overlapping sampler jobs
+- background chat queue scans use an in-flight flag to avoid overlapping queue
+  candidate loads
+- hidden queue drain skips the visible selected chat thread
 - tab snapshots use generations to drop stale async results
 - message timeline refreshes use per-thread generations
 - message timeline DB loads do not run synchronously in GTK callbacks
 - nonselected message refreshes warm cache before skipping render
 - Archcar wake is debounced at 150 ms
 - wake registry entries are removed when the chat surface is destroyed
+- background chat Archcar wake is debounced at 150 ms and lives for the app
+  lifetime
 - selected workspace filtering prevents off-workspace events from repainting
   the visible chat surface
 - deleted workspace refresh clears navigation and visible chat widgets instead
@@ -298,6 +358,11 @@ Notable assertions:
 - timestamp-only changes are ignored
 - duplicate message/lifecycle events are coalesced
 - selected running thread is not unread
+- hidden queued chats are ensured before first send
+- hidden queued chats probe running sessions until ready
+- hidden queued chats send only when ready, idle, and not selected-visible
+- failed hidden turns hold queue drain; successful turns release it
+- background send Ack stays in-flight until an event boundary
 - idle running process is not enough to mark active provider work
 - active provider turn marks nav item running
 - chat message refresh maps to `ChatRefreshKind::Messages`
@@ -316,6 +381,9 @@ Notable assertions:
   selected-workspace paths
 - background sync keeps only in-memory previous snapshot state, so app restart
   starts from an empty comparison
+- the selected visible chat still has local queue/readiness state in
+  `session_surface.rs`; the background runner intentionally skips it to avoid
+  duplicate sends
 
 ## Branch Focus Recommendation
 

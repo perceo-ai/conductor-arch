@@ -493,6 +493,23 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    pub fn queued_chat_thread_ids(&self) -> Vec<i64> {
+        self.inner
+            .borrow()
+            .queued_chat_inputs
+            .iter()
+            .filter_map(|(thread_id, inputs)| (!inputs.is_empty()).then_some(*thread_id))
+            .collect()
+    }
+
+    pub fn visible_selected_chat_thread(&self) -> Option<i64> {
+        let state = self.inner.borrow();
+        (state.active_page == AppPage::Workspace
+            && state.active_workspace_tab == WorkspaceTab::Chats)
+            .then_some(state.selected_chat_thread)
+            .flatten()
+    }
+
     pub fn pop_next_queued_chat_input(&self, thread_id: i64) -> Option<QueuedChatInputDraft> {
         let mut state = self.inner.borrow_mut();
         let entry = state.queued_chat_inputs.get_mut(&thread_id)?;

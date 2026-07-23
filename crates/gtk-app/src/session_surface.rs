@@ -7832,12 +7832,12 @@ Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PreparedSessionSendInput {
-    input: String,
-    visible_input: Option<String>,
+pub(crate) struct PreparedSessionSendInput {
+    pub(crate) input: String,
+    pub(crate) visible_input: Option<String>,
 }
 
-fn prepare_session_send_input(
+pub(crate) fn prepare_session_send_input(
     command: &str,
     workspace_name: &str,
     branch_prefix: &str,
