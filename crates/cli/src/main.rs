@@ -606,6 +606,7 @@ enum CliArchcarInputKind {
     User,
     ReviewPrompt,
     ControlCommand,
+    RawTerminal,
 }
 
 fn main() -> Result<()> {
@@ -2174,6 +2175,7 @@ impl From<CliArchcarInputKind> for ArchcarInputKind {
             CliArchcarInputKind::User => Self::User,
             CliArchcarInputKind::ReviewPrompt => Self::ReviewPrompt,
             CliArchcarInputKind::ControlCommand => Self::ControlCommand,
+            CliArchcarInputKind::RawTerminal => Self::RawTerminal,
         }
     }
 }
@@ -3124,6 +3126,35 @@ mod tests {
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
         assert!(immediate);
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
+
+        let raw = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "send",
+            "9",
+            "--kind",
+            "raw-terminal",
+            "pwd\n",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Send {
+                    session_id,
+                    kind,
+                    visible_input,
+                    immediate,
+                    input,
+                },
+        } = raw.command
+        else {
+            panic!("expected archcar send");
+        };
+        assert_eq!(session_id, 9);
+        assert_eq!(kind, CliArchcarInputKind::RawTerminal);
+        assert_eq!(visible_input, None);
+        assert!(!immediate);
+        assert_eq!(input, vec!["pwd\n".to_owned()]);
     }
 
     #[test]

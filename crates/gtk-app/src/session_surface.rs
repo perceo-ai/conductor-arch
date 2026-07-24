@@ -45,8 +45,7 @@ use gtk::prelude::*;
 use gtk::{
     Adjustment, Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry,
     EventControllerKey, GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextTag, TextView, ToggleButton,
-    Widget,
+    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::any::Any;
@@ -80,7 +79,7 @@ use crate::refresh::RefreshEvent;
 use crate::state::{
     AppPage, AppState, AppStateSnapshot, ChatUiPhase, ChatUiTarget, QueuedChatInputDraft,
 };
-use crate::terminal::terminal_display_text;
+use crate::terminal::{self, terminal_display_text};
 use crate::toast::ToastManager;
 
 const SESSION_SCROLLBACK_LINES: usize = 2_000;
@@ -98,6 +97,7 @@ const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
 const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 32;
 const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
+const INLINE_EVENT_CODE_MAX_LINES: usize = 320;
 const LONG_PASTE_ATTACHMENT_THRESHOLD: usize = 2_000;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -277,6 +277,8 @@ enum InlineEventBodyRenderKind {
     Markdown,
     Monospace,
     Diff,
+    Code,
+    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7208,27 +7210,255 @@ fn inline_event_body_widget(
     match inline_event_body_render_kind(event, text) {
         InlineEventBodyRenderKind::Markdown => chat_text_widget(text, open_file),
         InlineEventBodyRenderKind::Monospace => {
-            let view = inline_event_text_view(text);
-            view.upcast()
+            let label = Label::new(Some(text));
+            label.add_css_class("chat-inline-event-body");
+            label.set_xalign(0.0);
+            label.set_selectable(true);
+            label.set_wrap(false);
+            label.upcast()
         }
-        InlineEventBodyRenderKind::Diff => {
-            let view = inline_event_text_view(text);
-            apply_inline_event_diff_tags(&view.buffer());
-            view.upcast()
+        InlineEventBodyRenderKind::Code => inline_event_code_block_widget(text, open_file),
+        InlineEventBodyRenderKind::Terminal => inline_event_terminal_output_widget(text),
+        InlineEventBodyRenderKind::Diff => inline_event_diff_widget(text),
+    }
+}
+
+fn inline_event_code_block_widget(text: &str, _open_file: Option<OpenWorkspaceFile>) -> Widget {
+    inline_event_code_rows_widget(text, false)
+}
+
+fn inline_event_diff_widget(text: &str) -> Widget {
+    inline_event_code_rows_widget(text, true)
+}
+
+fn inline_event_terminal_output_widget(text: &str) -> Widget {
+    let terminal_text = bounded_inline_event_text(text, INLINE_EVENT_CODE_MAX_LINES);
+    let preferences = terminal::TerminalPreferences {
+        scrollback_lines: INLINE_EVENT_CODE_MAX_LINES,
+        ..terminal::TerminalPreferences::default()
+    };
+    let terminal = terminal::read_only_terminal_grid(&terminal_text, &preferences);
+    terminal
+        .widget()
+        .add_css_class("chat-inline-event-terminal");
+    terminal.widget().set_min_content_height(96);
+    terminal.widget().clone().upcast()
+}
+
+fn inline_event_code_rows_widget(text: &str, force_diff: bool) -> Widget {
+    let rows = GBox::new(Orientation::Vertical, 0);
+    rows.add_css_class("chat-inline-event-code-rows");
+    rows.set_hexpand(true);
+
+    let mut line_count = 0usize;
+    for line in text.lines().take(INLINE_EVENT_CODE_MAX_LINES) {
+        rows.append(&inline_event_code_row_widget(line, force_diff));
+        line_count += 1;
+    }
+
+    let total_lines = text.lines().count();
+    if total_lines > line_count {
+        rows.append(&inline_event_code_omitted_row(total_lines - line_count));
+    } else if line_count == 0 {
+        rows.append(&inline_event_code_row_widget("", force_diff));
+    }
+
+    let scroll = ScrolledWindow::new();
+    scroll.add_css_class("chat-inline-event-code");
+    scroll.set_hexpand(true);
+    scroll.set_min_content_height(64);
+    scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(&rows));
+    scroll.upcast()
+}
+
+fn inline_event_code_row_widget(line: &str, force_diff: bool) -> GBox {
+    let parsed = inline_event_code_row_parts(line, force_diff);
+    inline_event_code_row(
+        parsed.old_line,
+        parsed.new_line,
+        parsed.sign,
+        parsed.text,
+        parsed.kind.css_class(),
+    )
+}
+
+fn inline_event_code_omitted_row(omitted: usize) -> GBox {
+    inline_event_code_row(
+        None,
+        None,
+        "",
+        format!("... {omitted} lines omitted"),
+        "chat-inline-event-code-row-meta",
+    )
+}
+
+fn inline_event_code_row(
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    sign: &str,
+    text: String,
+    row_class: &str,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 0);
+    row.add_css_class("chat-inline-event-code-row");
+    row.add_css_class(row_class);
+    row.set_hexpand(true);
+
+    row.append(&inline_event_code_gutter_label(old_line));
+    row.append(&inline_event_code_gutter_label(new_line));
+
+    let sign_label = Label::new(Some(sign));
+    sign_label.add_css_class("chat-inline-event-code-sign");
+    sign_label.set_xalign(0.5);
+    row.append(&sign_label);
+
+    let text_label = Label::new(Some(&text));
+    text_label.add_css_class("chat-inline-event-code-text");
+    text_label.set_xalign(0.0);
+    text_label.set_selectable(true);
+    text_label.set_wrap(false);
+    text_label.set_hexpand(true);
+    row.append(&text_label);
+
+    row
+}
+
+fn inline_event_code_gutter_label(line_number: Option<u32>) -> Label {
+    let label = Label::new(line_number.map(|number| number.to_string()).as_deref());
+    label.add_css_class("chat-inline-event-code-gutter");
+    label.set_xalign(1.0);
+    label
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InlineEventCodeRowKind {
+    Context,
+    Added,
+    Removed,
+    Hunk,
+    Meta,
+}
+
+impl InlineEventCodeRowKind {
+    fn css_class(self) -> &'static str {
+        match self {
+            Self::Context => "chat-inline-event-code-row-context",
+            Self::Added => "chat-inline-event-code-row-added",
+            Self::Removed => "chat-inline-event-code-row-removed",
+            Self::Hunk => "chat-inline-event-code-row-hunk",
+            Self::Meta => "chat-inline-event-code-row-meta",
         }
     }
 }
 
-fn inline_event_text_view(text: &str) -> TextView {
-    let view = TextView::new();
-    view.add_css_class("chat-inline-event-body");
-    view.set_editable(false);
-    view.set_cursor_visible(false);
-    view.set_monospace(true);
-    view.set_wrap_mode(gtk::WrapMode::None);
-    view.set_hexpand(true);
-    view.buffer().set_text(text);
-    view
+#[derive(Debug, PartialEq, Eq)]
+struct InlineEventCodeRowParts {
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    sign: &'static str,
+    text: String,
+    kind: InlineEventCodeRowKind,
+}
+
+fn inline_event_code_row_parts(line: &str, force_diff: bool) -> InlineEventCodeRowParts {
+    if let Some((number, rest)) = parse_numbered_detail_prefix(line.trim_start()) {
+        if let Some((kind, sign, text)) = inline_event_numbered_row_kind(rest) {
+            return InlineEventCodeRowParts {
+                old_line: (!matches!(kind, InlineEventCodeRowKind::Added)).then_some(number),
+                new_line: (!matches!(kind, InlineEventCodeRowKind::Removed)).then_some(number),
+                sign,
+                text: text.to_owned(),
+                kind,
+            };
+        }
+    }
+
+    let trimmed = line.trim_start();
+    if force_diff && (trimmed.starts_with("@@") || trimmed.starts_with("diff --git")) {
+        return InlineEventCodeRowParts {
+            old_line: None,
+            new_line: None,
+            sign: "",
+            text: line.to_owned(),
+            kind: InlineEventCodeRowKind::Hunk,
+        };
+    }
+    if force_diff
+        && (trimmed.starts_with("index ")
+            || trimmed.starts_with("--- ")
+            || trimmed.starts_with("+++ ")
+            || trimmed.starts_with("new file mode ")
+            || trimmed.starts_with("deleted file mode ")
+            || trimmed.starts_with("rename from ")
+            || trimmed.starts_with("rename to "))
+    {
+        return InlineEventCodeRowParts {
+            old_line: None,
+            new_line: None,
+            sign: "",
+            text: line.to_owned(),
+            kind: InlineEventCodeRowKind::Meta,
+        };
+    }
+    if force_diff && trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+        return InlineEventCodeRowParts {
+            old_line: None,
+            new_line: None,
+            sign: "+",
+            text: trimmed.trim_start_matches('+').to_owned(),
+            kind: InlineEventCodeRowKind::Added,
+        };
+    }
+    if force_diff && trimmed.starts_with('-') && !trimmed.starts_with("---") {
+        return InlineEventCodeRowParts {
+            old_line: None,
+            new_line: None,
+            sign: "-",
+            text: trimmed.trim_start_matches('-').to_owned(),
+            kind: InlineEventCodeRowKind::Removed,
+        };
+    }
+
+    InlineEventCodeRowParts {
+        old_line: None,
+        new_line: None,
+        sign: "",
+        text: line.to_owned(),
+        kind: InlineEventCodeRowKind::Context,
+    }
+}
+
+fn inline_event_numbered_row_kind(
+    rest: &str,
+) -> Option<(InlineEventCodeRowKind, &'static str, &str)> {
+    if let Some(text) = rest.strip_prefix(" +") {
+        Some((InlineEventCodeRowKind::Added, "+", text))
+    } else if let Some(text) = rest.strip_prefix(" -") {
+        Some((InlineEventCodeRowKind::Removed, "-", text))
+    } else if let Some(text) = rest.strip_prefix("  ") {
+        Some((InlineEventCodeRowKind::Context, "", text))
+    } else {
+        None
+    }
+}
+
+fn bounded_inline_event_text(text: &str, max_lines: usize) -> String {
+    let mut lines = text.lines();
+    let bounded = lines
+        .by_ref()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let omitted = lines.count();
+    if omitted == 0 {
+        bounded
+    } else if bounded.is_empty() {
+        format!("... {omitted} lines omitted")
+    } else {
+        format!("{bounded}\n... {omitted} lines omitted")
+    }
 }
 
 fn inline_event_body_render_kind(
@@ -7237,23 +7467,27 @@ fn inline_event_body_render_kind(
 ) -> InlineEventBodyRenderKind {
     if inline_event_body_looks_like_diff(event, text) {
         InlineEventBodyRenderKind::Diff
-    } else if inline_event_body_should_use_monospace(event) {
-        InlineEventBodyRenderKind::Monospace
+    } else if inline_event_body_should_use_code(event) {
+        InlineEventBodyRenderKind::Code
+    } else if inline_event_body_should_use_terminal(event) {
+        InlineEventBodyRenderKind::Terminal
     } else {
         InlineEventBodyRenderKind::Markdown
     }
 }
 
-fn inline_event_body_should_use_monospace(event: &CodexInlineEvent) -> bool {
+fn inline_event_body_should_use_code(event: &CodexInlineEvent) -> bool {
     matches!(
         event.subtitle.as_deref(),
-        Some("Command")
-            | Some("Command result")
-            | Some("File")
-            | Some("File preview")
-            | Some("Skill")
-            | Some("Process")
+        Some("File") | Some("File preview") | Some("Skill")
     ) || event.path.is_some()
+}
+
+fn inline_event_body_should_use_terminal(event: &CodexInlineEvent) -> bool {
+    matches!(
+        event.subtitle.as_deref(),
+        Some("Command") | Some("Command result") | Some("Process")
+    )
 }
 
 fn inline_event_body_looks_like_diff(event: &CodexInlineEvent, text: &str) -> bool {
@@ -7280,61 +7514,6 @@ fn inline_event_diff_line_starts_with_change_marker(line: &str) -> bool {
         return true;
     };
     !second.is_whitespace()
-}
-
-fn apply_inline_event_diff_tags(buffer: &TextBuffer) {
-    let text = {
-        let start = buffer.start_iter();
-        let end = buffer.end_iter();
-        buffer.text(&start, &end, false).to_string()
-    };
-    let table = buffer.tag_table();
-    let add_tag = inline_event_diff_tag(&table, "inline-diff-add", "#0d2612", "#8fcf9f");
-    let del_tag = inline_event_diff_tag(&table, "inline-diff-del", "#2d0d0d", "#cf8f8f");
-    let hunk_tag = inline_event_diff_tag(&table, "inline-diff-hunk", "#0f1a2d", "#7fa0bf");
-    let header_tag = inline_event_diff_tag(&table, "inline-diff-header", "#1a1a1a", "#909090");
-
-    let mut iter = buffer.start_iter();
-    for line in text.split('\n') {
-        let line_start = iter;
-        let mut line_end = iter;
-        line_end.forward_to_line_end();
-        let trimmed = line.trim_start();
-
-        if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
-            buffer.apply_tag(&add_tag, &line_start, &line_end);
-        } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
-            buffer.apply_tag(&del_tag, &line_start, &line_end);
-        } else if trimmed.starts_with("@@") {
-            buffer.apply_tag(&hunk_tag, &line_start, &line_end);
-        } else if trimmed.starts_with("diff ")
-            || trimmed.starts_with("index ")
-            || trimmed.starts_with("--- ")
-            || trimmed.starts_with("+++ ")
-        {
-            buffer.apply_tag(&header_tag, &line_start, &line_end);
-        }
-
-        iter.forward_line();
-    }
-}
-
-fn inline_event_diff_tag(
-    table: &gtk::TextTagTable,
-    name: &str,
-    background: &str,
-    foreground: &str,
-) -> TextTag {
-    if let Some(tag) = table.lookup(name) {
-        return tag;
-    }
-    let tag = TextTag::new(Some(name));
-    tag.set_property("paragraph-background", background);
-    tag.set_property("paragraph-background-set", true);
-    tag.set_property("foreground", foreground);
-    tag.set_property("foreground-set", true);
-    table.add(&tag);
-    tag
 }
 
 fn inline_event_tooltip(event: &CodexInlineEvent) -> String {
@@ -17195,15 +17374,75 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert_eq!(
             inline_event_body_render_kind(&file, file.body.as_deref().unwrap()),
-            InlineEventBodyRenderKind::Monospace
+            InlineEventBodyRenderKind::Code
         );
         assert_eq!(
             inline_event_body_render_kind(&diff, diff.body.as_deref().unwrap()),
             InlineEventBodyRenderKind::Diff
         );
+        let command = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "cargo test".to_owned(),
+            subtitle: Some("Command".to_owned()),
+            body: Some("running 4 tests\ntest result: ok".to_owned()),
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+        assert_eq!(
+            inline_event_body_render_kind(&command, command.body.as_deref().unwrap()),
+            InlineEventBodyRenderKind::Terminal
+        );
         assert_eq!(
             inline_event_body_render_kind(&markdown, markdown.body.as_deref().unwrap()),
             InlineEventBodyRenderKind::Markdown
+        );
+    }
+
+    #[test]
+    fn inline_event_body_renderer_uses_code_and_terminal_surfaces() {
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("inline_event_code_block_widget(text,"));
+        assert!(source.contains("inline_event_terminal_output_widget(text)"));
+        assert!(source.contains("inline-event-code-row-added"));
+        assert!(source.contains("terminal::read_only_terminal_grid("));
+        assert!(!source.contains("InlineEventBodyRenderKind::Diff => {\n            let view = inline_event_text_view(text);"));
+    }
+
+    #[test]
+    fn inline_event_code_rows_classify_numbered_changes_and_bound_long_text() {
+        assert_eq!(
+            inline_event_code_row_parts("    379 +added", true),
+            InlineEventCodeRowParts {
+                old_line: None,
+                new_line: Some(379),
+                sign: "+",
+                text: "added".to_owned(),
+                kind: InlineEventCodeRowKind::Added,
+            }
+        );
+        assert_eq!(
+            inline_event_code_row_parts("    381 -deleted", true),
+            InlineEventCodeRowParts {
+                old_line: Some(381),
+                new_line: None,
+                sign: "-",
+                text: "deleted".to_owned(),
+                kind: InlineEventCodeRowKind::Removed,
+            }
+        );
+        assert_eq!(
+            inline_event_code_row_parts("@@ -1 +1 @@", true).kind,
+            InlineEventCodeRowKind::Hunk
+        );
+
+        let text = "1\n2\n3\n4";
+        assert_eq!(
+            bounded_inline_event_text(text, 2),
+            "1\n2\n... 2 lines omitted"
         );
     }
 

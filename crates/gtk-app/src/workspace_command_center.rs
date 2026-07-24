@@ -1,6 +1,7 @@
 use crate::file_component::OpenWorkspaceFile;
 use adw::ToastOverlay;
 use archductor_core::agent_tools::launchable_provider_key;
+use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
@@ -122,12 +123,12 @@ fn clone_external_thread_selection_controller(
 
 use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{
-    AppState, AppStateEvent, ChatUiPhase, ChatUiTarget, WorkspaceRightPanelTab, WorkspaceTab,
-    WorkspaceUiPhase,
+    AppState, AppStateEvent, ChatUiPhase, ChatUiTarget, QueuedChatInputDraft,
+    WorkspaceRightPanelTab, WorkspaceTab, WorkspaceUiPhase,
 };
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
-    archcar_async::{spawn_archcar_request, spawn_background_job},
+    archcar_async::spawn_background_job,
     buttons::{compact_text_button, menu_text_button, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
@@ -1170,9 +1171,11 @@ fn ws_center_panel(
             let workspace_name = current_workspace_name.borrow().clone();
             match event {
                 RefreshEvent::WorkspaceChatLifecycleChanged { workspace }
-                | RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }
                     if workspace != &workspace_name =>
                 {
+                    return;
+                }
+                RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
                     return;
                 }
                 _ => {}
@@ -1937,23 +1940,34 @@ fn close_workspace_chat_thread(
     thread_id: i64,
     archcar_paths: AppPaths,
 ) {
-    let Ok(store) = WorkspaceStore::open_app(db_path) else {
-        return;
-    };
-    let records = store.list_thread_processes(thread_id).unwrap_or_default();
-    let _ = store.close_chat_thread(thread_id);
-    for record in records
-        .into_iter()
-        .filter(|record| record.status == ProcessStatus::Running)
-    {
-        spawn_archcar_request(
-            archcar_paths.clone(),
-            ArchcarRequest::KillSession {
-                session_id: record.id,
-            },
-        );
-        let _ = store.stop_session_process(workspace_name, record.id);
-    }
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    spawn_background_job(
+        move || {
+            let Ok(store) = WorkspaceStore::open_app(db_path) else {
+                return;
+            };
+            let records = store.list_thread_processes(thread_id).unwrap_or_default();
+            let running_records = records
+                .into_iter()
+                .filter(|record| record.status == ProcessStatus::Running)
+                .collect::<Vec<_>>();
+            let client = ArchcarClient::from_paths(&archcar_paths);
+            for record in &running_records {
+                let _ = client.send(ArchcarRequest::InterruptTurn {
+                    session_id: record.id,
+                });
+            }
+            let _ = store.close_chat_thread(thread_id);
+            for record in running_records {
+                let _ = client.send(ArchcarRequest::KillSession {
+                    session_id: record.id,
+                });
+                let _ = store.stop_session_process(&workspace_name, record.id);
+            }
+        },
+        |_| {},
+    );
 }
 
 fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
@@ -2597,21 +2611,12 @@ fn workspace_prompt_tab_view(
     heading.set_xalign(0.0);
     panel.append(&heading);
 
-    let prompt_view = TextView::new();
-    prompt_view.set_editable(false);
-    prompt_view.set_monospace(true);
-    prompt_view.set_wrap_mode(WrapMode::WordChar);
-    prompt_view.set_vexpand(true);
-    prompt_view.add_css_class("ws-run-output");
-    prompt_view
-        .buffer()
-        .set_text(&format!("$ cat <<'PROMPT'\n{}\nPROMPT\n", prompt.trim()));
-    let prompt_scroll = ScrolledWindow::new();
-    prompt_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    prompt_scroll.set_vexpand(true);
-    prompt_scroll.set_child(Some(&prompt_view));
+    let prompt_scroll = terminal::read_only_terminal_grid(
+        &format!("$ cat <<'PROMPT'\n{}\nPROMPT\n", prompt.trim()),
+        &terminal::TerminalPreferences::default(),
+    );
     let prompt_overlay = gtk::Overlay::new();
-    prompt_overlay.set_child(Some(&prompt_scroll));
+    prompt_overlay.set_child(Some(prompt_scroll.widget()));
 
     let modal = GBox::new(Orientation::Vertical, 6);
     modal.add_css_class("ws-prompt-modal");
@@ -2690,27 +2695,19 @@ fn workspace_terminal_tab_view(
     command_row.append(&clear_btn);
     panel.append(&command_row);
 
-    let output_view = TextView::new();
-    output_view.set_editable(false);
-    output_view.set_monospace(true);
-    output_view.set_vexpand(true);
-    output_view.add_css_class("ws-run-output");
     let initial_terminal_state = run_console_states
         .borrow()
         .get(workspace_name)
         .and_then(|state| state.terminal_by_name(tab_name).cloned())
         .unwrap_or_else(|| WorkspaceRunConsoleTerminalState::new(1));
     command_entry.set_text(&initial_terminal_state.draft);
-    output_view
-        .buffer()
-        .set_text(initial_terminal_state.display_text());
-    let output_scroll = ScrolledWindow::new();
-    output_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    output_scroll.set_vexpand(true);
-    output_scroll.set_child(Some(&output_view));
-    panel.append(&output_scroll);
+    let output_surface = terminal::read_only_terminal_grid(
+        initial_terminal_state.display_text(),
+        &terminal::TerminalPreferences::default(),
+    );
+    panel.append(output_surface.widget());
 
-    let buffer = output_view.buffer();
+    let buffer = output_surface.buffer();
     let state_for_change = run_console_states.clone();
     let workspace_for_change = workspace_name.to_owned();
     let tab_for_change = tab_name.to_owned();
@@ -5586,6 +5583,7 @@ pub(crate) enum PullRequestStateKind {
     Pending,
     Ready,
     Failed,
+    MergeBlocked,
     Merged,
 }
 
@@ -5603,6 +5601,7 @@ impl PullRequestStatusSummary {
             PullRequestStateKind::Pending
             | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
+            | PullRequestStateKind::MergeBlocked
             | PullRequestStateKind::Merged => Some(self.label.as_str()),
         }
     }
@@ -5613,6 +5612,7 @@ impl PullRequestStatusSummary {
             PullRequestStateKind::Pending
             | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
+            | PullRequestStateKind::MergeBlocked
             | PullRequestStateKind::Merged => Some(self.css_class),
         }
     }
@@ -5639,6 +5639,13 @@ pub(crate) fn pull_request_status_summary(
     }
 
     if let Some(readiness) = readiness {
+        if pull_request_is_merge_blocked(readiness) {
+            return PullRequestStatusSummary {
+                label: "merge blocked".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::MergeBlocked,
+            };
+        }
         if pull_request_is_failed(readiness) {
             return PullRequestStatusSummary {
                 label: "checks failed".to_owned(),
@@ -5707,9 +5714,10 @@ enum WorkspacePrTopActionKind {
     CreatePr,
     CommitAndPush,
     Push,
-    MergeSourceBranch,
+    Rebase,
+    MergeConflicts,
     MergePr,
-    FixBlocked,
+    FixErrors,
     ViewPr,
 }
 
@@ -5724,16 +5732,12 @@ struct WorkspacePrTopAction {
 fn workspace_pr_primary_action(
     snapshot: &WorkspacePrStatusSnapshot,
 ) -> Option<WorkspacePrTopAction> {
-    let has_conflicts = snapshot
-        .summary
-        .as_ref()
-        .is_some_and(|summary| !summary.conflicting_workspaces.is_empty());
-    if has_conflicts {
+    if snapshot.pr.is_none() {
         return Some(WorkspacePrTopAction {
-            label: "Resolve Conflicts",
-            tooltip: "Queue a prompt to resolve workspace conflicts",
-            css_class: "ws-pr-status-failed",
-            kind: WorkspacePrTopActionKind::FixBlocked,
+            label: "Create PR",
+            tooltip: "Queue a prompt to commit, push, and create a pull request",
+            css_class: "ws-pr-status-missing",
+            kind: WorkspacePrTopActionKind::CreatePr,
         });
     }
 
@@ -5751,43 +5755,46 @@ fn workspace_pr_primary_action(
         });
     }
 
+    let needs_push = snapshot
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.branch_push_state.as_ref())
+        .is_some_and(|push| push.ahead > 0 && push.behind == 0);
+    if needs_push {
+        return Some(WorkspacePrTopAction {
+            label: "Push",
+            tooltip: "Push the workspace branch",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::Push,
+        });
+    }
+
+    let branch_state = snapshot
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.branch_push_state.as_ref());
     let source_branch_ahead = snapshot
         .summary
         .as_ref()
         .map(|summary| summary.source_branch_ahead)
         .unwrap_or_default();
-    if source_branch_ahead > 0 {
+    let needs_rebase = branch_state.is_some_and(|push| push.behind > 0) || source_branch_ahead > 0;
+    if needs_rebase {
         return Some(WorkspacePrTopAction {
-            label: "Merge",
-            tooltip: "Ask the current chat to merge the source branch into this workspace",
+            label: "Rebase",
+            tooltip: "Queue a prompt to rebase this branch",
             css_class: "ws-pr-status-pending",
-            kind: WorkspacePrTopActionKind::MergeSourceBranch,
-        });
-    }
-
-    let needs_push = snapshot
-        .summary
-        .as_ref()
-        .and_then(|summary| summary.branch_push_state.as_ref())
-        .is_some_and(|push| push.ahead > 0);
-    if needs_push {
-        if snapshot.pr.is_some() {
-            return Some(WorkspacePrTopAction {
-                label: "Push Branch",
-                tooltip: "Push the workspace branch",
-                css_class: "ws-pr-status-muted",
-                kind: WorkspacePrTopActionKind::Push,
-            });
-        }
-        return Some(WorkspacePrTopAction {
-            label: "Create PR",
-            tooltip: "Ask the current chat to create a pull request",
-            css_class: "ws-pr-status-missing",
-            kind: WorkspacePrTopActionKind::CreatePr,
+            kind: WorkspacePrTopActionKind::Rebase,
         });
     }
 
     match snapshot.status.as_ref().map(|status| status.kind) {
+        Some(PullRequestStateKind::MergeBlocked) => Some(WorkspacePrTopAction {
+            label: "Merge",
+            tooltip: "Queue a prompt to resolve merge blockers",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::MergeConflicts,
+        }),
         Some(PullRequestStateKind::Ready) => Some(WorkspacePrTopAction {
             label: "Merge PR",
             tooltip: "Merge the ready pull request",
@@ -5795,10 +5802,10 @@ fn workspace_pr_primary_action(
             kind: WorkspacePrTopActionKind::MergePr,
         }),
         Some(PullRequestStateKind::Failed) => Some(WorkspacePrTopAction {
-            label: "Fix Checks",
+            label: "Fix errors",
             tooltip: "Queue a prompt to fix failing checks",
             css_class: "ws-pr-status-failed",
-            kind: WorkspacePrTopActionKind::FixBlocked,
+            kind: WorkspacePrTopActionKind::FixErrors,
         }),
         Some(PullRequestStateKind::Merged) => Some(WorkspacePrTopAction {
             label: "Merged",
@@ -5833,15 +5840,74 @@ fn refresh_workspace_chat_lifecycle(refresh_hub: &RefreshHub, workspace_name: &s
 }
 
 fn stage_prompt_for_chat(
+    db_path: &Path,
     state: &AppState,
     refresh_hub: &RefreshHub,
     workspace_name: &str,
     prompt: String,
 ) {
     let workspace_name = current_workspace_action_target(state, workspace_name);
-    state.queue_pending_chat_prompt(prompt);
+    if !queue_prompt_to_selected_archcar_chat(db_path, state, &workspace_name, &prompt) {
+        state.queue_pending_chat_prompt(prompt);
+    }
     state.set_active_workspace_tab(WorkspaceTab::Chats);
     refresh_workspace_chat_lifecycle(refresh_hub, &workspace_name);
+}
+
+fn queue_prompt_to_selected_archcar_chat(
+    db_path: &Path,
+    state: &AppState,
+    workspace_name: &str,
+    prompt: &str,
+) -> bool {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return false;
+    }
+    let Some(thread_id) = state.selected_chat_thread() else {
+        return false;
+    };
+    let Ok(store) = WorkspaceStore::open_app(db_path) else {
+        return false;
+    };
+    let Ok(thread) = store.get_chat_thread_record(thread_id) else {
+        return false;
+    };
+    let Ok(workspace) = store.get_workspace_record(thread.workspace_id) else {
+        return false;
+    };
+    if workspace.name != workspace_name {
+        return false;
+    }
+    let session_kind = session_kind_from_provider(&thread.provider);
+    let Ok(queued) = store.enqueue_chat_input(
+        thread_id,
+        prompt,
+        None,
+        ArchcarInputKind::User,
+        session_kind,
+    ) else {
+        return false;
+    };
+    state.queue_chat_input(
+        thread_id,
+        QueuedChatInputDraft {
+            id: Some(queued.id),
+            input: queued.input,
+            visible_input: queued.visible_input,
+            kind: queued.input_kind,
+            session_kind: queued.session_kind,
+        },
+    );
+    true
+}
+
+fn session_kind_from_provider(provider: &str) -> SessionKind {
+    match provider.to_ascii_lowercase().as_str() {
+        "claude" => SessionKind::Claude,
+        "shell" => SessionKind::Shell,
+        _ => SessionKind::Codex,
+    }
 }
 
 fn connect_create_pr_prompt_button(
@@ -5854,7 +5920,7 @@ fn connect_create_pr_prompt_button(
     button.connect_clicked(move |_| {
         let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
-        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
+        stage_prompt_for_chat(&db_path, &state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5868,7 +5934,7 @@ fn connect_commit_and_push_prompt_button(
     button.connect_clicked(move |_| {
         let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
-        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
+        stage_prompt_for_chat(&db_path, &state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5882,7 +5948,7 @@ fn connect_merge_source_branch_prompt_button(
     button.connect_clicked(move |_| {
         let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_merge_source_branch_chat_prompt(&db_path, &workspace_name);
-        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
+        stage_prompt_for_chat(&db_path, &state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5963,6 +6029,14 @@ fn workspace_pr_status_panel(
             .map(|action| action.css_class)
             .unwrap_or("ws-pr-status-muted"),
     );
+    if let Some(pr) = snapshot.pr.as_ref() {
+        let chip = secondary_button(&pull_request_chip_label(pr.number));
+        chip.add_css_class("ws-pr-chip");
+        chip.set_tooltip_text(Some(&pull_request_chip_tooltip(pr.number)));
+        let url = pr.url.clone();
+        chip.connect_clicked(move |_| open_external_url(&url));
+        panel.append(&chip);
+    }
     let title = Label::new(Some(match action {
         Some(action) => workspace_pr_status_title(&snapshot, action),
         None => "No changes",
@@ -6000,7 +6074,7 @@ fn workspace_pr_status_panel(
             state.clone(),
             refresh_hub.clone(),
         ),
-        WorkspacePrTopActionKind::MergeSourceBranch => connect_merge_source_branch_prompt_button(
+        WorkspacePrTopActionKind::Rebase => connect_merge_source_branch_prompt_button(
             &primary_btn,
             db_path.to_path_buf(),
             workspace_name.to_owned(),
@@ -6024,14 +6098,16 @@ fn workspace_pr_status_panel(
             toast_overlay,
             refresh_hub.clone(),
         ),
-        WorkspacePrTopActionKind::FixBlocked => connect_fix_blocked_prompt_button(
-            &primary_btn,
-            db_path.to_path_buf(),
-            workspace_name.to_owned(),
-            state.clone(),
-            &feedback,
-            toast_overlay,
-        ),
+        WorkspacePrTopActionKind::MergeConflicts | WorkspacePrTopActionKind::FixErrors => {
+            connect_fix_blocked_prompt_button(
+                &primary_btn,
+                db_path.to_path_buf(),
+                workspace_name.to_owned(),
+                state.clone(),
+                &feedback,
+                toast_overlay,
+            )
+        }
         WorkspacePrTopActionKind::ViewPr => {
             if let Some(pr) = snapshot.pr.as_ref() {
                 let url = pr.url.clone();
@@ -6044,6 +6120,14 @@ fn workspace_pr_status_panel(
     panel
 }
 
+fn pull_request_chip_label(number: i64) -> String {
+    format!("#{number}")
+}
+
+fn pull_request_chip_tooltip(number: i64) -> String {
+    format!("Open pull request #{number}")
+}
+
 fn workspace_pr_status_title(
     snapshot: &WorkspacePrStatusSnapshot,
     action: WorkspacePrTopAction,
@@ -6051,9 +6135,11 @@ fn workspace_pr_status_title(
     match action.kind {
         WorkspacePrTopActionKind::CommitAndPush => return "Commit and push branch",
         WorkspacePrTopActionKind::Push => return "Push branch",
-        WorkspacePrTopActionKind::MergeSourceBranch => return "Merge source branch",
+        WorkspacePrTopActionKind::Rebase => return "Rebase branch",
         WorkspacePrTopActionKind::CreatePr => return "No pull request yet",
-        WorkspacePrTopActionKind::FixBlocked if action.css_class == "ws-pr-status-failed" => {
+        WorkspacePrTopActionKind::MergeConflicts | WorkspacePrTopActionKind::FixErrors
+            if action.css_class == "ws-pr-status-failed" =>
+        {
             return "Blocked";
         }
         _ => {}
@@ -6062,6 +6148,7 @@ fn workspace_pr_status_title(
         Some(PullRequestStateKind::Pending) => "Checks pending",
         Some(PullRequestStateKind::Ready) => "Ready to merge",
         Some(PullRequestStateKind::Failed) => "Checks failed",
+        Some(PullRequestStateKind::MergeBlocked) => "Merge blocked",
         Some(PullRequestStateKind::Merged) => "Pull request merged",
         Some(PullRequestStateKind::Open) => "Pull request open",
         None => "No pull request yet",
@@ -6081,6 +6168,13 @@ fn pull_request_status_summary_without_checks_summary(
     }
 
     if let Some(readiness) = readiness {
+        if pull_request_is_merge_blocked(readiness) {
+            return PullRequestStatusSummary {
+                label: "merge blocked".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::MergeBlocked,
+            };
+        }
         if pull_request_is_failed(readiness) {
             return PullRequestStatusSummary {
                 label: "checks failed".to_owned(),
@@ -6110,6 +6204,33 @@ fn pull_request_is_failed(readiness: &archductor_core::workspace::PullRequestRea
             .deployments
             .iter()
             .any(|deployment| deployment.is_failure())
+}
+
+fn pull_request_is_merge_blocked(
+    readiness: &archductor_core::workspace::PullRequestReadiness,
+) -> bool {
+    readiness
+        .merge_state_status
+        .as_deref()
+        .is_some_and(github_merge_state_is_blocked)
+        || readiness
+            .mergeable
+            .as_deref()
+            .is_some_and(github_mergeable_is_blocked)
+}
+
+fn github_merge_state_is_blocked(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "BLOCKED" | "CONFLICTING" | "DIRTY" | "UNKNOWN"
+    )
+}
+
+fn github_mergeable_is_blocked(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "CONFLICTING" | "NO" | "FALSE"
+    )
 }
 
 fn pull_request_is_pending(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
@@ -6187,7 +6308,7 @@ fn workspace_create_pr_chat_prompt_from_parts(
 ) -> String {
     let mut prompt = format!(
         "Create a GitHub pull request for workspace {name}.\n\n\
-         Push the branch if needed. Write a clear PR title and full PR body, then create the PR. \
+         Push the branch if needed. Use `gh pr create` with a clear PR title and full PR body. \
          Include a concise summary and testing/verification section in the body."
     );
     if let Some(repo_prompt) = repo_prompt
@@ -6225,9 +6346,9 @@ fn workspace_merge_source_branch_chat_prompt(db_path: &Path, name: &str) -> Stri
         .and_then(|store| store.workspace_base_ref(name))
         .unwrap_or_else(|_| "the source branch".to_owned());
     let mut prompt = format!(
-        "Merge {source} into workspace {name} before creating a pull request.\n\n\
-         Fetch the latest source branch if needed, merge it into the workspace branch, resolve \
-         conflicts carefully, run the relevant verification, then report the merge result and any \
+        "Rebase workspace {name} onto {source} before continuing review.\n\n\
+         Fetch the latest source branch if needed, rebase the workspace branch, resolve \
+         conflicts carefully, run the relevant verification, then report the rebase result and any \
          remaining blockers."
     );
     append_configured_prompt(
@@ -7023,7 +7144,7 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
                             workspace: workspace_for_refresh.clone(),
                         });
                     });
@@ -7119,7 +7240,7 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
                             workspace: workspace_for_refresh.clone(),
                         });
                     });
@@ -7131,7 +7252,7 @@ fn workspace_checks_panel(
                     actions.append(&merge_row);
                     actions.append(&top_row);
                 }
-                PullRequestStateKind::Failed => {
+                PullRequestStateKind::Failed | PullRequestStateKind::MergeBlocked => {
                     let top_row = make_action_row();
                     let fix_btn = text_button(action_labels[0]);
                     fix_btn.add_css_class("suggested-action");
@@ -7209,7 +7330,7 @@ fn workspace_checks_panel(
                             &message,
                             true,
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+                        refresh_after.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
                             workspace: workspace_for_refresh.clone(),
                         });
                     });
@@ -7317,6 +7438,7 @@ fn pull_request_action_labels(kind: Option<PullRequestStateKind>) -> Vec<&'stati
         Some(PullRequestStateKind::Pending) => vec!["PR summary", "Reviews", "Refresh"],
         Some(PullRequestStateKind::Ready) => vec!["Merge", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Failed) => vec!["Fix checks", "PR summary", "Refresh"],
+        Some(PullRequestStateKind::MergeBlocked) => vec!["Merge", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Merged) => vec!["Continue", "Archive"],
     }
 }
@@ -7671,7 +7793,7 @@ fn pull_request_merge_refresh_event(
     {
         RefreshEvent::WorkspaceInventoryChanged
     } else {
-        RefreshEvent::WorkspaceReviewChanged {
+        RefreshEvent::WorkspaceGitReviewChanged {
             workspace: workspace.to_owned(),
         }
     }
@@ -8669,6 +8791,82 @@ mod tests {
         assert_eq!(state.staged_review_prompt(), None);
     }
 
+    #[test]
+    fn pull_request_chip_model_is_compact_and_clickable() {
+        assert_eq!(pull_request_chip_label(42), "#42");
+        assert_eq!(pull_request_chip_tooltip(42), "Open pull request #42");
+    }
+
+    #[test]
+    fn top_bar_prompt_delivery_falls_back_to_composer_without_selected_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            crate::AppPage::Workspace,
+        );
+
+        let queued =
+            queue_prompt_to_selected_archcar_chat(&db_path, &state, "berlin", "Commit and push");
+
+        assert!(!queued);
+        assert_eq!(state.take_pending_chat_prompt(), None);
+    }
+
+    #[test]
+    fn top_bar_prompt_delivery_queues_selected_chat_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO repositories (
+                id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+             ) VALUES (1, 'repo', ?1, 'main', 'origin', ?2, 'now', 'now')",
+            rusqlite::params![
+                temp.path().join("repo").display().to_string(),
+                temp.path().join("workspaces").display().to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (
+                id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at
+             ) VALUES (1, 1, 'berlin', ?1, 'feature/berlin', 'main', 3000, 'active', 'now', 'now')",
+            [temp.path().join("workspaces/berlin").display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (7, 1, 'codex', 'New Chat', 'active', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            crate::AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(7));
+
+        let queued =
+            queue_prompt_to_selected_archcar_chat(&db_path, &state, "berlin", "Commit and push");
+
+        assert!(queued);
+        assert_eq!(state.take_pending_chat_prompt(), None);
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+        let inputs = store.list_queued_chat_inputs(7).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].input, "Commit and push");
+        assert_eq!(inputs[0].input_kind, ArchcarInputKind::User);
+        assert_eq!(inputs[0].session_kind, SessionKind::Codex);
+    }
+
     fn test_checks_summary(
         changed_files: usize,
         branch_push_state: Option<archductor_core::workspace::BranchPushState>,
@@ -9486,7 +9684,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_tab_refresh_ignores_message_events_for_other_workspaces() {
+    fn chat_tab_refresh_ignores_message_events() {
         let source = include_str!("workspace_command_center.rs");
         let start = source
             .find("refresh_hub.set_workspace_chat_tabs(move |event| {")
@@ -9498,16 +9696,17 @@ mod tests {
         let handler_region = &source[start..end];
 
         assert!(
-            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }"),
-            "message events should be filtered to the visible workspace before refreshing chat tabs"
-        );
-        assert!(
             handler_region.contains("RefreshEvent::WorkspaceChatLifecycleChanged { workspace }"),
             "lifecycle events should remain filtered to the visible workspace"
         );
         assert!(
             handler_region.contains("workspace != &workspace_name"),
             "chat tab refreshes for other workspaces must not rebuild visible tabs"
+        );
+        assert!(
+            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { .. }")
+                && handler_region.contains("return;"),
+            "message events should not rebuild chat tabs"
         );
     }
 
@@ -9746,6 +9945,32 @@ mod tests {
     }
 
     #[test]
+    fn closing_chat_tab_interrupts_running_turn_before_closing_thread() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn close_workspace_chat_thread(").unwrap();
+        let end = source[start..]
+            .find("fn guarded_gtk_callback")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        let interrupt = region
+            .find("ArchcarRequest::InterruptTurn")
+            .expect("closing a chat tab must request an active-turn interrupt");
+        let close = region
+            .find("store.close_chat_thread(thread_id)")
+            .expect("closing a chat tab must close the thread");
+        let kill = region
+            .find("ArchcarRequest::KillSession")
+            .expect("closing a chat tab must still stop the running session");
+
+        assert!(
+            interrupt < close && close < kill,
+            "chat tab close should interrupt the active turn, then close the thread, then stop the session"
+        );
+    }
+
+    #[test]
     fn workspace_chat_tabs_hide_shell_threads() {
         let shell = ChatThreadRecord {
             id: 1,
@@ -9936,24 +10161,20 @@ mod tests {
             status: None,
             summary: Some(test_checks_summary(0, None, Vec::new())),
         };
-        assert_eq!(workspace_pr_primary_action_label(&no_pr), None);
-        assert!(workspace_pr_primary_action(&no_pr).is_none());
+        assert_eq!(workspace_pr_primary_action_label(&no_pr), Some("Create PR"));
 
         let dirty = WorkspacePrStatusSnapshot {
             pr: None,
             status: None,
             summary: Some(test_checks_summary(3, None, Vec::new())),
         };
-        assert_eq!(
-            workspace_pr_primary_action_label(&dirty),
-            Some("Commit and Push")
-        );
+        assert_eq!(workspace_pr_primary_action_label(&dirty), Some("Create PR"));
         let dirty_action = workspace_pr_primary_action(&dirty).unwrap();
         assert_eq!(
             workspace_pr_status_title(&dirty, dirty_action),
-            "Commit and push branch"
+            "No pull request yet"
         );
-        assert_eq!(dirty_action.css_class, "ws-pr-status-muted");
+        assert_eq!(dirty_action.css_class, "ws-pr-status-missing");
 
         let needs_push = WorkspacePrStatusSnapshot {
             pr: None,
@@ -9980,30 +10201,27 @@ mod tests {
         let mut source_ahead_summary = test_checks_summary(
             0,
             Some(archductor_core::workspace::BranchPushState {
-                ahead: 2,
-                behind: 0,
+                ahead: 0,
+                behind: 2,
                 has_upstream: true,
             }),
             Vec::new(),
         );
         source_ahead_summary.source_branch_ahead = 1;
         let source_ahead = WorkspacePrStatusSnapshot {
-            pr: None,
+            pr: Some(test_pull_request("OPEN")),
             status: None,
             summary: Some(source_ahead_summary),
         };
         assert_eq!(
             workspace_pr_primary_action_label(&source_ahead),
-            Some("Merge")
+            Some("Rebase")
         );
         let source_ahead_action = workspace_pr_primary_action(&source_ahead).unwrap();
-        assert_eq!(
-            source_ahead_action.kind,
-            WorkspacePrTopActionKind::MergeSourceBranch
-        );
+        assert_eq!(source_ahead_action.kind, WorkspacePrTopActionKind::Rebase);
         assert_eq!(
             workspace_pr_status_title(&source_ahead, source_ahead_action),
-            "Merge source branch"
+            "Rebase branch"
         );
 
         let clean_without_upstream = WorkspacePrStatusSnapshot {
@@ -10021,7 +10239,7 @@ mod tests {
         };
         assert_eq!(
             workspace_pr_primary_action_label(&clean_without_upstream),
-            None
+            Some("Create PR")
         );
 
         let snapshot = WorkspacePrStatusSnapshot {
@@ -10054,7 +10272,7 @@ mod tests {
         };
         assert_eq!(
             workspace_pr_primary_action_label(&blocked),
-            Some("Fix Checks")
+            Some("Fix errors")
         );
         assert_eq!(
             workspace_pr_primary_action(&blocked).unwrap().css_class,
@@ -10064,19 +10282,15 @@ mod tests {
         let conflict = WorkspacePrStatusSnapshot {
             pr: Some(test_pull_request("OPEN")),
             status: Some(PullRequestStatusSummary {
-                label: "ready to merge".to_owned(),
-                css_class: "ws-pr-status-ready",
-                kind: PullRequestStateKind::Ready,
+                label: "merge blocked".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::MergeBlocked,
             }),
-            summary: Some(test_checks_summary(
-                0,
-                None,
-                vec![("paris".to_owned(), vec!["src/main.rs".to_owned()])],
-            )),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
         };
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().kind,
-            WorkspacePrTopActionKind::FixBlocked
+            WorkspacePrTopActionKind::MergeConflicts
         );
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().css_class,
@@ -10113,6 +10327,9 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
+                state: None,
+                merge_state_status: None,
+                mergeable: None,
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -10192,6 +10409,52 @@ mod tests {
             Some("  printf 'ok'  ".to_owned())
         );
         assert_eq!(normalize_terminal_input_for_send("   \n"), None);
+    }
+
+    #[test]
+    fn run_configure_panes_use_terminal_style_without_input_controller() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_prompt_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn workspace_prompt_queue_button_label")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(region.contains("terminal::read_only_terminal_grid"));
+        assert!(!region.contains("EventControllerKey"));
+        assert!(!region.contains("Entry::new()"));
+    }
+
+    #[test]
+    fn run_console_terminal_tabs_use_shared_terminal_component() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_terminal_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn run_console_terminal_key")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(region.contains("terminal::read_only_terminal_grid"));
+        assert!(!region.contains("TextView::new()"));
+    }
+
+    #[test]
+    fn workspace_surfaces_use_shared_embedded_terminal_panel() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("terminal::embedded_terminal_panel("));
+        assert_eq!(
+            production
+                .matches("terminal::embedded_terminal_panel(")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -10359,7 +10622,7 @@ mod tests {
         });
         assert_eq!(
             pull_request_merge_refresh_event("berlin", &not_archived),
-            RefreshEvent::WorkspaceReviewChanged {
+            RefreshEvent::WorkspaceGitReviewChanged {
                 workspace: "berlin".to_owned()
             }
         );
@@ -10368,7 +10631,7 @@ mod tests {
             Err(anyhow::anyhow!("merge failed"));
         assert_eq!(
             pull_request_merge_refresh_event("berlin", &failed),
-            RefreshEvent::WorkspaceReviewChanged {
+            RefreshEvent::WorkspaceGitReviewChanged {
                 workspace: "berlin".to_owned()
             }
         );
@@ -10472,6 +10735,9 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
+                state: None,
+                merge_state_status: None,
+                mergeable: None,
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -10579,6 +10845,9 @@ mod tests {
             updated_at: "now".to_owned(),
         };
         let readiness = archductor_core::workspace::PullRequestReadiness {
+            state: None,
+            merge_state_status: None,
+            mergeable: None,
             review_decision: None,
             latest_reviews: Vec::new(),
             comments: Vec::new(),
@@ -10613,6 +10882,9 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
+                state: None,
+                merge_state_status: None,
+                mergeable: None,
                 review_decision: Some("CHANGES_REQUESTED".to_owned()),
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),

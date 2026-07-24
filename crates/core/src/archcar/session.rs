@@ -208,6 +208,20 @@ impl ManagedSessionConnection {
         }
     }
 
+    fn write_raw(&mut self, input: &str) -> Result<()> {
+        match self {
+            Self::Live(session) => session.write(input),
+            Self::CodexAppServer(_) | Self::ClaudeStream(_) => {
+                anyhow::bail!("provider-native sessions do not accept terminal input")
+            }
+            Self::Reattached { write, .. } => {
+                write.write_all(input.as_bytes())?;
+                write.flush()?;
+                Ok(())
+            }
+        }
+    }
+
     fn stop(&mut self) -> Result<()> {
         match self {
             Self::Live(session) => session.stop(),
@@ -1407,7 +1421,7 @@ fn format_input_audit_log(
             session_id,
             crate::redaction::redact_sensitive_text(input)
         ),
-        ArchcarInputKind::ControlCommand => String::new(),
+        ArchcarInputKind::ControlCommand | ArchcarInputKind::RawTerminal => String::new(),
     }
 }
 
@@ -1611,6 +1625,27 @@ fn run_session_loop(
                     delivery: _,
                 } => {
                     let current = snapshot.lock().unwrap().clone();
+                    if kind == ArchcarInputKind::RawTerminal {
+                        match pty.write_raw(&input) {
+                            Ok(()) => {
+                                if let Ok(mut state) = snapshot.lock() {
+                                    state.ready = true;
+                                    state.runtime_state = AgentSessionState::WaitingForInput;
+                                }
+                            }
+                            Err(err) => {
+                                warn!(
+                                    session_id = current.session_id,
+                                    thread_id = current.thread_id,
+                                    kind = ?kind,
+                                    chars = input.chars().count(),
+                                    error = %err,
+                                    "archcar session raw terminal write failed"
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let persisted_input = visible_input.as_deref().unwrap_or(&input);
                     info!(
                         session_id = current.session_id,
@@ -1624,6 +1659,7 @@ fn run_session_loop(
                         ArchcarInputKind::User => ("user", "user_send"),
                         ArchcarInputKind::ReviewPrompt => ("user", "staged_review_send"),
                         ArchcarInputKind::ControlCommand => ("system", "control_command"),
+                        ArchcarInputKind::RawTerminal => unreachable!("raw terminal handled above"),
                     };
                     let log_text = format_input_audit_log(
                         &current.workspace,
@@ -1655,11 +1691,17 @@ fn run_session_loop(
                                 ArchcarInputKind::User => "user_input",
                                 ArchcarInputKind::ReviewPrompt => "review_prompt",
                                 ArchcarInputKind::ControlCommand => "control_command",
+                                ArchcarInputKind::RawTerminal => {
+                                    unreachable!("raw terminal handled above")
+                                }
                             },
                             title: match kind {
                                 ArchcarInputKind::User => "User input",
                                 ArchcarInputKind::ReviewPrompt => "Review prompt",
                                 ArchcarInputKind::ControlCommand => "Control command",
+                                ArchcarInputKind::RawTerminal => {
+                                    unreachable!("raw terminal handled above")
+                                }
                             },
                             body: persisted_input,
                         }),
@@ -2917,6 +2959,7 @@ fn persist_runtime_user_input(
         ArchcarInputKind::User => ("user", "user_send"),
         ArchcarInputKind::ReviewPrompt => ("user", "staged_review_send"),
         ArchcarInputKind::ControlCommand => ("system", "control_command"),
+        ArchcarInputKind::RawTerminal => ("system", "raw_terminal"),
     };
     let log_text = format_input_audit_log(
         &started.workspace,
@@ -2947,6 +2990,7 @@ fn persist_runtime_user_input(
                 ArchcarInputKind::User => "User input",
                 ArchcarInputKind::ReviewPrompt => "Review prompt",
                 ArchcarInputKind::ControlCommand => "Control command",
+                ArchcarInputKind::RawTerminal => "Raw terminal input",
             },
             body: persisted_input,
         }),
@@ -2999,6 +3043,7 @@ fn input_kind_storage_label(kind: &ArchcarInputKind) -> &'static str {
         ArchcarInputKind::User => "user",
         ArchcarInputKind::ReviewPrompt => "review_prompt",
         ArchcarInputKind::ControlCommand => "control_command",
+        ArchcarInputKind::RawTerminal => "raw_terminal",
     }
 }
 

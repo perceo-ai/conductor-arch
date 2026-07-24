@@ -20,6 +20,7 @@ pub enum ArchcarInputKind {
     User,
     ReviewPrompt,
     ControlCommand,
+    RawTerminal,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -584,6 +585,7 @@ fn input_kind_label(kind: &ArchcarInputKind) -> &'static str {
         ArchcarInputKind::User => "user",
         ArchcarInputKind::ReviewPrompt => "review_prompt",
         ArchcarInputKind::ControlCommand => "control_command",
+        ArchcarInputKind::RawTerminal => "raw_terminal",
     }
 }
 

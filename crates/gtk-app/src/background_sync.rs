@@ -14,6 +14,9 @@ use archductor_core::workspace::{ChatThreadRecord, WorkspaceStore};
 
 use crate::refresh::RefreshEvent;
 
+pub(crate) const SELECTED_GIT_REVIEW_SAMPLE_SECONDS: u64 = 10;
+pub(crate) const BACKGROUND_GIT_REVIEW_SAMPLE_SECONDS: u64 = 30;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundThreadSnapshot {
     pub workspace: String,
@@ -31,6 +34,58 @@ pub struct BackgroundThreadSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackgroundSyncSnapshot {
     pub running_threads: Vec<BackgroundThreadSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitReviewSampleCandidate {
+    pub workspace: String,
+    pub status: String,
+    pub path_exists: bool,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitReviewSampler {
+    last_sampled_at: BTreeMap<String, u64>,
+    in_flight: bool,
+}
+
+impl WorkspaceGitReviewSampler {
+    pub(crate) fn due_workspaces(
+        &self,
+        now_secs: u64,
+        candidates: &[WorkspaceGitReviewSampleCandidate],
+    ) -> Vec<String> {
+        if self.in_flight {
+            return Vec::new();
+        }
+        candidates
+            .iter()
+            .filter(|candidate| candidate.status == "active" && candidate.path_exists)
+            .filter(|candidate| {
+                let interval = if candidate.selected {
+                    SELECTED_GIT_REVIEW_SAMPLE_SECONDS
+                } else {
+                    BACKGROUND_GIT_REVIEW_SAMPLE_SECONDS
+                };
+                self.last_sampled_at
+                    .get(&candidate.workspace)
+                    .is_none_or(|last| now_secs.saturating_sub(*last) >= interval)
+            })
+            .map(|candidate| candidate.workspace.clone())
+            .collect()
+    }
+
+    pub(crate) fn mark_started(&mut self, now_secs: u64, workspaces: &[String]) {
+        self.in_flight = !workspaces.is_empty();
+        for workspace in workspaces {
+            self.last_sampled_at.insert(workspace.clone(), now_secs);
+        }
+    }
+
+    pub(crate) fn mark_finished(&mut self) {
+        self.in_flight = false;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +121,43 @@ pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSna
         });
     }
     Ok(BackgroundSyncSnapshot { running_threads })
+}
+
+pub(crate) fn load_workspace_git_review_candidates(
+    db_path: &Path,
+    selected_workspace: Option<&str>,
+) -> Result<Vec<WorkspaceGitReviewSampleCandidate>> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    Ok(store
+        .list_status()?
+        .into_iter()
+        .map(|line| {
+            let workspace = line.workspace.name;
+            WorkspaceGitReviewSampleCandidate {
+                selected: selected_workspace == Some(workspace.as_str()),
+                status: line.workspace.status,
+                path_exists: line.workspace.path.exists(),
+                workspace,
+            }
+        })
+        .collect())
+}
+
+pub(crate) fn sample_workspace_git_review_state(
+    db_path: &Path,
+    workspaces: &[String],
+) -> Result<Vec<String>> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let mut refreshed = Vec::new();
+    for workspace in workspaces {
+        let _ = store.branch_push_state(workspace);
+        let _ = store.checks_summary(workspace);
+        if store.pull_request(workspace)?.is_some() {
+            let _ = store.refresh_pull_request_state(workspace);
+        }
+        refreshed.push(workspace.clone());
+    }
+    Ok(refreshed)
 }
 
 pub(crate) fn load_workspace_chat_nav(
@@ -548,6 +640,68 @@ mod tests {
         ];
 
         assert_eq!(coalesce_refresh_events(events).len(), 2);
+    }
+
+    #[test]
+    fn git_review_sampler_uses_selected_and_background_cadence() {
+        let candidates = vec![
+            WorkspaceGitReviewSampleCandidate {
+                workspace: "selected".to_owned(),
+                status: "active".to_owned(),
+                path_exists: true,
+                selected: true,
+            },
+            WorkspaceGitReviewSampleCandidate {
+                workspace: "background".to_owned(),
+                status: "active".to_owned(),
+                path_exists: true,
+                selected: false,
+            },
+        ];
+        let mut sampler = WorkspaceGitReviewSampler::default();
+
+        let due = sampler.due_workspaces(0, &candidates);
+        assert_eq!(due, vec!["selected".to_owned(), "background".to_owned()]);
+        sampler.mark_started(0, &due);
+        sampler.mark_finished();
+
+        assert!(sampler.due_workspaces(9, &candidates).is_empty());
+        assert_eq!(sampler.due_workspaces(10, &candidates), vec!["selected"]);
+        assert_eq!(
+            sampler.due_workspaces(30, &candidates),
+            vec!["selected", "background"]
+        );
+    }
+
+    #[test]
+    fn git_review_sampler_skips_archived_missing_and_inflight_work() {
+        let candidates = vec![
+            WorkspaceGitReviewSampleCandidate {
+                workspace: "archived".to_owned(),
+                status: "archived".to_owned(),
+                path_exists: true,
+                selected: true,
+            },
+            WorkspaceGitReviewSampleCandidate {
+                workspace: "missing".to_owned(),
+                status: "active".to_owned(),
+                path_exists: false,
+                selected: false,
+            },
+            WorkspaceGitReviewSampleCandidate {
+                workspace: "active".to_owned(),
+                status: "active".to_owned(),
+                path_exists: true,
+                selected: false,
+            },
+        ];
+        let mut sampler = WorkspaceGitReviewSampler::default();
+
+        assert_eq!(sampler.due_workspaces(0, &candidates), vec!["active"]);
+        sampler.mark_started(0, &["active".to_owned()]);
+        assert!(sampler.due_workspaces(31, &candidates).is_empty());
+        sampler.mark_finished();
+        assert_eq!(sampler.due_workspaces(31, &candidates), vec!["active"]);
     }
 
     #[test]

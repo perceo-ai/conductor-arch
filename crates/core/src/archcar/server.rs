@@ -316,7 +316,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             delivery,
         } => match load_or_restore_session_handle(state, session_id) {
             Ok(Some(handle)) => {
-                if let Err(err) = validate_send_input_delivery(&handle, delivery) {
+                if let Err(err) = validate_send_input_delivery(&handle, &kind, delivery) {
                     return ArchcarResponse::Error {
                         message: err.to_string(),
                     };
@@ -642,12 +642,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
 
 fn validate_send_input_delivery(
     handle: &SessionHandle,
+    kind: &crate::archcar::protocol::ArchcarInputKind,
     delivery: crate::archcar::protocol::ArchcarInputDelivery,
 ) -> Result<()> {
+    let snapshot = handle.snapshot.lock().unwrap();
+    if *kind == crate::archcar::protocol::ArchcarInputKind::RawTerminal
+        && snapshot.kind != SessionKind::Shell
+    {
+        anyhow::bail!("raw terminal input is only supported for shell sessions");
+    }
     if delivery == crate::archcar::protocol::ArchcarInputDelivery::Immediate {
         return Ok(());
     }
-    let snapshot = handle.snapshot.lock().unwrap();
     if matches!(snapshot.kind, SessionKind::Codex | SessionKind::Claude) && !snapshot.ready {
         anyhow::bail!(
             "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn",
@@ -731,6 +737,7 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
     };
     if let Err(err) = validate_send_input_delivery(
         &handle,
+        &crate::archcar::protocol::ArchcarInputKind::User,
         crate::archcar::protocol::ArchcarInputDelivery::Auto,
     ) {
         warn!(thread_id, error = %format!("{err:#}"), "archcar queued chat input waited for session readiness");

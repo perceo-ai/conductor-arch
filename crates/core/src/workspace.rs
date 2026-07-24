@@ -1594,7 +1594,8 @@ impl WorkspaceStore {
                 None
             };
             let (diff_additions, diff_deletions) = if workspace.status == "active" {
-                workspace_diff_stats_against_head(&workspace).unwrap_or_default()
+                self.diff_stats_against_base(&workspace.name)
+                    .unwrap_or_default()
             } else {
                 (0, 0)
             };
@@ -3823,7 +3824,8 @@ impl WorkspaceStore {
 
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
         let workspace = self.get_by_name(name)?;
-        workspace_diff_stats_against_head(&workspace)
+        let base_ref = workspace_merge_diff_base_ref(&workspace);
+        workspace_diff_stats_against_ref(&workspace, &base_ref)
     }
 
     pub fn workspace_base_ref(&self, name: &str) -> Result<String> {
@@ -4405,7 +4407,7 @@ impl WorkspaceStore {
             "view",
             &[
                 "--json",
-                "id,headRefOid,reviewDecision,latestReviews,comments,statusCheckRollup",
+                "id,state,headRefOid,mergeStateStatus,mergeable,reviewDecision,latestReviews,comments,statusCheckRollup",
             ],
         )?;
         let output = command_output_owned(&workspace.path, "gh", &args)?;
@@ -8659,6 +8661,7 @@ fn archcar_input_kind_as_str(kind: ArchcarInputKind) -> &'static str {
         ArchcarInputKind::User => "user",
         ArchcarInputKind::ReviewPrompt => "review_prompt",
         ArchcarInputKind::ControlCommand => "control_command",
+        ArchcarInputKind::RawTerminal => "raw_terminal",
     }
 }
 
@@ -8667,6 +8670,7 @@ fn archcar_input_kind_from_str(value: &str) -> Result<ArchcarInputKind, String> 
         "user" => Ok(ArchcarInputKind::User),
         "review_prompt" => Ok(ArchcarInputKind::ReviewPrompt),
         "control_command" => Ok(ArchcarInputKind::ControlCommand),
+        "raw_terminal" => Ok(ArchcarInputKind::RawTerminal),
         other => Err(format!("unknown archcar input kind {other}")),
     }
 }
@@ -9144,8 +9148,13 @@ fn hunk_unsupported_reason(diff: &str) -> Option<String> {
     None
 }
 
-fn workspace_diff_stats_against_head(workspace: &Workspace) -> Result<(usize, usize)> {
-    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", "HEAD", "--"])?;
+fn workspace_diff_stats_against_ref(
+    workspace: &Workspace,
+    base_ref: &str,
+) -> Result<(usize, usize)> {
+    let base_commit =
+        workspace_merge_base_ref(workspace, base_ref).unwrap_or_else(|| base_ref.to_owned());
+    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", &base_commit, "--"])?;
     let mut additions = 0;
     let mut deletions = 0;
     for summary in parse_diff_numstat(&diff) {
@@ -9166,6 +9175,20 @@ fn workspace_diff_stats_against_head(workspace: &Workspace) -> Result<(usize, us
     }
 
     Ok((additions, deletions))
+}
+
+fn workspace_merge_base_ref(workspace: &Workspace, base_ref: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&workspace.path)
+        .args(["merge-base", "HEAD", base_ref])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn workspace_source_branch_ahead(workspace: &Workspace, default_branch: &str) -> usize {
@@ -9202,6 +9225,15 @@ fn workspace_base_ref(workspace: &Workspace) -> &str {
     } else {
         workspace.base_ref.as_str()
     }
+}
+
+fn workspace_merge_diff_base_ref(workspace: &Workspace) -> String {
+    let base_ref = workspace_base_ref(workspace);
+    git_output_dynamic(&workspace.path, &["merge-base", "HEAD", base_ref])
+        .ok()
+        .map(|output| output.trim().to_owned())
+        .filter(|output| !output.is_empty())
+        .unwrap_or_else(|| base_ref.to_owned())
 }
 
 fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary> {
@@ -11075,6 +11107,146 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn branch_push_state_reports_no_upstream_ahead_behind_and_diverged() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&origin_path)
+            .status()
+            .unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        git_dynamic(
+            &repo_path,
+            &["remote", "add", "origin", origin_path.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&repo_path, ["push", "-u", "origin", "main"]).unwrap();
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.branch_push_state("berlin").unwrap(),
+            BranchPushState {
+                ahead: 0,
+                behind: 0,
+                has_upstream: false,
+            }
+        );
+
+        git(&workspace.path, ["push", "-u", "origin", "HEAD"]).unwrap();
+        fs::write(workspace.path.join("ahead.txt"), "ahead\n").unwrap();
+        git(&workspace.path, ["add", "ahead.txt"]).unwrap();
+        git(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local ahead",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            store.branch_push_state("berlin").unwrap(),
+            BranchPushState {
+                ahead: 1,
+                behind: 0,
+                has_upstream: true,
+            }
+        );
+
+        git(&workspace.path, ["push"]).unwrap();
+        let other_path = temp.path().join("other");
+        Command::new("git")
+            .args([
+                "clone",
+                origin_path.to_str().unwrap(),
+                other_path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        git(&other_path, ["checkout", "lc/berlin"]).unwrap();
+        fs::write(other_path.join("behind.txt"), "behind\n").unwrap();
+        git(&other_path, ["add", "behind.txt"]).unwrap();
+        git(
+            &other_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "remote ahead",
+            ],
+        )
+        .unwrap();
+        git(&other_path, ["push"]).unwrap();
+        git(&workspace.path, ["fetch", "origin"]).unwrap();
+        assert_eq!(
+            store.branch_push_state("berlin").unwrap(),
+            BranchPushState {
+                ahead: 0,
+                behind: 1,
+                has_upstream: true,
+            }
+        );
+
+        fs::write(workspace.path.join("diverged.txt"), "diverged\n").unwrap();
+        git(&workspace.path, ["add", "diverged.txt"]).unwrap();
+        git(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local diverged",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            store.branch_push_state("berlin").unwrap(),
+            BranchPushState {
+                ahead: 1,
+                behind: 1,
+                has_upstream: true,
+            }
+        );
     }
 
     #[cfg(not(unix))]
@@ -18127,14 +18299,14 @@ general = "Keep changes focused."
             .unwrap();
         fs::write(workspace.path.join("notes.txt"), "new\nnotes\n").unwrap();
 
-        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (2, 0));
+        assert_eq!(store.diff_stats_against_base("berlin").unwrap(), (3, 1));
         let line = store
             .list_status()
             .unwrap()
             .into_iter()
             .find(|line| line.workspace.name == "berlin")
             .unwrap();
-        assert_eq!((line.diff_additions, line.diff_deletions), (2, 0));
+        assert_eq!((line.diff_additions, line.diff_deletions), (3, 1));
     }
 
     #[test]
@@ -18759,6 +18931,30 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     }
 
     #[test]
+    fn pull_request_readiness_parses_github_mergeability_fields() {
+        let json = r#"
+{
+  "state": "OPEN",
+  "mergeStateStatus": "CONFLICTING",
+  "mergeable": "CONFLICTING",
+  "reviewDecision": "APPROVED",
+  "latestReviews": [],
+  "comments": [],
+  "statusCheckRollup": []
+}
+"#;
+
+        let readiness = parse_pull_request_readiness(json).unwrap();
+
+        assert_eq!(readiness.state.as_deref(), Some("OPEN"));
+        assert_eq!(readiness.merge_state_status.as_deref(), Some("CONFLICTING"));
+        assert_eq!(readiness.mergeable.as_deref(), Some("CONFLICTING"));
+        let text = format_pull_request_readiness("berlin", &readiness);
+        assert!(text.contains("Merge state: CONFLICTING"));
+        assert!(text.contains("Mergeable: CONFLICTING"));
+    }
+
+    #[test]
     fn pull_request_readiness_parses_latest_status_deployment_urls() {
         let json = r#"
 {
@@ -18911,6 +19107,9 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
         assert!(threads[1].resolved);
 
         let readiness = PullRequestReadiness {
+            state: None,
+            merge_state_status: None,
+            mergeable: None,
             review_decision: None,
             latest_reviews: Vec::new(),
             comments: Vec::new(),
@@ -18925,6 +19124,9 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     #[test]
     fn pull_request_readiness_agent_prompt_includes_actionable_summary() {
         let readiness = PullRequestReadiness {
+            state: None,
+            merge_state_status: None,
+            mergeable: None,
             review_decision: Some("REVIEW_REQUIRED".to_owned()),
             latest_reviews: vec![PullRequestReviewEntry {
                 author: "alice".to_owned(),
@@ -18977,6 +19179,9 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     #[test]
     fn pull_request_readiness_summary_promotes_blockers_and_pending_gates() {
         let readiness = PullRequestReadiness {
+            state: None,
+            merge_state_status: None,
+            mergeable: None,
             review_decision: Some("CHANGES_REQUESTED".to_owned()),
             latest_reviews: Vec::new(),
             comments: Vec::new(),
@@ -19047,6 +19252,9 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     #[test]
     fn pull_request_readiness_summary_includes_compact_rollup_counts() {
         let readiness = PullRequestReadiness {
+            state: None,
+            merge_state_status: None,
+            mergeable: None,
             review_decision: Some("APPROVED".to_owned()),
             latest_reviews: vec![
                 PullRequestReviewEntry {
