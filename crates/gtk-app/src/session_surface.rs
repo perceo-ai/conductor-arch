@@ -19783,8 +19783,8 @@ Schema confirms the app moved CRM around businesses.";
             .find("match live_chat_source()")
             .expect("selected chat source branch exists");
         let end = source[start..]
-            .find("let submitted_user_inputs = submitted_user_input_texts_for_thread(\n                        thread_id,\n                        pending_archcar_inputs.as_ref(),\n                        inflight_archcar_actions.as_ref(),\n                        &[],")
-            .expect("empty structured fallback follows selected chat source branch");
+            .find("render_chat_timeline_snapshot(")
+            .expect("structured timeline render follows selected chat source branch");
         let structured_branch = &source[start..start + end];
 
         assert!(structured_branch.contains("load_chat_timeline_snapshot("));
