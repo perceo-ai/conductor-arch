@@ -229,10 +229,7 @@ impl ManagedSessionConnection {
                 connection.child.kill()?;
                 Ok(())
             }
-            Self::Reattached { pid, .. } => {
-                stop_reattached_process(*pid);
-                Ok(())
-            }
+            Self::Reattached { pid, .. } => stop_reattached_process(*pid),
         }
     }
 
@@ -1382,8 +1379,15 @@ pub fn restore_managed_session(
         return Ok(None);
     };
     if kind == SessionKind::Shell {
-        terminate_process(process.pid);
-        let _ = store.mark_session_process_exited(process.id, None);
+        if terminate_process_and_wait(process.pid) {
+            let _ = store.mark_session_process_exited(process.id, None);
+        } else {
+            warn!(
+                session_id = process.id,
+                pid = process.pid,
+                "archcar restore left shell session running after termination failed"
+            );
+        }
         return Ok(None);
     }
     let Some(thread_id) = process.chat_thread_id else {
@@ -1642,6 +1646,7 @@ fn run_session_loop(
                                 }
                             }
                             Err(err) => {
+                                let message = format!("Raw terminal input failed: {err:#}");
                                 warn!(
                                     session_id = current.session_id,
                                     thread_id = current.thread_id,
@@ -1650,6 +1655,36 @@ fn run_session_loop(
                                     error = %err,
                                     "archcar session raw terminal write failed"
                                 );
+                                let _ = event_tx.send(ArchcarEvent::SessionError {
+                                    session_id: Some(current.session_id),
+                                    thread_id: Some(current.thread_id),
+                                    message,
+                                });
+                                let stopped = match pty.stop() {
+                                    Ok(()) => true,
+                                    Err(stop_err) => {
+                                        warn!(
+                                            session_id = current.session_id,
+                                            thread_id = current.thread_id,
+                                            error = %stop_err,
+                                            "archcar session stop after raw terminal write failure failed"
+                                        );
+                                        pty.has_exited().unwrap_or(false)
+                                    }
+                                };
+                                if stopped {
+                                    let _ = runtime_store
+                                        .mark_session_process_exited(current.session_id, None);
+                                    mark_snapshot_exited(&snapshot, None);
+                                    let _ = event_tx.send(ArchcarEvent::SessionExited {
+                                        session_id: current.session_id,
+                                        exit_code: None,
+                                    });
+                                } else if let Ok(mut state) = snapshot.lock() {
+                                    state.ready = false;
+                                    state.runtime_state = AgentSessionState::Failed;
+                                }
+                                return;
                             }
                         }
                         continue;
@@ -3126,19 +3161,32 @@ fn terminal_process_alive(process_id: u32) -> bool {
     crate::platform::process_alive(process_id)
 }
 
-fn stop_reattached_process(process_id: u32) {
+fn stop_reattached_process(process_id: u32) -> Result<()> {
     if !terminal_process_alive(process_id) {
-        return;
+        return Ok(());
     }
     request_process_stop(process_id);
     if wait_for_process_exit(process_id, Duration::from_secs(3)) {
-        return;
+        return Ok(());
     }
     force_process_stop(process_id);
     if wait_for_process_exit(process_id, Duration::from_millis(500)) {
-        return;
+        return Ok(());
     }
     hard_kill_process(process_id);
+    if wait_for_process_exit(process_id, Duration::from_secs(1)) {
+        return Ok(());
+    }
+    anyhow::bail!("process {process_id} remained alive after forced termination")
+}
+
+fn terminate_process_and_wait(process_id: u32) -> bool {
+    terminate_process(process_id);
+    if wait_for_process_exit(process_id, Duration::from_secs(1)) {
+        return true;
+    }
+    hard_kill_process(process_id);
+    wait_for_process_exit(process_id, Duration::from_secs(1))
 }
 
 fn wait_for_process_exit(process_id: u32, timeout: Duration) -> bool {
@@ -3286,6 +3334,77 @@ mod tests {
         let _ = child.wait();
 
         assert_eq!(fs::read_to_string(marker).unwrap(), "term\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_terminal_write_failure_emits_error_and_terminates_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "shell", "Shell", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let write = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let connection = ManagedSessionConnection::Reattached {
+            write,
+            output: Arc::new(Mutex::new(String::new())),
+            read_cursor: 0,
+            pid: child.id(),
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Shell,
+            child.id(),
+            true,
+        )));
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let loop_thread = thread::spawn(move || {
+            run_session_loop(
+                db_path,
+                logs_dir,
+                snapshot_for_loop,
+                controller_for_kind(SessionKind::Shell),
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "raw".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::RawTerminal,
+                delivery: ArchcarInputDelivery::Immediate,
+            })
+            .unwrap();
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, message, .. } if *session_id == Some(process.id) && message.contains("Raw terminal input failed")),
+        );
+        loop_thread.join().unwrap();
+        let _ = child.wait();
+        let exited = store.get_process_record(process.id).unwrap();
+        assert_eq!(exited.status, ProcessStatus::Exited);
     }
 
     #[test]
@@ -4806,6 +4925,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let _ = child.wait();
     }
 
+    #[cfg(unix)]
     #[test]
     fn restore_managed_session_terminates_shell_records_instead_of_pty_restore() {
         let temp = tempfile::tempdir().unwrap();
@@ -4832,9 +4952,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         .unwrap();
 
         assert!(restored.is_none());
+        assert!(wait_for_process_exit(child.id(), Duration::from_secs(5)));
+        let _ = child.wait();
         let exited = store.get_process_record(process.id).unwrap();
         assert_eq!(exited.status, ProcessStatus::Exited);
-        let _ = child.wait();
     }
 
     #[test]
