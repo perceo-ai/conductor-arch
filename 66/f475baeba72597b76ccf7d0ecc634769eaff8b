@@ -1,0 +1,60 @@
+crates/core/src/archcar/server.rs
+  s_8febca27b7927d::t_379e0e84198a58 687-690,728-729,736-744,753
+  s_8febca27b7927d::t_4ad895b8ddd201 2021-2049,2059-2079,2087,2104-2105,2107,2109-2114,2121-2191
+  s_8febca27b7927d::t_2249baad99d915 2106,2108
+crates/core/src/workspace.rs
+  s_8febca27b7927d::t_a67b65c0ec5ab7 18304,18309-18322
+  s_8febca27b7927d::t_db20f0802228fc 3827-3830,9153,9155
+  s_8febca27b7927d::t_22eadd2839f07f 18305-18308
+  s_8febca27b7927d::t_fd7a62798fd942 9157
+  s_8febca27b7927d::t_a77366599ef02c 18303
+crates/gtk-app/src/session_surface.rs
+  s_8febca27b7927d::t_bc3c0f7d4b929a 1948,1953,1986
+  s_8febca27b7927d::t_c7409a952dcb2d 1868
+  s_8febca27b7927d::t_2fc0a025b27d20 6996,6998,7003-7005
+  s_8febca27b7927d::t_2b596c0c595bb7 19976-19996
+  s_8febca27b7927d::t_210e951c9b1dd9 1942-1947,1949-1952,1954-1961,1964-1984,1987-1989,1991,1993-1994,1996-2000,2002-2026
+  s_8febca27b7927d::t_ef6b64f5117c0a 19975
+crates/core/src/archcar/session.rs
+  s_8febca27b7927d::t_cdf223aeaf0a09 233,3129-3172,3176-3179,3187-3194
+  s_8febca27b7927d::t_cdd00c92ac29b6 3256-3290
+crates/cli/tests/cli_sessions.rs
+  s_8febca27b7927d::t_c405b1dc3805d4 138
+crates/gtk-app/src/archcar_async.rs
+  s_8febca27b7927d::t_747ff9f6705828 860-868
+  s_8febca27b7927d::t_84252de6e81f71 859
+crates/gtk-app/src/workspace_command_center.rs
+  s_8febca27b7927d::t_21470c4d80c2f9 10154-10161,10180-10186,10325-10327
+  s_8febca27b7927d::t_4ffdd6f5626dfb 1828,5906
+  s_8febca27b7927d::t_5187efebdc87bf 5793,6221
+  s_c73ff4c7a5b551::t_b9ec1da0a7b85c 10153,10162-10179,10328
+crates/gtk-app/src/terminal.rs
+  s_8febca27b7927d::t_11c0df4406a401 4036-4047,4055-4056
+  s_8febca27b7927d::t_a78d6363a15803 138-139,144-155
+  s_8febca27b7927d::t_909615adbd1cff 4048-4054
+  s_8febca27b7927d::t_a8ed0ce3df5a35 4035
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "66f475baeba72597b76ccf7d0ecc634769eaff8b",
+  "prompts": {},
+  "sessions": {
+    "s_8febca27b7927d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f9236-398a-7e92-90f2-c40544ac0e47",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_c73ff4c7a5b551": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f9236-51f9-7742-b704-5228ef2290ef",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
