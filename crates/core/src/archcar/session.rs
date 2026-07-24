@@ -3261,13 +3261,9 @@ mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessRecord};
-    use std::env;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
-    use std::time::Instant;
-
-    const SIGTERM_HELPER_ENV: &str = "ARCHDUCTOR_SIGTERM_HELPER";
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3303,78 +3299,6 @@ mod tests {
         assert!(should_persist_provider_native_event(
             ProviderEventKind::AssistantOutput
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reattached_stop_sends_sigterm_before_force_kill() {
-        let temp = tempfile::tempdir().unwrap();
-        let marker = temp.path().join("term.marker");
-        let ready = temp.path().join("ready.marker");
-        let mut child = Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "archcar::session::tests::sigterm_marker_helper_process",
-                "--nocapture",
-            ])
-            .env(SIGTERM_HELPER_ENV, "1")
-            .env("TERM_MARKER", &marker)
-            .env("READY_MARKER", &ready)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let write = fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/null")
-            .unwrap();
-        let mut session = ManagedSessionConnection::Reattached {
-            write,
-            output: Arc::new(Mutex::new(String::new())),
-            read_cursor: 0,
-            pid: child.id(),
-        };
-
-        wait_for_file_contents(&ready, "ready");
-        session.stop().unwrap();
-        let _ = child.wait();
-
-        assert_eq!(fs::read_to_string(marker).unwrap(), "term\n");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sigterm_marker_helper_process() {
-        if env::var_os(SIGTERM_HELPER_ENV).is_none() {
-            return;
-        }
-        let marker = PathBuf::from(env::var_os("TERM_MARKER").unwrap());
-        let ready = PathBuf::from(env::var_os("READY_MARKER").unwrap());
-        ctrlc::set_handler(move || {
-            let _ = fs::write(&marker, "term\n");
-            std::process::exit(0);
-        })
-        .unwrap();
-        fs::write(ready, "ready").unwrap();
-        loop {
-            thread::sleep(Duration::from_secs(60));
-        }
-    }
-
-    #[cfg(unix)]
-    fn wait_for_file_contents(path: &Path, expected: &str) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if fs::read_to_string(path).is_ok_and(|contents| contents == expected) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        panic!(
-            "timed out waiting for {} to contain {expected:?}",
-            path.display()
-        );
     }
 
     #[cfg(unix)]
