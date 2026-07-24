@@ -3261,10 +3261,13 @@ mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessRecord};
+    use std::env;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
+
+    const SIGTERM_HELPER_ENV: &str = "ARCHDUCTOR_SIGTERM_HELPER";
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3308,12 +3311,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("term.marker");
         let ready = temp.path().join("ready.marker");
-        let script = "trap 'printf \"term\\n\" > \"$TERM_MARKER\"; exit 0' TERM; \
-            printf ready > \"$READY_MARKER\"; \
-            while :; do sleep 1; done";
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(script)
+        let mut child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "archcar::session::tests::sigterm_marker_helper_process",
+                "--nocapture",
+            ])
+            .env(SIGTERM_HELPER_ENV, "1")
             .env("TERM_MARKER", &marker)
             .env("READY_MARKER", &ready)
             .stdin(Stdio::null())
@@ -3337,6 +3341,25 @@ mod tests {
         let _ = child.wait();
 
         assert_eq!(fs::read_to_string(marker).unwrap(), "term\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_marker_helper_process() {
+        if env::var_os(SIGTERM_HELPER_ENV).is_none() {
+            return;
+        }
+        let marker = PathBuf::from(env::var_os("TERM_MARKER").unwrap());
+        let ready = PathBuf::from(env::var_os("READY_MARKER").unwrap());
+        ctrlc::set_handler(move || {
+            let _ = fs::write(&marker, "term\n");
+            std::process::exit(0);
+        })
+        .unwrap();
+        fs::write(ready, "ready").unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
     }
 
     #[cfg(unix)]

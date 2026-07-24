@@ -37,10 +37,13 @@ pub mod workspace;
 
 #[cfg(test)]
 mod pty_tests {
+    use std::env;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use std::{fs, thread};
+
+    const SIGTERM_HELPER_ENV: &str = "ARCHDUCTOR_SIGTERM_HELPER";
 
     #[test]
     fn pty_session_accepts_input_and_streams_output() {
@@ -95,16 +98,18 @@ mod pty_tests {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("term.marker");
         let ready = temp.path().join("ready.marker");
-        let script = "trap 'printf \"term\\n\" > \"$TERM_MARKER\"; exit 0' TERM; \
-            printf ready > \"$READY_MARKER\"; \
-            while :; do sleep 1; done";
         let mut session = crate::pty::PtySession::spawn(
-            PathBuf::from("/bin/sh"),
-            vec!["-c".to_owned(), script.to_owned()],
+            env::current_exe().unwrap(),
+            vec![
+                "--exact".to_owned(),
+                "pty_tests::sigterm_marker_helper_process".to_owned(),
+                "--nocapture".to_owned(),
+            ],
             temp.path(),
             vec![
                 ("TERM_MARKER".to_owned(), marker.as_os_str().to_owned()),
                 ("READY_MARKER".to_owned(), ready.as_os_str().to_owned()),
+                (SIGTERM_HELPER_ENV.to_owned(), OsString::from("1")),
             ],
             24,
             80,
@@ -115,6 +120,25 @@ mod pty_tests {
         session.stop().unwrap();
 
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "term\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_marker_helper_process() {
+        if env::var_os(SIGTERM_HELPER_ENV).is_none() {
+            return;
+        }
+        let marker = PathBuf::from(env::var_os("TERM_MARKER").unwrap());
+        let ready = PathBuf::from(env::var_os("READY_MARKER").unwrap());
+        ctrlc::set_handler(move || {
+            let _ = fs::write(&marker, "term\n");
+            std::process::exit(0);
+        })
+        .unwrap();
+        fs::write(ready, "ready").unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
     }
 
     #[cfg(unix)]
