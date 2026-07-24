@@ -230,7 +230,7 @@ impl ManagedSessionConnection {
                 Ok(())
             }
             Self::Reattached { pid, .. } => {
-                request_graceful_process_stop(*pid);
+                terminate_process(*pid);
                 Ok(())
             }
         }
@@ -1381,6 +1381,11 @@ pub fn restore_managed_session(
     let Some(kind) = session_kind_from_command(&process.command) else {
         return Ok(None);
     };
+    if kind == SessionKind::Shell {
+        terminate_process(process.pid);
+        let _ = store.mark_session_process_exited(process.id, None);
+        return Ok(None);
+    }
     let Some(thread_id) = process.chat_thread_id else {
         return Ok(None);
     };
@@ -3134,25 +3139,6 @@ pub(crate) fn terminate_process(process_id: u32) {
     }
 }
 
-fn request_graceful_process_stop(process_id: u32) {
-    if crate::platform::terminate_process_group(process_id, false).unwrap_or(false) {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(process_id.to_string())
-            .status();
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill.exe")
-            .args(["/PID", &process_id.to_string(), "/T"])
-            .status();
-    }
-}
-
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
     let fd = format!("/proc/{process_id}/fd/0");
     let target = fs::read_link(&fd)?;
@@ -4711,6 +4697,37 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let mut launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
         launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
         let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel();
+
+        let restored = restore_managed_session(
+            temp.path().join("state.db"),
+            temp.path().join("logs"),
+            process.id,
+            event_tx,
+        )
+        .unwrap();
+
+        assert!(restored.is_none());
+        let exited = store.get_process_record(process.id).unwrap();
+        assert_eq!(exited.status, ProcessStatus::Exited);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn restore_managed_session_terminates_shell_records_instead_of_pty_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "shell", "Shell", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let mut child = ProcessCommand::new("/bin/sh")
+            .args(["-c", "while :; do sleep 1; done"])
+            .spawn()
+            .unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
             .unwrap();

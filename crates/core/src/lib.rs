@@ -98,7 +98,7 @@ mod pty_tests {
             marker.display()
         );
         let mut session = crate::pty::PtySession::spawn(
-            crate::platform::shell_program(),
+            PathBuf::from("/bin/sh"),
             vec!["-c".to_owned(), script],
             temp.path(),
             Vec::new(),
