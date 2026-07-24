@@ -1,6 +1,7 @@
 use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
+use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::harness::managed_harness_for_kind;
 use archductor_core::archcar::harness_contract::{
     HarnessCapability, HarnessDescriptor, ProviderInteractionKind, RequiredHarnessFeature,
@@ -23,6 +24,7 @@ use archductor_core::codex_tui::{
 };
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_MODEL};
+use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
@@ -241,6 +243,7 @@ struct ChatTimelineSnapshot {
     thread_messages: Vec<ChatMessageRecord>,
     thread_events: Vec<ChatEventRecord>,
     provider_events: Vec<ProviderEventRecord>,
+    queued_inputs: Vec<ProtocolQueuedArchcarInput>,
     transcript_display: String,
 }
 
@@ -331,6 +334,49 @@ fn clear_deleted_workspace_surface(
 }
 
 fn load_chat_timeline_snapshot(
+    paths: AppPaths,
+    workspace: String,
+    thread_id: i64,
+) -> Result<ChatTimelineSnapshot, String> {
+    match load_chat_timeline_snapshot_from_archcar(&paths, &workspace, thread_id) {
+        Ok(snapshot) => return Ok(snapshot),
+        Err(err) => {
+            warn!(
+                workspace = %workspace,
+                thread_id,
+                error = %err,
+                "Archcar chat snapshot unavailable; falling back to SQLite"
+            );
+        }
+    }
+    load_chat_timeline_snapshot_from_db(paths.database_path.clone(), workspace, thread_id)
+}
+
+fn load_chat_timeline_snapshot_from_archcar(
+    paths: &AppPaths,
+    workspace: &str,
+    thread_id: i64,
+) -> Result<ChatTimelineSnapshot, String> {
+    let client = ArchcarClient::from_paths(paths);
+    match client
+        .send(archductor_core::archcar::protocol::ArchcarRequest::GetChatSnapshot { thread_id })
+        .map_err(|err| format!("{err:#}"))?
+    {
+        ArchcarResponse::ChatSnapshot { snapshot } => Ok(ChatTimelineSnapshot {
+            thread_messages: snapshot.messages,
+            thread_events: snapshot.events,
+            provider_events: snapshot.provider_events,
+            queued_inputs: snapshot.queued_inputs,
+            transcript_display: transcript_display_for_workspace(&paths.database_path, workspace),
+        }),
+        ArchcarResponse::Error { message } => Err(message),
+        other => Err(format!(
+            "unexpected Archcar chat snapshot response: {other:?}"
+        )),
+    }
+}
+
+fn load_chat_timeline_snapshot_from_db(
     database_path: PathBuf,
     workspace: String,
     thread_id: i64,
@@ -339,6 +385,20 @@ fn load_chat_timeline_snapshot(
         .and_then(|store| {
             let thread_messages = store.list_chat_messages(thread_id)?;
             let thread_events = store.list_chat_events(thread_id)?;
+            let queued_inputs = store
+                .list_queued_chat_inputs(thread_id)?
+                .into_iter()
+                .map(|input| ProtocolQueuedArchcarInput {
+                    id: input.id,
+                    thread_id: input.thread_id,
+                    input: input.input,
+                    visible_input: input.visible_input,
+                    kind: input.input_kind,
+                    session_kind: input.session_kind,
+                    created_at: input.created_at,
+                    updated_at: input.updated_at,
+                })
+                .collect();
             let provider_events =
                 ProviderEventStore::new(database_path.clone()).list_for_chat_thread(thread_id)?;
             let transcript_display = transcript_display_for_workspace(&database_path, &workspace);
@@ -346,6 +406,7 @@ fn load_chat_timeline_snapshot(
                 thread_messages,
                 thread_events,
                 provider_events,
+                queued_inputs,
                 transcript_display,
             })
         })
@@ -1922,39 +1983,42 @@ pub fn agent_session_panel(
                     });
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
-                            let (thread_messages, thread_events, provider_events) =
-                                match WorkspaceStore::open_app(database_path.clone()).and_then(
-                                    |store| {
-                                        let messages = store.list_chat_messages(thread_id)?;
-                                        let events = store.list_chat_events(thread_id)?;
-                                        let provider_events =
-                                            ProviderEventStore::new(database_path.clone())
-                                                .list_for_chat_thread(thread_id)?;
-                                        Ok((messages, events, provider_events))
-                                    },
-                                ) {
-                                    Ok(timeline) => timeline,
-                                    Err(err) => {
-                                        error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
-                                        let message =
-                                            session_refresh_error_text("load chat timeline", &err);
-                                        toast_manager.error(message.clone());
-                                        let label = Label::new(Some(&message));
-                                        label.add_css_class("chat-agent-text");
-                                        label.set_selectable(true);
-                                        label.set_wrap(true);
-                                        label.set_xalign(0.0);
-                                        clear_box(&messages);
-                                        *last_timeline_render_state.borrow_mut() = None;
-                                        *last_render_signature.borrow_mut() = None;
-                                        apply_context_usage_state(&context_usage, None);
-                                        append_chat_refresh_row(&messages, &label);
-                                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                                        return;
-                                    }
-                                };
-                            let transcript_display =
-                                transcript_display_for_workspace(&database_path, &workspace);
+                            let snapshot = match load_chat_timeline_snapshot(
+                                app_state.paths.clone(),
+                                workspace.clone(),
+                                thread_id,
+                            ) {
+                                Ok(snapshot) => snapshot,
+                                Err(err) => {
+                                    error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
+                                    let message = format!("Load chat timeline failed: {err}");
+                                    toast_manager.error(message.clone());
+                                    let label = Label::new(Some(&message));
+                                    label.add_css_class("chat-agent-text");
+                                    label.set_selectable(true);
+                                    label.set_wrap(true);
+                                    label.set_xalign(0.0);
+                                    clear_box(&messages);
+                                    *last_timeline_render_state.borrow_mut() = None;
+                                    *last_render_signature.borrow_mut() = None;
+                                    apply_context_usage_state(&context_usage, None);
+                                    append_chat_refresh_row(&messages, &label);
+                                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                    return;
+                                }
+                            };
+                            app_state.replace_queued_chat_inputs(
+                                thread_id,
+                                snapshot
+                                    .queued_inputs
+                                    .iter()
+                                    .map(queued_chat_draft_from_archcar_input)
+                                    .collect(),
+                            );
+                            let thread_messages = snapshot.thread_messages;
+                            let thread_events = snapshot.thread_events;
+                            let provider_events = snapshot.provider_events;
+                            let transcript_display = snapshot.transcript_display;
                             let submitted_user_inputs = submitted_user_input_texts_for_thread(
                                 thread_id,
                                 pending_archcar_inputs.as_ref(),
@@ -2265,7 +2329,7 @@ pub fn agent_session_panel(
         if let Some(register_refresh) = external_chat_tabs.on_chat_surface_refresh_ready.as_ref() {
             let refresh_view_for_external = refresh_view.clone();
             let refresh_messages_for_external: Rc<dyn Fn(i64)> = {
-                let database_path = database_path.clone();
+                let paths = app_state.paths.clone();
                 let current_workspace_name = current_workspace_name.clone();
                 let selected_thread = selected_thread.clone();
                 let messages = messages.clone();
@@ -2288,7 +2352,7 @@ pub fn agent_session_panel(
                         generations.insert(thread_id, generation);
                         generation
                     };
-                    let database_path_for_job = database_path.clone();
+                    let paths_for_job = paths.clone();
                     let workspace_for_job = workspace.clone();
                     let selected_thread = selected_thread.clone();
                     let messages = messages.clone();
@@ -2304,11 +2368,7 @@ pub fn agent_session_panel(
                     let open_file_for_result = open_file.clone();
                     spawn_background_job(
                         move || {
-                            load_chat_timeline_snapshot(
-                                database_path_for_job,
-                                workspace_for_job,
-                                thread_id,
-                            )
+                            load_chat_timeline_snapshot(paths_for_job, workspace_for_job, thread_id)
                         },
                         move |result| {
                             if message_refresh_generation.borrow().get(&thread_id).copied()
@@ -19731,6 +19791,24 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*messages.borrow(), vec![42, 99]);
         assert_eq!(thread_nav.get(), 1);
         assert_eq!(full.get(), 1);
+    }
+
+    #[test]
+    fn selected_chat_refresh_loads_timeline_through_archcar_snapshot() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("match live_chat_source()")
+            .expect("selected chat source branch exists");
+        let end = source[start..]
+            .find("let submitted_user_inputs = submitted_user_input_texts_for_thread(\n                        thread_id,\n                        pending_archcar_inputs.as_ref(),\n                        inflight_archcar_actions.as_ref(),\n                        &[],")
+            .expect("empty structured fallback follows selected chat source branch");
+        let structured_branch = &source[start..start + end];
+
+        assert!(structured_branch.contains("load_chat_timeline_snapshot("));
+        assert!(
+            !structured_branch.contains("store.list_chat_messages(thread_id)?"),
+            "selected chat refresh should read active chat state through Archcar snapshot first"
+        );
     }
 
     #[test]

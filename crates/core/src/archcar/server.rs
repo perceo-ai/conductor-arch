@@ -15,8 +15,9 @@ use uuid::Uuid;
 use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
-    archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
-    ArchcarMessage, ArchcarRequest, ArchcarResponse, QueuedArchcarInput, RpcEnvelope,
+    archcar_event_summary, archcar_request_summary, archcar_response_summary,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarEvent, ArchcarMessage, ArchcarRequest,
+    ArchcarResponse, QueuedArchcarInput, RpcEnvelope,
 };
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
@@ -461,6 +462,21 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetChatSnapshot { thread_id } => {
+            let (db_path, live_session) = {
+                let guard = state.lock().unwrap();
+                (
+                    guard.db_path.clone(),
+                    live_session_snapshot_for_thread(&guard, thread_id),
+                )
+            };
+            match chat_snapshot_for_thread(&db_path, thread_id, live_session) {
+                Ok(snapshot) => ArchcarResponse::ChatSnapshot { snapshot },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::QueueChatInput {
             thread_id,
             input,
@@ -840,6 +856,25 @@ fn queued_archcar_input_from_record(
     }
 }
 
+fn live_session_snapshot_for_thread(
+    state: &ServerState,
+    thread_id: i64,
+) -> Option<ArchcarChatLiveSession> {
+    state.sessions.values().find_map(|handle| {
+        let snapshot = handle.snapshot.lock().ok()?.clone();
+        if snapshot.thread_id != thread_id {
+            return None;
+        }
+        Some(ArchcarChatLiveSession {
+            session_id: snapshot.session_id,
+            status: snapshot.status.as_str().to_owned(),
+            runtime_state: snapshot.runtime_state,
+            ready: snapshot.ready,
+            capabilities: snapshot.capabilities,
+        })
+    })
+}
+
 fn send_session_control(
     state: &Arc<Mutex<ServerState>>,
     session_id: i64,
@@ -874,6 +909,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionStatus { .. }
             | ArchcarRequest::GetSessionScreen { .. }
             | ArchcarRequest::GetSessionMessages { .. }
+            | ArchcarRequest::GetChatSnapshot { .. }
             | ArchcarRequest::ListQueuedChatInputs { .. }
     )
 }
@@ -973,6 +1009,30 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
     messages.extend(persisted_messages);
 
     Ok(messages)
+}
+
+fn chat_snapshot_for_thread(
+    db_path: &Path,
+    thread_id: i64,
+    live_session: Option<ArchcarChatLiveSession>,
+) -> Result<ArchcarChatSnapshot> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let messages = store.list_chat_messages(thread_id)?;
+    let events = store.list_chat_events(thread_id)?;
+    let queued_inputs = store
+        .list_queued_chat_inputs(thread_id)?
+        .into_iter()
+        .map(queued_archcar_input_from_record)
+        .collect();
+    let provider_events = ProviderEventStore::new(db_path).list_for_chat_thread(thread_id)?;
+    Ok(ArchcarChatSnapshot {
+        thread_id,
+        messages,
+        events,
+        provider_events,
+        queued_inputs,
+        live_session,
+    })
 }
 
 fn semantic_roles_match(left: &str, right: &str) -> bool {
@@ -1906,6 +1966,79 @@ mod tests {
         };
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].id, input.id);
+    }
+
+    #[test]
+    fn chat_snapshot_dispatch_returns_persisted_messages_and_archcar_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "fix auth", "user_send")
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "run tests",
+                Some("run visible tests"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::GetChatSnapshot {
+                thread_id: thread.id,
+            },
+            &state,
+        );
+
+        let ArchcarResponse::ChatSnapshot { snapshot } = response else {
+            panic!("expected chat snapshot response");
+        };
+        assert_eq!(snapshot.thread_id, thread.id);
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages[0].content, "fix auth");
+        assert!(snapshot.events.is_empty());
+        assert!(snapshot.provider_events.is_empty());
+        assert_eq!(snapshot.queued_inputs.len(), 1);
+        assert_eq!(snapshot.queued_inputs[0].input, "run tests");
+        assert_eq!(
+            snapshot.queued_inputs[0].visible_input.as_deref(),
+            Some("run visible tests")
+        );
     }
 
     #[test]

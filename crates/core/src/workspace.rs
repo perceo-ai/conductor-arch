@@ -37,6 +37,7 @@ use crate::todos::parse_context_todos;
 use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
@@ -739,7 +740,7 @@ pub struct PtyChunkRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatThreadRecord {
     pub id: i64,
     pub workspace_id: i64,
@@ -753,7 +754,7 @@ pub struct ChatThreadRecord {
     pub archived_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessageRecord {
     pub id: i64,
     pub thread_id: i64,
@@ -765,7 +766,7 @@ pub struct ChatMessageRecord {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueuedChatInputRecord {
     pub id: i64,
     pub thread_id: i64,
@@ -790,7 +791,7 @@ pub struct RunningChatThreadSummary {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatEventRecord {
     pub id: i64,
     pub thread_id: i64,

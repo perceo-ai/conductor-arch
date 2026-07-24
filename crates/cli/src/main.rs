@@ -1737,6 +1737,17 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::SessionMessages { messages, .. } => {
             print!("{}", render_archcar_protocol_messages(&messages));
         }
+        ArchcarResponse::ChatSnapshot { snapshot } => {
+            println!(
+                "chat snapshot thread {} messages={} events={} provider_events={} queued_inputs={} live_session={}",
+                snapshot.thread_id,
+                snapshot.messages.len(),
+                snapshot.events.len(),
+                snapshot.provider_events.len(),
+                snapshot.queued_inputs.len(),
+                snapshot.live_session.is_some()
+            );
+        }
         ArchcarResponse::QueuedChatInput { input } => {
             print!("{}", render_queued_archcar_inputs(&[input]));
         }
