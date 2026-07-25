@@ -88,6 +88,8 @@ pub struct AppStateSnapshot {
     next_pending_chat_id: u64,
     navigation_back: Vec<NavigationEntry>,
     navigation_forward: Vec<NavigationEntry>,
+    window_focused: bool,
+    window_visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +209,8 @@ impl AppState {
                 next_pending_chat_id: 1,
                 navigation_back: Vec::new(),
                 navigation_forward: Vec::new(),
+                window_focused: true,
+                window_visible: true,
             })),
             watchers: Rc::new(RefCell::new(HashMap::new())),
             next_watcher_id: Rc::new(Cell::new(1)),
@@ -244,7 +248,20 @@ impl AppState {
     }
 
     pub fn note_window_focus(&self, focused: bool) {
+        self.inner.borrow_mut().window_focused = focused;
         self.emit(AppStateEvent::WindowFocusChanged { focused });
+    }
+
+    pub fn window_focused(&self) -> bool {
+        self.inner.borrow().window_focused
+    }
+
+    pub fn note_window_visible(&self, visible: bool) {
+        self.inner.borrow_mut().window_visible = visible;
+    }
+
+    pub fn window_visible(&self) -> bool {
+        self.inner.borrow().window_visible
     }
 
     pub fn selected_workspace(&self) -> Option<String> {

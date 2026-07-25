@@ -537,6 +537,10 @@ fn make_action_row() -> GBox {
 type RunConsoleStateStore = Rc<RefCell<HashMap<String, WorkspaceRunConsoleState>>>;
 type RunConsoleTerminalStore = Rc<RefCell<HashMap<String, WorkspaceRunConsoleTerminalConnection>>>;
 
+thread_local! {
+    static RUN_CONSOLE_TERMINAL_PUMPS: RefCell<HashMap<String, gtk::glib::SourceId>> = RefCell::new(HashMap::new());
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceRunConsoleTerminalState {
     id: usize,
@@ -578,10 +582,12 @@ impl WorkspaceRunConsoleTerminalState {
 
     fn append_submitted_input(&mut self, input: &str) {
         self.transcript.push_str(&format!("$ {input}\n"));
+        self.transcript = trim_run_console_terminal_scrollback(&self.transcript);
     }
 
     fn append_result(&mut self, result: &str) {
         self.transcript.push_str(result);
+        self.transcript = trim_run_console_terminal_scrollback(&self.transcript);
     }
 
     fn clear_transcript(&mut self) {
@@ -590,22 +596,15 @@ impl WorkspaceRunConsoleTerminalState {
 }
 
 struct WorkspaceRunConsoleTerminalConnection {
-    database_path: PathBuf,
-    workspace_name: String,
+    store: WorkspaceStore,
     process_id: i64,
     pty: PtySession,
 }
 
 impl WorkspaceRunConsoleTerminalConnection {
-    fn local_pty(
-        database_path: PathBuf,
-        workspace_name: String,
-        process_id: i64,
-        pty: PtySession,
-    ) -> Self {
+    fn local_pty(store: WorkspaceStore, process_id: i64, pty: PtySession) -> Self {
         Self {
-            database_path,
-            workspace_name,
+            store,
             process_id,
             pty,
         }
@@ -628,14 +627,46 @@ impl WorkspaceRunConsoleTerminalConnection {
     }
 
     fn persist_output(&self, output: &str) {
-        let _ = WorkspaceStore::open_app(self.database_path.clone())
-            .and_then(|store| store.append_terminal_process_output(self.process_id, output));
+        if let Err(err) = self
+            .store
+            .append_terminal_process_output(self.process_id, output)
+        {
+            tracing::warn!(
+                error = %err,
+                process_id = self.process_id,
+                "workspace terminal output persistence failed"
+            );
+        }
     }
 
     fn mark_exited(&self) {
-        let _ = WorkspaceStore::open_app(self.database_path.clone())
-            .and_then(|store| store.mark_terminal_process_exited(self.process_id, None));
+        if let Err(err) = self
+            .store
+            .mark_terminal_process_exited(self.process_id, None)
+        {
+            tracing::warn!(
+                error = %err,
+                process_id = self.process_id,
+                "workspace terminal exit persistence failed"
+            );
+        }
     }
+}
+
+fn trim_run_console_terminal_scrollback(text: &str) -> String {
+    const MAX_LINES: usize = 2_000;
+    const TRIM_MARKER: &str = "[terminal scrollback trimmed]\n";
+    let trailing_newline = text.ends_with('\n');
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= MAX_LINES {
+        return text.to_owned();
+    }
+    let mut trimmed = TRIM_MARKER.to_owned();
+    trimmed.push_str(&lines[lines.len() - MAX_LINES..].join("\n"));
+    if trailing_newline {
+        trimmed.push('\n');
+    }
+    trimmed
 }
 
 fn normalize_terminal_input_for_send(input: &str) -> Option<String> {
@@ -2743,6 +2774,11 @@ fn workspace_terminal_tab_view(
     let last_pty_size = Rc::new(RefCell::new(None::<(u16, u16)>));
     let last_pty_size_for_tick = last_pty_size.clone();
     output_surface.widget().add_tick_callback(move |_, _| {
+        if resize_surface.widget().allocated_width() <= 0
+            || resize_surface.widget().allocated_height() <= 0
+        {
+            return gtk::glib::ControlFlow::Continue;
+        }
         let (rows, cols) = resize_surface.viewport_size();
         if *last_pty_size_for_tick.borrow() == Some((rows, cols)) {
             return gtk::glib::ControlFlow::Continue;
@@ -2762,13 +2798,21 @@ fn workspace_terminal_tab_view(
 
     let buffer = output_surface.buffer();
     install_workspace_terminal_output_pump(
-        terminal_key,
+        terminal_key.clone(),
         run_console_states.clone(),
         run_console_terminals.clone(),
         buffer.clone(),
         workspace_name.to_owned(),
         tab_name.to_owned(),
     );
+    let terminal_key_for_unroot = terminal_key.clone();
+    output_surface
+        .widget()
+        .connect_notify_local(Some("root"), move |widget, _| {
+            if widget.root().is_none() {
+                cancel_workspace_terminal_output_pump(&terminal_key_for_unroot);
+            }
+        });
 
     panel
 }
@@ -2801,21 +2845,24 @@ fn spawn_workspace_terminal_session(
 ) -> anyhow::Result<WorkspaceRunConsoleTerminalConnection> {
     let store = WorkspaceStore::open_app(db_path)?;
     let launch = store.session_launch(workspace_name, SessionKind::Shell)?;
-    let pty = PtySession::spawn(launch.program, launch.args, &launch.cwd, launch.env, 24, 80);
-    let pty = pty?;
+    let pty = PtySession::spawn(launch.program, launch.args, &launch.cwd, launch.env, 24, 80)?;
     let pid = pty.process_id().context("terminal pty has no process id")?;
     let record = store.record_terminal_process(workspace_name, "shell", pid)?;
     Ok(WorkspaceRunConsoleTerminalConnection::local_pty(
-        db_path.to_path_buf(),
-        workspace_name.to_owned(),
-        record.id,
-        pty,
+        store, record.id, pty,
     ))
 }
 
 fn append_terminal_buffer_text(buffer: &gtk::TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
+    let existing = buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string();
+    let trimmed = trim_run_console_terminal_scrollback(&existing);
+    if trimmed != existing {
+        buffer.set_text(&trimmed);
+    }
 }
 
 fn install_workspace_terminal_output_pump(
@@ -2829,10 +2876,13 @@ fn install_workspace_terminal_output_pump(
     // PER-190: Workspace shell terminal tabs still own a local PTY in GTK.
     // This timer is scoped to one visible tab and only pumps terminal bytes
     // into that tab; provider chat sessions stay Archcar/event owned.
-    gtk::glib::timeout_add_local(Duration::from_millis(33), move || {
+    cancel_workspace_terminal_output_pump(&terminal_key);
+    let pump_key = terminal_key.clone();
+    let source_id = gtk::glib::timeout_add_local(Duration::from_millis(33), move || {
         let (output, exited) = {
             let mut terminals = run_console_terminals.borrow_mut();
             let Some(connection) = terminals.get_mut(&terminal_key) else {
+                forget_workspace_terminal_output_pump(&terminal_key);
                 return gtk::glib::ControlFlow::Break;
             };
             let output = connection.read_available();
@@ -2857,10 +2907,28 @@ fn install_workspace_terminal_output_pump(
 
         if exited {
             run_console_terminals.borrow_mut().remove(&terminal_key);
+            forget_workspace_terminal_output_pump(&terminal_key);
             gtk::glib::ControlFlow::Break
         } else {
             gtk::glib::ControlFlow::Continue
         }
+    });
+    RUN_CONSOLE_TERMINAL_PUMPS.with(|pumps| {
+        pumps.borrow_mut().insert(pump_key, source_id);
+    });
+}
+
+fn cancel_workspace_terminal_output_pump(terminal_key: &str) {
+    RUN_CONSOLE_TERMINAL_PUMPS.with(|pumps| {
+        if let Some(source_id) = pumps.borrow_mut().remove(terminal_key) {
+            source_id.remove();
+        }
+    });
+}
+
+fn forget_workspace_terminal_output_pump(terminal_key: &str) {
+    RUN_CONSOLE_TERMINAL_PUMPS.with(|pumps| {
+        pumps.borrow_mut().remove(terminal_key);
     });
 }
 
@@ -6404,6 +6472,9 @@ fn workspace_pr_status_title(
 }
 
 fn workspace_pr_status_is_loading(snapshot: &WorkspacePrStatusSnapshot) -> bool {
+    // Loading is represented by AppState::refreshing_git_review_workspaces before
+    // snapshots are converted into this summary; no-snapshot status intentionally
+    // renders as "No pull request yet" here.
     let _ = snapshot;
     false
 }
@@ -6522,7 +6593,7 @@ fn pull_request_ci_status_label(
 fn pull_request_needs_review(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
     matches!(
         readiness.review_decision.as_deref(),
-        Some("REVIEW_REQUIRED") | Some("REVIEW_REQUIRED_WITH_COMMENT")
+        Some("REVIEW_REQUIRED")
     ) && readiness.checks.iter().all(|check| check.is_success())
         && readiness
             .deployments
@@ -11243,6 +11314,39 @@ mod tests",
     }
 
     #[test]
+    fn run_console_terminal_state_trims_transcript_to_bounded_scrollback() {
+        let mut terminal = WorkspaceRunConsoleTerminalState::new(3);
+
+        for index in 0..2_010 {
+            terminal.append_result(&format!("line {index}\n"));
+        }
+
+        let rendered = terminal.display_text();
+        assert!(rendered.starts_with("[terminal scrollback trimmed]\n"));
+        assert!(!rendered.contains("line 0\n"));
+        assert!(rendered.contains("line 2009\n"));
+    }
+
+    #[test]
+    fn review_required_with_comment_does_not_mark_pr_as_review_needed() {
+        let mut readiness = test_pull_request_readiness();
+        readiness.review_decision = Some("REVIEW_REQUIRED_WITH_COMMENT".to_owned());
+        readiness.checks = vec![archductor_core::workspace::PullRequestCheckRun {
+            name: "unit".to_owned(),
+            status: "SUCCESS".to_owned(),
+            detail: None,
+        }];
+
+        let status = pull_request_status_summary(
+            &test_pull_request("OPEN"),
+            Some(&readiness),
+            &test_checks_summary(0, None, Vec::new()),
+        );
+
+        assert_eq!(status.kind, PullRequestStateKind::Open);
+    }
+
+    #[test]
     fn run_console_terminal_empty_state_waits_for_native_shell_prompt() {
         let terminal = WorkspaceRunConsoleTerminalState::new(1);
 
@@ -11264,6 +11368,111 @@ mod tests",
             Some("  printf 'ok'  ".to_owned())
         );
         assert_eq!(normalize_terminal_input_for_send("   \n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_terminal_connection_drives_local_pty_and_persists_transcript() {
+        use archductor_core::repository::{AddRepository, RepositoryStore};
+        use archductor_core::workspace::CreateWorkspace;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("demo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        std::fs::write(repo_path.join("README.md"), "demo\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .env("GIT_AUTHOR_NAME", "Archductor Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Archductor Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let pty = PtySession::spawn(
+            PathBuf::from("/bin/sh"),
+            Vec::new(),
+            temp.path(),
+            Vec::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        let pid = pty.process_id().unwrap();
+        let record = store
+            .record_terminal_process("berlin", "shell", pid)
+            .unwrap();
+        let process_id = record.id;
+        let mut connection =
+            WorkspaceRunConsoleTerminalConnection::local_pty(store, process_id, pty);
+
+        connection.resize(33, 111).unwrap();
+        connection
+            .write_bytes(b"printf 'gtk local pty ok\\n'\n")
+            .unwrap();
+        let mut output = String::new();
+        for _ in 0..50 {
+            output.push_str(&connection.read_available());
+            if output.contains("gtk local pty ok") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(output.contains("gtk local pty ok"));
+        connection.persist_output(&output);
+        connection.write_bytes(b"exit\n").unwrap();
+        for _ in 0..50 {
+            if connection.has_exited() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        connection.mark_exited();
+        drop(connection);
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let terminal = store
+            .list_terminals("berlin")
+            .unwrap()
+            .into_iter()
+            .find(|terminal| terminal.id == process_id)
+            .unwrap();
+        assert_eq!(terminal.status, ProcessStatus::Exited);
+        let transcript = store.read_terminal_log("berlin", process_id).unwrap();
+        assert!(transcript.contains("gtk local pty ok"));
     }
 
     #[test]

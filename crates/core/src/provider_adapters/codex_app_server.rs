@@ -11,6 +11,7 @@ use crate::provider_events::{
 };
 use crate::workspace::SessionKind;
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -1359,7 +1360,11 @@ fn process_body_from_payload(payload: &Value) -> Option<String> {
         parts.push(stderr);
     }
     if parts.is_empty() {
-        string_at_any(payload, &["/params/stream"])
+        payload
+            .pointer("/params/data")
+            .and_then(Value::as_str)
+            .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
     } else {
         Some(parts.join("\n"))
     }
@@ -2696,6 +2701,9 @@ mod tests {
             assert_eq!(event.provider_subtype.as_deref(), Some(subtype));
             assert_eq!(event.phase, phase);
             assert_eq!(event.provider_item_id.as_deref(), item_id);
+            if subtype == "process/outputDelta" {
+                assert_eq!(event.normalized_payload["body"], "log\n");
+            }
         }
     }
 

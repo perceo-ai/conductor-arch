@@ -123,7 +123,13 @@ mod pty_tests {
             .spawn()
             .unwrap();
 
-        wait_for_file_contents(&ready, "ready");
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_file_contents(&ready, "ready");
+        })) {
+            let _ = child.kill();
+            let _ = child.wait();
+            std::panic::resume_unwind(panic);
+        }
         assert!(crate::platform::process_alive(child.id()));
         let _ = child.kill();
         let _ = child.wait();

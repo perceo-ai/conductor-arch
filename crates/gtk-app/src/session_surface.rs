@@ -5716,8 +5716,9 @@ fn chat_text_label(text: &str) -> Label {
 }
 
 fn chat_text_widget(text: &str, open_file: Option<OpenWorkspaceFile>) -> Widget {
-    if chat_text_contains_inline_chip_token(text) {
-        chat_markdown_inline_chip_widget(text, open_file).upcast()
+    let segments = chat_inline_chip_segments_from_markdown(text);
+    if chat_inline_chip_segments_contain_chip(&segments) {
+        chat_markdown_inline_chip_widget(segments, open_file).upcast()
     } else {
         chat_text_label(text).upcast()
     }
@@ -5738,33 +5739,42 @@ enum ChatInlineChipSegment {
 }
 
 fn chat_text_contains_inline_chip_token(text: &str) -> bool {
-    chat_inline_chip_segments_from_markdown(text)
+    chat_inline_chip_segments_contain_chip(&chat_inline_chip_segments_from_markdown(text))
+}
+
+fn chat_inline_chip_segments_contain_chip(segments: &[ChatInlineChipSegment]) -> bool {
+    segments
         .iter()
         .any(|segment| !matches!(segment, ChatInlineChipSegment::Text(_)))
 }
 
-fn chat_markdown_inline_chip_widget(text: &str, open_file: Option<OpenWorkspaceFile>) -> GBox {
+fn chat_markdown_inline_chip_widget(
+    segments: Vec<ChatInlineChipSegment>,
+    open_file: Option<OpenWorkspaceFile>,
+) -> GBox {
     let root = GBox::new(Orientation::Vertical, 2);
     root.add_css_class("chat-agent-text");
     root.set_hexpand(true);
-    root.append(&chat_markdown_inline_chip_line_widget(
-        text,
-        open_file.clone(),
-    ));
+    root.append(&chat_markdown_inline_chip_line_widget(segments, open_file));
     root
 }
 
 fn chat_markdown_inline_chip_line_widget(
-    line: &str,
+    segments: Vec<ChatInlineChipSegment>,
     open_file: Option<OpenWorkspaceFile>,
 ) -> Widget {
-    let segments = chat_inline_chip_segments_from_markdown(line);
-    if !segments
-        .iter()
-        .any(|segment| !matches!(segment, ChatInlineChipSegment::Text(_)))
-    {
+    if !chat_inline_chip_segments_contain_chip(&segments) {
+        let line = segments
+            .into_iter()
+            .map(|segment| match segment {
+                ChatInlineChipSegment::Text(text) => text,
+                ChatInlineChipSegment::Code(code) => code,
+                ChatInlineChipSegment::Link { label, .. } => label,
+                ChatInlineChipSegment::File(link) => link.label,
+            })
+            .collect::<String>();
         let label = Label::new(None);
-        label.set_markup(&chat_text_markup(line));
+        label.set_markup(&chat_text_markup(&line));
         label.add_css_class("chat-agent-text");
         label.set_selectable(true);
         label.set_wrap(true);
@@ -5979,12 +5989,25 @@ impl ChatInlineChipSegmentBuilder {
     }
 
     fn ensure_block_gap(&mut self) {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && !self.segments_end_with_newline() {
+            if !self.segments.is_empty() {
+                self.pending.push('\n');
+            }
             return;
         }
         if !self.pending.ends_with('\n') {
             self.pending.push('\n');
         }
+    }
+
+    fn segments_end_with_newline(&self) -> bool {
+        self.pending.ends_with('\n')
+            || self.segments.last().is_some_and(|segment| match segment {
+                ChatInlineChipSegment::Text(text) => text.ends_with('\n'),
+                ChatInlineChipSegment::Code(_)
+                | ChatInlineChipSegment::Link { .. }
+                | ChatInlineChipSegment::File(_) => false,
+            })
     }
 
     fn finish_link(&mut self) {
@@ -6003,11 +6026,13 @@ impl ChatInlineChipSegmentBuilder {
                     label,
                     path,
                 }));
-        } else {
+        } else if chat_inline_link_is_launchable(&link.target) {
             self.segments.push(ChatInlineChipSegment::Link {
                 label,
                 url: link.target,
             });
+        } else {
+            self.segments.push(ChatInlineChipSegment::Code(label));
         }
     }
 
@@ -6046,19 +6071,12 @@ fn chat_inline_markdown_chip(
     external_url: Option<&str>,
     file_target: Option<(&str, &OpenWorkspaceFile)>,
 ) -> Widget {
-    let anchor = Fixed::new();
-    anchor.add_css_class("chat-markdown-chip-anchor");
-    anchor.set_halign(Align::Start);
-    anchor.set_valign(Align::Baseline);
-
     let chip = GBox::new(Orientation::Horizontal, 0);
-    chip.add_css_class("chat-markdown-chip");
     let kind_class = match (external_url, file_target.as_ref()) {
         (_, Some(_)) => "chat-markdown-file-chip",
         (Some(_), None) => "chat-markdown-link-chip",
         (None, None) => "chat-markdown-code-chip",
     };
-    chip.add_css_class(kind_class);
     chip.set_halign(Align::Start);
     chip.set_valign(Align::Center);
     chip.set_baseline_position(BaselinePosition::Bottom);
@@ -6073,31 +6091,60 @@ fn chat_inline_markdown_chip(
     });
     text.set_valign(Align::Center);
     chip.append(&text);
-    anchor.put(&chip, 0.0, 0.0);
-    let transform = gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(0.0, 3.0));
-    anchor.set_child_transform(&chip, Some(&transform));
 
-    if let Some(url) = external_url.filter(|url| !url.trim().is_empty()) {
+    if let Some(url) = external_url.filter(|url| chat_inline_link_is_launchable(url)) {
         let url = url.to_owned();
-        let click = GestureClick::new();
-        click.set_button(1);
-        click.connect_released(move |_, _, _, _| {
+        let button = Button::new();
+        button.add_css_class("chat-markdown-chip-anchor");
+        button.add_css_class("chat-markdown-chip");
+        button.add_css_class(kind_class);
+        button.set_halign(Align::Start);
+        button.set_valign(Align::Baseline);
+        button.set_tooltip_text(Some(url.as_str()));
+        button.set_child(Some(&chip));
+        button.connect_clicked(move |_| {
             let _ = gtk::gio::AppInfo::launch_default_for_uri(
                 &url,
                 None::<&gtk::gio::AppLaunchContext>,
             );
         });
-        anchor.add_controller(click);
+        return button.upcast();
     } else if let Some((path, open_file)) = file_target {
         let path = path.to_owned();
         let open_file = open_file.clone();
-        let click = GestureClick::new();
-        click.set_button(1);
-        click.connect_released(move |_, _, _, _| open_file(path.as_str()));
-        anchor.add_controller(click);
+        let button = Button::new();
+        button.add_css_class("chat-markdown-chip-anchor");
+        button.add_css_class("chat-markdown-chip");
+        button.add_css_class(kind_class);
+        button.set_halign(Align::Start);
+        button.set_valign(Align::Baseline);
+        button.set_tooltip_text(Some(path.as_str()));
+        button.set_child(Some(&chip));
+        button.connect_clicked(move |_| open_file(path.as_str()));
+        return button.upcast();
     }
 
+    let anchor = Fixed::new();
+    anchor.add_css_class("chat-markdown-chip-anchor");
+    anchor.add_css_class("chat-markdown-chip");
+    anchor.add_css_class(kind_class);
+    anchor.set_halign(Align::Start);
+    anchor.set_valign(Align::Baseline);
+    anchor.set_tooltip_text(external_url.or(file_target.map(|(path, _)| path)));
+    anchor.put(&chip, 0.0, 0.0);
+    let transform = gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(0.0, 3.0));
+    anchor.set_child_transform(&chip, Some(&transform));
     anchor.upcast()
+}
+
+fn chat_inline_link_is_launchable(url: &str) -> bool {
+    let trimmed = url.trim();
+    ["http://", "https://", "mailto:"].iter().any(|scheme| {
+        trimmed.len() > scheme.len()
+            && trimmed
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
 }
 
 fn markdown_file_link_label(label: &str, path: &str) -> String {
@@ -18420,6 +18467,32 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
+    fn chat_inline_chip_segments_preserve_block_gap_after_inline_chips() {
+        let segments =
+            chat_inline_chip_segments_from_markdown("Run `cargo test`\n\nThen continue.");
+
+        assert_eq!(
+            segments,
+            vec![
+                ChatInlineChipSegment::Text("Run ".to_owned()),
+                ChatInlineChipSegment::Code("cargo test".to_owned()),
+                ChatInlineChipSegment::Text("\nThen continue.".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_inline_link_launch_allowlist_only_accepts_web_and_mailto_urls() {
+        assert!(chat_inline_link_is_launchable("https://example.com"));
+        assert!(chat_inline_link_is_launchable(" http://example.com "));
+        assert!(chat_inline_link_is_launchable("mailto:dev@example.com"));
+        assert!(!chat_inline_link_is_launchable("javascript:alert(1)"));
+        assert!(!chat_inline_link_is_launchable("file:///tmp/secret"));
+        assert!(!chat_inline_link_is_launchable("ssh://example.com"));
+        assert!(!chat_inline_link_is_launchable("example.com"));
+    }
+
+    #[test]
     fn chat_markdown_file_links_render_as_inline_chips() {
         let source = include_str!("session_surface.rs");
         let line_widget = source
@@ -18461,18 +18534,15 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(anchor_helper.contains("create_child_anchor"));
         assert!(anchor_helper.contains("add_child_at_anchor"));
         assert!(line_widget.contains("chat-markdown-inline-view"));
-        assert!(chip_helper.contains("Fixed::new"));
-        assert!(chip_helper.contains("GestureClick::new"));
+        assert!(chip_helper.contains("Button::new"));
+        assert!(chip_helper.contains("connect_clicked"));
+        assert!(chip_helper.contains("chat_inline_link_is_launchable"));
         assert!(chip_helper.contains("chat-markdown-file-chip"));
         assert!(chip_helper.contains("chat-markdown-code-chip"));
         assert!(chip_helper.contains("chat-markdown-link-chip"));
         assert!(chip_helper.contains("chat-markdown-file-chip-label"));
         assert!(chip_helper.contains("BaselinePosition::Bottom"));
-        assert!(chip_helper.contains("anchor.set_valign(Align::Baseline);"));
-        assert!(chip_helper.contains("anchor.put(&chip, 0.0, 0.0);"));
-        assert!(chip_helper.contains("gtk::gsk::Transform::new()"));
-        assert!(chip_helper.contains("gtk::graphene::Point::new(0.0, 3.0)"));
-        assert!(chip_helper.contains("anchor.set_child_transform(&chip, Some(&transform));"));
+        assert!(chip_helper.contains("button.set_valign(Align::Baseline);"));
         assert!(!chip_helper.contains("chat-markdown-chip-baseline-probe"));
         assert!(!chip_helper.contains("baseline.set_opacity"));
         assert!(!chip_helper.contains("baseline.set_height_request"));
@@ -18484,11 +18554,9 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(!chip_helper.contains("chip.set_margin_top"));
         assert!(chip_helper.contains("chip.set_margin_bottom(0);"));
         assert!(chip_helper.contains("text.set_valign(Align::Center);"));
-        assert!(!chip_helper.contains("Button::new"));
         assert!(!chip_helper.contains("set_ellipsize"));
         assert!(!chip_helper.contains("set_max_width_chars"));
         assert!(!line_widget.contains("chat-inline-event-chip"));
-        assert!(!line_widget.contains("Button::new"));
         assert!(!line_widget.contains("set_ellipsize"));
         assert!(!line_widget.contains("set_max_width_chars"));
         assert!(!line_widget.contains("let row = GBox::new"));

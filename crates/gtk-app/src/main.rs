@@ -227,16 +227,6 @@ fn application_id() -> String {
     dev_application_id_from_suffix(std::env::var("ARCHDUCTOR_DEV_INSTANCE").ok().as_deref())
 }
 
-#[cfg(target_os = "macos")]
-fn build_application() -> Application {
-    let app_id = application_id();
-    Application::builder()
-        .application_id(&app_id)
-        .flags(application_flags())
-        .build()
-}
-
-#[cfg(not(target_os = "macos"))]
 fn build_application() -> Application {
     let app_id = application_id();
     Application::builder()
@@ -792,6 +782,9 @@ fn install_git_review_foreground_sampler(db_path: PathBuf, app_state: AppState) 
         if git_review_in_flight.get() {
             return glib::ControlFlow::Continue;
         }
+        if !app_state.window_focused() || !app_state.window_visible() {
+            return glib::ControlFlow::Continue;
+        }
         let Some(workspace) = app_state.selected_workspace() else {
             return glib::ControlFlow::Continue;
         };
@@ -1325,6 +1318,13 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 toast_on_focus.clone(),
                 "workspace lifecycle recovery",
             );
+        });
+    }
+
+    {
+        let state_on_visible = app_state.clone();
+        window.connect_visible_notify(move |window| {
+            state_on_visible.note_window_visible(window.is_visible());
         });
     }
 
@@ -2273,9 +2273,6 @@ fn build_integrated_window_controls() -> Option<gtk::WindowControls> {
 }
 
 fn present_main_window(window: &ApplicationWindow) {
-    #[cfg(target_os = "macos")]
-    window.present();
-    #[cfg(not(target_os = "macos"))]
     window.present();
 }
 
@@ -2326,21 +2323,22 @@ mod tests {
     }
 
     #[test]
-    fn macos_source_run_shows_window_without_present_activation() {
+    fn present_main_window_calls_present_directly() {
         let source = include_str!("main.rs");
         let production = source
             .split("#[cfg(test)]")
             .next()
             .expect("production source exists");
-        let macos_present = source_between(
+        let present_main_window = source_between(
             production,
-            "#[cfg(target_os = \"macos\")]\n    window",
-            "#[cfg(not(target_os = \"macos\"))]",
+            "fn present_main_window(window: &ApplicationWindow) {",
+            "\n}",
         );
 
         assert!(production.contains("fn present_main_window("));
-        assert!(macos_present.contains("window.present();"));
-        assert!(!macos_present.contains("window.show();"));
+        assert!(present_main_window.contains("window.present();"));
+        assert!(!present_main_window.contains("#[cfg("));
+        assert!(!present_main_window.contains("window.show();"));
         assert!(production.contains("present_main_window(&window);"));
     }
 
@@ -2552,16 +2550,23 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production source exists");
-        let macos_build_application = source_between(
+        let build_application = source_between(
             production,
-            "#[cfg(target_os = \"macos\")]\nfn build_application",
-            "#[cfg(not(target_os = \"macos\"))]\nfn build_application",
+            "fn build_application() -> Application",
+            "fn application_flags() -> gio::ApplicationFlags",
         );
 
         assert!(source.contains("#[cfg(target_os = \"macos\")]"));
         assert!(source.contains("fn build_application() -> Application"));
-        assert!(macos_build_application.contains("let app_id = application_id();"));
-        assert!(macos_build_application.contains(".application_id(&app_id)"));
+        assert_eq!(
+            production
+                .matches("fn build_application() -> Application")
+                .count(),
+            1
+        );
+        assert!(build_application.contains("let app_id = application_id();"));
+        assert!(build_application.contains(".application_id(&app_id)"));
+        assert!(build_application.contains(".flags(application_flags())"));
         assert!(source.contains("gio::ApplicationFlags::NON_UNIQUE"));
         assert!(source.contains("#[cfg(not(target_os = \"macos\"))]"));
         assert!(source.contains("gio::ApplicationFlags::FLAGS_NONE"));
@@ -2996,6 +3001,8 @@ mod tests {
             "_add_seconds_local(GIT_REVIEW_REFRESH_SECONDS"
         )));
         assert!(production_source.contains("git_review_in_flight.get()"));
+        assert!(production_source.contains("app_state.window_focused()"));
+        assert!(production_source.contains("app_state.window_visible()"));
         assert!(
             production_source.contains("WorkspaceSelectionChanged")
                 && production_source.contains("spawn_git_review_sample_now("),

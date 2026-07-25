@@ -161,12 +161,14 @@ impl TerminalGridSurface {
         let area_for_viewport_resize = drawing_area.clone();
         let model_for_viewport_resize = model.clone();
         let last_viewport_size = Rc::new(RefCell::new(None::<(i32, i32)>));
-        let last_viewport_size_for_tick = last_viewport_size.clone();
-        scroll.add_tick_callback(move |scroll, _| {
+        let resize_for_viewport_change: Rc<dyn Fn(&ScrolledWindow)> = Rc::new(move |scroll| {
             let width = scroll.allocated_width();
             let height = scroll.allocated_height();
-            if *last_viewport_size_for_tick.borrow() != Some((width, height)) {
-                *last_viewport_size_for_tick.borrow_mut() = Some((width, height));
+            if width <= 0 || height <= 0 {
+                return;
+            }
+            if *last_viewport_size.borrow() != Some((width, height)) {
+                *last_viewport_size.borrow_mut() = Some((width, height));
                 resize_terminal_grid_for_viewport(
                     &area_for_viewport_resize,
                     &model_for_viewport_resize,
@@ -174,7 +176,11 @@ impl TerminalGridSurface {
                     height,
                 );
             }
-            glib::ControlFlow::Continue
+        });
+        let resize_for_width = resize_for_viewport_change.clone();
+        scroll.connect_notify_local(Some("width"), move |scroll, _| resize_for_width(scroll));
+        scroll.connect_notify_local(Some("height"), move |scroll, _| {
+            resize_for_viewport_change(scroll)
         });
 
         if interactive {
@@ -857,6 +863,11 @@ pub fn embedded_terminal_panel(
         let last_size_for_resize = last_size.clone();
         let terminal_surface_for_resize = terminal_surface.clone();
         terminal_surface.widget().add_tick_callback(move |_, _| {
+            if terminal_surface_for_resize.widget().allocated_width() <= 0
+                || terminal_surface_for_resize.widget().allocated_height() <= 0
+            {
+                return glib::ControlFlow::Continue;
+            }
             let (rows, cols) = terminal_surface_viewport_size(&terminal_surface_for_resize);
             if *last_size_for_resize.borrow() == Some((rows, cols)) {
                 return glib::ControlFlow::Continue;

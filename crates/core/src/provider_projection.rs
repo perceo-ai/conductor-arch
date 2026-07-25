@@ -380,10 +380,12 @@ fn provider_projection_record_body(
 fn provider_turn_durations(records: &[ProviderEventRecord]) -> HashMap<String, u64> {
     let mut starts = HashMap::<String, u64>::new();
     let mut durations = HashMap::<String, u64>::new();
-    for record in records
+    let mut turn_records = records
         .iter()
         .filter(|record| record.kind == ProviderEventKind::Turn)
-    {
+        .collect::<Vec<_>>();
+    turn_records.sort_by(|left, right| provider_projection_record_order(left, right));
+    for record in turn_records {
         let key = provider_projection_canonical_id(record);
         if provider_event_phase_is_active(record.phase) {
             starts
@@ -397,6 +399,24 @@ fn provider_turn_durations(records: &[ProviderEventRecord]) -> HashMap<String, u
         }
     }
     durations
+}
+
+fn provider_projection_record_order(
+    left: &ProviderEventRecord,
+    right: &ProviderEventRecord,
+) -> std::cmp::Ordering {
+    provider_projection_record_sequence(left)
+        .cmp(&provider_projection_record_sequence(right))
+        .then_with(|| {
+            provider_projection_canonical_id(left).cmp(&provider_projection_canonical_id(right))
+        })
+}
+
+fn provider_projection_record_sequence(record: &ProviderEventRecord) -> u64 {
+    record
+        .provider_sequence
+        .unwrap_or(record.received_sequence)
+        .max(0) as u64
 }
 
 fn provider_event_phase_is_active(phase: ProviderEventPhase) -> bool {
@@ -927,6 +947,42 @@ mod tests {
 
         assert_eq!(turn.id, "codex:thread-1:turn:turn-1");
         assert_eq!(turn.status, ProviderProjectionStatus::Complete);
+        assert_eq!(turn.body, "Completed in 12.3s");
+    }
+
+    #[test]
+    fn turn_projection_elapsed_time_uses_projection_order_for_reversed_lifecycle_records() {
+        let mut started = record(
+            ProviderEventKind::Turn,
+            ProviderEventPhase::Started,
+            "turn/started",
+        );
+        started.provider_item_id = None;
+        started.provider_event_id = Some("event-turn-started".to_owned());
+        started.provider_turn_id = Some("turn-1".to_owned());
+        started.provider_sequence = Some(1);
+        started.received_sequence = 1;
+        started.timeline_seq = Some(1);
+        started.occurred_at_ms = 1_000;
+        started.normalized_payload = json!({"title": "Turn", "body": "Working"});
+
+        let mut completed = started.clone();
+        completed.identity_key = "codex:event:event-turn-completed".to_owned();
+        completed.provider_event_id = Some("event-turn-completed".to_owned());
+        completed.phase = ProviderEventPhase::Completed;
+        completed.provider_sequence = Some(2);
+        completed.received_sequence = 2;
+        completed.timeline_seq = Some(2);
+        completed.occurred_at_ms = 13_345;
+        completed.normalized_payload = json!({"title": "Turn", "body": ""});
+
+        let projection = provider_projection_from_records(&[completed, started]);
+        let turn = projection
+            .items
+            .iter()
+            .find(|item| item.category == ProviderProjectionCategory::Status)
+            .unwrap();
+
         assert_eq!(turn.body, "Completed in 12.3s");
     }
 
