@@ -206,6 +206,8 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
             if let Some(turn_id) = managed_codex_turn_id(&message.value) {
                 self.active_turn_id = Some(turn_id);
             }
+            let provider_event_turn_id =
+                managed_codex_turn_id(&message.value).or_else(|| self.active_turn_id.clone());
             if message.method.as_deref() == Some("turn/started") {
                 if let Some(local_input_id) = self.active_input_id.clone() {
                     effects.push(HarnessEffect::TurnStarted { local_input_id });
@@ -216,22 +218,30 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
                     .or_else(|| self.active_turn_id.clone())
                     .unwrap_or_else(|| message.raw_json.clone());
                 if self.completed_turns.insert(completion_key) {
+                    let status = managed_codex_turn_status(&message.value);
                     if let Some(local_input_id) = self.active_input_id.take() {
                         effects.push(HarnessEffect::TurnCompleted {
                             local_input_id,
-                            status: managed_codex_turn_status(&message.value),
+                            status,
                         });
+                    } else {
+                        effects.push(HarnessEffect::TurnSettled { status });
                     }
                     effects.push(HarnessEffect::Ready);
                 }
                 self.active_turn_id = None;
             }
 
-            effects.push(HarnessEffect::ProviderEvent(
-                message
-                    .to_provider_event_draft()
-                    .into_provider_event_draft(self.provider_context()),
-            ));
+            let mut provider_event = message
+                .to_provider_event_draft()
+                .into_provider_event_draft(self.provider_context());
+            if provider_event.provider_thread_id.is_none() {
+                provider_event.provider_thread_id = self.context.native_session_id.clone();
+            }
+            if provider_event.provider_turn_id.is_none() {
+                provider_event.provider_turn_id = provider_event_turn_id;
+            }
+            effects.push(HarnessEffect::ProviderEvent(provider_event));
         }
 
         Ok(effects)
@@ -332,6 +342,8 @@ fn managed_codex_turn_status(value: &Value) -> HarnessTurnStatus {
     let status = [
         "/params/status",
         "/params/turn/status",
+        "/params/finalStatus",
+        "/params/final_status",
         "/result/status",
         "/result/turn/status",
     ]
@@ -830,6 +842,11 @@ fn codex_event_name(
                 return format!("item/{item_type}/{phase}");
             }
         }
+        if let Some(phase) = method.strip_prefix("rawResponseItem/") {
+            if phase == "completed" {
+                return format!("rawResponseItem/{item_type}/{phase}");
+            }
+        }
     }
 
     if !method.is_empty() {
@@ -1072,12 +1089,15 @@ impl CodexProviderEventDraft {
                 &self.payload,
                 &[
                     "/params/item/id",
+                    "/params/item/call_id",
                     "/params/itemId",
                     "/params/item_id",
                     "/params/message/id",
                     "/params/toolCall/id",
                     "/params/tool_call/id",
                     "/params/callId",
+                    "/params/processId",
+                    "/params/process_id",
                     "/result/item/id",
                     "/result/message/id",
                 ],
@@ -1196,6 +1216,9 @@ fn codex_event_title(name: &str, kind: ProviderEventKind, payload: &Value) -> St
         Some("commandExecution") => {
             command_from_payload(payload).unwrap_or_else(|| "Command".to_owned())
         }
+        Some("local_shell_call") => {
+            local_shell_command_from_payload(payload).unwrap_or_else(|| "Process".to_owned())
+        }
         Some("fileChange") => "File changes".to_owned(),
         Some("mcpToolCall") => {
             tool_title_from_payload(payload).unwrap_or_else(|| "MCP tool".to_owned())
@@ -1203,6 +1226,9 @@ fn codex_event_title(name: &str, kind: ProviderEventKind, payload: &Value) -> St
         Some("dynamicToolCall") => {
             tool_title_from_payload(payload).unwrap_or_else(|| "Dynamic tool".to_owned())
         }
+        Some("tool_search_call") => "Search".to_owned(),
+        Some("tool_search_output") => "Search output".to_owned(),
+        Some("web_search_call") => "Web search".to_owned(),
         Some("webSearch") => "Web search".to_owned(),
         Some("imageView") => "Image".to_owned(),
         Some("enteredReviewMode") | Some("exitedReviewMode") => "Review".to_owned(),
@@ -1225,7 +1251,16 @@ fn codex_payload_body(payload: &Value) -> String {
     match string_at_any(payload, &["/params/item/type"]).as_deref() {
         Some("reasoning") => return reasoning_body_from_payload(payload).unwrap_or_default(),
         Some("commandExecution") => return command_body_from_payload(payload).unwrap_or_default(),
+        Some("local_shell_call") => {
+            return local_shell_body_from_payload(payload).unwrap_or_default();
+        }
         Some("fileChange") => return file_change_body_from_payload(payload).unwrap_or_default(),
+        Some("tool_search_call") | Some("tool_search_output") => {
+            return search_body_from_payload(payload).unwrap_or_default();
+        }
+        Some("web_search_call") => {
+            return web_search_body_from_payload(payload).unwrap_or_default()
+        }
         Some("mcpToolCall") | Some("dynamicToolCall") | Some("webSearch") | Some("imageView") => {
             return tool_body_from_payload(payload).unwrap_or_default();
         }
@@ -1248,7 +1283,10 @@ fn codex_payload_body(payload: &Value) -> String {
         ],
     )
     .or_else(|| command_body_from_payload(payload))
+    .or_else(|| local_shell_body_from_payload(payload))
+    .or_else(|| process_body_from_payload(payload))
     .or_else(|| file_change_body_from_payload(payload))
+    .or_else(|| search_body_from_payload(payload))
     .or_else(|| tool_body_from_payload(payload))
     .unwrap_or_default()
 }
@@ -1286,6 +1324,47 @@ fn command_from_payload(payload: &Value) -> Option<String> {
     (!command.trim().is_empty()).then_some(command)
 }
 
+fn local_shell_body_from_payload(payload: &Value) -> Option<String> {
+    local_shell_command_from_payload(payload)
+}
+
+fn local_shell_command_from_payload(payload: &Value) -> Option<String> {
+    let value = payload.pointer("/params/item/action/command")?;
+    let command = match value {
+        Value::String(command) => command.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    };
+    (!command.trim().is_empty()).then_some(command)
+}
+
+fn process_body_from_payload(payload: &Value) -> Option<String> {
+    let stdout = string_at_any(payload, &["/params/stdout"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let stderr = string_at_any(payload, &["/params/stderr"])
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let mut parts = Vec::new();
+    if !stdout.is_empty() {
+        parts.push(stdout);
+    }
+    if !stderr.is_empty() {
+        parts.push(stderr);
+    }
+    if parts.is_empty() {
+        string_at_any(payload, &["/params/stream"])
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 fn file_change_body_from_payload(payload: &Value) -> Option<String> {
     let changes = payload.pointer("/params/item/changes")?.as_array()?;
     let lines = changes
@@ -1314,6 +1393,23 @@ fn tool_body_from_payload(payload: &Value) -> Option<String> {
         ],
     )
     .and_then(display_value)
+}
+
+fn search_body_from_payload(payload: &Value) -> Option<String> {
+    value_at_any(
+        payload,
+        &[
+            "/params/item/tools",
+            "/params/item/output",
+            "/params/item/arguments",
+            "/params/item/query",
+        ],
+    )
+    .and_then(display_value)
+}
+
+fn web_search_body_from_payload(payload: &Value) -> Option<String> {
+    value_at_any(payload, &["/params/item/action", "/params/item/query"]).and_then(display_value)
 }
 
 fn tool_title_from_payload(payload: &Value) -> Option<String> {
@@ -1474,11 +1570,6 @@ pub fn classify_codex_method(
         CodexProviderEventCategory::UserInput
     } else if has_any(
         &tokens,
-        &["assistant", "answer", "message", "output", "response"],
-    ) {
-        CodexProviderEventCategory::AssistantOutput
-    } else if has_any(
-        &tokens,
         &["plan", "planning", "reasoning", "thought", "analysis"],
     ) {
         CodexProviderEventCategory::PlanningReasoning
@@ -1499,6 +1590,14 @@ pub fn classify_codex_method(
         &["command", "exec", "execution", "process", "subprocess"],
     ) {
         CodexProviderEventCategory::CommandProcessExecution
+    } else if has_any(&tokens, &["search"]) {
+        CodexProviderEventCategory::WebBrowserMedia
+    } else if has_any(&tokens, &["tool", "tools", "toolcall"]) {
+        CodexProviderEventCategory::Tools
+    } else if has_any(&tokens, &["assistant", "answer", "message", "response"])
+        || tokens.as_slice() == ["output"]
+    {
+        CodexProviderEventCategory::AssistantOutput
     } else if has_any(
         &tokens,
         &["terminal", "background", "runtime", "shell", "pty"],
@@ -1514,8 +1613,6 @@ pub fn classify_codex_method(
         &["file", "files", "filesystem", "fs", "directory", "path"],
     ) {
         CodexProviderEventCategory::Filesystem
-    } else if has_any(&tokens, &["tool", "tools", "toolcall"]) {
-        CodexProviderEventCategory::Tools
     } else if has_any(&tokens, &["mcp"]) {
         CodexProviderEventCategory::Mcp
     } else if has_any(
@@ -1568,6 +1665,16 @@ fn codex_canonical_kind_and_subtype(
     name: &str,
     payload: &Value,
 ) -> (ProviderEventKind, Option<String>) {
+    match string_at_any(payload, &["/params/item/type"]).as_deref() {
+        Some("local_shell_call") => {
+            return (ProviderEventKind::CommandProcess, Some(name.to_owned()));
+        }
+        Some("tool_search_call" | "tool_search_output" | "web_search_call" | "webSearch") => {
+            return (ProviderEventKind::WebBrowserMedia, Some(name.to_owned()));
+        }
+        _ => {}
+    }
+
     if let Some(tool_name) = codex_dynamic_tool_name(name, payload) {
         if let Some((kind, subtype)) = codex_local_tool_action_kind_and_subtype(&tool_name) {
             return (kind, Some(subtype.to_owned()));
@@ -1638,7 +1745,7 @@ fn codex_category_to_provider_kind(category: CodexProviderEventCategory) -> Prov
 }
 
 fn codex_phase_for(name: &str, message_kind: CodexAppServerMessageKind) -> ProviderEventPhase {
-    let normalized = name.to_ascii_lowercase();
+    let normalized = split_camel_segments(name).to_ascii_lowercase();
     let tokens: Vec<_> = normalized
         .split(|ch: char| !(ch.is_ascii_alphanumeric()))
         .filter(|token| !token.is_empty())
@@ -1667,6 +1774,8 @@ fn codex_phase_for(name: &str, message_kind: CodexAppServerMessageKind) -> Provi
             "finish",
             "stop",
             "stopped",
+            "exit",
+            "exited",
             "closed",
             "result",
         ],
@@ -1897,6 +2006,81 @@ mod tests {
             .any(|effect| matches!(effect, HarnessEffect::Ready)));
         assert!(adapter.active_input_id.is_none());
         assert!(adapter.pending_inputs.is_empty());
+    }
+
+    #[test]
+    fn codex_turn_completed_without_active_input_still_settles_turn() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+        adapter.set_active_turn_id(Some("turn-1".to_owned()));
+
+        let effects = adapter
+            .observe_native(managed_record(
+                r#"{"method":"turn/completed","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"},"finalStatus":"completed"}}"#,
+            ))
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnSettled {
+                status: HarnessTurnStatus::Success,
+            }
+        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert!(adapter.active_turn_id.is_none());
+    }
+
+    #[test]
+    fn codex_turn_status_reads_final_status_payload() {
+        let message = parse_jsonl_message(
+            r#"{"method":"turn/completed","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"},"finalStatus":"cancelled"}}"#,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            managed_codex_turn_status(&message.value),
+            HarnessTurnStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn codex_provider_event_backfills_thread_and_turn_ids_from_session_state() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+        adapter.set_active_turn_id(Some("turn-1".to_owned()));
+
+        let effects = adapter
+            .observe_native(managed_record(
+                r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#,
+            ))
+            .unwrap();
+        let provider_event = effects
+            .iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::ProviderEvent(event) => Some(event),
+                _ => None,
+            })
+            .expect("provider event is emitted");
+
+        assert_eq!(
+            provider_event.provider_thread_id.as_deref(),
+            Some("codex-thread-1")
+        );
+        assert_eq!(provider_event.provider_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(provider_event.phase, ProviderEventPhase::Completed);
     }
 
     fn managed_input(local_input_id: &str, content: &str, immediate: bool) -> HarnessInput {
@@ -2431,6 +2615,88 @@ mod tests {
         assert_eq!(event.provider_item_id.as_deref(), Some("tool-1"));
         assert_eq!(event.normalized_payload["body"], "running");
         assert_eq!(event.raw_json["method"], "item/mcpToolCall/progress");
+    }
+
+    #[test]
+    fn raw_response_tool_search_output_does_not_become_assistant_output() {
+        let message = parse_jsonl_message(
+            r#"{"method":"rawResponseItem/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"tool_search_output","id":"search-1","call_id":"call-1","execution":"completed","status":"completed","tools":[{"name":"list_files","output":"/repo\nCargo.toml\ncrates\nprogress.md"}]}}}"#,
+            1,
+        )
+        .unwrap();
+
+        let event = message.to_provider_event_draft().into_provider_event_draft(
+            crate::provider_events::ProviderEventContext {
+                workspace_id: Some(1),
+                chat_thread_id: Some(7),
+                process_id: Some(9),
+                occurred_at_ms: 42,
+                schema_version: 1,
+                adapter_version: "codex-app-server-test".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            event.kind,
+            crate::provider_events::ProviderEventKind::WebBrowserMedia
+        );
+        assert_eq!(
+            event.provider_subtype.as_deref(),
+            Some("rawResponseItem/tool_search_output/completed")
+        );
+        assert_eq!(event.provider_item_id.as_deref(), Some("search-1"));
+        assert_eq!(event.normalized_payload["title"], "Search output");
+        assert_ne!(
+            event.kind,
+            crate::provider_events::ProviderEventKind::AssistantOutput
+        );
+    }
+
+    #[test]
+    fn process_notifications_classify_as_command_process_events() {
+        let cases = [
+            (
+                r#"{"method":"process/outputDelta","params":{"threadId":"thread-1","processId":"proc-1","stream":"stdout","data":"bG9nCg==","isFinal":false}}"#,
+                "process/outputDelta",
+                crate::provider_events::ProviderEventPhase::Delta,
+                Some("proc-1"),
+            ),
+            (
+                r#"{"method":"process/exited","params":{"threadId":"thread-1","processId":"proc-1","exitCode":0,"stdout":"ready\n","stderr":"","durationMs":1200}}"#,
+                "process/exited",
+                crate::provider_events::ProviderEventPhase::Completed,
+                Some("proc-1"),
+            ),
+            (
+                r#"{"method":"rawResponseItem/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"local_shell_call","id":"shell-1","status":"completed","action":{"type":"exec","command":["npm","run","dev"],"working_directory":"/repo"}}}}"#,
+                "rawResponseItem/local_shell_call/completed",
+                crate::provider_events::ProviderEventPhase::Completed,
+                Some("shell-1"),
+            ),
+        ];
+
+        for (raw, subtype, phase, item_id) in cases {
+            let event = parse_jsonl_message(raw, 1)
+                .unwrap()
+                .to_provider_event_draft()
+                .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: Some(1),
+                    chat_thread_id: Some(7),
+                    process_id: Some(9),
+                    occurred_at_ms: 42,
+                    schema_version: 1,
+                    adapter_version: "codex-app-server-test".to_owned(),
+                });
+
+            assert_eq!(
+                event.kind,
+                crate::provider_events::ProviderEventKind::CommandProcess,
+                "{subtype}"
+            );
+            assert_eq!(event.provider_subtype.as_deref(), Some(subtype));
+            assert_eq!(event.phase, phase);
+            assert_eq!(event.provider_item_id.as_deref(), item_id);
+        }
     }
 
     #[test]

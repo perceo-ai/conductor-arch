@@ -1,10 +1,12 @@
 use crate::file_component::OpenWorkspaceFile;
 use adw::ToastOverlay;
+use anyhow::Context;
 use archductor_core::agent_tools::launchable_provider_key;
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
+use archductor_core::pty::PtySession;
 use archductor_core::settings::PromptKind;
 use archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, MergePullRequestResult, ProcessRecord, ProcessStatus,
@@ -24,6 +26,7 @@ use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 use tracing::error;
 
 const WORKSPACE_SPLIT_MIN_START: i32 = 280;
@@ -566,11 +569,7 @@ impl WorkspaceRunConsoleTerminalState {
     }
 
     fn display_text(&self) -> &str {
-        if self.transcript.is_empty() {
-            "$ "
-        } else {
-            &self.transcript
-        }
+        &self.transcript
     }
 
     fn append_command(&mut self, command: &str) {
@@ -590,41 +589,52 @@ impl WorkspaceRunConsoleTerminalState {
     }
 }
 
-#[derive(Debug, Clone)]
 struct WorkspaceRunConsoleTerminalConnection {
     database_path: PathBuf,
     workspace_name: String,
+    process_id: i64,
+    pty: PtySession,
 }
 
 impl WorkspaceRunConsoleTerminalConnection {
-    fn runtime(database_path: PathBuf, workspace_name: String) -> Self {
+    fn local_pty(
+        database_path: PathBuf,
+        workspace_name: String,
+        process_id: i64,
+        pty: PtySession,
+    ) -> Self {
         Self {
             database_path,
             workspace_name,
+            process_id,
+            pty,
         }
     }
 
-    fn write(&mut self, input: &str) -> anyhow::Result<()> {
-        let Some(input) = normalize_terminal_input_for_send(input) else {
-            return Ok(());
-        };
-        let Some(record) = latest_running_runtime_shell(&self.database_path, &self.workspace_name)
-        else {
-            return Err(anyhow::anyhow!(
-                "no running runtime shell session; start shell first"
-            ));
-        };
-        crate::archcar_async::spawn_archcar_request(
-            archductor_core::paths::AppPaths::from_env(),
-            ArchcarRequest::SendInput {
-                session_id: record.id,
-                input,
-                visible_input: None,
-                kind: ArchcarInputKind::ControlCommand,
-                delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
-            },
-        );
-        Ok(())
+    fn write_bytes(&mut self, input: &[u8]) -> anyhow::Result<()> {
+        self.pty.write_bytes(input)
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) -> anyhow::Result<()> {
+        self.pty.resize(rows, cols)
+    }
+
+    fn read_available(&mut self) -> String {
+        self.pty.read_available()
+    }
+
+    fn has_exited(&mut self) -> bool {
+        self.pty.has_exited().unwrap_or(false)
+    }
+
+    fn persist_output(&self, output: &str) {
+        let _ = WorkspaceStore::open_app(self.database_path.clone())
+            .and_then(|store| store.append_terminal_process_output(self.process_id, output));
+    }
+
+    fn mark_exited(&self) {
+        let _ = WorkspaceStore::open_app(self.database_path.clone())
+            .and_then(|store| store.mark_terminal_process_exited(self.process_id, None));
     }
 }
 
@@ -2421,7 +2431,7 @@ fn ws_run_console(
     run_console_states: RunConsoleStateStore,
     run_console_terminals: RunConsoleTerminalStore,
     _refresh_hub: RefreshHub,
-    _toast_overlay: ToastOverlay,
+    toast_overlay: ToastOverlay,
     _collapse_sidebar: Rc<dyn Fn()>,
 ) -> GBox {
     {
@@ -2527,6 +2537,7 @@ fn ws_run_console(
             db_path,
             run_console_states.clone(),
             run_console_terminals.clone(),
+            ToastManager::new(&toast_overlay),
         );
         content.add_named(&tab, Some(&name));
         let button = text_button(&label);
@@ -2543,6 +2554,7 @@ fn ws_run_console(
         let set_active = set_active.clone();
         let register_tab = register_tab.clone();
         let run_console_states = run_console_states.clone();
+        let toast_overlay = toast_overlay.clone();
         Rc::new(move || {
             if tabs.borrow().len() >= 7 {
                 return;
@@ -2564,6 +2576,7 @@ fn ws_run_console(
                 &db_path,
                 run_console_states.clone(),
                 run_console_terminals.clone(),
+                ToastManager::new(&toast_overlay),
             );
             content.add_named(&tab, Some(&name));
             let button = text_button(&label);
@@ -2680,10 +2693,11 @@ fn queue_workspace_prompt_draft(app_state: &AppState, prompt: &str) {
 fn workspace_terminal_tab_view(
     workspace_name: &str,
     tab_name: &str,
-    label: &str,
+    _label: &str,
     db_path: &Path,
     run_console_states: RunConsoleStateStore,
     run_console_terminals: RunConsoleTerminalStore,
+    toast_manager: ToastManager,
 ) -> GBox {
     ensure_workspace_terminal_session(
         db_path,
@@ -2692,134 +2706,69 @@ fn workspace_terminal_tab_view(
         &run_console_states,
         &run_console_terminals,
     );
-    let panel = GBox::new(Orientation::Vertical, 8);
-    panel.add_css_class("ws-run-panel");
-
-    let heading = Label::new(Some(label));
-    heading.add_css_class("detail-label");
-    heading.set_xalign(0.0);
-    panel.append(&heading);
-
-    let command_row = make_action_row();
-    let prompt_label = Label::new(Some("$"));
-    prompt_label.add_css_class("ws-terminal-prompt");
-    prompt_label.set_xalign(0.0);
-    let command_entry = Entry::new();
-    command_entry.set_placeholder_text(Some("type shell command"));
-    command_entry.set_hexpand(true);
-    command_entry.add_css_class("ws-terminal-entry");
-    let run_btn = text_button("Send");
-    run_btn.add_css_class("suggested-action");
-    let clear_btn = text_button("Clear");
-    clear_btn.add_css_class("secondary-action");
-    command_row.append(&prompt_label);
-    command_row.append(&command_entry);
-    command_row.append(&run_btn);
-    command_row.append(&clear_btn);
-    panel.append(&command_row);
+    let panel = GBox::new(Orientation::Vertical, 0);
+    panel.add_css_class("ws-run-terminal-panel");
+    panel.set_hexpand(true);
+    panel.set_vexpand(true);
 
     let initial_terminal_state = run_console_states
         .borrow()
         .get(workspace_name)
         .and_then(|state| state.terminal_by_name(tab_name).cloned())
         .unwrap_or_else(|| WorkspaceRunConsoleTerminalState::new(1));
-    command_entry.set_text(&initial_terminal_state.draft);
-    let output_surface = terminal::read_only_terminal_grid(
+    let output_surface = terminal::interactive_terminal_grid(
         initial_terminal_state.display_text(),
         &terminal::TerminalPreferences::default(),
     );
+    let terminal_key = run_console_terminal_key(workspace_name, tab_name);
+    let input_terminals = run_console_terminals.clone();
+    let input_toast = toast_manager.clone();
+    let input_key = terminal_key.clone();
+    terminal::install_terminal_input_controller_with_sender(
+        &output_surface,
+        Rc::new(move |bytes| {
+            let mut terminals = input_terminals.borrow_mut();
+            let Some(connection) = terminals.get_mut(&input_key) else {
+                input_toast.error("No running terminal for this tab.".to_owned());
+                return;
+            };
+            if let Err(err) = connection.write_bytes(&bytes) {
+                input_toast.error(format!("Terminal input failed: {err:#}"));
+            }
+        }),
+    );
+    let resize_terminals = run_console_terminals.clone();
+    let resize_key = terminal_key.clone();
+    let resize_surface = output_surface.clone();
+    let last_pty_size = Rc::new(RefCell::new(None::<(u16, u16)>));
+    let last_pty_size_for_tick = last_pty_size.clone();
+    output_surface.widget().add_tick_callback(move |_, _| {
+        let (rows, cols) = resize_surface.viewport_size();
+        if *last_pty_size_for_tick.borrow() == Some((rows, cols)) {
+            return gtk::glib::ControlFlow::Continue;
+        }
+        *last_pty_size_for_tick.borrow_mut() = Some((rows, cols));
+        let mut terminals = resize_terminals.borrow_mut();
+        if let Some(connection) = terminals.get_mut(&resize_key) {
+            if let Err(err) = connection.resize(rows, cols) {
+                tracing::warn!(error = %err, rows, cols, "workspace terminal pty resize failed");
+            }
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+    output_surface.widget().set_hexpand(true);
+    output_surface.widget().set_vexpand(true);
     panel.append(output_surface.widget());
 
     let buffer = output_surface.buffer();
-    let state_for_change = run_console_states.clone();
-    let workspace_for_change = workspace_name.to_owned();
-    let tab_for_change = tab_name.to_owned();
-    command_entry.connect_changed(move |entry| {
-        if let Some(state) = state_for_change.borrow_mut().get_mut(&workspace_for_change) {
-            if let Some(terminal) = state.terminal_by_name_mut(&tab_for_change) {
-                terminal.draft = entry.text().to_string();
-            }
-        }
-    });
-    let db_for_run = db_path.to_path_buf();
-    let workspace_for_run = workspace_name.to_owned();
-    let buffer_for_run = buffer.clone();
-    let tab_for_run = tab_name.to_owned();
-    let state_for_run = run_console_states.clone();
-    let terminals_for_run = run_console_terminals.clone();
-    let command_entry_for_run = command_entry.clone();
-    let run_command = Rc::new(move || {
-        let command = command_entry_for_run.text().to_string();
-        let Some(send_input) = normalize_terminal_input_for_send(&command) else {
-            return;
-        };
-        let transcript = {
-            let mut states = state_for_run.borrow_mut();
-            let Some(state) = states.get_mut(&workspace_for_run) else {
-                return;
-            };
-            let Some(terminal) = state.terminal_by_name_mut(&tab_for_run) else {
-                return;
-            };
-            terminal.draft.clear();
-            terminal.display_text().to_owned()
-        };
-        command_entry_for_run.set_text("");
-        let key = run_console_terminal_key(&workspace_for_run, &tab_for_run);
-        if !terminals_for_run.borrow().contains_key(&key) {
-            ensure_workspace_terminal_session(
-                &db_for_run,
-                &workspace_for_run,
-                &tab_for_run,
-                &state_for_run,
-                &terminals_for_run,
-            );
-        }
-        let mut terminals = terminals_for_run.borrow_mut();
-        let Some(connection) = terminals.get_mut(&key) else {
-            return;
-        };
-        let write_result = connection.write(&(send_input.clone() + "\n"));
-        let updated_transcript =
-            if let Some(state) = state_for_run.borrow_mut().get_mut(&workspace_for_run) {
-                if let Some(terminal) = state.terminal_by_name_mut(&tab_for_run) {
-                    terminal.append_submitted_input(&send_input);
-                    match write_result {
-                        Ok(()) => {}
-                        Err(err) => {
-                            terminal.append_result(&format!("[terminal send paused]\n{err:#}\n"))
-                        }
-                    }
-                    terminal.display_text().to_owned()
-                } else {
-                    transcript
-                }
-            } else {
-                transcript
-            };
-        buffer_for_run.set_text(&updated_transcript);
-    });
-    let run_btn_handler = run_command.clone();
-    run_btn.connect_clicked(move |_| {
-        run_btn_handler();
-    });
-    let run_activate = run_command.clone();
-    command_entry.connect_activate(move |_| {
-        run_activate();
-    });
-
-    let buffer_for_clear = buffer.clone();
-    let state_for_clear = run_console_states;
-    let workspace_for_clear = workspace_name.to_owned();
-    let tab_for_clear = tab_name.to_owned();
-    clear_btn.connect_clicked(move |_| {
-        if let Some(state) = state_for_clear.borrow_mut().get_mut(&workspace_for_clear) {
-            if let Some(terminal) = state.terminal_by_name_mut(&tab_for_clear) {
-                terminal.clear_transcript();
-            }
-        }
-        buffer_for_clear.set_text("$ ");
-    });
+    install_workspace_terminal_output_pump(
+        terminal_key,
+        run_console_states.clone(),
+        run_console_terminals.clone(),
+        buffer.clone(),
+        workspace_name.to_owned(),
+        tab_name.to_owned(),
+    );
 
     panel
 }
@@ -2851,24 +2800,65 @@ fn spawn_workspace_terminal_session(
     workspace_name: &str,
 ) -> anyhow::Result<WorkspaceRunConsoleTerminalConnection> {
     let store = WorkspaceStore::open_app(db_path)?;
-    let _ = store.session_launch(workspace_name, SessionKind::Shell)?;
-    crate::archcar_async::spawn_archcar_request(
-        archductor_core::paths::AppPaths::from_env(),
-        ArchcarRequest::SpawnSession {
-            workspace: workspace_name.to_owned(),
-            kind: SessionKind::Shell,
-            harness: None,
-        },
-    );
-    Ok(WorkspaceRunConsoleTerminalConnection::runtime(
+    let launch = store.session_launch(workspace_name, SessionKind::Shell)?;
+    let pty = PtySession::spawn(launch.program, launch.args, &launch.cwd, launch.env, 24, 80);
+    let pty = pty?;
+    let pid = pty.process_id().context("terminal pty has no process id")?;
+    let record = store.record_terminal_process(workspace_name, "shell", pid)?;
+    Ok(WorkspaceRunConsoleTerminalConnection::local_pty(
         db_path.to_path_buf(),
         workspace_name.to_owned(),
+        record.id,
+        pty,
     ))
 }
 
 fn append_terminal_buffer_text(buffer: &gtk::TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
+}
+
+fn install_workspace_terminal_output_pump(
+    terminal_key: String,
+    run_console_states: RunConsoleStateStore,
+    run_console_terminals: RunConsoleTerminalStore,
+    buffer: gtk::TextBuffer,
+    workspace_name: String,
+    tab_name: String,
+) {
+    gtk::glib::timeout_add_local(Duration::from_millis(33), move || {
+        let (output, exited) = {
+            let mut terminals = run_console_terminals.borrow_mut();
+            let Some(connection) = terminals.get_mut(&terminal_key) else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            let output = connection.read_available();
+            if !output.is_empty() {
+                connection.persist_output(&output);
+            }
+            let exited = connection.has_exited();
+            if exited {
+                connection.mark_exited();
+            }
+            (output, exited)
+        };
+
+        if !output.is_empty() {
+            append_terminal_buffer_text(&buffer, &output);
+            if let Some(state) = run_console_states.borrow_mut().get_mut(&workspace_name) {
+                if let Some(terminal) = state.terminal_by_name_mut(&tab_name) {
+                    terminal.append_result(&output);
+                }
+            }
+        }
+
+        if exited {
+            run_console_terminals.borrow_mut().remove(&terminal_key);
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
 }
 
 fn workspace_files_panel(
@@ -5733,7 +5723,9 @@ fn workspace_todos_text(store: &WorkspaceStore, name: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PullRequestStateKind {
     Open,
+    Draft,
     Pending,
+    ReviewNeeded,
     Ready,
     Failed,
     MergeBlocked,
@@ -5751,7 +5743,9 @@ impl PullRequestStatusSummary {
     pub(crate) fn attention_label(&self) -> Option<&str> {
         match self.kind {
             PullRequestStateKind::Open => None,
-            PullRequestStateKind::Pending
+            PullRequestStateKind::Draft
+            | PullRequestStateKind::ReviewNeeded
+            | PullRequestStateKind::Pending
             | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
             | PullRequestStateKind::MergeBlocked
@@ -5762,7 +5756,9 @@ impl PullRequestStatusSummary {
     pub(crate) fn attention_css_class(&self) -> Option<&'static str> {
         match self.kind {
             PullRequestStateKind::Open => None,
-            PullRequestStateKind::Pending
+            PullRequestStateKind::Draft
+            | PullRequestStateKind::ReviewNeeded
+            | PullRequestStateKind::Pending
             | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
             | PullRequestStateKind::MergeBlocked
@@ -5794,6 +5790,13 @@ pub(crate) fn pull_request_status_summary(
     }
 
     if let Some(readiness) = readiness {
+        if pull_request_is_draft(readiness) {
+            return PullRequestStatusSummary {
+                label: "draft".to_owned(),
+                css_class: "ws-pr-status-muted",
+                kind: PullRequestStateKind::Draft,
+            };
+        }
         if pull_request_is_merge_blocked(readiness) {
             return PullRequestStatusSummary {
                 label: "merge blocked".to_owned(),
@@ -5803,16 +5806,25 @@ pub(crate) fn pull_request_status_summary(
         }
         if pull_request_is_failed(readiness) {
             return PullRequestStatusSummary {
-                label: "checks failed".to_owned(),
+                label: pull_request_ci_status_label(readiness)
+                    .unwrap_or_else(|| "checks failed".to_owned()),
                 css_class: "ws-pr-status-failed",
                 kind: PullRequestStateKind::Failed,
             };
         }
         if pull_request_is_pending(readiness) {
             return PullRequestStatusSummary {
-                label: "checks pending".to_owned(),
+                label: pull_request_ci_status_label(readiness)
+                    .unwrap_or_else(|| "checks pending".to_owned()),
                 css_class: "ws-pr-status-pending",
                 kind: PullRequestStateKind::Pending,
+            };
+        }
+        if pull_request_needs_review(readiness) {
+            return PullRequestStatusSummary {
+                label: "review needed".to_owned(),
+                css_class: "ws-pr-status-pending",
+                kind: PullRequestStateKind::ReviewNeeded,
             };
         }
         if pull_request_is_ready(readiness, summary) {
@@ -5996,6 +6008,18 @@ fn workspace_pr_primary_action(
         Some(PullRequestStateKind::Pending) => Some(WorkspacePrTopAction {
             label: "View PR",
             tooltip: "Open pull request with pending checks",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        Some(PullRequestStateKind::Draft) => Some(WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open draft pull request",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        Some(PullRequestStateKind::ReviewNeeded) => Some(WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request awaiting review",
             css_class: "ws-pr-status-muted",
             kind: WorkspacePrTopActionKind::ViewPr,
         }),
@@ -6256,13 +6280,7 @@ fn workspace_pr_status_panel(
         chip.connect_clicked(move |_| open_external_url(&url));
         panel.append(&chip);
     }
-    if workspace_pr_status_is_loading(&snapshot) {
-        let spinner = Spinner::new();
-        spinner.start();
-        panel.append(&spinner);
-    }
     let title = Label::new(Some(match action {
-        _ if workspace_pr_status_is_loading(&snapshot) => "Updating review state...",
         Some(action) => workspace_pr_status_title(&snapshot, action),
         None => "No changes",
     }));
@@ -6371,6 +6389,8 @@ fn workspace_pr_status_title(
     }
     match snapshot.status.as_ref().map(|status| status.kind) {
         Some(PullRequestStateKind::Pending) => "Checks pending",
+        Some(PullRequestStateKind::Draft) => "Draft pull request",
+        Some(PullRequestStateKind::ReviewNeeded) => "Review needed",
         Some(PullRequestStateKind::Ready) => "Ready to merge",
         Some(PullRequestStateKind::Failed) => "Checks failed",
         Some(PullRequestStateKind::MergeBlocked) => "Merge blocked",
@@ -6381,7 +6401,8 @@ fn workspace_pr_status_title(
 }
 
 fn workspace_pr_status_is_loading(snapshot: &WorkspacePrStatusSnapshot) -> bool {
-    snapshot.refreshing || (snapshot.pr.is_some() && !snapshot.has_review_snapshot)
+    let _ = snapshot;
+    false
 }
 
 fn pull_request_status_summary_without_checks_summary(
@@ -6397,6 +6418,13 @@ fn pull_request_status_summary_without_checks_summary(
     }
 
     if let Some(readiness) = readiness {
+        if pull_request_is_draft(readiness) {
+            return PullRequestStatusSummary {
+                label: "draft".to_owned(),
+                css_class: "ws-pr-status-muted",
+                kind: PullRequestStateKind::Draft,
+            };
+        }
         if pull_request_is_merge_blocked(readiness) {
             return PullRequestStatusSummary {
                 label: "merge blocked".to_owned(),
@@ -6406,16 +6434,25 @@ fn pull_request_status_summary_without_checks_summary(
         }
         if pull_request_is_failed(readiness) {
             return PullRequestStatusSummary {
-                label: "checks failed".to_owned(),
+                label: pull_request_ci_status_label(readiness)
+                    .unwrap_or_else(|| "checks failed".to_owned()),
                 css_class: "ws-pr-status-failed",
                 kind: PullRequestStateKind::Failed,
             };
         }
         if pull_request_is_pending(readiness) {
             return PullRequestStatusSummary {
-                label: "checks pending".to_owned(),
+                label: pull_request_ci_status_label(readiness)
+                    .unwrap_or_else(|| "checks pending".to_owned()),
                 css_class: "ws-pr-status-pending",
                 kind: PullRequestStateKind::Pending,
+            };
+        }
+        if pull_request_needs_review(readiness) {
+            return PullRequestStatusSummary {
+                label: "review needed".to_owned(),
+                css_class: "ws-pr-status-pending",
+                kind: PullRequestStateKind::ReviewNeeded,
             };
         }
     }
@@ -6433,6 +6470,61 @@ fn pull_request_is_failed(readiness: &archductor_core::workspace::PullRequestRea
             .deployments
             .iter()
             .any(|deployment| deployment.is_failure())
+}
+
+fn pull_request_is_draft(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
+    readiness.is_draft.unwrap_or(false)
+        || readiness
+            .state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("draft"))
+}
+
+fn pull_request_ci_status_label(
+    readiness: &archductor_core::workspace::PullRequestReadiness,
+) -> Option<String> {
+    let failing = readiness
+        .checks
+        .iter()
+        .filter(|check| check.is_failure())
+        .count()
+        + readiness
+            .deployments
+            .iter()
+            .filter(|deployment| deployment.is_failure())
+            .count();
+    let running = readiness
+        .checks
+        .iter()
+        .filter(|check| check.is_pending())
+        .count()
+        + readiness
+            .deployments
+            .iter()
+            .filter(|deployment| deployment.is_pending())
+            .count();
+    if failing == 0 && running == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if failing > 0 {
+        parts.push(format!("{failing} failing"));
+    }
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    Some(parts.join(", "))
+}
+
+fn pull_request_needs_review(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
+    matches!(
+        readiness.review_decision.as_deref(),
+        Some("REVIEW_REQUIRED") | Some("REVIEW_REQUIRED_WITH_COMMENT")
+    ) && readiness.checks.iter().all(|check| check.is_success())
+        && readiness
+            .deployments
+            .iter()
+            .all(|deployment| deployment.is_success())
 }
 
 fn pull_request_is_merge_blocked(
@@ -7319,7 +7411,10 @@ fn workspace_checks_panel(
 
             let actions = make_action_stack();
             match status_summary.kind {
-                PullRequestStateKind::Open | PullRequestStateKind::Pending => {
+                PullRequestStateKind::Open
+                | PullRequestStateKind::Draft
+                | PullRequestStateKind::Pending
+                | PullRequestStateKind::ReviewNeeded => {
                     let top_row = make_action_row();
                     let summary_btn = secondary_button(action_labels[0]);
                     let review_btn = secondary_button(action_labels[1]);
@@ -7753,7 +7848,9 @@ fn pull_request_action_labels(kind: Option<PullRequestStateKind>) -> Vec<&'stati
     match kind {
         None => vec!["Push branch", "Create PR"],
         Some(PullRequestStateKind::Open) => vec!["PR summary", "Reviews", "Refresh"],
+        Some(PullRequestStateKind::Draft) => vec!["PR summary", "Reviews", "Refresh"],
         Some(PullRequestStateKind::Pending) => vec!["PR summary", "Reviews", "Refresh"],
+        Some(PullRequestStateKind::ReviewNeeded) => vec!["PR summary", "Reviews", "Refresh"],
         Some(PullRequestStateKind::Ready) => vec!["Merge", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Failed) => vec!["Fix checks", "PR summary", "Refresh"],
         Some(PullRequestStateKind::MergeBlocked) => vec!["Merge", "PR summary", "Refresh"],
@@ -9341,6 +9438,21 @@ mod tests {
         }
     }
 
+    fn test_pull_request_readiness() -> archductor_core::workspace::PullRequestReadiness {
+        archductor_core::workspace::PullRequestReadiness {
+            state: Some("OPEN".to_owned()),
+            is_draft: Some(false),
+            merge_state_status: None,
+            mergeable: None,
+            review_decision: None,
+            latest_reviews: Vec::new(),
+            comments: Vec::new(),
+            review_threads: Vec::new(),
+            checks: Vec::new(),
+            deployments: Vec::new(),
+        }
+    }
+
     #[test]
     fn workspace_tab_stack_name_maps_palette_targets_to_tabs() {
         assert_eq!(
@@ -10763,6 +10875,28 @@ mod tests",
     }
 
     #[test]
+    fn pr_status_snapshot_shows_stale_state_while_refreshing() {
+        let snapshot = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("OPEN")),
+            status: Some(PullRequestStatusSummary {
+                label: "1 running".to_owned(),
+                css_class: "ws-pr-status-pending",
+                kind: PullRequestStateKind::Pending,
+            }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: true,
+            has_review_snapshot: true,
+        };
+        let action = workspace_pr_primary_action(&snapshot).unwrap();
+
+        assert!(!workspace_pr_status_is_loading(&snapshot));
+        assert_eq!(
+            workspace_pr_status_title(&snapshot, action),
+            "Checks pending"
+        );
+    }
+
+    #[test]
     fn provider_session_kind_mapping_is_shared_and_case_insensitive() {
         assert_eq!(session_kind_from_provider("CLAUDE"), SessionKind::Claude);
         assert_eq!(session_kind_from_provider("SHELL"), SessionKind::Shell);
@@ -10966,6 +11100,7 @@ mod tests",
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
                 state: None,
+                is_draft: Some(false),
                 merge_state_status: None,
                 mergeable: None,
                 review_decision: None,
@@ -11008,10 +11143,89 @@ mod tests",
             },
         );
 
-        assert_eq!(status.label, "checks pending");
+        assert_eq!(status.label, "1 running");
         assert_eq!(status.css_class, "ws-pr-status-pending");
         assert_eq!(status.kind, PullRequestStateKind::Pending);
-        assert_eq!(status.attention_label(), Some("checks pending"));
+        assert_eq!(status.attention_label(), Some("1 running"));
+    }
+
+    #[test]
+    fn pull_request_status_summary_marks_draft_prs() {
+        let mut readiness = test_pull_request_readiness();
+        readiness.is_draft = Some(true);
+
+        let status = pull_request_status_summary(
+            &test_pull_request("OPEN"),
+            Some(&readiness),
+            &test_checks_summary(0, None, Vec::new()),
+        );
+
+        assert_eq!(status.label, "draft");
+        assert_eq!(status.css_class, "ws-pr-status-muted");
+        assert_eq!(status.kind, PullRequestStateKind::Draft);
+        assert_eq!(status.attention_label(), Some("draft"));
+    }
+
+    #[test]
+    fn pull_request_status_summary_counts_failing_and_running_checks() {
+        let mut readiness = test_pull_request_readiness();
+        readiness.checks = vec![
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "unit".to_owned(),
+                status: "FAILURE".to_owned(),
+                detail: None,
+            },
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "lint".to_owned(),
+                status: "ERROR".to_owned(),
+                detail: None,
+            },
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "e2e".to_owned(),
+                status: "IN_PROGRESS".to_owned(),
+                detail: None,
+            },
+        ];
+
+        let status = pull_request_status_summary(
+            &test_pull_request("OPEN"),
+            Some(&readiness),
+            &test_checks_summary(0, None, Vec::new()),
+        );
+
+        assert_eq!(status.label, "2 failing, 1 running");
+        assert_eq!(status.css_class, "ws-pr-status-failed");
+        assert_eq!(status.kind, PullRequestStateKind::Failed);
+        assert_eq!(status.attention_label(), Some("2 failing, 1 running"));
+    }
+
+    #[test]
+    fn pull_request_status_summary_marks_review_needed_when_checks_pass() {
+        let mut readiness = test_pull_request_readiness();
+        readiness.review_decision = Some("REVIEW_REQUIRED".to_owned());
+        readiness.checks = vec![
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "unit".to_owned(),
+                status: "SUCCESS".to_owned(),
+                detail: None,
+            },
+            archductor_core::workspace::PullRequestCheckRun {
+                name: "lint".to_owned(),
+                status: "SUCCESS".to_owned(),
+                detail: None,
+            },
+        ];
+
+        let status = pull_request_status_summary(
+            &test_pull_request("OPEN"),
+            Some(&readiness),
+            &test_checks_summary(0, None, Vec::new()),
+        );
+
+        assert_eq!(status.label, "review needed");
+        assert_eq!(status.css_class, "ws-pr-status-pending");
+        assert_eq!(status.kind, PullRequestStateKind::ReviewNeeded);
+        assert_eq!(status.attention_label(), Some("review needed"));
     }
 
     #[test]
@@ -11026,10 +11240,10 @@ mod tests",
     }
 
     #[test]
-    fn run_console_terminal_empty_state_renders_shell_prompt() {
+    fn run_console_terminal_empty_state_waits_for_native_shell_prompt() {
         let terminal = WorkspaceRunConsoleTerminalState::new(1);
 
-        assert_eq!(terminal.display_text(), "$ ");
+        assert_eq!(terminal.display_text(), "");
     }
 
     #[test]
@@ -11047,6 +11261,123 @@ mod tests",
             Some("  printf 'ok'  ".to_owned())
         );
         assert_eq!(normalize_terminal_input_for_send("   \n"), None);
+    }
+
+    #[test]
+    fn workspace_terminal_tab_accepts_direct_terminal_typing() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_terminal_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn run_console_terminal_key")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(
+            region.contains("terminal::interactive_terminal_grid"),
+            "workspace terminal tabs must use the direct-key terminal surface"
+        );
+        assert!(
+            region.contains("terminal::install_terminal_input_controller"),
+            "workspace terminal tabs must send keypresses from the terminal surface"
+        );
+        assert!(
+            !region.contains("Entry::new()"),
+            "workspace terminal tabs should not require a separate shell command entry"
+        );
+        assert!(
+            !region.contains("type shell command"),
+            "workspace terminal tabs should not expose command-entry placeholder copy"
+        );
+        assert!(region.contains("ws-run-terminal-panel"));
+        assert!(region.contains("set_hexpand(true)"));
+        assert!(region.contains("set_vexpand(true)"));
+        assert!(
+            !region.contains("Label::new"),
+            "workspace terminal tabs should not render a label above the terminal"
+        );
+        assert!(
+            !region.contains("Clear"),
+            "workspace terminal tabs should clear via the shell's clear command, not a GTK button"
+        );
+        assert!(
+            !region.contains("make_action_row"),
+            "workspace terminal tabs should not reserve space for control rows"
+        );
+    }
+
+    #[test]
+    fn workspace_terminal_tab_does_not_send_typing_through_archcar_rpc() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_terminal_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn run_console_terminal_key")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(region.contains("install_terminal_input_controller_with_sender"));
+        assert!(region.contains("connection.write_bytes(&bytes)"));
+        assert!(
+            !region.contains("ArchcarRequest::SendInput"),
+            "terminal keystrokes must write to the tab PTY, not the Archcar RPC stream"
+        );
+    }
+
+    #[test]
+    fn workspace_terminal_tab_resizes_local_pty_from_terminal_viewport() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_terminal_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn run_console_terminal_key")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(
+            region.contains("output_surface.widget().add_tick_callback"),
+            "workspace terminal tabs must watch the visible terminal viewport"
+        );
+        assert!(
+            region.contains(".viewport_size()"),
+            "workspace terminal tabs must convert viewport pixels into PTY rows/cols"
+        );
+        assert!(
+            region.contains("connection.resize(rows, cols)"),
+            "workspace terminal tabs must resize the local PTY, not only the rendered grid"
+        );
+
+        let connection_start = source
+            .find("impl WorkspaceRunConsoleTerminalConnection")
+            .unwrap();
+        let connection_end = source[connection_start..]
+            .find("struct RunConsoleState")
+            .map(|offset| connection_start + offset)
+            .unwrap();
+        let connection_impl = &source[connection_start..connection_end];
+        assert!(connection_impl.contains("fn resize(&mut self, rows: u16, cols: u16)"));
+        assert!(connection_impl.contains("self.pty.resize(rows, cols)"));
+    }
+
+    #[test]
+    fn workspace_terminal_output_pump_is_scoped_to_one_terminal_tab() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("fn install_workspace_terminal_output_pump(")
+            .unwrap();
+        let end = source[start..]
+            .find("fn workspace_files_panel(")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(region.contains("terminal_key: String"));
+        assert!(region.contains("terminals.get_mut(&terminal_key)"));
+        assert!(region.contains("append_terminal_buffer_text(&buffer, &output)"));
+        assert!(
+            !region.contains("refresh_event"),
+            "terminal output pump must update only its tab, not trigger broad refreshes"
+        );
     }
 
     #[test]
@@ -11074,7 +11405,8 @@ mod tests",
             .unwrap();
         let region = &source[start..end];
 
-        assert!(region.contains("terminal::read_only_terminal_grid"));
+        assert!(region.contains("terminal::interactive_terminal_grid"));
+        assert!(region.contains("terminal::install_terminal_input_controller"));
         assert!(!region.contains("TextView::new()"));
     }
 
@@ -11378,6 +11710,7 @@ mod tests",
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
                 state: None,
+                is_draft: Some(false),
                 merge_state_status: None,
                 mergeable: None,
                 review_decision: None,
@@ -11420,7 +11753,7 @@ mod tests",
             },
         );
 
-        assert_eq!(status.label, "checks failed");
+        assert_eq!(status.label, "1 failing");
         assert_eq!(status.css_class, "ws-pr-status-failed");
         assert_eq!(status.kind, PullRequestStateKind::Failed);
     }
@@ -11488,6 +11821,7 @@ mod tests",
         };
         let readiness = archductor_core::workspace::PullRequestReadiness {
             state: None,
+            is_draft: Some(false),
             merge_state_status: None,
             mergeable: None,
             review_decision: None,
@@ -11504,10 +11838,10 @@ mod tests",
 
         let status = pull_request_status_summary_without_checks_summary(&pr, Some(&readiness));
 
-        assert_eq!(status.label, "checks failed");
+        assert_eq!(status.label, "1 failing");
         assert_eq!(status.css_class, "ws-pr-status-failed");
         assert_eq!(status.kind, PullRequestStateKind::Failed);
-        assert_eq!(status.attention_label(), Some("checks failed"));
+        assert_eq!(status.attention_label(), Some("1 failing"));
     }
 
     #[test]
@@ -11525,6 +11859,7 @@ mod tests",
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
                 state: None,
+                is_draft: Some(false),
                 merge_state_status: None,
                 mergeable: None,
                 review_decision: Some("CHANGES_REQUESTED".to_owned()),

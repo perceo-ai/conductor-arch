@@ -4,7 +4,8 @@
 .worktrees/
 .context/
 .codex/skills/
+.superpowers/
 .flatpak-builder/
-docs/superpowers/plans/*.md
+docs/superpowers/plans/
 .archductor/dev-instances/
 .archductor/settings.local.toml*

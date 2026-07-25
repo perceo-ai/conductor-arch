@@ -103,7 +103,6 @@ impl TerminalGridSurface {
         drawing_area.set_focusable(interactive);
         drawing_area.set_hexpand(true);
         drawing_area.set_vexpand(true);
-        drawing_area.set_content_width((cols as i32) * TERMINAL_CELL_WIDTH);
         update_terminal_grid_content_height(&drawing_area, &model.borrow());
         drawing_area.add_css_class("history-view");
         drawing_area.add_css_class("terminal-transcript-dark");
@@ -124,13 +123,7 @@ impl TerminalGridSurface {
             );
         });
 
-        let model_for_resize = model.clone();
-        drawing_area.connect_resize(move |area, width, height| {
-            let (rows, cols) = terminal_size_from_pixels(width, height);
-            model_for_resize
-                .borrow_mut()
-                .resize(rows as usize, cols as usize);
-            update_terminal_grid_content_height(area, &model_for_resize.borrow());
+        drawing_area.connect_resize(move |area, _, _| {
             area.queue_draw();
         });
 
@@ -160,9 +153,38 @@ impl TerminalGridSurface {
         buffer.set_text(text);
 
         let scroll = ScrolledWindow::new();
-        scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroll.set_propagate_natural_width(false);
+        scroll.set_hexpand(true);
         scroll.set_vexpand(true);
         scroll.set_child(Some(&drawing_area));
+        let area_for_viewport_resize = drawing_area.clone();
+        let model_for_viewport_resize = model.clone();
+        let last_viewport_size = Rc::new(RefCell::new(None::<(i32, i32)>));
+        let last_viewport_size_for_tick = last_viewport_size.clone();
+        scroll.add_tick_callback(move |scroll, _| {
+            let width = scroll.allocated_width();
+            let height = scroll.allocated_height();
+            if *last_viewport_size_for_tick.borrow() != Some((width, height)) {
+                *last_viewport_size_for_tick.borrow_mut() = Some((width, height));
+                resize_terminal_grid_for_viewport(
+                    &area_for_viewport_resize,
+                    &model_for_viewport_resize,
+                    width,
+                    height,
+                );
+            }
+            glib::ControlFlow::Continue
+        });
+
+        if interactive {
+            let focus_click = gtk::GestureClick::new();
+            let area_for_focus = drawing_area.clone();
+            focus_click.connect_pressed(move |_, _, _, _| {
+                area_for_focus.grab_focus();
+            });
+            drawing_area.add_controller(focus_click);
+        }
 
         Self {
             widget: scroll,
@@ -178,6 +200,10 @@ impl TerminalGridSurface {
 
     pub(crate) fn buffer(&self) -> TextBuffer {
         self.buffer.clone()
+    }
+
+    pub(crate) fn viewport_size(&self) -> (u16, u16) {
+        terminal_surface_viewport_size(self)
     }
 
     fn area(&self) -> DrawingArea {
@@ -202,7 +228,10 @@ pub(crate) fn read_only_terminal_grid(
     TerminalGridSurface::new(text, preferences, false)
 }
 
-fn interactive_terminal_grid(text: &str, preferences: &TerminalPreferences) -> TerminalGridSurface {
+pub(crate) fn interactive_terminal_grid(
+    text: &str,
+    preferences: &TerminalPreferences,
+) -> TerminalGridSurface {
     TerminalGridSurface::new(text, preferences, true)
 }
 
@@ -538,15 +567,49 @@ fn update_terminal_grid_content_height(area: &DrawingArea, model: &TerminalEmula
     area.set_content_height(terminal_grid_content_height(model.scrollable_line_count()));
 }
 
+fn resize_terminal_grid_for_viewport(
+    area: &DrawingArea,
+    model: &Rc<RefCell<TerminalEmulatorModel>>,
+    width: i32,
+    height: i32,
+) {
+    let (rows, cols) = terminal_size_from_pixels(width, height);
+    model.borrow_mut().resize(rows as usize, cols as usize);
+    update_terminal_grid_content_height(area, &model.borrow());
+    area.queue_draw();
+}
+
 fn terminal_grid_content_height(lines: usize) -> i32 {
     ((lines.max(1) as i32) * TERMINAL_CELL_HEIGHT) + (TERMINAL_PADDING_Y as i32 * 2)
 }
 
-fn install_terminal_input_controller(
+fn terminal_surface_viewport_size(surface: &TerminalGridSurface) -> (u16, u16) {
+    terminal_size_from_pixels(
+        surface.widget().allocated_width(),
+        surface.widget().allocated_height(),
+    )
+}
+
+pub(crate) fn install_terminal_input_controller(
     surface: &TerminalGridSurface,
     database_path: PathBuf,
     workspace_name: String,
     toast_manager: ToastManager,
+) {
+    let sender: Rc<dyn Fn(Vec<u8>)> = Rc::new(move |bytes| {
+        send_terminal_raw_input(
+            database_path.clone(),
+            workspace_name.clone(),
+            bytes,
+            toast_manager.clone(),
+        );
+    });
+    install_terminal_input_controller_with_sender(surface, sender);
+}
+
+pub(crate) fn install_terminal_input_controller_with_sender(
+    surface: &TerminalGridSurface,
+    send_input: Rc<dyn Fn(Vec<u8>)>,
 ) {
     let key_controller = EventControllerKey::new();
     let surface_for_key = surface.clone();
@@ -559,22 +622,15 @@ fn install_terminal_input_controller(
         if ctrl && name.eq_ignore_ascii_case("v") {
             if let Some(widget) = controller.widget() {
                 let clipboard = widget.clipboard();
-                let db = database_path.clone();
-                let workspace = workspace_name.clone();
-                let toast = toast_manager.clone();
                 let bracketed = surface_for_key.bracketed_paste();
+                let send_input = send_input.clone();
                 glib::spawn_future_local(async move {
                     match clipboard.read_text_future().await {
                         Ok(Some(text)) if !text.is_empty() => {
-                            send_terminal_raw_input(
-                                db,
-                                workspace,
-                                encode_terminal_paste(text.as_str(), bracketed),
-                                toast,
-                            );
+                            send_input(encode_terminal_paste(text.as_str(), bracketed));
                         }
                         Ok(_) => {}
-                        Err(err) => toast.error(format!("Terminal paste failed: {err}")),
+                        Err(err) => tracing::warn!(error = %err, "terminal paste failed"),
                     }
                 });
             }
@@ -587,12 +643,7 @@ fn install_terminal_input_controller(
         let Some(bytes) = encode_terminal_key_event(event) else {
             return gtk::glib::Propagation::Proceed;
         };
-        send_terminal_raw_input(
-            database_path.clone(),
-            workspace_name.clone(),
-            bytes,
-            toast_manager.clone(),
-        );
+        send_input(bytes);
         gtk::glib::Propagation::Stop
     });
     surface.area().add_controller(key_controller);
@@ -797,7 +848,6 @@ pub fn embedded_terminal_panel(
         workspace_name.to_owned(),
         toast_manager.clone(),
     );
-    let transcript = terminal_surface.area();
     let transcript_buffer = terminal_surface.buffer();
     set_terminal_buffer_scrollback(&transcript_buffer, preferences.scrollback_lines);
     {
@@ -805,16 +855,17 @@ pub fn embedded_terminal_panel(
         let workspace_for_resize_event = workspace_name.to_owned();
         let last_size = Rc::new(RefCell::new(None::<(u16, u16)>));
         let last_size_for_resize = last_size.clone();
-        transcript.connect_resize(move |_, width, height| {
-            let (rows, cols) = terminal_size_from_pixels(width, height);
+        let terminal_surface_for_resize = terminal_surface.clone();
+        terminal_surface.widget().add_tick_callback(move |_, _| {
+            let (rows, cols) = terminal_surface_viewport_size(&terminal_surface_for_resize);
             if *last_size_for_resize.borrow() == Some((rows, cols)) {
-                return;
+                return glib::ControlFlow::Continue;
             }
             *last_size_for_resize.borrow_mut() = Some((rows, cols));
             let Some(record) =
                 latest_running_runtime_shell(&db_for_resize_event, &workspace_for_resize_event)
             else {
-                return;
+                return glib::ControlFlow::Continue;
             };
             crate::archcar_async::spawn_archcar_request(
                 archductor_core::paths::AppPaths::from_env(),
@@ -824,6 +875,7 @@ pub fn embedded_terminal_panel(
                     cols,
                 },
             );
+            glib::ControlFlow::Continue
         });
     }
     if full_mode {
@@ -882,7 +934,7 @@ pub fn embedded_terminal_panel(
     let db_for_resize = database_path.clone();
     let workspace_for_resize = workspace_name.to_owned();
     let buffer_for_resize = transcript_buffer.clone();
-    let transcript_for_resize = transcript.clone();
+    let terminal_surface_for_resize = terminal_surface.clone();
     resize_btn.connect_clicked(move |_| {
         let running_shell = latest_running_runtime_shell(&db_for_resize, &workspace_for_resize);
         let Some(record) = running_shell else {
@@ -892,10 +944,7 @@ pub fn embedded_terminal_panel(
             );
             return;
         };
-        let (rows, cols) = terminal_size_from_pixels(
-            transcript_for_resize.allocated_width(),
-            transcript_for_resize.allocated_height(),
-        );
+        let (rows, cols) = terminal_surface_viewport_size(&terminal_surface_for_resize);
         crate::archcar_async::spawn_archcar_request(
             archductor_core::paths::AppPaths::from_env(),
             ArchcarRequest::ResizeSession {
@@ -4017,6 +4066,84 @@ mod tests {
         assert!(
             !surface_impl.contains("set_content_height((rows as i32) * TERMINAL_CELL_HEIGHT)"),
             "fixed viewport-height content clips terminal scrollback"
+        );
+    }
+
+    #[test]
+    fn terminal_grid_surface_forbids_horizontal_scrolling() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("impl TerminalGridSurface")
+            .expect("terminal grid surface implementation exists");
+        let end = source[start..]
+            .find("pub(crate) fn read_only_terminal_grid")
+            .map(|offset| start + offset)
+            .expect("read-only constructor follows grid implementation");
+        let surface_impl = &source[start..end];
+
+        assert!(
+            surface_impl.contains("scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic)"),
+            "terminal grid must disable horizontal scrolling and wrap resizing through the viewport"
+        );
+        assert!(
+            surface_impl.contains("scroll.set_propagate_natural_width(false)"),
+            "terminal grid natural width must not force the workspace panel wider than its viewport"
+        );
+        assert!(
+            !surface_impl.contains("set_content_width((cols as i32) * TERMINAL_CELL_WIDTH)"),
+            "fixed 80-column content width creates a horizontal scroll range"
+        );
+    }
+
+    #[test]
+    fn terminal_grid_surface_resizes_from_scroll_viewport() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("impl TerminalGridSurface")
+            .expect("terminal grid surface implementation exists");
+        let end = source[start..]
+            .find("pub(crate) fn read_only_terminal_grid")
+            .map(|offset| start + offset)
+            .expect("read-only constructor follows grid implementation");
+        let surface_impl = &source[start..end];
+
+        assert!(
+            surface_impl.contains("resize_terminal_grid_for_viewport"),
+            "terminal model size must follow the visible scroll viewport, not the scrollback canvas allocation"
+        );
+        assert!(
+            !surface_impl.contains("let (rows, cols) = terminal_size_from_pixels(width, height);"),
+            "drawing area resize dimensions include scrollback content height and must not drive PTY rows"
+        );
+    }
+
+    #[test]
+    fn embedded_terminal_resizes_runtime_shell_from_scroll_viewport() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("pub fn embedded_terminal_panel")
+            .expect("embedded terminal panel exists");
+        let end = source[start..]
+            .find("fn clear_search_results")
+            .map(|offset| start + offset)
+            .expect("terminal helpers follow embedded panel");
+        let panel_impl = &source[start..end];
+
+        assert!(
+            panel_impl.contains("terminal_surface.widget().add_tick_callback"),
+            "runtime shell resize events must watch the visible terminal viewport"
+        );
+        assert!(
+            panel_impl.contains("terminal_surface_viewport_size"),
+            "manual runtime shell resize must use visible terminal viewport width"
+        );
+        assert!(
+            !panel_impl.contains("transcript.connect_resize"),
+            "drawing area resize follows scrollback canvas allocation and must not resize the runtime PTY"
+        );
+        assert!(
+            !panel_impl.contains("transcript_for_resize"),
+            "manual resize must not read drawing area allocation"
         );
     }
 

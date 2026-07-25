@@ -32,7 +32,7 @@ toast {
     color: @lc-text-strong;
     border: 1px solid #3a3a3a;
     border-radius: 10px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.34);
+    box-shadow: none;
     margin: 6px;
     padding: 6px;
 }
@@ -141,9 +141,6 @@ textview,
 .workspace-modal,
 .workspace-modal-preview,
 .project-template-card {
-    transition-property: background-color, border-color, color, box-shadow, opacity;
-    transition-duration: 160ms;
-    transition-timing-function: ease-out;
 }
 
 .dashboard,
@@ -179,7 +176,6 @@ textview,
     color: #8a8a8a;
     font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
     letter-spacing: 0.08em;
 }
 
@@ -221,7 +217,6 @@ textview,
     color: #8a8a8a;
     font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
     letter-spacing: 0.08em;
 }
 
@@ -362,16 +357,13 @@ entry {
     border-radius: 8px;
     font-size: 13px;
     padding: 7px 10px;
-    caret-color: #f5f5f5;
 }
 
 .sidebar-search:focus,
 .composer-bar entry:focus,
 entry:focus {
     border-color: #8a8a8a;
-    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.26);
-    outline: 1px solid transparent;
-    outline-offset: 2px;
+    box-shadow: none;
 }
 
 entry placeholder,
@@ -730,8 +722,6 @@ checkbutton {
 }
 
 .workspace-card-action:focus-visible {
-    outline: 2px solid #aaaaaa;
-    outline-offset: 2px;
 }
 
 .kanban-column-header {
@@ -941,7 +931,6 @@ separator {
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
-    text-transform: none;
 }
 
 .repo-section-count {
@@ -987,7 +976,6 @@ separator {
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
 }
 
 .action-input-row {
@@ -1972,7 +1960,7 @@ popover.ws-changes-popover contents {
     background-color: #1b1b1b;
     border: none;
     border-radius: 8px;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.3);
+    box-shadow: none;
     padding: 0;
 }
 popover.ws-changes-popover arrow {
@@ -2118,6 +2106,10 @@ row:hover .ws-folder-name {
 }
 .ws-run-panel {
     padding: 4px 12px 10px;
+}
+.ws-run-terminal-panel {
+    padding: 0;
+    margin: 0;
 }
 .ws-run-tab-bar {
     min-height: 38px;
@@ -2356,7 +2348,7 @@ popover.chat-menu-popover contents {
     background-color: #1e1e1e;
     border: none;
     border-radius: 10px;
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+    box-shadow: none;
 }
 .context-menu-popover {
     background-color: transparent;
@@ -2367,7 +2359,7 @@ popover.context-menu-popover contents {
     background-color: #1e1e1e;
     border: none;
     border-radius: 10px;
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+    box-shadow: none;
 }
 popover.context-menu-popover arrow {
     background-color: #1e1e1e;
@@ -2481,7 +2473,7 @@ popover.context-menu-popover arrow {
     background-color: transparent;
     border: none;
     border-radius: 0;
-    margin-bottom: 0;
+    margin-bottom: 3px;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -2551,6 +2543,53 @@ button.chat-inline-event-expander label {
     min-height: 0;
     padding: 0;
 }
+.chat-markdown-inline-view,
+.chat-markdown-inline-view text {
+    background-color: transparent;
+    color: #c6c6c6;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 0;
+    padding: 0;
+}
+.chat-markdown-chip {
+    background-color: #191919;
+    border: 1px solid #343434;
+    border-radius: 3px;
+    box-shadow: none;
+    color: #bdbdbd;
+    min-height: 0;
+    min-width: 0;
+    padding: 0 5px;
+}
+.chat-markdown-chip:hover {
+    background-color: #232323;
+    border-color: #4a4a4a;
+    box-shadow: none;
+}
+.chat-markdown-chip-label {
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 8px;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+.chat-markdown-file-chip {
+    border-color: rgba(195, 155, 80, 0.38);
+    padding: 0 5px;
+}
+.chat-markdown-file-chip-label {
+    color: #c39b50;
+    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 8px;
+    font-weight: 600;
+}
+.chat-markdown-code-chip-label,
+.chat-markdown-link-chip-label {
+    font-size: 8px;
+}
 .workspace-file-link {
     background-color: transparent;
     border: none;
@@ -2565,11 +2604,11 @@ button.chat-inline-event-expander label {
     padding: 2px 4px;
 }
 .workspace-file-link:hover {
-    background-color: rgba(134, 239, 172, 0.12);
+    background-color: rgba(195, 155, 80, 0.12);
     box-shadow: none;
 }
 .workspace-file-link label {
-    color: #d8f8e0;
+    color: #e6c98e;
     margin: 0;
     min-height: 0;
     padding: 0;
@@ -2701,10 +2740,6 @@ button.chat-inline-event-expander label {
     border: none;
     box-shadow: none;
 }
-.chat-queued-action-btn:focus-visible {
-    outline: 2px solid #8ab4f8;
-    outline-offset: 2px;
-}
 .chat-queued-action-btn:hover {
     background-color: #2a2a2a;
     color: #f0f0f0;
@@ -2815,8 +2850,7 @@ button.chat-inline-event-expander label {
 .settings-page .settings-editor:focus,
 .settings-page .settings-editor-shell:focus-within {
     border-color: #8a8a8a;
-    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
-    outline-offset: 2px;
+    box-shadow: none;
 }
 
 .chat-context-usage-danger {
@@ -2979,7 +3013,7 @@ window,
 .chat-menu-popover {
     background-color: #1f1f1f;
     border: 1px solid #2b2b2b;
-    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
+    box-shadow: none;
 }
 
 .dashboard-title,
@@ -3192,9 +3226,7 @@ combobox button:focus,
 textview:focus,
 .chat-composer-box:focus-within {
     border-color: #8a8a8a;
-    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
-    outline: 1px solid transparent;
-    outline-offset: 2px;
+    box-shadow: none;
 }
 
 .chat-composer-box .chat-input-scroll:focus-within,
@@ -3202,7 +3234,6 @@ textview:focus,
 .chat-composer-box .chat-input-view text:focus {
     border: none;
     box-shadow: none;
-    outline: none;
 }
 
 .workspace-modal-field:focus,
@@ -3210,8 +3241,7 @@ textview:focus,
 .settings-editor:focus,
 .chat-composer-box:focus-within {
     border-color: #8a8a8a;
-    box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
-    outline-offset: 2px;
+    box-shadow: none;
 }
 
 .chat-user-bubble {
@@ -3377,11 +3407,9 @@ mod tests {
         assert!(css.contains("combobox"));
         assert!(css.contains(".kanban-column-header"));
         assert!(css.contains(".dashboard-card-top"));
-        assert!(css.contains("outline-offset: 2px"));
-        assert!(css.contains(
-            "transition-property: background-color, border-color, color, box-shadow, opacity"
-        ));
-        assert!(css.contains("transition-duration: 160ms"));
+        assert!(!css.contains("outline-offset:"));
+        assert!(!css.contains("transition-property:"));
+        assert!(!css.contains("transition-duration:"));
         assert!(css.contains(".chat-inline-event-chip"));
         let chip_block = selector_block(css, ".chat-inline-event-chip");
         assert!(chip_block.contains("background-color: #191919;"));
@@ -3394,6 +3422,29 @@ mod tests {
         assert!(chip_block.contains("min-width: 0;"));
         assert!(!css.contains("button.chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-chip-label"));
+        let markdown_chip_block = selector_block(css, ".chat-markdown-chip");
+        assert!(markdown_chip_block.contains("border-radius: 3px;"));
+        assert!(markdown_chip_block.contains("padding: 0 5px;"));
+        let markdown_label_block = selector_block(css, ".chat-markdown-chip-label");
+        assert!(markdown_label_block.contains("font-size: 8px;"));
+        assert!(markdown_label_block.contains("font-family: \"Commit Mono\""));
+        let markdown_inline_view_block = selector_block(
+            css,
+            ".chat-markdown-inline-view,\n.chat-markdown-inline-view text",
+        );
+        assert_eq!(
+            property_value(markdown_inline_view_block, "font-size"),
+            Some("13px"),
+            "messages with inline chips should keep the same base text size as normal chat text"
+        );
+        assert!(
+            markdown_inline_view_block.contains("font-family: \"Mona Sans\""),
+            "messages with inline chips should keep the same font family as normal chat text"
+        );
+        let file_chip_block = selector_block(css, ".chat-markdown-file-chip-label");
+        assert!(file_chip_block.contains("color: #c39b50;"));
+        assert!(file_chip_block.contains("font-family: \"Mona Sans\""));
+        assert!(file_chip_block.contains("font-size: 8px;"));
         assert!(css.contains("margin: 0;"));
         let expander_block = selector_block(css, ".chat-inline-event-expander");
         assert!(expander_block.contains("border-radius: 2px;"));
@@ -3419,7 +3470,7 @@ mod tests {
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
         let inline_event_block = selector_block(css, ".chat-inline-event");
         assert!(inline_event_block.contains("background-color: transparent;"));
-        assert!(inline_event_block.contains("margin-bottom: 0;"));
+        assert!(inline_event_block.contains("margin-bottom: 3px;"));
         assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
         assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
         assert!(!css.contains(".lc-accent-green .suggested-action"));
@@ -3613,8 +3664,8 @@ mod tests {
         assert!(actions.contains("opacity: 0;"));
         assert!(css.contains(".chat-queued-composer-row:hover .chat-queued-actions"));
         assert!(css.contains(".chat-queued-composer-row:focus-within .chat-queued-actions"));
-        let action_focus = selector_block(css, ".chat-queued-action-btn:focus-visible");
-        assert!(action_focus.contains("outline: 2px solid"));
+        let action_btn = selector_block(css, ".chat-queued-action-btn");
+        assert!(action_btn.contains("box-shadow: none;"));
 
         let user_bubble = selector_block(css, ".chat-user-bubble");
         assert!(user_bubble.contains("background-color: #2e2e2e;"));
@@ -3689,6 +3740,32 @@ mod tests {
         assert!(css.contains(".toast-success"));
         assert!(css.contains(".toast-warning"));
         assert!(css.contains(".toast-error"));
+    }
+
+    #[test]
+    fn app_css_avoids_unsupported_gtk_parser_declarations() {
+        let css = app_css();
+
+        for unsupported in [
+            "transition-property:",
+            "transition-duration:",
+            "transition-timing-function:",
+            "outline:",
+            "outline-offset:",
+            "caret-color:",
+            "text-transform:",
+        ] {
+            assert!(
+                !css.contains(unsupported),
+                "unsupported GTK CSS declaration remains: {unsupported}"
+            );
+        }
+
+        for line in css.lines().map(str::trim) {
+            if line.starts_with("box-shadow:") {
+                assert_eq!(line, "box-shadow: none;");
+            }
+        }
     }
 
     #[test]

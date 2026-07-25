@@ -4409,7 +4409,7 @@ impl WorkspaceStore {
             "view",
             &[
                 "--json",
-                "id,state,headRefOid,mergeStateStatus,mergeable,reviewDecision,latestReviews,comments,statusCheckRollup",
+                "id,state,isDraft,headRefOid,mergeStateStatus,mergeable,reviewDecision,latestReviews,comments,statusCheckRollup",
             ],
         )?;
         let output = command_output_owned(&workspace.path, "gh", &args)?;
@@ -18771,6 +18771,8 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     fn pull_request_readiness_summary_formats_reviews_checks_and_deployments() {
         let json = r#"
 {
+  "state": "OPEN",
+  "isDraft": true,
   "reviewDecision": "CHANGES_REQUESTED",
   "latestReviews": [
     {
@@ -18823,6 +18825,7 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
             readiness.review_decision.as_deref(),
             Some("CHANGES_REQUESTED")
         );
+        assert_eq!(readiness.is_draft, Some(true));
         assert_eq!(readiness.latest_reviews.len(), 2);
         assert_eq!(readiness.comments.len(), 1);
         assert_eq!(readiness.checks.len(), 2);
@@ -18830,6 +18833,7 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
 
         let text = format_pull_request_readiness("berlin", &readiness);
         assert!(text.contains("PR readiness for workspace berlin."));
+        assert!(text.contains("Draft: true"));
         assert!(text.contains("Review decision: CHANGES_REQUESTED"));
         assert!(text.contains("alice: CHANGES_REQUESTED - Please add a regression test."));
         assert!(text.contains("carol: This also needs docs."));
@@ -19119,6 +19123,7 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
 
         let readiness = PullRequestReadiness {
             state: None,
+            is_draft: Some(false),
             merge_state_status: None,
             mergeable: None,
             review_decision: None,
@@ -19136,6 +19141,7 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     fn pull_request_readiness_agent_prompt_includes_actionable_summary() {
         let readiness = PullRequestReadiness {
             state: None,
+            is_draft: Some(false),
             merge_state_status: None,
             mergeable: None,
             review_decision: Some("REVIEW_REQUIRED".to_owned()),
@@ -19191,6 +19197,7 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     fn pull_request_readiness_summary_promotes_blockers_and_pending_gates() {
         let readiness = PullRequestReadiness {
             state: None,
+            is_draft: Some(false),
             merge_state_status: None,
             mergeable: None,
             review_decision: Some("CHANGES_REQUESTED".to_owned()),
@@ -19264,6 +19271,7 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
     fn pull_request_readiness_summary_includes_compact_rollup_counts() {
         let readiness = PullRequestReadiness {
             state: None,
+            is_draft: Some(false),
             merge_state_status: None,
             mergeable: None,
             review_decision: Some("APPROVED".to_owned()),
@@ -19364,6 +19372,10 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" 
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  case "$5" in
+    *isDraft*) ;;
+    *) echo "missing isDraft in gh json fields: $5" >&2; exit 1 ;;
+  esac
   printf '{"id":"PR_fake","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[]}\n'
   exit 0
 fi
@@ -19433,6 +19445,10 @@ exit 1
             temp.path(),
             r#"#!/bin/sh
 if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  case "$5" in
+    *isDraft*) ;;
+    *) echo "missing isDraft in gh json fields: $5" >&2; exit 1 ;;
+  esac
   printf '{"id":"PR_fake","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[]}\n'
   exit 0
 fi

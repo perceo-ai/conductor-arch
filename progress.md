@@ -198,9 +198,9 @@ task needs that context:
 - Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
 - User-facing install, workflow, or configuration docs: `README.md`
 
-Old one-off implementation specs remain in `docs/superpowers/specs` only as
-historical task artifacts. Do not read dated plans/specs for routine startup
-context.
+Dated one-off implementation plans/specs are not startup context. Keep only
+current durable docs and active status notes; do not recreate historical task
+artifacts under `docs/superpowers` or `.superpowers`.
 
 ## Verification Standard
 

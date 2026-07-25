@@ -134,8 +134,8 @@ pub(crate) fn load_workspace_chat_nav(
 }
 
 pub(crate) fn provider_events_have_active_work(events: &[ProviderEventRecord]) -> bool {
-    if provider_events_latest_turn_has_active_work(events) {
-        return true;
+    if let Some(turn_state) = provider_events_latest_turn_state(events) {
+        return turn_state == ProviderTurnActivityState::Active;
     }
 
     provider_projection_from_records(events)
@@ -147,34 +147,55 @@ pub(crate) fn provider_events_have_active_work(events: &[ProviderEventRecord]) -
         })
 }
 
-fn provider_events_latest_turn_has_active_work(events: &[ProviderEventRecord]) -> bool {
-    let mut latest_turn_by_thread = BTreeMap::<String, ((i64, i64), String)>::new();
-    let mut active_turns = HashSet::<String>::new();
-    let mut terminal_turns = HashSet::<String>::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderTurnActivityState {
+    Active,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderTurnActivity {
+    state: ProviderTurnActivityState,
+    latest_order: (i64, i64),
+}
+
+fn provider_events_latest_turn_state(
+    events: &[ProviderEventRecord],
+) -> Option<ProviderTurnActivityState> {
+    let mut turns = BTreeMap::<String, ProviderTurnActivity>::new();
     for event in events
         .iter()
         .filter(|event| event.kind == ProviderEventKind::Turn)
     {
         let turn_key = provider_event_activity_key(event);
-        if provider_event_phase_is_active(event.phase) {
-            active_turns.insert(turn_key.clone());
-        }
-        if provider_event_phase_is_terminal(event.phase) {
-            terminal_turns.insert(turn_key.clone());
-        }
-        let thread_key = provider_event_thread_key(event);
         let order_key = provider_event_order_key(event);
-        let replace = latest_turn_by_thread
-            .get(&thread_key)
-            .is_none_or(|(current_order, _)| order_key > *current_order);
-        if replace {
-            latest_turn_by_thread.insert(thread_key, (order_key, turn_key));
-        }
+        let state = if provider_event_phase_is_terminal(event.phase) {
+            ProviderTurnActivityState::Terminal
+        } else if provider_event_phase_is_active(event.phase) {
+            ProviderTurnActivityState::Active
+        } else {
+            continue;
+        };
+        turns
+            .entry(turn_key)
+            .and_modify(|turn| {
+                if order_key >= turn.latest_order {
+                    *turn = ProviderTurnActivity {
+                        state,
+                        latest_order: order_key,
+                    };
+                }
+            })
+            .or_insert(ProviderTurnActivity {
+                state,
+                latest_order: order_key,
+            });
     }
 
-    latest_turn_by_thread
+    turns
         .values()
-        .any(|(_, turn_key)| active_turns.contains(turn_key) && !terminal_turns.contains(turn_key))
+        .max_by_key(|turn| turn.latest_order)
+        .map(|turn| turn.state)
 }
 
 fn provider_event_phase_is_active(phase: ProviderEventPhase) -> bool {
@@ -204,37 +225,42 @@ fn provider_event_order_key(event: &ProviderEventRecord) -> (i64, i64) {
     )
 }
 
-fn provider_event_thread_key(event: &ProviderEventRecord) -> String {
-    format!(
-        "{}:{}",
-        event.provider,
-        event.provider_thread_id.as_deref().unwrap_or("-")
-    )
-}
-
 fn provider_event_activity_key(event: &ProviderEventRecord) -> String {
     if let Some(turn_id) = event.provider_turn_id.as_deref() {
         return format!(
             "{}:{}:turn:{turn_id}",
             event.provider,
-            event.provider_thread_id.as_deref().unwrap_or("-")
+            provider_event_thread_scope(event)
         );
     }
     if let Some(item_id) = event.provider_item_id.as_deref() {
         return format!(
             "{}:{}:item:{item_id}",
             event.provider,
-            event.provider_thread_id.as_deref().unwrap_or("-")
+            provider_event_thread_scope(event)
         );
     }
     if let Some(event_id) = event.provider_event_id.as_deref() {
         return format!(
             "{}:{}:event:{event_id}",
             event.provider,
-            event.provider_thread_id.as_deref().unwrap_or("-")
+            provider_event_thread_scope(event)
         );
     }
     event.identity_key.clone()
+}
+
+fn provider_event_thread_scope(event: &ProviderEventRecord) -> String {
+    event
+        .chat_thread_id
+        .map(|id| format!("chat:{id}"))
+        .or_else(|| {
+            event
+                .provider_thread_id
+                .as_deref()
+                .map(|id| format!("provider:{id}"))
+        })
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn workspace_chat_nav_item(
@@ -666,6 +692,62 @@ mod tests {
         provider_store
             .upsert_event(&provider_event_draft(7, ProviderEventPhase::Completed))
             .unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].running);
+        assert!(!items[0].unread);
+    }
+
+    #[test]
+    fn workspace_chat_nav_clears_working_when_completed_turn_lacks_provider_thread_id() {
+        let (_temp, db_path) = create_nav_fixture();
+        let provider_store = ProviderEventStore::new(&db_path);
+        provider_store
+            .upsert_event(&provider_turn_event_draft(
+                7,
+                "turn-1",
+                ProviderEventPhase::Started,
+            ))
+            .unwrap();
+        let mut completed = provider_turn_event_draft(7, "turn-1", ProviderEventPhase::Completed);
+        completed.provider_thread_id = None;
+        completed.provider_event_id = Some("event-turn-1-completed-no-thread".to_owned());
+        completed.provider_sequence = Some(2);
+        provider_store.upsert_event(&completed).unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].running);
+        assert!(!items[0].unread);
+    }
+
+    #[test]
+    fn workspace_chat_nav_uses_latest_turn_state_over_stale_running_items() {
+        let (_temp, db_path) = create_nav_fixture();
+        let provider_store = ProviderEventStore::new(&db_path);
+        provider_store
+            .upsert_event(&provider_turn_event_draft(
+                7,
+                "turn-1",
+                ProviderEventPhase::Started,
+            ))
+            .unwrap();
+        let mut command = provider_turn_event_draft(7, "turn-1", ProviderEventPhase::Started);
+        command.kind = ProviderEventKind::CommandProcess;
+        command.provider_item_id = Some("cmd-1".to_owned());
+        command.provider_event_id = Some("event-cmd-1-started".to_owned());
+        command.provider_subtype = Some("item/commandExecution/started".to_owned());
+        command.provider_sequence = Some(2);
+        provider_store.upsert_event(&command).unwrap();
+        let mut completed = provider_turn_event_draft(7, "turn-1", ProviderEventPhase::Completed);
+        completed.provider_event_id = Some("event-turn-1-completed".to_owned());
+        completed.provider_sequence = Some(3);
+        provider_store.upsert_event(&completed).unwrap();
         let store = WorkspaceStore::open_app(&db_path).unwrap();
 
         let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();

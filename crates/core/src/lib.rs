@@ -94,6 +94,43 @@ mod pty_tests {
 
     #[cfg(unix)]
     #[test]
+    fn pty_session_reports_child_unix_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = crate::pty::PtySession::spawn(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_owned(), "sleep 30".to_owned()],
+            temp.path(),
+            Vec::new(),
+            24,
+            80,
+        )
+        .unwrap();
+
+        let child_pid = session.process_id().unwrap();
+        assert_eq!(session.process_group_leader(), Some(child_pid));
+        session.stop().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_process_alive_tolerates_restricted_ps_on_unix() {
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready.marker");
+        let mut child = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", "pty_tests::sleep_helper_process", "--nocapture"])
+            .env("READY_MARKER", &ready)
+            .env("SLEEP_HELPER", "1")
+            .spawn()
+            .unwrap();
+
+        wait_for_file_contents(&ready, "ready");
+        assert!(crate::platform::process_alive(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pty_stop_sends_sigterm_before_force_kill() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("term.marker");
@@ -135,6 +172,19 @@ mod pty_tests {
             std::process::exit(0);
         })
         .unwrap();
+        fs::write(ready, "ready").unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sleep_helper_process() {
+        if env::var_os("SLEEP_HELPER").is_none() {
+            return;
+        }
+        let ready = PathBuf::from(env::var_os("READY_MARKER").unwrap());
         fs::write(ready, "ready").unwrap();
         loop {
             thread::sleep(Duration::from_secs(60));

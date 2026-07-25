@@ -126,6 +126,13 @@ impl PtySession {
         self.child.process_id()
     }
 
+    #[cfg(unix)]
+    pub fn process_group_leader(&self) -> Option<u32> {
+        self.master
+            .process_group_leader()
+            .and_then(|pid| u32::try_from(pid).ok())
+    }
+
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         trace!(rows, cols, "resizing pty");
         self.master
@@ -190,12 +197,12 @@ impl PtySession {
             return Ok(());
         }
         if let Some(pid) = self.process_id() {
-            request_graceful_stop(pid);
+            request_graceful_stop(pid, self.process_group_leader_for_stop());
             if wait_for_child_exit(&mut *self.child, Duration::from_secs(3))? {
                 self.exited = true;
                 return Ok(());
             }
-            force_stop(pid);
+            force_stop(pid, self.process_group_leader_for_stop());
             if wait_for_child_exit(&mut *self.child, Duration::from_millis(500))? {
                 self.exited = true;
                 return Ok(());
@@ -207,6 +214,20 @@ impl PtySession {
         let _ = self.child.wait();
         self.exited = true;
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl PtySession {
+    fn process_group_leader_for_stop(&self) -> Option<u32> {
+        self.process_group_leader()
+    }
+}
+
+#[cfg(not(unix))]
+impl PtySession {
+    fn process_group_leader_for_stop(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -222,15 +243,23 @@ fn wait_for_child_exit(child: &mut dyn Child, timeout: Duration) -> Result<bool>
     Ok(false)
 }
 
-fn request_graceful_stop(pid: u32) {
-    if crate::platform::terminate_process_group(pid, false).unwrap_or(false) {
+fn request_graceful_stop(pid: u32, process_group_leader: Option<u32>) {
+    if let Some(group_leader) = process_group_leader {
+        if crate::platform::terminate_process_group(group_leader, false).unwrap_or(false) {
+            return;
+        }
+    } else if crate::platform::terminate_process_group(pid, false).unwrap_or(false) {
         return;
     }
     let _ = terminate_process(pid, false);
 }
 
-fn force_stop(pid: u32) {
-    if crate::platform::terminate_process_group(pid, true).unwrap_or(false) {
+fn force_stop(pid: u32, process_group_leader: Option<u32>) {
+    if let Some(group_leader) = process_group_leader {
+        if crate::platform::terminate_process_group(group_leader, true).unwrap_or(false) {
+            return;
+        }
+    } else if crate::platform::terminate_process_group(pid, true).unwrap_or(false) {
         return;
     }
     let _ = terminate_process(pid, true);

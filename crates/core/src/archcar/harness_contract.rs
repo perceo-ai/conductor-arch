@@ -255,6 +255,9 @@ pub enum HarnessEffect {
         local_input_id: String,
         status: HarnessTurnStatus,
     },
+    TurnSettled {
+        status: HarnessTurnStatus,
+    },
     ProviderEvent(ProviderEventDraft),
     InteractionRequested(ProviderInteractionDraft),
     InteractionResolved {

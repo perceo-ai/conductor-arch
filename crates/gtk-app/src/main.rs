@@ -30,7 +30,7 @@ mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
-use adw::Application;
+use adw::{gio, Application};
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -62,6 +62,7 @@ const APP_ID: &str = "io.github.pranavkannepalli.archductor";
 const APP_SIDEBAR_DEFAULT_WIDTH_PX: f64 = 320.0;
 pub(crate) const COLUMN_HEADER_HEIGHT: i32 = 52;
 static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
+const GIT_REVIEW_REFRESH_SECONDS: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchTarget {
@@ -216,8 +217,7 @@ fn main() {
     let launch_target =
         parse_launch_target_with_debug_mode(std::env::args(), debug_mode).unwrap_or_default();
 
-    let app_id = application_id();
-    let app = Application::builder().application_id(&app_id).build();
+    let app = build_application();
     app.connect_shutdown(move |_| interrupt_running_managed_chats_on_shutdown(&paths));
     app.connect_activate(move |app| build_ui(app, launch_target.clone(), debug_mode));
     app.run_with_args(&["archductor-gtk"]);
@@ -225,6 +225,38 @@ fn main() {
 
 fn application_id() -> String {
     dev_application_id_from_suffix(std::env::var("ARCHDUCTOR_DEV_INSTANCE").ok().as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn build_application() -> Application {
+    let app_id = application_id();
+    Application::builder()
+        .application_id(&app_id)
+        .flags(application_flags())
+        .build()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_application() -> Application {
+    let app_id = application_id();
+    Application::builder()
+        .application_id(&app_id)
+        .flags(application_flags())
+        .build()
+}
+
+fn application_flags() -> gio::ApplicationFlags {
+    platform_application_flags()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_application_flags() -> gio::ApplicationFlags {
+    gio::ApplicationFlags::NON_UNIQUE
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_application_flags() -> gio::ApplicationFlags {
+    gio::ApplicationFlags::FLAGS_NONE
 }
 
 fn dev_application_id_from_suffix(suffix: Option<&str>) -> String {
@@ -546,7 +578,7 @@ const VIEW_COLOR_TOKENS: &[(&str, &str, &str)] = &[
     ("text", "lc-text", "#e4e4e4"),
     ("text_strong", "lc-text-strong", "#f8fafc"),
     ("text_muted", "lc-text-muted", "#8a8a8a"),
-    ("accent", "lc-accent", "#8a8a8a"),
+    ("accent", "lc-accent", "#c39b50"),
     ("accent_fg", "lc-accent-fg", "#f5f5f5"),
     ("success", "lc-success", "#d0d0d0"),
     ("warning", "lc-warning", "#f59e0b"),
@@ -720,12 +752,6 @@ fn spawn_git_review_sample_now(db_path: PathBuf, app_state: AppState, workspaces
     if workspaces.is_empty() {
         return;
     }
-    for workspace in &workspaces {
-        app_state.mark_workspace_git_review_refreshing(workspace.clone(), true);
-        app_state.request_refresh(RefreshEvent::WorkspaceGitReviewChanged {
-            workspace: workspace.clone(),
-        });
-    }
     let workspaces_for_error = workspaces.clone();
     archcar_async::spawn_background_job(
         move || background_sync::sample_workspace_git_review_state(&db_path, &workspaces),
@@ -750,13 +776,60 @@ fn spawn_git_review_sample_now(db_path: PathBuf, app_state: AppState, workspaces
             Err(err) => {
                 tracing::warn!(error = %err, "gtk immediate git review sample failed");
                 for workspace in workspaces_for_error {
-                    app_state.mark_workspace_git_review_refreshing(workspace.clone(), false);
                     app_state
                         .request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
                 }
             }
         },
     );
+}
+
+fn install_git_review_foreground_sampler(db_path: PathBuf, app_state: AppState) {
+    let git_review_in_flight = Rc::new(Cell::new(false));
+    // PER-190: Foreground PR/review state still needs a bounded poll while
+    // GitHub does not push local state changes into the GTK refresh bus.
+    glib::timeout_add_seconds_local(GIT_REVIEW_REFRESH_SECONDS, move || {
+        if git_review_in_flight.get() {
+            return glib::ControlFlow::Continue;
+        }
+        let Some(workspace) = app_state.selected_workspace() else {
+            return glib::ControlFlow::Continue;
+        };
+        git_review_in_flight.set(true);
+        let db_path = db_path.clone();
+        let state = app_state.clone();
+        let in_flight = Rc::clone(&git_review_in_flight);
+        archcar_async::spawn_background_job(
+            move || background_sync::sample_workspace_git_review_state(&db_path, &[workspace]),
+            move |result| {
+                in_flight.set(false);
+                match result {
+                    Ok(samples) => {
+                        for sample in samples {
+                            let workspace = sample.workspace.clone();
+                            let changed = state.set_workspace_git_review_snapshot(
+                                workspace.clone(),
+                                state::WorkspaceGitReviewUiSnapshot {
+                                    pull_request: sample.pull_request,
+                                    readiness: sample.readiness,
+                                    summary: sample.summary,
+                                },
+                            );
+                            if changed {
+                                state.request_refresh(RefreshEvent::WorkspaceGitReviewChanged {
+                                    workspace,
+                                });
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "gtk foreground git review sample failed");
+                    }
+                }
+            },
+        );
+        glib::ControlFlow::Continue
+    });
 }
 
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
@@ -819,6 +892,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         })
     };
     background_chat::install_background_chat_runner(&app_state);
+    install_git_review_foreground_sampler(app_state.workspace_database_path(), app_state.clone());
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Archductor")
@@ -1122,14 +1196,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     window_content.set_hexpand(true);
     window_content.set_vexpand(true);
     window_content.set_child(Some(&split));
-    let window_controls = gtk::WindowControls::new(gtk::PackType::Start);
-    window_controls.set_decoration_layout(Some("close,minimize,maximize:"));
-    window_controls.add_css_class("integrated-window-controls");
-    window_controls.set_halign(gtk::Align::Start);
-    window_controls.set_valign(gtk::Align::Start);
-    window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
-    window_controls.set_overflow(gtk::Overflow::Hidden);
-    window_content.add_overlay(&window_controls);
+    if let Some(window_controls) = build_integrated_window_controls() {
+        window_content.add_overlay(&window_controls);
+    }
     let window_shell = GBox::new(Orientation::Vertical, 0);
     window_shell.set_hexpand(true);
     window_shell.set_vexpand(true);
@@ -1139,7 +1208,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     }
     window_shell.append(&window_content);
     window.set_child(Some(&window_shell));
-    window.present();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: presenting window"
+    );
+    present_main_window(&window);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: checking setup readiness"
+    );
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -2166,8 +2243,40 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 // ── STYLES ────────────────────────────────────────────────────────────────
 
 fn configure_window_chrome(window: &ApplicationWindow) {
-    window.set_titlebar(None::<&gtk::Widget>);
-    window.set_decorated(false);
+    #[cfg(target_os = "macos")]
+    {
+        window.set_decorated(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.set_titlebar(None::<&gtk::Widget>);
+        window.set_decorated(false);
+    }
+}
+
+fn build_integrated_window_controls() -> Option<gtk::WindowControls> {
+    #[cfg(target_os = "macos")]
+    {
+        None::<gtk::WindowControls>
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window_controls = gtk::WindowControls::new(gtk::PackType::Start);
+        window_controls.set_decoration_layout(Some("close,minimize,maximize:"));
+        window_controls.add_css_class("integrated-window-controls");
+        window_controls.set_halign(gtk::Align::Start);
+        window_controls.set_valign(gtk::Align::Start);
+        window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
+        window_controls.set_overflow(gtk::Overflow::Hidden);
+        Some(window_controls)
+    }
+}
+
+fn present_main_window(window: &ApplicationWindow) {
+    #[cfg(target_os = "macos")]
+    window.present();
+    #[cfg(not(target_os = "macos"))]
+    window.present();
 }
 
 #[cfg(test)]
@@ -2179,6 +2288,13 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Mutex, OnceLock};
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start_index = source.find(start).expect("source start marker exists");
+        let after_start = &source[start_index..];
+        let end_index = after_start.find(end).expect("source end marker exists");
+        &after_start[..end_index]
+    }
 
     #[test]
     fn app_window_chrome_is_platform_appropriate() {
@@ -2193,17 +2309,39 @@ mod tests {
             "the main window should explicitly configure platform chrome"
         );
         assert!(
-            production.contains("use adw::Application;")
+            production.contains("Application")
                 && production.contains("ApplicationWindow,")
                 && !production.contains("use adw::{Application, ApplicationWindow};"),
             "custom title bars require GTK ApplicationWindow rather than AdwApplicationWindow"
         );
-        assert!(
-            production.contains("window.set_titlebar(None::<&gtk::Widget>)")
-                && production.contains("window.set_decorated(false)"),
-            "the integrated column headers should replace duplicate native chrome"
-        );
+        assert!(production.contains("#[cfg(target_os = \"macos\")]"));
+        assert!(production.contains("window.set_decorated(true)"));
+        assert!(production.contains("#[cfg(not(target_os = \"macos\"))]"));
+        assert!(production.contains("window.set_titlebar(None::<&gtk::Widget>)"));
+        assert!(production.contains("window.set_decorated(false)"));
+        assert!(production.contains("fn build_integrated_window_controls("));
+        assert!(production.contains("None::<gtk::WindowControls>"));
+        assert!(production.contains("Some(window_controls)"));
         assert!(!production.contains("gtk::HeaderBar::builder()"));
+    }
+
+    #[test]
+    fn macos_source_run_shows_window_without_present_activation() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+        let macos_present = source_between(
+            production,
+            "#[cfg(target_os = \"macos\")]\n    window",
+            "#[cfg(not(target_os = \"macos\"))]",
+        );
+
+        assert!(production.contains("fn present_main_window("));
+        assert!(macos_present.contains("window.present();"));
+        assert!(!macos_present.contains("window.show();"));
+        assert!(production.contains("present_main_window(&window);"));
     }
 
     #[test]
@@ -2405,6 +2543,28 @@ mod tests {
         );
         assert_eq!(dev_application_id_from_suffix(Some("...")), APP_ID);
         assert_eq!(dev_application_id_from_suffix(None), APP_ID);
+    }
+
+    #[test]
+    fn macos_dev_launch_uses_non_unique_application_registration() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+        let macos_build_application = source_between(
+            production,
+            "#[cfg(target_os = \"macos\")]\nfn build_application",
+            "#[cfg(not(target_os = \"macos\"))]\nfn build_application",
+        );
+
+        assert!(source.contains("#[cfg(target_os = \"macos\")]"));
+        assert!(source.contains("fn build_application() -> Application"));
+        assert!(macos_build_application.contains("let app_id = application_id();"));
+        assert!(macos_build_application.contains(".application_id(&app_id)"));
+        assert!(source.contains("gio::ApplicationFlags::NON_UNIQUE"));
+        assert!(source.contains("#[cfg(not(target_os = \"macos\"))]"));
+        assert!(source.contains("gio::ApplicationFlags::FLAGS_NONE"));
     }
 
     #[test]
@@ -2672,6 +2832,17 @@ mod tests {
     }
 
     #[test]
+    fn default_view_accent_is_tan() {
+        assert_eq!(
+            VIEW_COLOR_TOKENS
+                .iter()
+                .find(|(name, _, _)| *name == "accent")
+                .map(|(_, _, default)| *default),
+            Some("#c39b50")
+        );
+    }
+
+    #[test]
     fn runtime_error_reporter_dedupes_repeated_reconciliation_failures() {
         let mut reporter = RuntimeErrorReporter::default();
 
@@ -2808,7 +2979,7 @@ mod tests {
     }
 
     #[test]
-    fn git_review_updates_are_event_driven_without_recurring_sampler() {
+    fn git_review_updates_use_recurring_foreground_sampler_and_explicit_events() {
         let source = include_str!("main.rs");
         let production_source = source
             .split("#[cfg(test)]")
@@ -2816,9 +2987,15 @@ mod tests {
             .expect("main source should contain production code");
 
         assert!(
-            !production_source.contains("WorkspaceGitReviewSampler::default()"),
-            "GitHub review UI state must not be refreshed by a recurring sampler"
+            production_source.contains("install_git_review_foreground_sampler("),
+            "selected workspace GitHub review state should refresh on a recurring foreground sampler"
         );
+        assert!(production_source.contains("GIT_REVIEW_REFRESH_SECONDS: u32 = 10"));
+        assert!(production_source.contains(concat!(
+            "timeout",
+            "_add_seconds_local(GIT_REVIEW_REFRESH_SECONDS"
+        )));
+        assert!(production_source.contains("git_review_in_flight.get()"));
         assert!(
             production_source.contains("WorkspaceSelectionChanged")
                 && production_source.contains("spawn_git_review_sample_now("),
