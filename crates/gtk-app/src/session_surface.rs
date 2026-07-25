@@ -43,9 +43,10 @@ use archductor_core::workspace::{
 };
 use gtk::prelude::*;
 use gtk::{
-    Adjustment, Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry,
-    EventControllerKey, GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
+    Adjustment, Align, BaselinePosition, Box as GBox, Button, CheckButton, ComboBoxText,
+    DrawingArea, Entry, EventControllerKey, Fixed, GestureClick, Image, Label, Orientation,
+    Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer,
+    TextView, ToggleButton, Widget,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::any::Any;
@@ -71,9 +72,7 @@ use crate::archcar_async::{
 use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
-use crate::file_component::{
-    markdown_file_link_target, workspace_file_link_component, OpenWorkspaceFile,
-};
+use crate::file_component::{markdown_file_link_target, OpenWorkspaceFile};
 use crate::motion::{append_revealed, clear_box};
 use crate::refresh::RefreshEvent;
 use crate::state::{
@@ -96,7 +95,7 @@ const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
 const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 32;
-const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
+const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 560;
 const INLINE_EVENT_CODE_MAX_LINES: usize = 320;
 const LONG_PASTE_ATTACHMENT_THRESHOLD: usize = 2_000;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
@@ -5413,6 +5412,9 @@ fn parse_file_change_count_from_text(text: &str, sign: char) -> Option<u32> {
 fn provider_projection_inline_event_title(item: &ProviderProjectionItem) -> String {
     let title = provider_projection_display_title(item);
     let trimmed = title.trim();
+    if item.category == ProviderProjectionCategory::SearchOutput {
+        return format!("Searched {trimmed}");
+    }
     match item.render_class {
         ProjectionRenderClass::CommandCard | ProjectionRenderClass::ProcessCard => {
             format!("Ran {trimmed}")
@@ -5431,6 +5433,9 @@ fn provider_projection_inline_event_title(item: &ProviderProjectionItem) -> Stri
 }
 
 fn provider_projection_inline_event_subtitle(item: &ProviderProjectionItem) -> &'static str {
+    if item.category == ProviderProjectionCategory::SearchOutput {
+        return "Search output";
+    }
     match item.render_class {
         ProjectionRenderClass::CommandCard => "Command",
         ProjectionRenderClass::ProcessCard => "Process",
@@ -5711,11 +5716,11 @@ fn chat_text_label(text: &str) -> Label {
 }
 
 fn chat_text_widget(text: &str, open_file: Option<OpenWorkspaceFile>) -> Widget {
-    match open_file {
-        Some(open_file) if chat_text_contains_workspace_file_link(text) => {
-            chat_markdown_file_link_widget(text, open_file).upcast()
-        }
-        _ => chat_text_label(text).upcast(),
+    let segments = chat_inline_chip_segments_from_markdown(text);
+    if chat_inline_chip_segments_contain_chip(&segments) {
+        chat_markdown_inline_chip_widget(segments, open_file).upcast()
+    } else {
+        chat_text_label(text).upcast()
     }
 }
 
@@ -5726,40 +5731,50 @@ struct ChatMarkdownFileLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ChatMarkdownSegment {
+enum ChatInlineChipSegment {
     Text(String),
+    Code(String),
+    Link { label: String, url: String },
     File(ChatMarkdownFileLink),
 }
 
-fn chat_text_contains_workspace_file_link(text: &str) -> bool {
-    text.lines().any(|line| {
-        chat_markdown_file_segments(line)
-            .iter()
-            .any(|segment| matches!(segment, ChatMarkdownSegment::File(_)))
-    })
+fn chat_text_contains_inline_chip_token(text: &str) -> bool {
+    chat_inline_chip_segments_contain_chip(&chat_inline_chip_segments_from_markdown(text))
 }
 
-fn chat_markdown_file_link_widget(text: &str, open_file: OpenWorkspaceFile) -> GBox {
+fn chat_inline_chip_segments_contain_chip(segments: &[ChatInlineChipSegment]) -> bool {
+    segments
+        .iter()
+        .any(|segment| !matches!(segment, ChatInlineChipSegment::Text(_)))
+}
+
+fn chat_markdown_inline_chip_widget(
+    segments: Vec<ChatInlineChipSegment>,
+    open_file: Option<OpenWorkspaceFile>,
+) -> GBox {
     let root = GBox::new(Orientation::Vertical, 2);
     root.add_css_class("chat-agent-text");
     root.set_hexpand(true);
-    for line in text.lines() {
-        root.append(&chat_markdown_file_link_line_widget(
-            line,
-            open_file.clone(),
-        ));
-    }
+    root.append(&chat_markdown_inline_chip_line_widget(segments, open_file));
     root
 }
 
-fn chat_markdown_file_link_line_widget(line: &str, open_file: OpenWorkspaceFile) -> Widget {
-    let segments = chat_markdown_file_segments(line);
-    if !segments
-        .iter()
-        .any(|segment| matches!(segment, ChatMarkdownSegment::File(_)))
-    {
+fn chat_markdown_inline_chip_line_widget(
+    segments: Vec<ChatInlineChipSegment>,
+    open_file: Option<OpenWorkspaceFile>,
+) -> Widget {
+    if !chat_inline_chip_segments_contain_chip(&segments) {
+        let line = segments
+            .into_iter()
+            .map(|segment| match segment {
+                ChatInlineChipSegment::Text(text) => text,
+                ChatInlineChipSegment::Code(code) => code,
+                ChatInlineChipSegment::Link { label, .. } => label,
+                ChatInlineChipSegment::File(link) => link.label,
+            })
+            .collect::<String>();
         let label = Label::new(None);
-        label.set_markup(&chat_markdown_line_markup(line));
+        label.set_markup(&chat_text_markup(&line));
         label.add_css_class("chat-agent-text");
         label.set_selectable(true);
         label.set_wrap(true);
@@ -5768,94 +5783,368 @@ fn chat_markdown_file_link_line_widget(line: &str, open_file: OpenWorkspaceFile)
         return label.upcast();
     }
 
-    let row = GBox::new(Orientation::Horizontal, 4);
-    row.set_hexpand(true);
-    row.set_halign(Align::Fill);
-    let (prefix, inline_text) = chat_markdown_file_line_prefix(line);
-    if !prefix.is_empty() {
-        let label = Label::new(None);
-        label.set_markup(&pango_escape_text(&prefix));
-        label.add_css_class("chat-agent-text");
-        label.set_xalign(0.0);
-        row.append(&label);
-    }
-    for segment in chat_markdown_file_segments(&inline_text) {
+    let buffer = TextBuffer::new(None);
+    let view = TextView::with_buffer(&buffer);
+    view.add_css_class("chat-markdown-inline-view");
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.set_left_margin(0);
+    view.set_right_margin(0);
+    view.set_top_margin(0);
+    view.set_bottom_margin(0);
+    view.set_pixels_above_lines(0);
+    view.set_pixels_below_lines(0);
+    view.set_hexpand(true);
+    for segment in segments {
         match segment {
-            ChatMarkdownSegment::Text(text) if !text.is_empty() => {
-                let label = Label::new(None);
-                label.set_markup(&chat_inline_markdown_markup(&text));
-                label.add_css_class("chat-agent-text");
-                label.set_selectable(true);
-                label.set_wrap(true);
-                label.set_xalign(0.0);
-                row.append(&label);
+            ChatInlineChipSegment::Text(text) => append_chat_inline_text(&buffer, &text),
+            ChatInlineChipSegment::Code(code) => {
+                append_chat_inline_chip_anchor(
+                    &view,
+                    &buffer,
+                    &chat_inline_markdown_chip(&code, None, None),
+                );
             }
-            ChatMarkdownSegment::Text(_) => {}
-            ChatMarkdownSegment::File(link) => {
-                row.append(&workspace_file_link_component(
-                    &link.label,
-                    &link.path,
-                    open_file.clone(),
-                ));
+            ChatInlineChipSegment::Link { label, url } => {
+                append_chat_inline_chip_anchor(
+                    &view,
+                    &buffer,
+                    &chat_inline_markdown_chip(&label, Some(&url), None),
+                );
+            }
+            ChatInlineChipSegment::File(link) => {
+                append_chat_inline_chip_anchor(
+                    &view,
+                    &buffer,
+                    &chat_inline_markdown_chip(
+                        &link.label,
+                        None,
+                        open_file
+                            .as_ref()
+                            .map(|open_file| (link.path.as_str(), open_file)),
+                    ),
+                );
             }
         }
     }
-    row.upcast()
+    view.upcast()
 }
 
-fn chat_markdown_file_line_prefix(line: &str) -> (String, String) {
-    let trimmed = line.trim_start();
-    let indent = &line[..line.len() - trimmed.len()];
-    if let Some(item) = chat_markdown_bullet(trimmed) {
-        return (format!("{indent}• "), item.to_owned());
+fn chat_inline_chip_segments_from_markdown(text: &str) -> Vec<ChatInlineChipSegment> {
+    let mut builder = ChatInlineChipSegmentBuilder::default();
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    for event in Parser::new_ext(text, options) {
+        builder.push(event);
     }
-    if let Some(quote) = trimmed.strip_prefix("> ") {
-        return (format!("{indent}| "), quote.to_owned());
-    }
-    (String::new(), line.to_owned())
+    builder.finish()
 }
 
-fn chat_markdown_file_segments(text: &str) -> Vec<ChatMarkdownSegment> {
-    let mut segments = Vec::new();
-    let mut pending = String::new();
-    let mut rest = text;
+#[derive(Default)]
+struct ChatInlineChipSegmentBuilder {
+    segments: Vec<ChatInlineChipSegment>,
+    pending: String,
+    link: Option<ChatInlineChipLinkBuilder>,
+    list_stack: Vec<ChatMarkdownListState>,
+    quote_depth: usize,
+    table_cell_open: bool,
+}
 
-    while let Some(start) = rest.find('[') {
-        pending.push_str(&rest[..start]);
-        let after_open = &rest[start + 1..];
-        let Some((label, after_label)) = after_open.split_once("](") else {
-            pending.push('[');
-            rest = after_open;
-            continue;
-        };
-        let Some(close) = after_label.find(')') else {
-            pending.push('[');
-            rest = after_open;
-            continue;
-        };
-        let target = &after_label[..close];
-        let consumed = start + 1 + label.len() + 2 + target.len() + 1;
-        if let Some(path) = markdown_file_link_target(target) {
-            if !pending.is_empty() {
-                segments.push(ChatMarkdownSegment::Text(std::mem::take(&mut pending)));
+struct ChatInlineChipLinkBuilder {
+    target: String,
+    label: String,
+}
+
+impl ChatInlineChipSegmentBuilder {
+    fn push(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(tag) => self.start_tag(tag),
+            Event::End(tag) => self.end_tag(tag),
+            Event::Text(text) => self.push_text(&text),
+            Event::Code(code) | Event::InlineMath(code) | Event::DisplayMath(code) => {
+                self.flush_pending();
+                self.segments
+                    .push(ChatInlineChipSegment::Code(code.to_string()));
             }
-            let path = path.to_string_lossy().to_string();
-            segments.push(ChatMarkdownSegment::File(ChatMarkdownFileLink {
-                label: markdown_file_link_label(label, &path),
-                path,
-            }));
-            rest = &rest[consumed..];
+            Event::Html(html) | Event::InlineHtml(html) => self.push_text(&html),
+            Event::FootnoteReference(reference) => self.push_text(&reference),
+            Event::SoftBreak | Event::HardBreak => self.push_text("\n"),
+            Event::Rule => self.ensure_block_gap(),
+            Event::TaskListMarker(checked) => self.push_text(if checked { "[x] " } else { "[ ] " }),
+        }
+    }
+
+    fn start_tag(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph | Tag::Heading { .. } | Tag::Table(_) | Tag::TableRow => {
+                self.ensure_block_gap();
+            }
+            Tag::BlockQuote(_) => {
+                self.ensure_block_gap();
+                self.quote_depth += 1;
+                for _ in 0..self.quote_depth {
+                    self.push_text("| ");
+                }
+            }
+            Tag::CodeBlock(_) => {
+                self.ensure_block_gap();
+            }
+            Tag::List(start) => {
+                self.ensure_block_gap();
+                self.list_stack
+                    .push(ChatMarkdownListState { next_number: start });
+            }
+            Tag::Item => {
+                self.ensure_block_gap();
+                self.push_list_prefix();
+            }
+            Tag::Link { dest_url, .. } => {
+                self.flush_pending();
+                self.link = Some(ChatInlineChipLinkBuilder {
+                    target: dest_url.to_string(),
+                    label: String::new(),
+                });
+            }
+            Tag::TableCell => {
+                if self.table_cell_open {
+                    self.push_text(" | ");
+                }
+                self.table_cell_open = true;
+            }
+            Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::Image { .. }
+            | Tag::TableHead
+            | Tag::FootnoteDefinition(_)
+            | Tag::HtmlBlock
+            | Tag::MetadataBlock(_)
+            | Tag::DefinitionList
+            | Tag::DefinitionListTitle
+            | Tag::DefinitionListDefinition
+            | Tag::Superscript
+            | Tag::Subscript => {}
+        }
+    }
+
+    fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::BlockQuote(_) => {
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+            }
+            TagEnd::CodeBlock => {}
+            TagEnd::List(_) => {
+                self.list_stack.pop();
+            }
+            TagEnd::Link => self.finish_link(),
+            TagEnd::TableRow => {
+                self.table_cell_open = false;
+            }
+            TagEnd::Paragraph
+            | TagEnd::Heading(_)
+            | TagEnd::Item
+            | TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Image
+            | TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableCell
+            | TagEnd::FootnoteDefinition
+            | TagEnd::HtmlBlock
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+            | TagEnd::Superscript
+            | TagEnd::Subscript => {}
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        if let Some(link) = self.link.as_mut() {
+            link.label.push_str(text);
         } else {
-            pending.push('[');
-            rest = after_open;
+            self.pending.push_str(text);
         }
     }
 
-    pending.push_str(rest);
-    if !pending.is_empty() || segments.is_empty() {
-        segments.push(ChatMarkdownSegment::Text(pending));
+    fn push_list_prefix(&mut self) {
+        let depth = self.list_stack.len().saturating_sub(1);
+        for _ in 0..depth {
+            self.push_text("  ");
+        }
+        let number = self.list_stack.last_mut().and_then(|state| {
+            let number = state.next_number?;
+            state.next_number = Some(number + 1);
+            Some(number)
+        });
+        match number {
+            Some(number) => self.push_text(&format!("{number}. ")),
+            None => self.push_text("• "),
+        }
     }
-    segments
+
+    fn ensure_block_gap(&mut self) {
+        if self.pending.is_empty() && !self.segments_end_with_newline() {
+            if !self.segments.is_empty() {
+                self.pending.push('\n');
+            }
+            return;
+        }
+        if !self.pending.ends_with('\n') {
+            self.pending.push('\n');
+        }
+    }
+
+    fn segments_end_with_newline(&self) -> bool {
+        self.pending.ends_with('\n')
+            || self.segments.last().is_some_and(|segment| match segment {
+                ChatInlineChipSegment::Text(text) => text.ends_with('\n'),
+                ChatInlineChipSegment::Code(_)
+                | ChatInlineChipSegment::Link { .. }
+                | ChatInlineChipSegment::File(_) => false,
+            })
+    }
+
+    fn finish_link(&mut self) {
+        let Some(link) = self.link.take() else {
+            return;
+        };
+        let label = if link.label.trim().is_empty() {
+            read_value_display_name(&link.target)
+        } else {
+            link.label
+        };
+        if let Some(path) = markdown_file_link_target(&link.target) {
+            let path = path.to_string_lossy().to_string();
+            self.segments
+                .push(ChatInlineChipSegment::File(ChatMarkdownFileLink {
+                    label,
+                    path,
+                }));
+        } else if chat_inline_link_is_launchable(&link.target) {
+            self.segments.push(ChatInlineChipSegment::Link {
+                label,
+                url: link.target,
+            });
+        } else {
+            self.segments.push(ChatInlineChipSegment::Code(label));
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        if !self.pending.is_empty() {
+            self.segments
+                .push(ChatInlineChipSegment::Text(std::mem::take(
+                    &mut self.pending,
+                )));
+        }
+    }
+
+    fn finish(mut self) -> Vec<ChatInlineChipSegment> {
+        self.flush_pending();
+        if self.segments.is_empty() {
+            self.segments
+                .push(ChatInlineChipSegment::Text(String::new()));
+        }
+        self.segments
+    }
+}
+
+fn append_chat_inline_text(buffer: &TextBuffer, text: &str) {
+    let mut iter = buffer.end_iter();
+    buffer.insert(&mut iter, text);
+}
+
+fn append_chat_inline_chip_anchor(view: &TextView, buffer: &TextBuffer, chip: &Widget) {
+    let mut iter = buffer.end_iter();
+    let anchor = buffer.create_child_anchor(&mut iter);
+    view.add_child_at_anchor(chip, &anchor);
+}
+
+fn chat_inline_markdown_chip(
+    label: &str,
+    external_url: Option<&str>,
+    file_target: Option<(&str, &OpenWorkspaceFile)>,
+) -> Widget {
+    let chip = GBox::new(Orientation::Horizontal, 0);
+    let kind_class = match (external_url, file_target.as_ref()) {
+        (_, Some(_)) => "chat-markdown-file-chip",
+        (Some(_), None) => "chat-markdown-link-chip",
+        (None, None) => "chat-markdown-code-chip",
+    };
+    chip.set_halign(Align::Start);
+    chip.set_valign(Align::Center);
+    chip.set_baseline_position(BaselinePosition::Bottom);
+    chip.set_margin_bottom(0);
+    chip.set_tooltip_text(external_url.or(file_target.map(|(path, _)| path)));
+    let text = Label::new(Some(label));
+    text.add_css_class("chat-markdown-chip-label");
+    text.add_css_class(match (external_url, file_target.as_ref()) {
+        (_, Some(_)) => "chat-markdown-file-chip-label",
+        (Some(_), None) => "chat-markdown-link-chip-label",
+        (None, None) => "chat-markdown-code-chip-label",
+    });
+    text.set_valign(Align::Center);
+    chip.append(&text);
+
+    if let Some(url) = external_url.filter(|url| chat_inline_link_is_launchable(url)) {
+        let url = url.to_owned();
+        let button = Button::new();
+        button.add_css_class("chat-markdown-chip-anchor");
+        button.add_css_class("chat-markdown-chip");
+        button.add_css_class(kind_class);
+        button.set_halign(Align::Start);
+        button.set_valign(Align::Baseline);
+        button.set_tooltip_text(Some(url.as_str()));
+        button.set_child(Some(&chip));
+        button.connect_clicked(move |_| {
+            let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                &url,
+                None::<&gtk::gio::AppLaunchContext>,
+            );
+        });
+        return button.upcast();
+    } else if let Some((path, open_file)) = file_target {
+        let path = path.to_owned();
+        let open_file = open_file.clone();
+        let button = Button::new();
+        button.add_css_class("chat-markdown-chip-anchor");
+        button.add_css_class("chat-markdown-chip");
+        button.add_css_class(kind_class);
+        button.set_halign(Align::Start);
+        button.set_valign(Align::Baseline);
+        button.set_tooltip_text(Some(path.as_str()));
+        button.set_child(Some(&chip));
+        button.connect_clicked(move |_| open_file(path.as_str()));
+        return button.upcast();
+    }
+
+    let anchor = Fixed::new();
+    anchor.add_css_class("chat-markdown-chip-anchor");
+    anchor.add_css_class("chat-markdown-chip");
+    anchor.add_css_class(kind_class);
+    anchor.set_halign(Align::Start);
+    anchor.set_valign(Align::Baseline);
+    anchor.set_tooltip_text(external_url.or(file_target.map(|(path, _)| path)));
+    anchor.put(&chip, 0.0, 0.0);
+    let transform = gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(0.0, 3.0));
+    anchor.set_child_transform(&chip, Some(&transform));
+    anchor.upcast()
+}
+
+fn chat_inline_link_is_launchable(url: &str) -> bool {
+    let trimmed = url.trim();
+    ["http://", "https://", "mailto:"].iter().any(|scheme| {
+        trimmed.len() > scheme.len()
+            && trimmed
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
 }
 
 fn markdown_file_link_label(label: &str, path: &str) -> String {
@@ -5942,7 +6231,7 @@ impl ChatMarkdownMarkupRenderer {
                 self.ensure_block_gap();
                 self.in_code_block = true;
                 self.markup
-                    .push_str("<span font_family=\"monospace\" foreground=\"#f2f5f8\">");
+                    .push_str("<span font_family=\"monospace\" size=\"small\" foreground=\"#f2f5f8\" background=\"#191919\">");
             }
             Tag::List(start) => {
                 self.ensure_block_gap();
@@ -5956,7 +6245,9 @@ impl ChatMarkdownMarkupRenderer {
             Tag::Emphasis => self.markup.push_str("<i>"),
             Tag::Strong => self.markup.push_str("<b>"),
             Tag::Strikethrough => self.markup.push_str("<span strikethrough=\"true\">"),
-            Tag::Link { .. } => self.markup.push_str("<u>"),
+            Tag::Link { .. } => self.markup.push_str(
+                "<span font_family=\"monospace\" size=\"small\" foreground=\"#bdbdbd\" background=\"#191919\">",
+            ),
             Tag::Image { .. } => self.markup.push_str("<i>"),
             Tag::Table(_) => self.ensure_block_gap(),
             Tag::TableHead => {}
@@ -6008,7 +6299,7 @@ impl ChatMarkdownMarkupRenderer {
             TagEnd::Emphasis => self.markup.push_str("</i>"),
             TagEnd::Strong => self.markup.push_str("</b>"),
             TagEnd::Strikethrough => self.markup.push_str("</span>"),
-            TagEnd::Link => self.markup.push_str("</u>"),
+            TagEnd::Link => self.markup.push_str("</span>"),
             TagEnd::Image => self.markup.push_str("</i>"),
             TagEnd::Table => {}
             TagEnd::TableHead => {}
@@ -6090,145 +6381,9 @@ fn heading_level_pango_size(level: HeadingLevel) -> &'static str {
     }
 }
 
-fn chat_markdown_line_markup(line: &str) -> String {
-    let trimmed = line.trim_start();
-    let indent = &line[..line.len() - trimmed.len()];
-
-    if let Some((level, heading)) = chat_markdown_heading(trimmed) {
-        let size = match level {
-            1 => "large",
-            2 => "medium",
-            _ => "small",
-        };
-        return format!(
-            "{}<span weight=\"bold\" size=\"{}\">{}</span>",
-            pango_escape_text(indent),
-            size,
-            chat_inline_markdown_markup(heading)
-        );
-    }
-
-    if let Some(item) = chat_markdown_bullet(trimmed) {
-        return format!(
-            "{}• {}",
-            pango_escape_text(indent),
-            chat_inline_markdown_markup(item)
-        );
-    }
-
-    if let Some(quote) = trimmed.strip_prefix("> ") {
-        return format!(
-            "{}<span foreground=\"#9aa4ad\">| {}</span>",
-            pango_escape_text(indent),
-            chat_inline_markdown_markup(quote)
-        );
-    }
-
-    chat_inline_markdown_markup(line)
-}
-
-fn chat_markdown_heading(line: &str) -> Option<(usize, &str)> {
-    let marks = line.chars().take_while(|ch| *ch == '#').count();
-    if !(1..=3).contains(&marks) {
-        return None;
-    }
-    line.get(marks..)
-        .and_then(|rest| rest.strip_prefix(' '))
-        .map(|heading| (marks, heading))
-        .filter(|(_, heading)| !heading.trim().is_empty())
-}
-
-fn chat_markdown_bullet(line: &str) -> Option<&str> {
-    ["- ", "* ", "+ "]
-        .into_iter()
-        .find_map(|marker| line.strip_prefix(marker))
-}
-
-fn chat_inline_markdown_markup(text: &str) -> String {
-    let mut markup = String::new();
-    let mut rest = text;
-
-    while !rest.is_empty() {
-        let next = chat_next_inline_marker(rest);
-        let Some((start, marker)) = next else {
-            markup.push_str(&pango_escape_text(rest));
-            break;
-        };
-
-        markup.push_str(&pango_escape_text(&rest[..start]));
-        let after_marker = &rest[start + marker.len()..];
-        if marker == "[" {
-            if let Some((consumed, link_markup)) = chat_link_markup(after_marker) {
-                markup.push_str(&link_markup);
-                rest = &after_marker[consumed..];
-            } else {
-                markup.push_str(&pango_escape_text("["));
-                rest = after_marker;
-            }
-            continue;
-        }
-
-        if let Some(end) = after_marker.find(marker) {
-            let inner = &after_marker[..end];
-            markup.push_str(&chat_inline_marker_markup(marker, inner));
-            rest = &after_marker[end + marker.len()..];
-        } else {
-            markup.push_str(&pango_escape_text(&rest[start..start + marker.len()]));
-            rest = after_marker;
-        }
-    }
-
-    markup
-}
-
-fn chat_next_inline_marker(text: &str) -> Option<(usize, &'static str)> {
-    ["```", "`", "**", "__", "[", "*", "_"]
-        .into_iter()
-        .filter_map(|marker| {
-            text.find(marker).and_then(|index| {
-                if marker == "_" && chat_marker_is_inside_word(text, index, marker.len()) {
-                    None
-                } else {
-                    Some((index, marker))
-                }
-            })
-        })
-        .min_by_key(|(index, _)| *index)
-}
-
-fn chat_marker_is_inside_word(text: &str, index: usize, len: usize) -> bool {
-    let before = text[..index].chars().next_back();
-    let after = text[index + len..].chars().next();
-    before.is_some_and(|ch| ch.is_ascii_alphanumeric())
-        && after.is_some_and(|ch| ch.is_ascii_alphanumeric())
-}
-
-fn chat_inline_marker_markup(marker: &str, inner: &str) -> String {
-    match marker {
-        "`" | "```" => chat_code_span_markup(inner.trim_matches('\n')),
-        "**" | "__" => format!("<b>{}</b>", chat_inline_markdown_markup(inner)),
-        "*" | "_" => format!("<i>{}</i>", chat_inline_markdown_markup(inner)),
-        _ => pango_escape_text(inner),
-    }
-}
-
-fn chat_link_markup(after_open_bracket: &str) -> Option<(usize, String)> {
-    let (label, after_label) = after_open_bracket.split_once("](")?;
-    let (url, _) = after_label.split_once(')')?;
-    let consumed = label.len() + 2 + url.len() + 1;
-    Some((
-        consumed,
-        format!(
-            "<u>{}</u> ({})",
-            chat_inline_markdown_markup(label),
-            pango_escape_text(url)
-        ),
-    ))
-}
-
 fn chat_code_span_markup(code: &str) -> String {
     format!(
-        "<span font_family=\"monospace\" foreground=\"#f2f5f8\">{}</span>",
+        "<span font_family=\"monospace\" size=\"small\" foreground=\"#f2f5f8\" background=\"#191919\">{}</span>",
         pango_escape_text(code)
     )
 }
@@ -6453,6 +6608,9 @@ fn inline_event_chip_name_parts(name: &str) -> (&str, &str) {
 }
 
 fn inline_event_action_label(event: &CodexInlineEvent) -> String {
+    if inline_event_is_command_result(event) {
+        return "Ran".to_owned();
+    }
     let name = if inline_event_title_is_action_label(&event.title) {
         event.title.as_str()
     } else {
@@ -6481,7 +6639,7 @@ fn inline_event_type_css_class(event: &CodexInlineEvent) -> &'static str {
 fn inline_event_type_color(event: &CodexInlineEvent) -> &'static str {
     match inline_event_type_css_class(event) {
         "chat-inline-event-command" => "#93c5fd",
-        "chat-inline-event-file" => "#86efac",
+        "chat-inline-event-file" => "#c39b50",
         "chat-inline-event-diff" => "#f0abfc",
         "chat-inline-event-skill" => "#fcd34d",
         "chat-inline-event-plugin" => "#c4b5fd",
@@ -6507,7 +6665,7 @@ fn inline_event_type_icon(event: &CodexInlineEvent) -> &'static str {
 }
 
 fn inline_event_chip_label_max_width_chars() -> i32 {
-    96
+    50
 }
 
 fn inline_event_chip_label_width_chars(label: &str) -> i32 {
@@ -6520,11 +6678,19 @@ fn inline_event_chip_label_width_chars(label: &str) -> i32 {
 fn configure_inline_event_chip_label(label: &Label, text: &str) {
     label.set_xalign(0.0);
     label.set_wrap(false);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label.set_width_chars(inline_event_chip_label_width_chars(text));
     label.set_max_width_chars(inline_event_chip_label_max_width_chars());
 }
 
 fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
+    if inline_event_is_command_result(event) {
+        return event
+            .title
+            .strip_prefix("Ran ")
+            .map(str::to_owned)
+            .unwrap_or_else(|| event.title.clone());
+    }
     if inline_event_title_is_action_label(&event.title) {
         let (_, target) = inline_event_chip_name_parts(&event.title);
         if let Some(file_name) = event
@@ -6550,9 +6716,24 @@ fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
         .unwrap_or_else(|| event.title.clone())
 }
 
+fn inline_event_is_command_result(event: &CodexInlineEvent) -> bool {
+    event.kind == CodexInlineEventKind::Tool
+        && matches!(
+            event.subtitle.as_deref(),
+            Some("Command" | "Command result")
+        )
+}
+
 fn inline_event_title_is_action_label(title: &str) -> bool {
     [
-        "Ran ", "Read ", "Used ", "Opened ", "Added ", "Edited ", "Deleted ",
+        "Ran ",
+        "Read ",
+        "Used ",
+        "Opened ",
+        "Added ",
+        "Edited ",
+        "Deleted ",
+        "Searched ",
     ]
     .iter()
     .any(|prefix| title.starts_with(prefix))
@@ -6812,7 +6993,7 @@ fn inline_events_widget(
     events: &[CodexInlineEvent],
     open_file: Option<OpenWorkspaceFile>,
 ) -> Widget {
-    let group = GBox::new(Orientation::Vertical, 3);
+    let group = GBox::new(Orientation::Vertical, 5);
     group.set_hexpand(true);
     group.set_margin_top(0);
     group.set_margin_bottom(0);
@@ -6831,7 +7012,7 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
     }
     root.set_hexpand(true);
     root.set_margin_top(0);
-    root.set_margin_bottom(0);
+    root.set_margin_bottom(3);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
     let header = GBox::new(Orientation::Horizontal, 3);
@@ -6884,6 +7065,7 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
     let body_scroll = ScrolledWindow::new();
     body_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     body_scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);
+    body_scroll.set_propagate_natural_height(true);
     body_scroll.set_child(Some(&body_container));
     let body_revealer = Revealer::new();
     body_revealer.set_transition_type(RevealerTransitionType::None);
@@ -6987,7 +7169,8 @@ fn inline_event_terminal_output_widget(text: &str) -> Widget {
     terminal
         .widget()
         .add_css_class("chat-inline-event-terminal");
-    terminal.widget().set_min_content_height(96);
+    terminal.widget().set_vexpand(false);
+    terminal.widget().set_propagate_natural_height(true);
     terminal.widget().clone().upcast()
 }
 
@@ -7013,8 +7196,8 @@ fn inline_event_code_rows_widget(text: &str, force_diff: bool) -> Widget {
     let scroll = ScrolledWindow::new();
     scroll.add_css_class("chat-inline-event-code");
     scroll.set_hexpand(true);
-    scroll.set_min_content_height(64);
     scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);
+    scroll.set_propagate_natural_height(true);
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&rows));
     scroll.upcast()
@@ -14775,7 +14958,10 @@ fix it
     fn markdown_links_render_label_without_raw_url_suffix() {
         let markup = chat_text_markup("See [docs](https://example.com) now.");
 
-        assert_eq!(markup, "See <u>docs</u> now.");
+        assert_eq!(
+            markup,
+            "See <span font_family=\"monospace\" size=\"small\" foreground=\"#bdbdbd\" background=\"#191919\">docs</span> now."
+        );
     }
 
     #[test]
@@ -14785,7 +14971,7 @@ fix it
 
         assert_eq!(
             markup,
-            "1. Run <span font_family=\"monospace\" foreground=\"#f2f5f8\">cargo test</span>\n2. Inspect\n<span font_family=\"monospace\" foreground=\"#f2f5f8\">let ok = true;</span>"
+            "1. Run <span font_family=\"monospace\" size=\"small\" foreground=\"#f2f5f8\" background=\"#191919\">cargo test</span>\n2. Inspect\n<span font_family=\"monospace\" size=\"small\" foreground=\"#f2f5f8\" background=\"#191919\">let ok = true;</span>"
         );
     }
 
@@ -15351,6 +15537,23 @@ fix it
     }
 
     #[test]
+    fn inline_event_chip_label_ellipsizes_at_width_cap() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("fn configure_inline_event_chip_label(")
+            .expect("chip label configuration exists");
+        let end = source[start..]
+            .find("fn inline_event_chip_name(")
+            .map(|offset| start + offset)
+            .expect("chip name helper follows label configuration");
+        let helper_source = &source[start..end];
+
+        assert!(helper_source.contains("label.set_ellipsize(gtk::pango::EllipsizeMode::End);"));
+        assert!(helper_source
+            .contains("label.set_max_width_chars(inline_event_chip_label_max_width_chars());"));
+    }
+
+    #[test]
     fn inline_event_chip_label_layout_caps_long_commands() {
         let long_command = format!("Ran pnpm {}", "x".repeat(240));
         let event = CodexInlineEvent {
@@ -15362,16 +15565,34 @@ fix it
             status: CodexInlineEventStatus::Complete,
         };
 
-        assert_eq!(inline_event_chip_label_max_width_chars(), 96);
+        assert_eq!(inline_event_chip_label_max_width_chars(), 50);
         assert_eq!(
             inline_event_chip_label_width_chars(&inline_event_chip_label(&event, false)),
-            96
+            50
         );
         assert_eq!(
             inline_event_type_css_class(&event),
             "chat-inline-event-command"
         );
         assert!(inline_event_chip_markup(&event, false).contains("pnpm"));
+    }
+
+    #[test]
+    fn command_result_inline_event_uses_ran_action_for_plain_command_title() {
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "cargo test -p archductor-gtk session_surface".to_owned(),
+            subtitle: Some("Command result".to_owned()),
+            body: Some("running 1 test\ntest result: ok".to_owned()),
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        assert_eq!(inline_event_action_label(&event), "Ran");
+        assert_eq!(
+            inline_event_chip_label(&event, false),
+            "cargo test -p archductor-gtk session_surface"
+        );
     }
 
     #[test]
@@ -17156,6 +17377,8 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(source.contains("inline_event_terminal_output_widget(text)"));
         assert!(source.contains("inline-event-code-row-added"));
         assert!(source.contains("terminal::read_only_terminal_grid("));
+        assert!(source.contains("terminal.widget().set_vexpand(false);"));
+        assert!(source.contains("terminal.widget().set_propagate_natural_height(true);"));
         assert!(!source.contains("InlineEventBodyRenderKind::Diff => {\n            let view = inline_event_text_view(text);"));
     }
 
@@ -17947,6 +18170,12 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
                 serde_json::json!({"title": "skill-creator", "body": "loaded"}),
                 "Read skill-creator",
             ),
+            (
+                ProviderEventKind::WebBrowserMedia,
+                Some("rawResponseItem/tool_search_output/completed"),
+                serde_json::json!({"title": "Search output", "body": "Cargo.toml\ncrates"}),
+                "Searched Search output",
+            ),
         ];
 
         for (kind, subtype, payload, label) in cases {
@@ -18073,12 +18302,15 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
     #[test]
     fn inline_tool_event_rows_keep_compact_breathing_room() {
-        let source = include_str!("session_surface.rs");
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
 
-        assert!(source.contains("let group = GBox::new(Orientation::Vertical, 3);"));
+        assert!(source.contains("let group = GBox::new(Orientation::Vertical, 5);"));
         assert!(source.contains("let root = GBox::new(Orientation::Vertical, 2);"));
-        assert!(source.contains("expander.set_margin_bottom(1);"));
-        assert!(source.contains("body.set_margin_top(2);"));
+        assert!(source.contains("root.set_margin_bottom(3);"));
+        assert!(source.contains("body_container.set_margin_top(2);"));
     }
 
     #[test]
@@ -18112,7 +18344,43 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(
             source.contains("body_scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);")
         );
+        assert!(source.contains("body_scroll.set_propagate_natural_height(true);"));
         assert!(source.contains("body_revealer.set_child(Some(&body_scroll));"));
+    }
+
+    #[test]
+    fn inline_event_output_max_height_allows_large_bodies() {
+        const {
+            assert!(
+            INLINE_EVENT_BODY_MAX_HEIGHT >= 480,
+            "inline command/read/edit output should grow well beyond a compact preview before scrolling"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_event_code_output_uses_natural_height_until_cap() {
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let start = source
+            .find("fn inline_event_code_rows_widget")
+            .expect("code output widget exists");
+        let end = source[start..]
+            .find("fn inline_event_code_row_widget")
+            .map(|offset| start + offset)
+            .expect("code row helper follows code output widget");
+        let widget_source = &source[start..end];
+
+        assert!(
+            widget_source.contains("scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);")
+        );
+        assert!(widget_source.contains("scroll.set_propagate_natural_height(true);"));
+        assert!(
+            !widget_source.contains("scroll.set_min_content_height("),
+            "code/read/edit output should not reserve a fixed minimum height"
+        );
     }
 
     #[test]
@@ -18129,6 +18397,8 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert!(markup.contains("Use "));
         assert!(markup.contains("font_family=\"monospace\""));
+        assert!(markup.contains("size=\"small\""));
+        assert!(markup.contains("background=\"#191919\""));
         assert!(markup.contains("cargo test"));
         assert!(markup.contains("&lt;merge&gt;"));
         assert!(!markup.contains("<merge>"));
@@ -18153,8 +18423,10 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         let markup = chat_text_markup("**<danger>** [docs](https://example.com?a=1&b=2)");
 
         assert!(markup.contains("<b>&lt;danger&gt;</b>"));
-        assert!(markup.contains("<u>docs</u>"));
-        assert!(!markup.contains("https://example.com"));
+        assert!(!markup.contains("<a href="));
+        assert!(markup.contains("background=\"#191919\""));
+        assert!(markup.contains(">docs</span>"));
+        assert!(!markup.contains("(https://example.com"));
         assert!(!markup.contains("<danger>"));
         assert!(!markup.contains("a=1&b=2"));
     }
@@ -18169,21 +18441,130 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
-    fn chat_markdown_file_segments_extract_workspace_file_links_only() {
-        let segments = chat_markdown_file_segments(
-            "See [session surface](crates/gtk-app/src/session_surface.rs:42) and [docs](https://example.com).",
+    fn chat_inline_chip_segments_use_markdown_parser_for_links_and_code() {
+        let segments = chat_inline_chip_segments_from_markdown(
+            "See [session surface](crates/gtk-app/src/session_surface.rs:42), [docs](https://example.com), and `cargo test`.",
         );
 
         assert_eq!(
             segments,
             vec![
-                ChatMarkdownSegment::Text("See ".to_owned()),
-                ChatMarkdownSegment::File(ChatMarkdownFileLink {
+                ChatInlineChipSegment::Text("See ".to_owned()),
+                ChatInlineChipSegment::File(ChatMarkdownFileLink {
                     label: "session surface".to_owned(),
                     path: "crates/gtk-app/src/session_surface.rs".to_owned(),
                 }),
-                ChatMarkdownSegment::Text(" and [docs](https://example.com).".to_owned()),
+                ChatInlineChipSegment::Text(", ".to_owned()),
+                ChatInlineChipSegment::Link {
+                    label: "docs".to_owned(),
+                    url: "https://example.com".to_owned(),
+                },
+                ChatInlineChipSegment::Text(", and ".to_owned()),
+                ChatInlineChipSegment::Code("cargo test".to_owned()),
+                ChatInlineChipSegment::Text(".".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn chat_inline_chip_segments_preserve_block_gap_after_inline_chips() {
+        let segments =
+            chat_inline_chip_segments_from_markdown("Run `cargo test`\n\nThen continue.");
+
+        assert_eq!(
+            segments,
+            vec![
+                ChatInlineChipSegment::Text("Run ".to_owned()),
+                ChatInlineChipSegment::Code("cargo test".to_owned()),
+                ChatInlineChipSegment::Text("\nThen continue.".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_inline_link_launch_allowlist_only_accepts_web_and_mailto_urls() {
+        assert!(chat_inline_link_is_launchable("https://example.com"));
+        assert!(chat_inline_link_is_launchable(" http://example.com "));
+        assert!(chat_inline_link_is_launchable("mailto:dev@example.com"));
+        assert!(!chat_inline_link_is_launchable("javascript:alert(1)"));
+        assert!(!chat_inline_link_is_launchable("file:///tmp/secret"));
+        assert!(!chat_inline_link_is_launchable("ssh://example.com"));
+        assert!(!chat_inline_link_is_launchable("example.com"));
+    }
+
+    #[test]
+    fn chat_markdown_file_links_render_as_inline_chips() {
+        let source = include_str!("session_surface.rs");
+        let line_widget = source
+            .split("fn chat_markdown_inline_chip_line_widget")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn chat_inline_chip_segments_from_markdown")
+                    .next()
+            })
+            .expect("chat markdown inline chip line widget exists");
+        let segment_builder = source
+            .split("fn chat_inline_chip_segments_from_markdown")
+            .nth(1)
+            .and_then(|tail| tail.split("#[derive(Default)]").next())
+            .expect("chat inline chip segment builder exists");
+        let anchor_helper = source
+            .split("fn append_chat_inline_chip_anchor")
+            .nth(1)
+            .and_then(|tail| tail.split("fn chat_inline_markdown_chip").next())
+            .expect("chat inline chip anchor helper exists");
+        let chip_helper = source
+            .split("fn chat_inline_markdown_chip")
+            .nth(1)
+            .and_then(|tail| tail.split("fn chat_text_markup").next())
+            .expect("chat inline markdown chip helper exists");
+        let segments = chat_inline_chip_segments_from_markdown(
+            "See [session_surface.rs](crates/gtk-app/src/session_surface.rs:42) inline.",
+        );
+
+        assert!(matches!(
+            &segments[1],
+            ChatInlineChipSegment::File(ChatMarkdownFileLink { label, path })
+                if label == "session_surface.rs" && path == "crates/gtk-app/src/session_surface.rs"
+        ));
+        assert!(segment_builder.contains("Parser::new_ext"));
+        assert!(line_widget.contains("TextView::with_buffer"));
+        assert!(line_widget.contains("view.set_pixels_above_lines(0);"));
+        assert!(line_widget.contains("view.set_pixels_below_lines(0);"));
+        assert!(anchor_helper.contains("create_child_anchor"));
+        assert!(anchor_helper.contains("add_child_at_anchor"));
+        assert!(line_widget.contains("chat-markdown-inline-view"));
+        assert!(chip_helper.contains("Button::new"));
+        assert!(chip_helper.contains("connect_clicked"));
+        assert!(chip_helper.contains("chat_inline_link_is_launchable"));
+        assert!(chip_helper.contains("chat-markdown-file-chip"));
+        assert!(chip_helper.contains("chat-markdown-code-chip"));
+        assert!(chip_helper.contains("chat-markdown-link-chip"));
+        assert!(chip_helper.contains("chat-markdown-file-chip-label"));
+        assert!(chip_helper.contains("BaselinePosition::Bottom"));
+        assert!(chip_helper.contains("button.set_valign(Align::Baseline);"));
+        assert!(!chip_helper.contains("chat-markdown-chip-baseline-probe"));
+        assert!(!chip_helper.contains("baseline.set_opacity"));
+        assert!(!chip_helper.contains("baseline.set_height_request"));
+        assert!(chip_helper.contains("chip.set_valign(Align::Center);"));
+        assert!(chip_helper.contains("chat-markdown-chip-anchor"));
+        assert!(!chip_helper.contains("chat-markdown-chip-offset"));
+        assert!(!chip_helper.contains("chat-markdown-chip-text-offset"));
+        assert!(!chip_helper.contains("text_offset.set_height_request"));
+        assert!(!chip_helper.contains("chip.set_margin_top"));
+        assert!(chip_helper.contains("chip.set_margin_bottom(0);"));
+        assert!(chip_helper.contains("text.set_valign(Align::Center);"));
+        assert!(!chip_helper.contains("set_ellipsize"));
+        assert!(!chip_helper.contains("set_max_width_chars"));
+        assert!(!line_widget.contains("chat-inline-event-chip"));
+        assert!(!line_widget.contains("set_ellipsize"));
+        assert!(!line_widget.contains("set_max_width_chars"));
+        assert!(!line_widget.contains("let row = GBox::new"));
+        assert!(!line_widget.contains("FlowBox::new"));
+        assert!(!line_widget.contains("connect_activate_link"));
+        assert!(
+            !line_widget.contains("workspace_file_link_component("),
+            "chat message file links should stay in one wrapping text view, not generic workspace rows"
         );
     }
 
@@ -18341,6 +18722,37 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(!rendered_text.contains("Unknown provider event"));
         assert!(!rendered_text.contains("\"result\""));
         assert!(!rendered_text.contains("thread/started"));
+    }
+
+    #[test]
+    fn completed_turn_duration_survives_normal_chat_projection_filter() {
+        let mut started =
+            provider_event_record(ProviderEventKind::Turn, ProviderEventPhase::Started);
+        started.provider_item_id = None;
+        started.provider_event_id = Some("turn-started".to_owned());
+        started.provider_turn_id = Some("turn-1".to_owned());
+        started.provider_subtype = Some("turn/started".to_owned());
+        started.received_sequence = 1;
+        started.timeline_seq = Some(1);
+        started.occurred_at_ms = 2_000;
+        started.normalized_payload = serde_json::json!({"title": "Turn", "body": "Working"});
+
+        let mut completed = started.clone();
+        completed.identity_key = "codex:event:turn-completed".to_owned();
+        completed.provider_event_id = Some("turn-completed".to_owned());
+        completed.phase = ProviderEventPhase::Completed;
+        completed.provider_subtype = Some("turn/completed".to_owned());
+        completed.received_sequence = 2;
+        completed.timeline_seq = Some(2);
+        completed.occurred_at_ms = 5_450;
+        completed.normalized_payload = serde_json::json!({"title": "Turn", "body": ""});
+
+        let projection = provider_projection_from_records(&[started, completed]);
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Turn");
+        assert_eq!(items[0].body, "Completed in 3.5s");
     }
 
     #[test]
@@ -20252,14 +20664,12 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn gtk_sources_do_not_own_or_poll_ptys() {
+    fn gtk_provider_surfaces_do_not_own_or_poll_ptys() {
         let session_surface = include_str!("session_surface.rs");
         let terminal = include_str!("terminal.rs");
-        let workspace_command_center = include_str!("workspace_command_center.rs");
-        let gtk_sources = [
+        let provider_surface_sources = [
             ("session_surface.rs", session_surface),
             ("terminal.rs", terminal),
-            ("workspace_command_center.rs", workspace_command_center),
         ];
         let pty_session = concat!("Pty", "Session");
         let pty_spawn = concat!("Pty", "Session", "::", "spawn");
@@ -20276,24 +20686,15 @@ Schema confirms the app moved CRM around businesses.";
             "_MS",
             ")"
         );
-        let run_console_live = concat!("WorkspaceRunConsoleTerminalConnection", "::", "Live");
-        let terminal_ownership_marker = concat!("active", "_", "ptys");
-        let run_console_timer = concat!(
-            "timeout",
-            "_add",
-            "_local(std::time::Duration::from_",
-            "millis(100), ",
-            "move ||"
-        );
 
-        for (path, source) in gtk_sources {
+        for (path, source) in provider_surface_sources {
             assert!(
                 !source.contains(pty_session),
-                "{path} must not import, store, or wrap GTK PTY sessions"
+                "{path} must not import, store, or wrap provider PTY sessions"
             );
             assert!(
                 !source.contains(pty_spawn),
-                "{path} must not spawn PTYs directly"
+                "{path} must not spawn provider PTYs directly"
             );
             assert!(
                 !source.contains(proc_prefix) && !source.contains(fd_zero),
@@ -20306,16 +20707,8 @@ Schema confirms the app moved CRM around businesses.";
             "session/chat PTY poll loop must be removed from GTK"
         );
         assert!(
-            !terminal.contains(terminal_ownership_marker),
-            "shell terminal PTY ownership must be removed from GTK"
-        );
-        assert!(
-            !workspace_command_center.contains(run_console_live),
-            "run-console PTY ownership must be removed from GTK"
-        );
-        assert!(
-            !workspace_command_center.contains(run_console_timer),
-            "run-console PTY poll loop must be removed from GTK"
+            !terminal.contains(concat!("active", "_", "ptys")),
+            "shared terminal widgets must not own shell PTY sessions"
         );
     }
 

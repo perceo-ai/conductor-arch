@@ -20,6 +20,7 @@ pub enum ProviderProjectionCategory {
     FileWrite,
     FilePatch,
     FileDiff,
+    SearchOutput,
     McpTool,
     NativeTool,
     Skill,
@@ -194,10 +195,18 @@ pub struct ProviderProjectionItemSignature {
 }
 
 pub fn provider_projection_from_records(records: &[ProviderEventRecord]) -> ProviderProjection {
+    let turn_durations = provider_turn_durations(records);
     render_provider_event_projection(
         records
             .iter()
-            .map(provider_projection_event_from_record)
+            .map(|record| {
+                provider_projection_event_from_record(
+                    record,
+                    turn_durations
+                        .get(&provider_projection_canonical_id(record))
+                        .copied(),
+                )
+            })
             .collect(),
     )
 }
@@ -250,10 +259,12 @@ pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjection
 
     match item.render_class {
         ProjectionRenderClass::FallbackCard => false,
-        ProjectionRenderClass::StatusCard => matches!(
-            item.status,
-            ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
-        ),
+        ProjectionRenderClass::StatusCard => {
+            matches!(
+                item.status,
+                ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
+            ) || (item.title == "Turn" && !item.body.trim().is_empty())
+        }
         _ => true,
     }
 }
@@ -296,10 +307,14 @@ pub fn provider_projection_item_text(item: &ProviderProjectionItem) -> String {
     }
 }
 
-fn provider_projection_event_from_record(record: &ProviderEventRecord) -> ProviderProjectionEvent {
+fn provider_projection_event_from_record(
+    record: &ProviderEventRecord,
+    turn_duration_ms: Option<u64>,
+) -> ProviderProjectionEvent {
     let category = provider_projection_category(record.kind, record.provider_subtype.as_deref());
     let raw_payload =
         provider_projection_category_uses_raw_payload(category).then(|| record.raw_json.clone());
+    let body = provider_projection_record_body(record, turn_duration_ms);
     ProviderProjectionEvent {
         canonical_id: provider_projection_canonical_id(record),
         sequence: record.received_sequence.max(0) as u64,
@@ -311,13 +326,7 @@ fn provider_projection_event_from_record(record: &ProviderEventRecord) -> Provid
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        body: record
-            .normalized_payload
-            .get("body")
-            .or_else(|| record.normalized_payload.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
+        body,
         status: provider_projection_status(record.phase),
         stream_state: provider_projection_stream_state(record.phase),
         parent_id: provider_projection_parent_id(record),
@@ -332,6 +341,11 @@ fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
         .as_deref()
         .or(record.parent_provider_thread_id.as_deref())
         .unwrap_or("-");
+    if record.kind == ProviderEventKind::Turn {
+        if let Some(turn_id) = record.provider_turn_id.as_deref() {
+            return format!("{}:{thread_id}:turn:{turn_id}", record.provider);
+        }
+    }
     if let Some(item_id) = record.provider_item_id.as_deref() {
         return format!("{}:{thread_id}:{item_id}", record.provider);
     }
@@ -339,6 +353,110 @@ fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
         return format!("{}:{thread_id}:event:{event_id}", record.provider);
     }
     record.identity_key.clone()
+}
+
+fn provider_projection_record_body(
+    record: &ProviderEventRecord,
+    turn_duration_ms: Option<u64>,
+) -> String {
+    if record.kind == ProviderEventKind::Turn && provider_event_phase_is_terminal(record.phase) {
+        if let Some(duration_ms) = turn_duration_ms {
+            return format!(
+                "{} in {}",
+                provider_turn_terminal_label(record.phase),
+                format_provider_turn_duration(duration_ms)
+            );
+        }
+    }
+    record
+        .normalized_payload
+        .get("body")
+        .or_else(|| record.normalized_payload.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn provider_turn_durations(records: &[ProviderEventRecord]) -> HashMap<String, u64> {
+    let mut starts = HashMap::<String, u64>::new();
+    let mut durations = HashMap::<String, u64>::new();
+    let mut turn_records = records
+        .iter()
+        .filter(|record| record.kind == ProviderEventKind::Turn)
+        .collect::<Vec<_>>();
+    turn_records.sort_by(|left, right| provider_projection_record_order(left, right));
+    for record in turn_records {
+        let key = provider_projection_canonical_id(record);
+        if provider_event_phase_is_active(record.phase) {
+            starts
+                .entry(key)
+                .and_modify(|started_at| *started_at = (*started_at).min(record.occurred_at_ms))
+                .or_insert(record.occurred_at_ms);
+        } else if provider_event_phase_is_terminal(record.phase) {
+            if let Some(started_at) = starts.get(&key).copied() {
+                durations.insert(key, record.occurred_at_ms.saturating_sub(started_at));
+            }
+        }
+    }
+    durations
+}
+
+fn provider_projection_record_order(
+    left: &ProviderEventRecord,
+    right: &ProviderEventRecord,
+) -> std::cmp::Ordering {
+    provider_projection_record_sequence(left)
+        .cmp(&provider_projection_record_sequence(right))
+        .then_with(|| {
+            provider_projection_canonical_id(left).cmp(&provider_projection_canonical_id(right))
+        })
+}
+
+fn provider_projection_record_sequence(record: &ProviderEventRecord) -> u64 {
+    record
+        .provider_sequence
+        .unwrap_or(record.received_sequence)
+        .max(0) as u64
+}
+
+fn provider_event_phase_is_active(phase: ProviderEventPhase) -> bool {
+    matches!(
+        phase,
+        ProviderEventPhase::Started | ProviderEventPhase::Delta | ProviderEventPhase::Progress
+    )
+}
+
+fn provider_event_phase_is_terminal(phase: ProviderEventPhase) -> bool {
+    matches!(
+        phase,
+        ProviderEventPhase::Completed
+            | ProviderEventPhase::Failed
+            | ProviderEventPhase::Declined
+            | ProviderEventPhase::Interrupted
+    )
+}
+
+fn provider_turn_terminal_label(phase: ProviderEventPhase) -> &'static str {
+    match phase {
+        ProviderEventPhase::Failed => "Failed",
+        ProviderEventPhase::Declined => "Declined",
+        ProviderEventPhase::Interrupted => "Interrupted",
+        _ => "Completed",
+    }
+}
+
+fn format_provider_turn_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return format!("{duration_ms}ms");
+    }
+    if duration_ms < 60_000 {
+        let seconds = duration_ms as f64 / 1_000.0;
+        return format!("{seconds:.1}s");
+    }
+    let total_seconds = duration_ms / 1_000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}m {seconds:02}s")
 }
 
 fn provider_projection_parent_id(record: &ProviderEventRecord) -> Option<String> {
@@ -367,6 +485,11 @@ fn provider_projection_category(
             ProviderProjectionCategory::Plan
         }
         ProviderEventKind::PlanningReasoning => ProviderProjectionCategory::Reasoning,
+        ProviderEventKind::CommandProcess
+            if subtype_contains_any(&subtype, &["process/", "local_shell_call"]) =>
+        {
+            ProviderProjectionCategory::Process
+        }
         ProviderEventKind::CommandProcess => ProviderProjectionCategory::Command,
         ProviderEventKind::TerminalRuntime => ProviderProjectionCategory::BackgroundTerminal,
         ProviderEventKind::FileSystem if subtype_contains_any(&subtype, &["write", "create"]) => {
@@ -388,6 +511,11 @@ fn provider_projection_category(
         ProviderEventKind::SkillPluginHook => ProviderProjectionCategory::Skill,
         ProviderEventKind::ApprovalPermission => ProviderProjectionCategory::Approval,
         ProviderEventKind::SubagentCollaboration => ProviderProjectionCategory::Subagent,
+        ProviderEventKind::WebBrowserMedia
+            if subtype_contains_any(&subtype, &["tool_search", "search_output"]) =>
+        {
+            ProviderProjectionCategory::SearchOutput
+        }
         ProviderEventKind::WebBrowserMedia
             if subtype_contains_any(&subtype, &["image", "media"]) =>
         {
@@ -423,6 +551,7 @@ fn provider_projection_category_uses_raw_payload(category: ProviderProjectionCat
             | ProviderProjectionCategory::FileWrite
             | ProviderProjectionCategory::FilePatch
             | ProviderProjectionCategory::FileDiff
+            | ProviderProjectionCategory::SearchOutput
             | ProviderProjectionCategory::McpTool
             | ProviderProjectionCategory::NativeTool
             | ProviderProjectionCategory::Skill
@@ -530,6 +659,7 @@ fn render_class_for_category(category: ProviderProjectionCategory) -> Projection
         | ProviderProjectionCategory::FileWrite
         | ProviderProjectionCategory::FilePatch => ProjectionRenderClass::FileCard,
         ProviderProjectionCategory::FileDiff => ProjectionRenderClass::DiffCard,
+        ProviderProjectionCategory::SearchOutput => ProjectionRenderClass::ToolCard,
         ProviderProjectionCategory::McpTool | ProviderProjectionCategory::NativeTool => {
             ProjectionRenderClass::ToolCard
         }
@@ -572,6 +702,7 @@ fn projection_title(category: ProviderProjectionCategory, title: &str) -> String
         ProviderProjectionCategory::FileWrite => "File write".to_owned(),
         ProviderProjectionCategory::FilePatch => "Patch".to_owned(),
         ProviderProjectionCategory::FileDiff => "Diff".to_owned(),
+        ProviderProjectionCategory::SearchOutput => "Search output".to_owned(),
         ProviderProjectionCategory::McpTool => "MCP tool".to_owned(),
         ProviderProjectionCategory::NativeTool => "Native tool".to_owned(),
         ProviderProjectionCategory::Skill => "Skill".to_owned(),
@@ -782,6 +913,80 @@ mod tests {
     }
 
     #[test]
+    fn turn_projection_merges_lifecycle_events_and_shows_elapsed_time() {
+        let mut started = record(
+            ProviderEventKind::Turn,
+            ProviderEventPhase::Started,
+            "turn/started",
+        );
+        started.provider_item_id = None;
+        started.provider_event_id = Some("event-turn-started".to_owned());
+        started.provider_turn_id = Some("turn-1".to_owned());
+        started.provider_sequence = Some(1);
+        started.received_sequence = 1;
+        started.timeline_seq = Some(1);
+        started.occurred_at_ms = 1_000;
+        started.normalized_payload = json!({"title": "Turn", "body": "Working"});
+
+        let mut completed = started.clone();
+        completed.identity_key = "codex:event:event-turn-completed".to_owned();
+        completed.provider_event_id = Some("event-turn-completed".to_owned());
+        completed.phase = ProviderEventPhase::Completed;
+        completed.provider_sequence = Some(2);
+        completed.received_sequence = 2;
+        completed.timeline_seq = Some(2);
+        completed.occurred_at_ms = 13_345;
+        completed.normalized_payload = json!({"title": "Turn", "body": ""});
+
+        let projection = provider_projection_from_records(&[started, completed]);
+        let turn = projection
+            .items
+            .iter()
+            .find(|item| item.category == ProviderProjectionCategory::Status)
+            .unwrap();
+
+        assert_eq!(turn.id, "codex:thread-1:turn:turn-1");
+        assert_eq!(turn.status, ProviderProjectionStatus::Complete);
+        assert_eq!(turn.body, "Completed in 12.3s");
+    }
+
+    #[test]
+    fn turn_projection_elapsed_time_uses_projection_order_for_reversed_lifecycle_records() {
+        let mut started = record(
+            ProviderEventKind::Turn,
+            ProviderEventPhase::Started,
+            "turn/started",
+        );
+        started.provider_item_id = None;
+        started.provider_event_id = Some("event-turn-started".to_owned());
+        started.provider_turn_id = Some("turn-1".to_owned());
+        started.provider_sequence = Some(1);
+        started.received_sequence = 1;
+        started.timeline_seq = Some(1);
+        started.occurred_at_ms = 1_000;
+        started.normalized_payload = json!({"title": "Turn", "body": "Working"});
+
+        let mut completed = started.clone();
+        completed.identity_key = "codex:event:event-turn-completed".to_owned();
+        completed.provider_event_id = Some("event-turn-completed".to_owned());
+        completed.phase = ProviderEventPhase::Completed;
+        completed.provider_sequence = Some(2);
+        completed.received_sequence = 2;
+        completed.timeline_seq = Some(2);
+        completed.occurred_at_ms = 13_345;
+        completed.normalized_payload = json!({"title": "Turn", "body": ""});
+
+        let projection = provider_projection_from_records(&[completed, started]);
+        let turn = projection
+            .items
+            .iter()
+            .find(|item| item.category == ProviderProjectionCategory::Status)
+            .unwrap();
+
+        assert_eq!(turn.body, "Completed in 12.3s");
+    }
+
+    #[test]
     fn chat_projection_hides_codex_parser_noise_events() {
         let cases = [
             (
@@ -840,6 +1045,28 @@ mod tests {
             .next()
             .unwrap();
 
+        assert!(provider_projection_item_is_relevant_chat_event(&item));
+    }
+
+    #[test]
+    fn projection_maps_search_outputs_to_search_category() {
+        let mut event = record(
+            ProviderEventKind::WebBrowserMedia,
+            ProviderEventPhase::Completed,
+            "rawResponseItem/tool_search_output/completed",
+        );
+        event.normalized_payload = json!({
+            "title": "Search output",
+            "body": "Cargo.toml\ncrates\nprogress.md",
+        });
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(item.category, ProviderProjectionCategory::SearchOutput);
+        assert_eq!(item.render_class, ProjectionRenderClass::ToolCard);
         assert!(provider_projection_item_is_relevant_chat_event(&item));
     }
 

@@ -96,6 +96,7 @@ pub struct PullRequestReviewThread {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestReadiness {
     pub state: Option<String>,
+    pub is_draft: Option<bool>,
     pub merge_state_status: Option<String>,
     pub mergeable: Option<String>,
     pub review_decision: Option<String>,
@@ -230,6 +231,7 @@ pub(crate) fn parse_pull_request_readiness(output: &str) -> Result<PullRequestRe
     }
     Ok(PullRequestReadiness {
         state: json_string(&value, "state"),
+        is_draft: value.get("isDraft").and_then(Value::as_bool),
         merge_state_status: json_string(&value, "mergeStateStatus"),
         mergeable: json_string(&value, "mergeable"),
         review_decision: json_string(&value, "reviewDecision"),
@@ -563,6 +565,9 @@ pub(crate) fn format_pull_request_readiness(
     if let Some(state) = readiness.state.as_deref() {
         out.push_str(&format!("State: {state}\n"));
     }
+    if readiness.is_draft.unwrap_or(false) {
+        out.push_str("Draft: true\n");
+    }
     if let Some(merge_state) = readiness.merge_state_status.as_deref() {
         out.push_str(&format!("Merge state: {merge_state}\n"));
     }
@@ -676,6 +681,9 @@ fn plural(count: usize, singular: &str, plural: &str) -> String {
 
 fn append_attention_entries(out: &mut String, readiness: &PullRequestReadiness) {
     let mut lines = Vec::new();
+    if readiness.is_draft.unwrap_or(false) {
+        lines.push("- Draft pull request".to_owned());
+    }
     if matches!(
         readiness
             .review_decision
@@ -873,4 +881,35 @@ pub(crate) fn extract_json_string_field(json: &str, field: &str) -> Option<Strin
     let after_quote = after_colon.strip_prefix('"')?;
     let end = after_quote.find('"')?;
     Some(after_quote[..end].to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn readiness() -> PullRequestReadiness {
+        PullRequestReadiness {
+            state: Some("OPEN".to_owned()),
+            is_draft: None,
+            merge_state_status: None,
+            mergeable: None,
+            review_decision: None,
+            latest_reviews: Vec::new(),
+            comments: Vec::new(),
+            review_threads: Vec::new(),
+            checks: Vec::new(),
+            deployments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn draft_pull_request_is_listed_as_attention_needed() {
+        let mut readiness = readiness();
+        readiness.is_draft = Some(true);
+
+        let rendered = format_pull_request_readiness("berlin", &readiness);
+
+        assert!(rendered.contains("Draft: true\n"));
+        assert!(rendered.contains("\nAttention needed:\n- Draft pull request\n"));
+    }
 }

@@ -653,6 +653,20 @@ fn apply_harness_effect(
                 status: Some(harness_turn_status_label(status).to_owned()),
             });
         }
+        HarnessEffect::TurnSettled { status } => {
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                status = harness_turn_status_label(status),
+                "managed harness turn settled"
+            );
+            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
+                session_id: started.session_id,
+                thread_id: started.thread_id,
+                status: Some(harness_turn_status_label(status).to_owned()),
+            });
+        }
         HarnessEffect::ProviderEvent(draft) => {
             append_runtime_provider_event(runtime_store, draft, "provider_native_event");
             let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
