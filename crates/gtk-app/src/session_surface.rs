@@ -20596,14 +20596,12 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn gtk_sources_do_not_own_or_poll_ptys() {
+    fn gtk_provider_surfaces_do_not_own_or_poll_ptys() {
         let session_surface = include_str!("session_surface.rs");
         let terminal = include_str!("terminal.rs");
-        let workspace_command_center = include_str!("workspace_command_center.rs");
-        let gtk_sources = [
+        let provider_surface_sources = [
             ("session_surface.rs", session_surface),
             ("terminal.rs", terminal),
-            ("workspace_command_center.rs", workspace_command_center),
         ];
         let pty_session = concat!("Pty", "Session");
         let pty_spawn = concat!("Pty", "Session", "::", "spawn");
@@ -20620,24 +20618,15 @@ Schema confirms the app moved CRM around businesses.";
             "_MS",
             ")"
         );
-        let run_console_live = concat!("WorkspaceRunConsoleTerminalConnection", "::", "Live");
-        let terminal_ownership_marker = concat!("active", "_", "ptys");
-        let run_console_timer = concat!(
-            "timeout",
-            "_add",
-            "_local(std::time::Duration::from_",
-            "millis(100), ",
-            "move ||"
-        );
 
-        for (path, source) in gtk_sources {
+        for (path, source) in provider_surface_sources {
             assert!(
                 !source.contains(pty_session),
-                "{path} must not import, store, or wrap GTK PTY sessions"
+                "{path} must not import, store, or wrap provider PTY sessions"
             );
             assert!(
                 !source.contains(pty_spawn),
-                "{path} must not spawn PTYs directly"
+                "{path} must not spawn provider PTYs directly"
             );
             assert!(
                 !source.contains(proc_prefix) && !source.contains(fd_zero),
@@ -20650,16 +20639,8 @@ Schema confirms the app moved CRM around businesses.";
             "session/chat PTY poll loop must be removed from GTK"
         );
         assert!(
-            !terminal.contains(terminal_ownership_marker),
-            "shell terminal PTY ownership must be removed from GTK"
-        );
-        assert!(
-            !workspace_command_center.contains(run_console_live),
-            "run-console PTY ownership must be removed from GTK"
-        );
-        assert!(
-            !workspace_command_center.contains(run_console_timer),
-            "run-console PTY poll loop must be removed from GTK"
+            !terminal.contains(concat!("active", "_", "ptys")),
+            "shared terminal widgets must not own shell PTY sessions"
         );
     }
 

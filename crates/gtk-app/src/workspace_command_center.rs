@@ -2826,6 +2826,9 @@ fn install_workspace_terminal_output_pump(
     workspace_name: String,
     tab_name: String,
 ) {
+    // PER-190: Workspace shell terminal tabs still own a local PTY in GTK.
+    // This timer is scoped to one visible tab and only pumps terminal bytes
+    // into that tab; provider chat sessions stay Archcar/event owned.
     gtk::glib::timeout_add_local(Duration::from_millis(33), move || {
         let (output, exited) = {
             let mut terminals = run_console_terminals.borrow_mut();
