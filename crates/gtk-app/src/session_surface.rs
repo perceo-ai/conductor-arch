@@ -18303,10 +18303,12 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
     #[test]
     fn inline_event_output_max_height_allows_large_bodies() {
-        assert!(
+        const {
+            assert!(
             INLINE_EVENT_BODY_MAX_HEIGHT >= 480,
             "inline command/read/edit output should grow well beyond a compact preview before scrolling"
-        );
+            );
+        }
     }
 
     #[test]
