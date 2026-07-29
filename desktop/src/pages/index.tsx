@@ -4,33 +4,13 @@ import { DashboardPage } from "./Dashboard";
 import CommandCenter from "./CommandCenter";
 import { HistoryPage } from "./History";
 import { ProjectsPage } from "./Projects";
+import { SettingsPage } from "./Settings";
 
-// Placeholder pages for phase 1. Each is a self-contained page shell; later
-// phases fill them with the real dashboard/workspace/chat surfaces. Only the
-// page matching nav.activePage() is mounted (see PageStack), so unmounted pages
-// cost nothing.
-
-function PageShell(props: { title: string; children?: any }) {
-  return (
-    <div class="page-shell">
-      <div class="page-header">
-        <div class="text-page-title">{props.title}</div>
-      </div>
-      <div class="page-body">{props.children}</div>
-    </div>
-  );
-}
+// Each page is a self-contained shell; only the page matching nav.activePage()
+// is mounted (see PageStack), so unmounted pages cost nothing.
 
 export function WorkspacePage() {
   return <CommandCenter />;
-}
-
-export function SettingsPage() {
-  return (
-    <PageShell title="Settings">
-      <div class="empty-state">Settings — later phase.</div>
-    </PageShell>
-  );
 }
 
 export function PageStack() {

@@ -297,6 +297,11 @@ enum ArchcarCommand {
     Checks {
         workspace: String,
     },
+    /// Print effective settings as JSON (global, or --repository <name>).
+    Settings {
+        #[arg(long)]
+        repository: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1013,6 +1018,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::Checks { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetChecksSummary { workspace })?,
+                    );
+                }
+                ArchcarCommand::Settings { repository } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSettings { repository })?,
                     );
                 }
             }
@@ -1994,6 +2004,10 @@ fn print_archcar_response(response: ArchcarResponse) {
                 let loc = c.line_number.map(|n| format!(":{n}")).unwrap_or_default();
                 println!("#{} [{}] {}{} {}", c.id, c.status, c.file_path, loc, c.body);
             }
+        }
+        ArchcarResponse::Settings { scope, toml } => {
+            println!("settings {scope}");
+            print!("{toml}");
         }
         ArchcarResponse::ChecksSummary { workspace, summary } => {
             println!("checks_summary {workspace}");

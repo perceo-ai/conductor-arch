@@ -53,6 +53,7 @@ export type ArchcarRequest =
   | { type: "get_workspace_processes"; workspace: string }
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
+  | { type: "get_settings"; repository?: string }
   | { type: "subscribe" };
 
 export type WorkspaceChangeScope = "all" | "uncommitted";
@@ -246,6 +247,7 @@ export type ArchcarResponse =
   | { type: "workspace_processes"; workspace: string; text: string }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
+  | { type: "settings"; scope: string; toml: string }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

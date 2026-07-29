@@ -804,6 +804,27 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetSettings { repository } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let shared = AppPaths::from_env().shared_settings_path();
+            let loaded = match &repository {
+                None => crate::settings::load_effective_app_shared_settings(&shared),
+                Some(repo) => RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(repo))
+                    .and_then(|r| {
+                        crate::settings::load_effective_repository_settings(&r.root_path, &shared)
+                    }),
+            };
+            match loaded.and_then(|s| crate::settings::repository_settings_to_toml(&s)) {
+                Ok(toml) => ArchcarResponse::Settings {
+                    scope: repository.unwrap_or_else(|| "global".to_owned()),
+                    toml,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -1201,6 +1222,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetWorkspaceProcesses { .. }
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
+            | ArchcarRequest::GetSettings { .. }
     )
 }
 

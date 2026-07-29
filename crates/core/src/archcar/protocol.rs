@@ -183,6 +183,11 @@ pub enum ArchcarRequest {
     GetChecksSummary {
         workspace: String,
     },
+    GetSettings {
+        /// Repository name for repo-scoped settings; None = global app settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -299,6 +304,12 @@ pub enum ArchcarResponse {
     ChecksSummary {
         workspace: String,
         summary: ArchcarChecksSummary,
+    },
+    Settings {
+        /// "global" or the repository name.
+        scope: String,
+        /// Effective settings serialized as pretty TOML.
+        toml: String,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -636,6 +647,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetChecksSummary { workspace } => {
             format!("get_checks_summary workspace={workspace}")
         }
+        ArchcarRequest::GetSettings { repository } => {
+            format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -780,6 +794,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChecksSummary { workspace, .. } => {
             format!("checks_summary workspace={workspace}")
+        }
+        ArchcarResponse::Settings { scope, toml } => {
+            format!("settings scope={scope} bytes={}", toml.len())
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",
