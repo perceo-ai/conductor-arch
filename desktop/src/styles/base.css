@@ -557,6 +557,69 @@ body {
   color: #cfcfcf;
 }
 
+/* ---- Workspace command-center panels (todos/checkpoints/review) ---- */
+.ws-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 20px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.ws-tab-panel .action-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.ws-tab-panel .detail-row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: baseline;
+}
+.ws-tab-panel .detail-label {
+  flex: 0 0 auto;
+  min-width: 120px;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 12px;
+}
+.ws-tab-panel .detail-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--lc-text, #d4d4d4);
+  overflow-wrap: anywhere;
+}
+.ws-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  background: #151515;
+  color: var(--lc-text, #e4e4e4);
+  font: inherit;
+  outline: none;
+}
+.ws-text-input:focus {
+  border-color: #4f6a92;
+}
+.ws-tab-panel .suggested-action,
+.ws-tab-panel .secondary-action {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  background: #242424;
+  color: #cfcfcf;
+  cursor: pointer;
+}
+.ws-tab-panel .suggested-action {
+  background: #3a5a86;
+  border-color: #4f6a92;
+  color: #fff;
+}
+
 /* dev update-metrics overlay */
 .metrics-overlay {
   position: fixed;

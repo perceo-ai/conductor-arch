@@ -239,11 +239,17 @@ enum ArchcarCommand {
     /// List repositories with workspace counts.
     Repositories,
     /// List chat threads for a workspace.
-    ChatThreads { workspace: String },
+    ChatThreads {
+        workspace: String,
+    },
     /// Print the projected chat timeline for a thread.
-    ChatProjection { thread_id: i64 },
+    ChatProjection {
+        thread_id: i64,
+    },
     /// List files in a workspace checkout (for the file browser).
-    WorkspaceFiles { workspace: String },
+    WorkspaceFiles {
+        workspace: String,
+    },
     /// List changed-file summaries for a workspace.
     WorkspaceChanges {
         workspace: String,
@@ -255,6 +261,37 @@ enum ArchcarCommand {
     WorkspaceDiff {
         workspace: String,
         path: Option<String>,
+    },
+    /// List todos for a workspace.
+    Todos {
+        workspace: String,
+    },
+    /// Add a todo to a workspace.
+    AddTodo {
+        workspace: String,
+        text: String,
+    },
+    /// List checkpoints for a workspace.
+    Checkpoints {
+        workspace: String,
+    },
+    /// Create a checkpoint in a workspace.
+    CreateCheckpoint {
+        workspace: String,
+        message: String,
+    },
+    /// Restore a workspace to a checkpoint.
+    RestoreCheckpoint {
+        workspace: String,
+        checkpoint_id: i64,
+    },
+    /// Print the processes text (setups/runs/checks/sessions) for a workspace.
+    Processes {
+        workspace: String,
+    },
+    /// List review comments for a workspace.
+    Review {
+        workspace: String,
     },
 }
 
@@ -930,6 +967,43 @@ fn main() -> Result<()> {
                 ArchcarCommand::WorkspaceDiff { workspace, path } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetWorkspaceDiff { workspace, path })?,
+                    );
+                }
+                ArchcarCommand::Todos { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::ListTodos { workspace })?);
+                }
+                ArchcarCommand::AddTodo { workspace, text } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::AddTodo { workspace, text })?,
+                    );
+                }
+                ArchcarCommand::Checkpoints { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListCheckpoints { workspace })?,
+                    );
+                }
+                ArchcarCommand::CreateCheckpoint { workspace, message } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::CreateCheckpoint { workspace, message })?,
+                    );
+                }
+                ArchcarCommand::RestoreCheckpoint {
+                    workspace,
+                    checkpoint_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::RestoreCheckpoint {
+                        workspace,
+                        checkpoint_id,
+                    })?);
+                }
+                ArchcarCommand::Processes { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetWorkspaceProcesses { workspace })?,
+                    );
+                }
+                ArchcarCommand::Review { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListReviewComments { workspace })?,
                     );
                 }
             }
@@ -1861,7 +1935,9 @@ fn print_archcar_response(response: ArchcarResponse) {
                 println!("{f}");
             }
         }
-        ArchcarResponse::WorkspaceChanges { workspace, files, .. } => {
+        ArchcarResponse::WorkspaceChanges {
+            workspace, files, ..
+        } => {
             println!("workspace_changes {} {}", workspace, files.len());
             for f in files {
                 let counts = match (f.additions, f.deletions) {
@@ -1874,6 +1950,41 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::WorkspaceDiff { workspace, diff } => {
             println!("workspace_diff {} {} bytes", workspace, diff.len());
             print!("{diff}");
+        }
+        ArchcarResponse::Todos { workspace, todos } => {
+            println!("todos {} {}", workspace, todos.len());
+            for t in todos {
+                println!("#{} [{}] {}", t.id, t.status, t.text);
+            }
+        }
+        ArchcarResponse::TodoAdded { todo } => {
+            println!("todo_added #{} {}", todo.id, todo.text);
+        }
+        ArchcarResponse::Checkpoints {
+            workspace,
+            checkpoints,
+        } => {
+            println!("checkpoints {} {}", workspace, checkpoints.len());
+            for c in checkpoints {
+                println!("#{} {} {}", c.id, c.created_at, c.message);
+            }
+        }
+        ArchcarResponse::CheckpointSaved { checkpoint } => {
+            println!("checkpoint_saved #{} {}", checkpoint.id, checkpoint.message);
+        }
+        ArchcarResponse::WorkspaceProcesses { workspace, text } => {
+            println!("workspace_processes {}", workspace);
+            print!("{text}");
+        }
+        ArchcarResponse::ReviewComments {
+            workspace,
+            comments,
+        } => {
+            println!("review_comments {} {}", workspace, comments.len());
+            for c in comments {
+                let loc = c.line_number.map(|n| format!(":{n}")).unwrap_or_default();
+                println!("#{} [{}] {}{} {}", c.id, c.status, c.file_path, loc, c.body);
+            }
         }
         ArchcarResponse::Repositories { repositories } => {
             println!("repositories {}", repositories.len());

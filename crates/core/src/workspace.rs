@@ -1061,7 +1061,7 @@ pub struct MergePullRequestResult {
     pub archived_workspace: Option<Workspace>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Todo {
     pub id: i64,
     pub workspace_id: i64,
@@ -1072,7 +1072,7 @@ pub struct Todo {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub id: i64,
     pub workspace_id: i64,
@@ -1129,7 +1129,7 @@ pub struct WorkspaceStatusLine {
     pub diff_deletions: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: i64,
     pub workspace_id: i64,

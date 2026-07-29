@@ -7,7 +7,8 @@ use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
 use crate::session_state::AgentSessionState;
 use crate::workspace::{
-    ChatEventRecord, ChatMessageRecord, DiffFileSummary, SessionHarnessOptions, SessionKind,
+    ChatEventRecord, ChatMessageRecord, Checkpoint, DiffFileSummary, ReviewComment,
+    SessionHarnessOptions, SessionKind, Todo,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +156,30 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    ListTodos {
+        workspace: String,
+    },
+    AddTodo {
+        workspace: String,
+        text: String,
+    },
+    ListCheckpoints {
+        workspace: String,
+    },
+    CreateCheckpoint {
+        workspace: String,
+        message: String,
+    },
+    RestoreCheckpoint {
+        workspace: String,
+        checkpoint_id: i64,
+    },
+    GetWorkspaceProcesses {
+        workspace: String,
+    },
+    ListReviewComments {
+        workspace: String,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -245,6 +270,28 @@ pub enum ArchcarResponse {
     WorkspaceDiff {
         workspace: String,
         diff: String,
+    },
+    Todos {
+        workspace: String,
+        todos: Vec<Todo>,
+    },
+    TodoAdded {
+        todo: Todo,
+    },
+    Checkpoints {
+        workspace: String,
+        checkpoints: Vec<Checkpoint>,
+    },
+    CheckpointSaved {
+        checkpoint: Checkpoint,
+    },
+    WorkspaceProcesses {
+        workspace: String,
+        text: String,
+    },
+    ReviewComments {
+        workspace: String,
+        comments: Vec<ReviewComment>,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -532,6 +579,25 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             "get_workspace_diff workspace={workspace} path={}",
             path.as_deref().unwrap_or("*")
         ),
+        ArchcarRequest::ListTodos { workspace } => format!("list_todos workspace={workspace}"),
+        ArchcarRequest::AddTodo { workspace, text } => {
+            format!("add_todo workspace={workspace} chars={}", text.chars().count())
+        }
+        ArchcarRequest::ListCheckpoints { workspace } => {
+            format!("list_checkpoints workspace={workspace}")
+        }
+        ArchcarRequest::CreateCheckpoint { workspace, message } => {
+            format!("create_checkpoint workspace={workspace} chars={}", message.chars().count())
+        }
+        ArchcarRequest::RestoreCheckpoint { workspace, checkpoint_id } => {
+            format!("restore_checkpoint workspace={workspace} checkpoint_id={checkpoint_id}")
+        }
+        ArchcarRequest::GetWorkspaceProcesses { workspace } => {
+            format!("get_workspace_processes workspace={workspace}")
+        }
+        ArchcarRequest::ListReviewComments { workspace } => {
+            format!("list_review_comments workspace={workspace}")
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -657,6 +723,22 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceDiff { workspace, diff } => {
             format!("workspace_diff workspace={workspace} bytes={}", diff.len())
+        }
+        ArchcarResponse::Todos { workspace, todos } => {
+            format!("todos workspace={workspace} count={}", todos.len())
+        }
+        ArchcarResponse::TodoAdded { todo } => format!("todo_added id={}", todo.id),
+        ArchcarResponse::Checkpoints { workspace, checkpoints } => {
+            format!("checkpoints workspace={workspace} count={}", checkpoints.len())
+        }
+        ArchcarResponse::CheckpointSaved { checkpoint } => {
+            format!("checkpoint_saved id={}", checkpoint.id)
+        }
+        ArchcarResponse::WorkspaceProcesses { workspace, text } => {
+            format!("workspace_processes workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::ReviewComments { workspace, comments } => {
+            format!("review_comments workspace={workspace} count={}", comments.len())
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",

@@ -20,8 +20,6 @@ use crate::archcar::protocol::{
     ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse,
     ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
 };
-use crate::repository::RepositoryStore;
-use crate::workspace::WorkspaceStatusLine;
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
 };
@@ -33,6 +31,8 @@ use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
 };
+use crate::repository::RepositoryStore;
+use crate::workspace::WorkspaceStatusLine;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
@@ -691,6 +691,87 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListTodos { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.list_todos(&workspace)) {
+                Ok(todos) => ArchcarResponse::Todos { workspace, todos },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::AddTodo { workspace, text } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.add_todo(&workspace, &text)) {
+                Ok(todo) => ArchcarResponse::TodoAdded { todo },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListCheckpoints { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.checkpoint_list(&workspace)) {
+                Ok(checkpoints) => ArchcarResponse::Checkpoints {
+                    workspace,
+                    checkpoints,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CreateCheckpoint { workspace, message } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_create(&workspace, &message, None))
+            {
+                Ok(checkpoint) => ArchcarResponse::CheckpointSaved { checkpoint },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RestoreCheckpoint {
+            workspace,
+            checkpoint_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_restore(&workspace, checkpoint_id))
+            {
+                Ok(checkpoint) => ArchcarResponse::CheckpointSaved { checkpoint },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceProcesses { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path) {
+                Ok(store) => ArchcarResponse::WorkspaceProcesses {
+                    text: workspace_processes_text(&store, &workspace),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListReviewComments { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.list_review_comments(&workspace))
+            {
+                Ok(comments) => ArchcarResponse::ReviewComments {
+                    workspace,
+                    comments,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -1083,6 +1164,10 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListWorkspaceFiles { .. }
             | ArchcarRequest::GetWorkspaceChanges { .. }
             | ArchcarRequest::GetWorkspaceDiff { .. }
+            | ArchcarRequest::ListTodos { .. }
+            | ArchcarRequest::ListCheckpoints { .. }
+            | ArchcarRequest::GetWorkspaceProcesses { .. }
+            | ArchcarRequest::ListReviewComments { .. }
     )
 }
 
@@ -1097,7 +1182,8 @@ fn workspace_diff_sections(store: &WorkspaceStore, name: &str, path: Option<&str
     let base_ref = store
         .workspace_base_ref(name)
         .unwrap_or_else(|_| "base".to_owned());
-    let mut out = format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
+    let mut out =
+        format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
     out.push_str(&format_diff_section(
         "Working tree changes",
         store.unified_diff_against_base(name, path_ref),
@@ -1135,6 +1221,91 @@ fn format_diff_section(title: &str, result: Result<String>) -> String {
     } else {
         format!("{title}\n{text}")
     }
+}
+
+fn exit_code_label(exit_code: Option<i32>) -> String {
+    exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+/// Compose the Processes tab text (Setups / Runs / Checks / Sessions). Ported
+/// from workspace_command_center::workspace_processes_text.
+fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
+    let mut out = String::new();
+    let section = |out: &mut String,
+                   title: &str,
+                   result: Result<Vec<crate::workspace::ProcessRecord>>,
+                   empty: &str,
+                   with_command: bool| {
+        out.push_str(title);
+        out.push('\n');
+        match result {
+            Ok(records) if records.is_empty() => {
+                out.push_str(empty);
+                out.push('\n');
+            }
+            Ok(records) => {
+                for r in records {
+                    if with_command {
+                        out.push_str(&format!(
+                            "#{} {} {} pid={} exit={} started={} log={}\n",
+                            r.id,
+                            r.command,
+                            r.status.as_str(),
+                            r.pid,
+                            exit_code_label(r.exit_code),
+                            r.started_at,
+                            r.log_path.display()
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "#{} {} pid={} exit={} started={} log={}\n",
+                            r.id,
+                            r.status.as_str(),
+                            r.pid,
+                            exit_code_label(r.exit_code),
+                            r.started_at,
+                            r.log_path.display()
+                        ));
+                    }
+                }
+            }
+            Err(err) => out.push_str(&format!("Could not read: {err:#}\n")),
+        }
+    };
+    section(
+        &mut out,
+        "Setups",
+        store.list_setups(name),
+        "No setup runs recorded.",
+        false,
+    );
+    out.push('\n');
+    section(
+        &mut out,
+        "Runs",
+        store.list_runs(name),
+        "No runs recorded.",
+        false,
+    );
+    out.push('\n');
+    section(
+        &mut out,
+        "Checks",
+        store.list_checks(name),
+        "No check runs recorded.",
+        false,
+    );
+    out.push('\n');
+    section(
+        &mut out,
+        "Sessions",
+        store.list_sessions(name),
+        "No sessions recorded.",
+        true,
+    );
+    out
 }
 
 fn workspace_summary_from_status_line(

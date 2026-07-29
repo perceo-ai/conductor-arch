@@ -45,6 +45,13 @@ export type ArchcarRequest =
   | { type: "list_workspace_files"; workspace: string }
   | { type: "get_workspace_changes"; workspace: string; scope: WorkspaceChangeScope }
   | { type: "get_workspace_diff"; workspace: string; path?: string }
+  | { type: "list_todos"; workspace: string }
+  | { type: "add_todo"; workspace: string; text: string }
+  | { type: "list_checkpoints"; workspace: string }
+  | { type: "create_checkpoint"; workspace: string; message: string }
+  | { type: "restore_checkpoint"; workspace: string; checkpoint_id: number }
+  | { type: "get_workspace_processes"; workspace: string }
+  | { type: "list_review_comments"; workspace: string }
   | { type: "subscribe" };
 
 export type WorkspaceChangeScope = "all" | "uncommitted";
@@ -120,6 +127,37 @@ export interface ArchcarWorkspaceSummary {
   updated_at: string;
 }
 
+export interface Todo {
+  id: number;
+  workspace_id: number;
+  text: string;
+  status: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Checkpoint {
+  id: number;
+  workspace_id: number;
+  session_id?: number;
+  git_ref: string;
+  message: string;
+  created_at: string;
+}
+
+export interface ReviewComment {
+  id: number;
+  workspace_id: number;
+  file_path: string;
+  line_number?: number;
+  body: string;
+  status: string;
+  github_thread_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DiffFileSummary {
   path: string;
   additions?: number;
@@ -182,6 +220,12 @@ export type ArchcarResponse =
       files: DiffFileSummary[];
     }
   | { type: "workspace_diff"; workspace: string; diff: string }
+  | { type: "todos"; workspace: string; todos: Todo[] }
+  | { type: "todo_added"; todo: Todo }
+  | { type: "checkpoints"; workspace: string; checkpoints: Checkpoint[] }
+  | { type: "checkpoint_saved"; checkpoint: Checkpoint }
+  | { type: "workspace_processes"; workspace: string; text: string }
+  | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

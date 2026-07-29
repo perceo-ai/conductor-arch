@@ -742,7 +742,14 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         | ArchcarRequest::GetChatProjection { .. }
         | ArchcarRequest::ListWorkspaceFiles { .. }
         | ArchcarRequest::GetWorkspaceChanges { .. }
-        | ArchcarRequest::GetWorkspaceDiff { .. } => {
+        | ArchcarRequest::GetWorkspaceDiff { .. }
+        | ArchcarRequest::ListTodos { .. }
+        | ArchcarRequest::AddTodo { .. }
+        | ArchcarRequest::ListCheckpoints { .. }
+        | ArchcarRequest::CreateCheckpoint { .. }
+        | ArchcarRequest::RestoreCheckpoint { .. }
+        | ArchcarRequest::GetWorkspaceProcesses { .. }
+        | ArchcarRequest::ListReviewComments { .. } => {
             AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
         }
     }
