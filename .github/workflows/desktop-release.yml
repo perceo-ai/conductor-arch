@@ -1,0 +1,133 @@
+name: Desktop Release
+
+# Builds the Electron desktop app (desktop/) into self-contained installers for
+# Linux (AppImage/deb/rpm), macOS (dmg), and Windows (nsis). Each installer
+# bundles Chromium + Node + the Rust sidecars (archcar, archductor), so target
+# machines need no Archductor-specific runtime libraries.
+#
+# Runs alongside the GTK publish workflow during the transition; retire that one
+# once the Electron app reaches parity.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v, for example 0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            dist: pnpm run dist:linux
+          - os: macos-14
+            dist: pnpm run dist -- --mac
+          - os: windows-2025
+            dist: pnpm run dist -- --win
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Linux packaging prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          # rpm -> rpmbuild for the rpm target; fuse for AppImage.
+          sudo apt-get install -y --no-install-recommends rpm fuse libfuse2 git
+
+      - name: Build Rust sidecars (release)
+        run: cargo build --release --locked --bin archcar --bin archductor
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - name: Derive version
+        id: version
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' <<< "$VERSION"; then
+            echo "version must look like MAJOR.MINOR.PATCH, got: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set package version
+        shell: bash
+        working-directory: desktop
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Package installers
+        working-directory: desktop
+        # No GH_TOKEN here so electron-builder never auto-publishes; the
+        # "Attach to release" step below uploads explicitly.
+        run: ${{ matrix.dist }} --publish never
+
+      - name: Collect artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            desktop/release/*.AppImage
+            desktop/release/*.deb
+            desktop/release/*.rpm
+            desktop/release/*.dmg
+            desktop/release/*.exe
+          if-no-files-found: warn
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.exe)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no installers produced on ${{ matrix.os }}" >&2
+            exit 0
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
