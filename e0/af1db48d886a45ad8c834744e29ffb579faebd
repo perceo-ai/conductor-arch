@@ -1,0 +1,20 @@
+desktop/src/pages/ChatSurface.tsx
+  s_248d41ce7a4a6d::t_ee37b0d596cbe0 182-191
+  s_248d41ce7a4a6d::t_ae6de39fb4f8bd 244-248
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e0af1db48d886a45ad8c834744e29ffb579faebd",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
