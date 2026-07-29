@@ -620,6 +620,51 @@ body {
   color: #fff;
 }
 
+/* ---- History / Projects lists ---- */
+.history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+.history-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--lc-border, #2a2a2a);
+}
+.history-row .workspace-name {
+  color: var(--lc-text, #e4e4e4);
+  font-weight: 600;
+}
+.history-row .workspace-meta {
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 12px;
+}
+.history-view .page-body,
+.repo-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.repo-group {
+  margin-bottom: 18px;
+}
+.repo-group .repo-section-header {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 12px;
+}
+.repo-group .repo-section-header .title {
+  flex: 0 0 auto;
+}
+
 /* dev update-metrics overlay */
 .metrics-overlay {
   position: fixed;
