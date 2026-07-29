@@ -1,0 +1,20 @@
+.github/workflows/desktop-release.yml
+  s_248d41ce7a4a6d::t_b8c8d96d797e7d 1-104,108-133
+  s_248d41ce7a4a6d::t_dcec6d320ca1e8 105-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "81691f31ff947c97ee85366ab0dbe32d530812ed",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
