@@ -769,19 +769,19 @@ jobs:
         if: matrix.family == 'debian'
         run: |
           apt-get update -q
-          apt-get install -y --no-install-recommends ca-certificates curl git gcc pkg-config
+          apt-get install -y --no-install-recommends ca-certificates curl git gcc libc6-dev pkg-config
 
       - name: Install Fedora dependencies
         if: matrix.family == 'fedora'
-        run: dnf install -y ca-certificates curl git gcc pkgconf-pkg-config
+        run: dnf install -y ca-certificates curl git gcc glibc-devel pkgconf-pkg-config
 
       - name: Install Arch dependencies
         if: matrix.family == 'arch'
-        run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc pkgconf
+        run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc glibc pkgconf
 
       - name: Install openSUSE dependencies
         if: matrix.family == 'opensuse'
-        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc pkg-config rust
+        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc glibc-devel pkg-config rust
 
       - name: Install Alpine dependencies
         if: matrix.family == 'alpine'

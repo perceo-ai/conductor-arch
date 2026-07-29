@@ -3111,12 +3111,6 @@ fn print_doctor(report: doctor::DoctorReport) {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
-
-    fn cli_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn parses_app_shared_settings_export() {
