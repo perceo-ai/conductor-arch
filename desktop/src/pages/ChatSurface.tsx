@@ -179,6 +179,16 @@ function Composer(props: { threadId: number; sessionKind: SessionKind }) {
   const slice = () => chatStore.slice(props.threadId);
   const busy = () => slice().session?.ready === false && slice().session != null;
 
+  // Context-window usage from the most recent message that reports it.
+  const contextPercent = createMemo(() => {
+    const msgs = slice().messages;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const pct = msgs[i].context_usage?.percent;
+      if (pct != null) return Math.round(pct);
+    }
+    return null;
+  });
+
   async function submit() {
     const value = text().trim();
     if (!value) return;
@@ -231,6 +241,11 @@ function Composer(props: { threadId: number; sessionKind: SessionKind }) {
         <div class="chat-toolbar">
           <div class="chat-toolbar-left" />
           <div class="chat-toolbar-right">
+            <Show when={contextPercent() != null}>
+              <span class="chat-context-usage" title="Context window used">
+                {contextPercent()}% context
+              </span>
+            </Show>
             <span class="chat-status-hint">{busy() ? "working…" : "⌘/Ctrl+Enter to send"}</span>
             <button
               class="chat-send-btn"
