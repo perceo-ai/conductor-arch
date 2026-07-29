@@ -1,0 +1,33 @@
+.github/workflows/desktop-release.yml
+  s_248d41ce7a4a6d::t_39d98860b6e316 30-141,143,153,155,157,178,183,191-193,201-208,211,225-226,228,230,237
+  s_248d41ce7a4a6d::t_55989f1e110390 227,234
+crates/gtk-app/src/workspace_command_center.rs
+  s_248d41ce7a4a6d::t_395b73dd3b468d 2881
+desktop/electron/archcar.ts
+  s_248d41ce7a4a6d::t_089d1d883e80c1 34-35,39-44,55,63-89
+  s_7f6db939b6570b::t_b7ead820774ed7 90-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "37fa8c2e284d6dafa0a4516f9e8ebd12364823cd",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_7f6db939b6570b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fac73-6c1c-7f82-90dd-cf1ad7882f36",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
