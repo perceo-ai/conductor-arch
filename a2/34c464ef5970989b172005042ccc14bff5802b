@@ -1,0 +1,77 @@
+desktop/src/pages/index.tsx
+  s_248d41ce7a4a6d::t_a54316e7bcee76 4
+  s_248d41ce7a4a6d::t_f2ac1e2c241a2a 31
+crates/core/src/provider_projection.rs
+  s_248d41ce7a4a6d::t_8066eeb12120ed 112-139
+crates/gtk-app/src/archcar_async.rs
+  s_248d41ce7a4a6d::t_9427ace5938e5f 739-740
+  s_248d41ce7a4a6d::t_e6bb5459f8f740 741-742
+crates/core/src/archcar/protocol.rs
+  s_248d41ce7a4a6d::t_3d1316d3d58496 339-355
+  s_248d41ce7a4a6d::t_268acbf0c1eefa 131-133
+  s_248d41ce7a4a6d::t_4654e4b411dc21 204-207
+  s_248d41ce7a4a6d::t_95acd1dba660e6 356-367
+  s_248d41ce7a4a6d::t_982a0b71f27599 485-487
+  s_248d41ce7a4a6d::t_e9c98952dda4bf 208-211
+  s_248d41ce7a4a6d::t_d115d04d0e85d4 128-130
+  s_248d41ce7a4a6d::t_ef2697f171dc5f 482-484
+  s_248d41ce7a4a6d::t_2c3e5bfbd2caef 602-604
+  s_248d41ce7a4a6d::t_f3f00e5f4fde3b 599-601
+desktop/src/store/chat.ts
+  s_248d41ce7a4a6d::t_014cc0c07d15c1 32-33,40-47
+  s_248d41ce7a4a6d::t_704981bffe0bb9 4
+  s_248d41ce7a4a6d::t_f9e35e0f6035dc 75
+  s_248d41ce7a4a6d::t_9bb451de56cf0a 100-106
+desktop/src/store/threads.ts
+  s_248d41ce7a4a6d::t_ba06bdeb950073 1-34
+crates/core/src/archcar/server.rs
+  s_248d41ce7a4a6d::t_2508a5735140fe 20-21
+  s_248d41ce7a4a6d::t_96dee96a645c7d 19
+  s_248d41ce7a4a6d::t_3e416992ca3c15 1042
+  s_248d41ce7a4a6d::t_5fa0b24acf882b 1043
+  s_248d41ce7a4a6d::t_5539c78dde9b38 603-626
+  s_248d41ce7a4a6d::t_ae5212ce49b84c 627-654
+desktop/src/store/reducer.ts
+  s_248d41ce7a4a6d::t_7214802d859b94 20-28,37-39
+  s_248d41ce7a4a6d::t_6f2810eb1ab045 40-41
+desktop/src/pages/CommandCenter.tsx
+  s_248d41ce7a4a6d::t_e33814987111e6 1-26,28-114,116-118
+  s_248d41ce7a4a6d::t_d96f8f5ec3edc5 115
+  s_248d41ce7a4a6d::t_6c38a8c360f959 27
+crates/cli/src/main.rs
+  s_248d41ce7a4a6d::t_4f386f17ef35f2 241-242
+  s_248d41ce7a4a6d::t_06559aefae3bec 243-244
+  s_248d41ce7a4a6d::t_979da8d4b03b4a 891-895
+  s_248d41ce7a4a6d::t_c7b9118fb4ceb6 896-900
+  s_248d41ce7a4a6d::t_c9f35c45976a28 1807-1815
+  s_248d41ce7a4a6d::t_9920d23b7ea86f 1816-1823
+desktop/src/store/index.ts
+  s_248d41ce7a4a6d::t_8ebefea90aa027 10,15
+desktop/src/styles/base.css
+  s_248d41ce7a4a6d::t_5a2c8aa29016e3 275-459
+desktop/src/bridge/protocol.ts
+  s_248d41ce7a4a6d::t_3e9bbea9f080ab 118-128
+  s_248d41ce7a4a6d::t_f1b93285dfb8c7 159
+  s_248d41ce7a4a6d::t_261f688fd7baf4 158
+  s_248d41ce7a4a6d::t_e9ff1d2ebd3883 43
+  s_248d41ce7a4a6d::t_1dfb1b8d2d390e 44
+  s_248d41ce7a4a6d::t_5ad1d7e2e5876d 129-137
+desktop/src/pages/ChatSurface.tsx
+  s_248d41ce7a4a6d::t_cb3dbc107df8d9 1-247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a234c464ef5970989b172005042ccc14bff5802b",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
