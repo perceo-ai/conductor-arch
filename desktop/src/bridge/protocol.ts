@@ -40,6 +40,8 @@ export type ArchcarRequest =
   | { type: "kill_session"; session_id: number }
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
+  | { type: "list_chat_threads"; workspace: string }
+  | { type: "get_chat_projection"; thread_id: number }
   | { type: "subscribe" };
 
 // --- Records ---------------------------------------------------------------
@@ -113,6 +115,26 @@ export interface ArchcarWorkspaceSummary {
   updated_at: string;
 }
 
+export interface ArchcarProjectionItem {
+  id: string;
+  sequence: number;
+  render_class: string; // user_chat | assistant_chat | reasoning_card | ...
+  role_label: string;
+  title: string;
+  body: string;
+  status: string; // pending | running | complete | failed | canceled
+  stream_state: string; // snapshot | streaming | complete
+}
+
+export interface ArchcarChatThread {
+  id: number;
+  provider: string;
+  title: string;
+  status: string;
+  updated_at: string;
+  archived_at?: string;
+}
+
 export interface ArchcarRepositorySummary {
   id: number;
   name: string;
@@ -133,6 +155,8 @@ export type ArchcarResponse =
   | { type: "queued_chat_inputs"; thread_id: number; inputs: QueuedArchcarInput[] }
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
+  | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
+  | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

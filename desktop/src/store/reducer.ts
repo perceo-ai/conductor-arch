@@ -17,15 +17,26 @@ async function refreshThreadSnapshot(threadId: number) {
   if (inflightSnapshot.get(threadId)) return;
   inflightSnapshot.set(threadId, true);
   try {
-    const res = await send({ type: "get_chat_snapshot", thread_id: threadId });
-    if (res.type === "chat_snapshot") {
-      chatStore.applySnapshot((res as { snapshot: ChatSnapshot }).snapshot);
+    const [snap, proj] = await Promise.all([
+      send({ type: "get_chat_snapshot", thread_id: threadId }),
+      send({ type: "get_chat_projection", thread_id: threadId }),
+    ]);
+    if (snap.type === "chat_snapshot") {
+      chatStore.applySnapshot((snap as { snapshot: ChatSnapshot }).snapshot);
+    }
+    if (proj.type === "chat_projection") {
+      chatStore.setProjection(threadId, proj.items);
     }
   } catch {
     // page owns its own error surface; ignore transient failures
   } finally {
     inflightSnapshot.set(threadId, false);
   }
+}
+
+/** Force a fresh snapshot+projection pull (used when a chat tab is opened). */
+export function loadThread(threadId: number): void {
+  void refreshThreadSnapshot(threadId);
 }
 
 export function applyEvent(event: ArchcarEvent) {

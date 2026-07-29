@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
 import { nav } from "@/store";
 import { DashboardPage } from "./Dashboard";
+import CommandCenter from "./CommandCenter";
 
 // Placeholder pages for phase 1. Each is a self-contained page shell; later
 // phases fill them with the real dashboard/workspace/chat surfaces. Only the
@@ -27,13 +28,7 @@ export function HistoryPage() {
 }
 
 export function WorkspacePage() {
-  return (
-    <PageShell title={nav.selectedWorkspace() ?? "Workspace"}>
-      <div class="empty-state">
-        Workspace command center (chat, changes, terminal…) — phases 4–6.
-      </div>
-    </PageShell>
-  );
+  return <CommandCenter />;
 }
 
 export function ProjectsPage() {

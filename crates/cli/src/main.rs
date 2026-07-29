@@ -238,6 +238,10 @@ enum ArchcarCommand {
     Workspaces,
     /// List repositories with workspace counts.
     Repositories,
+    /// List chat threads for a workspace.
+    ChatThreads { workspace: String },
+    /// Print the projected chat timeline for a thread.
+    ChatProjection { thread_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -883,6 +887,16 @@ fn main() -> Result<()> {
                 }
                 ArchcarCommand::Repositories => {
                     print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
+                }
+                ArchcarCommand::ChatThreads { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListChatThreads { workspace })?,
+                    );
+                }
+                ArchcarCommand::ChatProjection { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetChatProjection { thread_id })?,
+                    );
                 }
             }
         }
@@ -1788,6 +1802,23 @@ fn print_archcar_response(response: ArchcarResponse) {
                         .map(|n| format!(" pr=#{n}"))
                         .unwrap_or_default()
                 );
+            }
+        }
+        ArchcarResponse::ChatThreads { workspace, threads } => {
+            println!("chat_threads {} {}", workspace, threads.len());
+            for t in threads {
+                println!(
+                    "{} provider={} status={} updated={} {}",
+                    t.id, t.provider, t.status, t.updated_at, t.title
+                );
+            }
+        }
+        ArchcarResponse::ChatProjection { thread_id, items } => {
+            println!("chat_projection thread {} items {}", thread_id, items.len());
+            for item in items {
+                let preview = item.body.replace('\n', " ");
+                let preview: String = preview.chars().take(80).collect();
+                println!("[{}] {} {}", item.render_class, item.status, preview);
             }
         }
         ArchcarResponse::Repositories { repositories } => {

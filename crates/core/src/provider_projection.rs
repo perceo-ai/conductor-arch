@@ -109,6 +109,34 @@ pub enum ProjectionRenderClass {
 }
 
 impl ProjectionRenderClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserChat => "user_chat",
+            Self::AssistantChat => "assistant_chat",
+            Self::PlanCard => "plan_card",
+            Self::ReasoningCard => "reasoning_card",
+            Self::CommandCard => "command_card",
+            Self::ProcessCard => "process_card",
+            Self::FileCard => "file_card",
+            Self::DiffCard => "diff_card",
+            Self::ToolCard => "tool_card",
+            Self::SkillCard => "skill_card",
+            Self::PluginCard => "plugin_card",
+            Self::HookCard => "hook_card",
+            Self::SubagentCard => "subagent_card",
+            Self::NestedTranscriptCard => "nested_transcript_card",
+            Self::BackgroundCard => "background_card",
+            Self::PromptCard => "prompt_card",
+            Self::WebCard => "web_card",
+            Self::ImageCard => "image_card",
+            Self::UsageCard => "usage_card",
+            Self::WarningCard => "warning_card",
+            Self::ErrorCard => "error_card",
+            Self::StatusCard => "status_card",
+            Self::FallbackCard => "fallback_card",
+        }
+    }
+
     pub fn role_label(self) -> &'static str {
         match self {
             Self::UserChat => "user",

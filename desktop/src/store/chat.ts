@@ -1,6 +1,7 @@
 import { createStore, produce, reconcile } from "solid-js/store";
 import type {
   ArchcarMessage,
+  ArchcarProjectionItem,
   ChatSnapshot,
   ProviderEventRecord,
   QueuedArchcarInput,
@@ -28,13 +29,22 @@ export interface ChatSlice {
   messages: ArchcarMessage[];
   // provider events keyed by identity_key for in-place delta merge
   providerEvents: Record<string, ProviderEventRecord>;
+  // projected timeline items (built in core, keyed by id for delta reconcile)
+  projection: ArchcarProjectionItem[];
   queue: QueuedArchcarInput[];
   session: { session_id: number; status: string; runtime_state: string; ready: boolean } | null;
   phase: ChatUiPhase;
 }
 
 function emptySlice(): ChatSlice {
-  return { messages: [], providerEvents: {}, queue: [], session: null, phase: { kind: "ready" } };
+  return {
+    messages: [],
+    providerEvents: {},
+    projection: [],
+    queue: [],
+    session: null,
+    phase: { kind: "ready" },
+  };
 }
 
 const [chat, setChat] = createStore<Record<number, ChatSlice>>({});
@@ -62,6 +72,7 @@ export const chatStore = {
         {
           messages: snap.messages,
           providerEvents,
+          projection: chat[snap.thread_id]?.projection ?? [],
           queue: snap.queued_inputs,
           session: snap.live_session
             ? {
@@ -84,6 +95,13 @@ export const chatStore = {
     ensure(threadId);
     setChat(threadId, "messages", reconcile(messages, { key: "id", merge: true }));
     recordUpdate(`chat.messages.${threadId}`);
+  },
+
+  /** Replace the projected timeline (keyed by id → only changed items render). */
+  setProjection(threadId: number, items: ArchcarProjectionItem[]) {
+    ensure(threadId);
+    setChat(threadId, "projection", reconcile(items, { key: "id", merge: true }));
+    recordUpdate(`chat.projection.${threadId}`);
   },
 
   /** Merge one provider-event delta in place by identity_key. */

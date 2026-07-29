@@ -7,10 +7,12 @@ import { repositoriesStore } from "./repositories";
 export { nav } from "./nav";
 export { chatStore } from "./chat";
 export type { ChatSlice, ChatUiPhase } from "./chat";
+export { loadThread } from "./reducer";
 export { workspacesStore } from "./workspaces";
 export type { WorkspaceRow } from "./workspaces";
 export { repositoriesStore } from "./repositories";
 export type { RepositoryRow } from "./repositories";
+export { threadsStore } from "./threads";
 export { updateMetrics, metricsEnabled } from "./metrics";
 
 let started = false;

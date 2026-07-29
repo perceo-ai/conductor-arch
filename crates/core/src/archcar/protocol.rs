@@ -125,6 +125,12 @@ pub enum ArchcarRequest {
     },
     ListWorkspaces,
     ListRepositories,
+    ListChatThreads {
+        workspace: String,
+    },
+    GetChatProjection {
+        thread_id: i64,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -194,6 +200,14 @@ pub enum ArchcarResponse {
     },
     Repositories {
         repositories: Vec<ArchcarRepositorySummary>,
+    },
+    ChatThreads {
+        workspace: String,
+        threads: Vec<ArchcarChatThread>,
+    },
+    ChatProjection {
+        thread_id: i64,
+        items: Vec<ArchcarProjectionItem>,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -322,6 +336,35 @@ pub struct ArchcarWorkspaceSummary {
     pub updated_at: String,
 }
 
+/// Render-ready projected timeline item (flat projection of
+/// provider_projection::ProviderProjectionItem). The heavy projection/dedup
+/// logic stays in core so both surfaces render the same conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarProjectionItem {
+    pub id: String,
+    pub sequence: u64,
+    /// Snake-case render class (user_chat, assistant_chat, reasoning_card, …).
+    pub render_class: String,
+    /// Role/category label ("user", "assistant", "reasoning", "command", …).
+    pub role_label: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub stream_state: String,
+}
+
+/// Chat thread row for a workspace's chat-tab strip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChatThread {
+    pub id: i64,
+    pub provider: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+}
+
 /// Repository row for the desktop sidebar projects list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArchcarRepositorySummary {
@@ -436,6 +479,12 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
         ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
+        ArchcarRequest::ListChatThreads { workspace } => {
+            format!("list_chat_threads workspace={workspace}")
+        }
+        ArchcarRequest::GetChatProjection { thread_id } => {
+            format!("get_chat_projection thread_id={thread_id}")
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -546,6 +595,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::Repositories { repositories } => {
             format!("repositories count={}", repositories.len())
+        }
+        ArchcarResponse::ChatThreads { workspace, threads } => {
+            format!("chat_threads workspace={workspace} count={}", threads.len())
+        }
+        ArchcarResponse::ChatProjection { thread_id, items } => {
+            format!("chat_projection thread_id={thread_id} items={}", items.len())
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",

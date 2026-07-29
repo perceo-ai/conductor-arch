@@ -16,8 +16,9 @@ use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
-    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarEvent, ArchcarMessage, ArchcarRepositorySummary,
-    ArchcarRequest, ArchcarResponse, ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarEvent, ArchcarMessage,
+    ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse,
+    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
 };
 use crate::repository::RepositoryStore;
 use crate::workspace::WorkspaceStatusLine;
@@ -599,6 +600,58 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListChatThreads { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_chat_threads(&workspace))
+            {
+                Ok(threads) => ArchcarResponse::ChatThreads {
+                    workspace,
+                    threads: threads
+                        .into_iter()
+                        .map(|t| ArchcarChatThread {
+                            id: t.id,
+                            provider: t.provider,
+                            title: t.title,
+                            status: t.status,
+                            updated_at: t.updated_at,
+                            archived_at: t.archived_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChatProjection { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) {
+                Ok(records) => {
+                    let projection = provider_projection_from_records(&records);
+                    ArchcarResponse::ChatProjection {
+                        thread_id,
+                        items: projection
+                            .items
+                            .into_iter()
+                            .map(|item| ArchcarProjectionItem {
+                                id: item.id,
+                                sequence: item.sequence,
+                                render_class: item.render_class.as_str().to_owned(),
+                                role_label: item.render_class.role_label().to_owned(),
+                                title: item.title,
+                                body: item.body,
+                                status: item.status.as_str().to_owned(),
+                                stream_state: item.stream_state.as_str().to_owned(),
+                            })
+                            .collect(),
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -986,6 +1039,8 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListQueuedChatInputs { .. }
             | ArchcarRequest::ListWorkspaces
             | ArchcarRequest::ListRepositories
+            | ArchcarRequest::ListChatThreads { .. }
+            | ArchcarRequest::GetChatProjection { .. }
     )
 }
 
