@@ -42,7 +42,12 @@ export type ArchcarRequest =
   | { type: "list_repositories" }
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
+  | { type: "list_workspace_files"; workspace: string }
+  | { type: "get_workspace_changes"; workspace: string; scope: WorkspaceChangeScope }
+  | { type: "get_workspace_diff"; workspace: string; path?: string }
   | { type: "subscribe" };
+
+export type WorkspaceChangeScope = "all" | "uncommitted";
 
 // --- Records ---------------------------------------------------------------
 export interface ArchcarMessage {
@@ -115,6 +120,15 @@ export interface ArchcarWorkspaceSummary {
   updated_at: string;
 }
 
+export interface DiffFileSummary {
+  path: string;
+  additions?: number;
+  deletions?: number;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
 export interface ArchcarProjectionItem {
   id: string;
   sequence: number;
@@ -157,6 +171,14 @@ export type ArchcarResponse =
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
+  | { type: "workspace_files"; workspace: string; files: string[] }
+  | {
+      type: "workspace_changes";
+      workspace: string;
+      scope: WorkspaceChangeScope;
+      files: DiffFileSummary[];
+    }
+  | { type: "workspace_diff"; workspace: string; diff: string }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

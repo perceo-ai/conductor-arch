@@ -18,7 +18,7 @@ use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
     ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarEvent, ArchcarMessage,
     ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse,
-    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
+    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
 };
 use crate::repository::RepositoryStore;
 use crate::workspace::WorkspaceStatusLine;
@@ -652,6 +652,45 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkspaceFiles { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_files(&workspace, 400))
+            {
+                Ok(files) => ArchcarResponse::WorkspaceFiles { workspace, files },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| match scope {
+                WorkspaceChangeScope::All => store.all_file_change_summaries(&workspace),
+                WorkspaceChangeScope::Uncommitted => store.diff_file_summaries(&workspace),
+            }) {
+                Ok(files) => ArchcarResponse::WorkspaceChanges {
+                    workspace,
+                    scope,
+                    files,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceDiff { workspace, path } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path) {
+                Ok(store) => ArchcarResponse::WorkspaceDiff {
+                    diff: workspace_diff_sections(&store, &workspace, path.as_deref()),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -1041,7 +1080,61 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListRepositories
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
+            | ArchcarRequest::ListWorkspaceFiles { .. }
+            | ArchcarRequest::GetWorkspaceChanges { .. }
+            | ArchcarRequest::GetWorkspaceDiff { .. }
     )
+}
+
+const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
+
+/// Compose the three-section unified diff (working tree / unstaged / staged)
+/// the GTK Changes tab shows. Ported from workspace_command_center::
+/// workspace_diff_sections so both surfaces render identical diff text.
+fn workspace_diff_sections(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+    let path_ref = path.map(Path::new);
+    let target = path.unwrap_or("workspace");
+    let base_ref = store
+        .workspace_base_ref(name)
+        .unwrap_or_else(|_| "base".to_owned());
+    let mut out = format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
+    out.push_str(&format_diff_section(
+        "Working tree changes",
+        store.unified_diff_against_base(name, path_ref),
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Unstaged changes",
+        store.unified_diff(name, path_ref),
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Staged changes",
+        store.staged_diff(name, path_ref),
+    ));
+    out
+}
+
+fn format_diff_section(title: &str, result: Result<String>) -> String {
+    let text = match result {
+        Ok(text) => text,
+        Err(err) => return format!("{title}\nCould not read diff: {err:#}\n"),
+    };
+    if text.trim().is_empty() {
+        return format!("{title}\nNo changes.\n");
+    }
+    if text.len() > DIFF_RENDER_LIMIT_BYTES {
+        let mut end = DIFF_RENDER_LIMIT_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!(
+            "{title}\n{}\n[Diff truncated after {DIFF_RENDER_LIMIT_BYTES} bytes. Open the file for full context.]\n",
+            &text[..end]
+        )
+    } else {
+        format!("{title}\n{text}")
+    }
 }
 
 fn workspace_summary_from_status_line(

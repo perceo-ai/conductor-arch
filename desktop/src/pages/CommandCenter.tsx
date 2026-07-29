@@ -3,6 +3,8 @@ import { nav, workspacesStore } from "@/store";
 import type { WorkspaceTab } from "@/store/nav";
 import { titleCaseWorkspace } from "@/lib/text";
 import ChatSurface from "./ChatSurface";
+import WorkspaceFiles from "./WorkspaceFiles";
+import ChangesTab, { ChangesRows } from "./WorkspaceChanges";
 
 // Workspace command center — port of workspace_command_center.rs. Header +
 // workspace tab strip + a center/right split (right panel is the 340px fixed
@@ -24,7 +26,7 @@ function Placeholder(props: { label: string }) {
   return <div class="empty-state">{props.label} — later phase.</div>;
 }
 
-function RightPanel() {
+function RightPanel(props: { workspace: string }) {
   return (
     <aside class="ws-right-panel">
       <div class="command-center-strip">
@@ -46,9 +48,9 @@ function RightPanel() {
       <div class="ws-right-body">
         <Show
           when={nav.rightPanelTab() === "browse"}
-          fallback={<Placeholder label="Changes diff" />}
+          fallback={<ChangesRows workspace={props.workspace} />}
         >
-          <Placeholder label="File browser" />
+          <WorkspaceFiles workspace={props.workspace} />
         </Show>
       </div>
     </aside>
@@ -89,7 +91,7 @@ export default function CommandCenter() {
             <ChatSurface workspace={workspace()} />
           </Show>
           <Show when={nav.activeWorkspaceTab() === "changes"}>
-            <Placeholder label="Changes / diff" />
+            <ChangesTab workspace={workspace()} />
           </Show>
           <Show when={nav.activeWorkspaceTab() === "review"}>
             <Placeholder label="Review" />
@@ -112,7 +114,7 @@ export default function CommandCenter() {
         </div>
       </div>
 
-      <RightPanel />
+      <RightPanel workspace={workspace()} />
     </div>
   );
 }

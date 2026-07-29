@@ -958,7 +958,7 @@ fn configured_check_commands_from_settings(
     .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffFileSummary {
     pub path: String,
     pub additions: Option<usize>,
@@ -3301,6 +3301,40 @@ impl WorkspaceStore {
             return Ok(Vec::new());
         }
         Ok(conflict_paths.into_iter().collect())
+    }
+
+    /// Flat, sorted list of tracked-ish files under the workspace checkout
+    /// (skips .git/target/node_modules), capped at `cap`. The desktop file
+    /// browser builds the tree client-side from this. Ported from the GTK
+    /// `list_workspace_files` helper.
+    pub fn list_files(&self, name: &str, cap: usize) -> Result<Vec<String>> {
+        let workspace = self.get_by_name(name)?;
+        let mut files = Vec::new();
+        Self::list_files_recursive(&workspace.path, &workspace.path, &mut files);
+        files.sort();
+        files.truncate(cap);
+        Ok(files)
+    }
+
+    fn list_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(current) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+                continue;
+            }
+            if path.is_dir() {
+                Self::list_files_recursive(root, &path, files);
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(root) {
+                files.push(relative.to_string_lossy().to_string());
+            }
+        }
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {

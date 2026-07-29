@@ -3,7 +3,7 @@ use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
-    QueuedArchcarInput,
+    QueuedArchcarInput, WorkspaceChangeScope,
 };
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::doctor;
@@ -242,6 +242,20 @@ enum ArchcarCommand {
     ChatThreads { workspace: String },
     /// Print the projected chat timeline for a thread.
     ChatProjection { thread_id: i64 },
+    /// List files in a workspace checkout (for the file browser).
+    WorkspaceFiles { workspace: String },
+    /// List changed-file summaries for a workspace.
+    WorkspaceChanges {
+        workspace: String,
+        /// Show all changes vs the review base (default: uncommitted only).
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print the three-section unified diff for a workspace.
+    WorkspaceDiff {
+        workspace: String,
+        path: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -896,6 +910,26 @@ fn main() -> Result<()> {
                 ArchcarCommand::ChatProjection { thread_id } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetChatProjection { thread_id })?,
+                    );
+                }
+                ArchcarCommand::WorkspaceFiles { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceFiles { workspace })?,
+                    );
+                }
+                ArchcarCommand::WorkspaceChanges { workspace, all } => {
+                    let scope = if all {
+                        WorkspaceChangeScope::All
+                    } else {
+                        WorkspaceChangeScope::Uncommitted
+                    };
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetWorkspaceChanges { workspace, scope })?,
+                    );
+                }
+                ArchcarCommand::WorkspaceDiff { workspace, path } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetWorkspaceDiff { workspace, path })?,
                     );
                 }
             }
@@ -1820,6 +1854,26 @@ fn print_archcar_response(response: ArchcarResponse) {
                 let preview: String = preview.chars().take(80).collect();
                 println!("[{}] {} {}", item.render_class, item.status, preview);
             }
+        }
+        ArchcarResponse::WorkspaceFiles { workspace, files } => {
+            println!("workspace_files {} {}", workspace, files.len());
+            for f in files {
+                println!("{f}");
+            }
+        }
+        ArchcarResponse::WorkspaceChanges { workspace, files, .. } => {
+            println!("workspace_changes {} {}", workspace, files.len());
+            for f in files {
+                let counts = match (f.additions, f.deletions) {
+                    (Some(a), Some(d)) => format!("+{a} -{d}"),
+                    _ => "binary".to_owned(),
+                };
+                println!("{} {}", f.path, counts);
+            }
+        }
+        ArchcarResponse::WorkspaceDiff { workspace, diff } => {
+            println!("workspace_diff {} {} bytes", workspace, diff.len());
+            print!("{diff}");
         }
         ArchcarResponse::Repositories { repositories } => {
             println!("repositories {}", repositories.len());

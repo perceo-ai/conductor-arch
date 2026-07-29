@@ -739,7 +739,10 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         ArchcarRequest::ListWorkspaces
         | ArchcarRequest::ListRepositories
         | ArchcarRequest::ListChatThreads { .. }
-        | ArchcarRequest::GetChatProjection { .. } => {
+        | ArchcarRequest::GetChatProjection { .. }
+        | ArchcarRequest::ListWorkspaceFiles { .. }
+        | ArchcarRequest::GetWorkspaceChanges { .. }
+        | ArchcarRequest::GetWorkspaceDiff { .. } => {
             AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
         }
     }

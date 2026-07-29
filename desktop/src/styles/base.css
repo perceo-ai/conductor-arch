@@ -457,6 +457,106 @@ body {
   padding: 6px 16px 0 16px;
 }
 
+/* ---- File browser + changes/diff ---- */
+.ws-file-list,
+.ws-file-summary-panel {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  min-height: 0;
+}
+.ws-dir-row,
+.ws-file-row,
+.ws-file-summary-row-content {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  padding: 3px 8px;
+  background: transparent;
+  border: none;
+  color: var(--lc-text, #d4d4d4);
+  font-size: 13px;
+}
+.ws-dir-row:hover,
+.ws-file-row:hover,
+.ws-file-summary-row-content:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.ws-folder-toggle,
+.ws-folder-icon,
+.ws-file-icon {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  width: 12px;
+  text-align: center;
+}
+.ws-file-name,
+.ws-folder-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-file-summary-state {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 11px;
+}
+.ws-file-summary-counts {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.ws-changes-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-changes-title {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+.ws-changes-scope {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+}
+.ws-changes-tab {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.ws-changes-tab .ws-file-summary-panel {
+  flex: 0 0 auto;
+  max-height: 45%;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-diff-view {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+}
+.ws-diff-text {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  padding: 12px 16px;
+  margin: 0;
+  color: #cfcfcf;
+}
+
 /* dev update-metrics overlay */
 .metrics-overlay {
   position: fixed;

@@ -6,7 +6,9 @@ use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
 use crate::session_state::AgentSessionState;
-use crate::workspace::{ChatEventRecord, ChatMessageRecord, SessionHarnessOptions, SessionKind};
+use crate::workspace::{
+    ChatEventRecord, ChatMessageRecord, DiffFileSummary, SessionHarnessOptions, SessionKind,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RpcEnvelope<T> {
@@ -42,6 +44,16 @@ impl ArchcarInputDelivery {
             Self::Immediate => "immediate",
         }
     }
+}
+
+/// Which set of file changes a workspace-changes query returns.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceChangeScope {
+    /// All changes against the review base ref (working tree vs base).
+    All,
+    /// Uncommitted staged + unstaged + untracked changes.
+    Uncommitted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +143,18 @@ pub enum ArchcarRequest {
     GetChatProjection {
         thread_id: i64,
     },
+    ListWorkspaceFiles {
+        workspace: String,
+    },
+    GetWorkspaceChanges {
+        workspace: String,
+        scope: WorkspaceChangeScope,
+    },
+    GetWorkspaceDiff {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -208,6 +232,19 @@ pub enum ArchcarResponse {
     ChatProjection {
         thread_id: i64,
         items: Vec<ArchcarProjectionItem>,
+    },
+    WorkspaceFiles {
+        workspace: String,
+        files: Vec<String>,
+    },
+    WorkspaceChanges {
+        workspace: String,
+        scope: WorkspaceChangeScope,
+        files: Vec<DiffFileSummary>,
+    },
+    WorkspaceDiff {
+        workspace: String,
+        diff: String,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -485,6 +522,16 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetChatProjection { thread_id } => {
             format!("get_chat_projection thread_id={thread_id}")
         }
+        ArchcarRequest::ListWorkspaceFiles { workspace } => {
+            format!("list_workspace_files workspace={workspace}")
+        }
+        ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
+            format!("get_workspace_changes workspace={workspace} scope={scope:?}")
+        }
+        ArchcarRequest::GetWorkspaceDiff { workspace, path } => format!(
+            "get_workspace_diff workspace={workspace} path={}",
+            path.as_deref().unwrap_or("*")
+        ),
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -601,6 +648,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChatProjection { thread_id, items } => {
             format!("chat_projection thread_id={thread_id} items={}", items.len())
+        }
+        ArchcarResponse::WorkspaceFiles { workspace, files } => {
+            format!("workspace_files workspace={workspace} count={}", files.len())
+        }
+        ArchcarResponse::WorkspaceChanges { workspace, files, .. } => {
+            format!("workspace_changes workspace={workspace} count={}", files.len())
+        }
+        ArchcarResponse::WorkspaceDiff { workspace, diff } => {
+            format!("workspace_diff workspace={workspace} bytes={}", diff.len())
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",
