@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_248d41ce7a4a6d::t_aa1db08812c956 772,776,780,784
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "09d4ffd963ee3a48eb8fabf9c08e404bd08ac7c9",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
