@@ -15,7 +15,7 @@ export default function App() {
 
   return (
     <>
-      <Show when={navigator.platform.indexOf("Mac") === -1}>
+      <Show when={!navigator.userAgent.includes("Mac")}>
         <WindowControls />
       </Show>
       <div class="window-content">

@@ -170,16 +170,27 @@ function lineReader(socket: net.Socket, onLine: (line: string) => void): void {
 }
 
 export class ArchcarBridge {
-  private endpoint: string;
+  // Resolved lazily: endpointPath() can throw (e.g. an over-long socket path
+  // with no override). Computing it in the constructor would throw at module
+  // load in the main process, so the window is never created and the app fails
+  // silently. Deferring to first use surfaces the error through the IPC handler
+  // instead, and still lets the window open.
+  private endpoint: string | null;
   private subSocket: net.Socket | null = null;
 
-  constructor(endpoint = endpointPath()) {
-    this.endpoint = endpoint;
+  constructor(endpoint?: string) {
+    this.endpoint = endpoint ?? null;
+  }
+
+  private resolveEndpoint(): string {
+    if (this.endpoint === null) this.endpoint = endpointPath();
+    return this.endpoint;
   }
 
   async request<Req, Res>(payload: Req): Promise<Res> {
-    await ensureDaemon(this.endpoint);
-    const socket = await connectOnce(this.endpoint);
+    const endpoint = this.resolveEndpoint();
+    await ensureDaemon(endpoint);
+    const socket = await connectOnce(endpoint);
     const envelope: RpcEnvelope<Req> = { id: randomUUID(), payload };
     return new Promise<Res>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -212,8 +223,9 @@ export class ArchcarBridge {
 
   /** Open the persistent event stream. `onEvent` fires for each ArchcarEvent. */
   async subscribe(onEvent: (event: unknown) => void, onClose: () => void): Promise<void> {
-    await ensureDaemon(this.endpoint);
-    const socket = await connectOnce(this.endpoint);
+    const endpoint = this.resolveEndpoint();
+    await ensureDaemon(endpoint);
+    const socket = await connectOnce(endpoint);
     this.subSocket = socket;
     const envelope: RpcEnvelope<{ type: "subscribe" }> = {
       id: randomUUID(),
