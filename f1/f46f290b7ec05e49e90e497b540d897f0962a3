@@ -1,0 +1,38 @@
+desktop/src/pages/index.tsx
+  s_248d41ce7a4a6d::t_69258248cbac61 3
+desktop/src/pages/Dashboard.tsx
+  s_248d41ce7a4a6d::t_ad315844a456c1 1-126,128-153
+  s_248d41ce7a4a6d::t_fde4c5495a0e71 127
+desktop/src/lib/text.ts
+  s_248d41ce7a4a6d::t_f5229739452634 1-10
+desktop/src/styles/base.css
+  s_248d41ce7a4a6d::t_83d4080838eb25 198-274
+crates/core/src/archcar/server.rs
+  s_248d41ce7a4a6d::t_95b0230497a94b 992-995,1017
+  s_248d41ce7a4a6d::t_d1a3879e6399bc 553-572
+crates/core/src/archcar/protocol.rs
+  s_248d41ce7a4a6d::t_6eefe47fc1b9f3 309
+desktop/src/store/workspaces.ts
+  s_248d41ce7a4a6d::t_a21452247d0fd1 49
+  s_248d41ce7a4a6d::t_189097e3808ea5 22
+desktop/src/styles/theme.css
+  s_248d41ce7a4a6d::t_db22fbb85ff2fe 161-165
+desktop/src/bridge/protocol.ts
+  s_248d41ce7a4a6d::t_fe1a512448a8e8 105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f1f46f290b7ec05e49e90e497b540d897f0962a3",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
