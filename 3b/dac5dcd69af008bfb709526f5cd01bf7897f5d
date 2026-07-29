@@ -1,0 +1,64 @@
+desktop/src/components/Sidebar.tsx
+  s_248d41ce7a4a6d::t_fc12482f8657da 82
+desktop/src/bridge/protocol.ts
+  s_248d41ce7a4a6d::t_f9ae6e2f6d802d 165,167-168
+desktop/src/App.tsx
+  s_248d41ce7a4a6d::t_1247e2f8203de8 18
+desktop/src/pages/WorkspaceFiles.tsx
+  s_248d41ce7a4a6d::t_b14910f2f3f10d 32-33,35-38
+  s_248d41ce7a4a6d::t_be632a18383aa7 90-96
+desktop/electron/main.ts
+  s_248d41ce7a4a6d::t_bac5ba84252f07 30-32
+desktop/src/pages/ChatSurface.tsx
+  s_248d41ce7a4a6d::t_955a9ae3798609 1
+  s_248d41ce7a4a6d::t_04213382388db8 188-193
+  s_248d41ce7a4a6d::t_c207eb5e9ebd63 48-59,61-70
+crates/core/src/workspace.rs
+  s_248d41ce7a4a6d::t_5848aab332cf4b 964,966
+  s_248d41ce7a4a6d::t_cf0db203428b43 3332-3341,3345-3348
+desktop/package.json
+  s_248d41ce7a4a6d::t_cd2a5cda937e8a 27
+desktop/src/pages/CommandCenter.tsx
+  s_248d41ce7a4a6d::t_b57628c5837541 62,65-77,79-92,94-104,106-110
+  s_248d41ce7a4a6d::t_772fef4af46f22 1
+claude/CLAUDE.md
+  s_248d41ce7a4a6d::t_755c6caa81d05c 14-15
+desktop/electron/archcar.ts
+  s_248d41ce7a4a6d::t_af5c344e3e5c5d 70-87
+desktop/src/bridge/client.ts
+  s_248d41ce7a4a6d::t_80bfcc4c3ba120 30-36
+desktop/src/store/index.ts
+  s_248d41ce7a4a6d::t_3bc7d527920c70 18-19,26-48,50
+desktop/src/store/reducer.ts
+  s_248d41ce7a4a6d::t_105be228287a56 14-15,18-25,40-43
+docs/electron-rewrite-architecture.md
+  s_248d41ce7a4a6d::t_f5a6f3590018fd 48
+  s_248d41ce7a4a6d::t_93a7e81d159c3f 130
+desktop/src/store/startStore.test.ts
+  s_248d41ce7a4a6d::t_e4ab9fbed5802d 1
+  s_248d41ce7a4a6d::t_e65f648a7a95f5 2-62
+desktop/src/styles/theme.css
+  s_248d41ce7a4a6d::t_64e70b9235a549 109,183,230,408,500,515,529,860,1345,1585,1794,1816,1847,1918,1949,1998,2003,2038,2068,2082,2087,2189,2198,2206,2493,2513,2549,2559,2582,2594,2608,2627,2635,2679,2686,2693,2826,2909,2919,2954,2972,2980,2997,3083
+desktop/src/pages/WorkspaceChanges.tsx
+  s_248d41ce7a4a6d::t_348c035f0c79f4 84-89
+  s_248d41ce7a4a6d::t_4265181cee360f 102-104,107
+  s_248d41ce7a4a6d::t_51e23842098b58 39-44
+desktop/pnpm-lock.yaml
+  s_248d41ce7a4a6d::t_1dbc928339a39b 24-26,44,51-58,140-179,505-513,923-925,1104-1107,1111-1114,1124-1126,1231-1234,1448-1451,1530-1532,1570-1578,1646-1649,1676-1678,1849-1851,1941-1944,1993-1996,2130-2132,2167-2173,2181-2188,2204-2207,2373-2376,2380-2395,2420-2423,2428-2430,2464-2478,2590-2617,2841-2842,3263-3266,3488-3492,3495-3501,3506-3507,3658-3659,3952-3957,4037-4038,4069-4094,4149-4150,4194-4195,4361-4364,4446-4447,4522-4525,4659-4660,4698-4703,4710-4717,4729-4730,4826,4850,4862-4865,4870-4889,4917-4918,4921-4922
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3bdac5dcd69af008bfb709526f5cd01bf7897f5d",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
