@@ -52,9 +52,19 @@ function connectOnce(endpoint: string): Promise<net.Socket> {
 }
 
 function archcarBinary(): string {
-  // Prefer an explicit path; else rely on PATH. In a packaged app this points at
-  // the bundled sidecar.
-  return process.env.ARCHDUCTOR_ARCHCAR_BIN || "archcar";
+  // 1. Explicit override.
+  const override = process.env.ARCHDUCTOR_ARCHCAR_BIN;
+  if (override && override.trim().length > 0) return override;
+  // 2. Bundled sidecar shipped via electron-builder extraResources
+  //    (resources/bin/archcar[.exe]). Self-contained so no PATH install needed.
+  const exe = process.platform === "win32" ? "archcar.exe" : "archcar";
+  const resources = process.resourcesPath;
+  if (resources) {
+    const bundled = path.join(resources, "bin", exe);
+    if (fs.existsSync(bundled)) return bundled;
+  }
+  // 3. Fall back to PATH (dev / system install).
+  return "archcar";
 }
 
 async function ensureDaemon(endpoint: string): Promise<void> {
