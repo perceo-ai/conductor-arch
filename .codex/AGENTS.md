@@ -79,9 +79,10 @@ change:
 - CLI smoke: run the relevant `archductor` command or CLI test path that proves
   the behavior reaches the command boundary. Do not treat core-only tests as CLI
   verification.
-- GTK smoke: run the relevant `archductor-gtk` test/build/runtime path that
-  proves the behavior reaches the app surface. For visible UI changes, use GTK
-  smoke tests or a real GTK launch path when the environment supports it.
+- Desktop smoke: the desktop UI is the Electron app in `desktop/`. For visible
+  UI changes, build/run it (`cd desktop && pnpm typecheck && pnpm build`, or a
+  real launch when the environment supports it) to prove the behavior reaches
+  the app surface.
 
 Keep CLI and GTK inline:
 
@@ -173,9 +174,9 @@ Agents should understand the repo before editing:
 - `crates/core`
   - data model, repository/workspace/process state, PTY integration, Codex TUI
     parsing, harness launch planning
-- `crates/gtk-app`
-  - main desktop product surface, workspace command center, chat UI, history,
-    terminal UI, app state
+- `desktop/`
+  - main desktop product surface (Electron + Solid): workspace command center,
+    chat UI, history, terminal UI, app state
 - `crates/cli`
   - fallback CLI, automation hooks, durable helper paths used by the GTK app
 - `docs`

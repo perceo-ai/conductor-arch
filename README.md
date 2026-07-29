@@ -8,9 +8,9 @@ workspace, start Codex or Claude Code, review the diff, open or merge a GitHub
 pull request, archive the workspace, then start the next task without leaving
 the app.
 
-Inspired by [Conductor](https://conductor.build). This project targets Linux
-desktops and native Windows with GTK4/libadwaita. Linux is the primary validated
-target; Windows is currently a preview target.
+Inspired by [Conductor](https://conductor.build). The desktop UI is an Electron
+app; the `archductor` CLI and `archcar` daemon back it. Linux is the primary
+validated target; Windows is currently a preview target.
 
 ## Product Structure
 
@@ -75,7 +75,7 @@ application, and full Archductor visual parity are still in progress.
 
 ## The Workflow
 
-1. Open `archductor-gtk`.
+1. Launch the Archductor desktop app.
 2. Add or clone a repository on the Projects page. This creates the Archductor
    project entry for that codebase.
 3. Configure repository scripts and settings if the project needs them.
@@ -108,8 +108,8 @@ Run the app:
 archductor
 ```
 
-The AppImage opens the GTK app with no arguments and forwards CLI arguments to
-the command-line interface.
+The AppImage runs the `archductor` command-line interface and forwards any
+arguments to it.
 
 ### Package Managers
 
@@ -130,18 +130,18 @@ experimental until the sandbox and screenshots pass Flathub review.
 
 ### Build From Source
 
-Install GTK4/libadwaita and Rust first:
+Install the build dependencies and Rust first:
 
 ```bash
 # Ubuntu / Debian
 sudo apt update
-sudo apt install git gh sqlite3 openssh-client pkg-config libgtk-4-dev libadwaita-1-dev
+sudo apt install git gh sqlite3 openssh-client pkg-config
 
 # Fedora
-sudo dnf install git gh sqlite openssh-clients pkgconf-pkg-config gtk4-devel libadwaita-devel
+sudo dnf install git gh sqlite openssh-clients pkgconf-pkg-config
 
 # Arch Linux
-sudo pacman -S --needed git github-cli sqlite openssh pkgconf gtk4 libadwaita
+sudo pacman -S --needed git github-cli sqlite openssh pkgconf
 
 # Rust
 curl https://sh.rustup.rs -sSf | sh
@@ -153,13 +153,13 @@ Build and run:
 git clone https://github.com/perceo-ai/conductor-arch
 cd conductor-arch
 cargo build --workspace --release --locked
-./target/release/archductor-gtk
+./target/release/archductor
 ```
 
-Or use the short `make` targets:
+The desktop UI is a separate Electron app in `desktop/`. Or use the short
+`make` targets:
 
 ```bash
-make gtk
 make cli
 make build
 make build-release
@@ -169,28 +169,27 @@ make tag VERSION=0.1.0
 make publish-tag VERSION=0.1.0
 ```
 
-Development `make` launch targets are branch-scoped. `make dev`, `make gtk`,
-`make cli`, and `make archcar` set separate XDG config/data/state/cache
-directories from the current branch, so multiple Archductor checkouts can run
-side by side while dogfooding. Run `make dev-env` to print the active paths.
+Development `make` launch targets are branch-scoped. `make dev`, `make cli`,
+and `make archcar` set separate XDG config/data/state/cache directories from
+the current branch, so multiple Archductor checkouts can run side by side while
+dogfooding. Run `make dev-env` to print the active paths.
 
 Optional install:
 
 ```bash
 sudo install -Dm755 target/release/archductor /usr/local/bin/archductor
-sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 ```
 
 ### Windows Preview
 
-Tagged releases build `archductor-<version>-windows-x86_64.zip`. Extract the
-whole directory so the GTK DLLs and data directories remain beside
-`archductor-gtk.exe`, then launch that executable. Install Git and GitHub CLI
-with `winget install --id Git.Git --id GitHub.cli`; agent CLIs remain optional.
+Tagged releases build `archductor-<version>-windows-x86_64.zip` with the CLI
+and archcar sidecar. Install Git and GitHub CLI with
+`winget install --id Git.Git --id GitHub.cli`; agent CLIs remain optional. The
+Archductor desktop app is packaged separately as an Electron app.
 
-For source builds, install the MSYS2 UCRT64 GCC, pkgconf, GTK4, and libadwaita
-packages, then build the `x86_64-pc-windows-gnu` target. The CI workflow is the
-canonical build recipe.
+For source builds, install the MSYS2 UCRT64 GCC and pkgconf packages, then
+build the `x86_64-pc-windows-gnu` target. The CI workflow is the canonical
+build recipe.
 
 ## Requirements
 
@@ -507,11 +506,11 @@ already honors
 `port_block_size`. Runtime setup/run/archive scripts, terminal commands, and
 agent sessions honor `working_directory`. PR merge honors
 `customization.naming.default_merge_method` plus merge blockers for open todos,
-open local review comments, failed checks, and pending checks. GTK workspace
-startup and sidebar selection honor `default_visible_tab` unless an explicit
-launch tab is provided, and apply the configured `theme`, `accent_color`, and
-`density` as stylesheet classes. GTK also honors `keybindings` for global
-refresh, sidebar, and command-palette shortcuts, including `vim` and custom
+open local review comments, failed checks, and pending checks. The desktop app
+workspace startup and sidebar selection honor `default_visible_tab` unless an
+explicit launch tab is provided, and apply the configured `theme`,
+`accent_color`, and `density`. The desktop app also honors `keybindings` for
+global refresh, sidebar, and command-palette shortcuts, including `vim` and custom
 `action=shortcut` mappings, and applies `terminal_font` plus
 `terminal_scrollback` to workspace terminal surfaces. `command_palette_presets`
 feeds workspace terminal preset buttons; entries can be known aliases or custom
@@ -530,13 +529,13 @@ surfaces that consume them.
 
 - Linux: primary supported platform. CI covers glibc, musl, Debian, Fedora,
   Arch, openSUSE, and Alpine families.
-- Native Windows: preview target with native path, shell, process, IPC, GTK
-  compile, and portable ZIP support. Real package/runtime validation is still
+- Native Windows: preview target with native path, shell, process, IPC, and
+  portable ZIP support. Real package/runtime validation is still
   required before a stable support claim.
 - WSL: supported as a Linux environment, but it is not a substitute for the
   native Windows port.
 - macOS: technically possible, but lower priority because the original
-  the upstream Conductor app already serves macOS and GTK packaging is less native there.
+  upstream Conductor app already serves macOS.
 
 ## CLI Reference
 

@@ -1,7 +1,7 @@
 # Deploy And Test Locally
 
-This guide validates Archductor on a local machine. It covers both the GTK
-app and the CLI backend used by the app.
+This guide validates Archductor on a local machine. It covers the CLI backend
+that the desktop app uses. The desktop UI is a separate Electron app.
 
 The happy path is app-first: add a repository, create workspaces, run agent
 sessions, review changes, create/merge a GitHub PR, archive, and repeat. The
@@ -13,21 +13,19 @@ Ubuntu / Debian:
 
 ```bash
 sudo apt update
-sudo apt install -y git gh sqlite3 openssh-client pkg-config \
-  libgtk-4-dev libadwaita-1-dev
+sudo apt install -y git gh sqlite3 openssh-client pkg-config
 ```
 
 Fedora:
 
 ```bash
-sudo dnf install -y git gh sqlite openssh-clients pkgconf-pkg-config \
-  gtk4-devel libadwaita-devel
+sudo dnf install -y git gh sqlite openssh-clients pkgconf-pkg-config
 ```
 
 Arch:
 
 ```bash
-sudo pacman -S --needed git github-cli sqlite openssh pkgconf gtk4 libadwaita
+sudo pacman -S --needed git github-cli sqlite openssh pkgconf
 ```
 
 Install Rust if needed:
@@ -52,7 +50,7 @@ CLI authentication.
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p archductor-core -p archductor -p archductor-gtk
+cargo test -p archductor-core -p archductor
 cargo build --workspace --release --locked
 ```
 
@@ -60,33 +58,18 @@ Binaries:
 
 ```text
 target/release/archductor
-target/release/archductor-gtk
 ```
 
 Optional install:
 
 ```bash
 sudo install -Dm755 target/release/archductor /usr/local/bin/archductor
-sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 ```
 
 ## 4. Launch The App
 
-```bash
-archductor-gtk
-```
-
-Or preselect a workspace:
-
-```bash
-archductor-gtk --workspace berlin
-archductor-gtk --workspace berlin --tab checks
-archductor-gtk 'archductor://workspace/berlin?tab=review'
-archductor-gtk 'archductor://history'
-```
-
-Validate the app path with
-[manual-testing-checklist.md](manual-testing-checklist.md).
+The desktop UI is a separate Electron app; launch it from `desktop/`. Validate
+the app path with [manual-testing-checklist.md](manual-testing-checklist.md).
 
 ## 5. Minimal Repository Settings
 
@@ -207,16 +190,16 @@ diff_preference = "unified"
 The exact advanced schema may evolve. The product direction is stable: prompts
 and common workflow controls belong in the UI; deep theme/view/layout,
 keybinding, notification, hook, and command-preset options can be file-editable.
-The GTK Projects settings page includes an advanced customization TOML block for
-these `[customization]` sections. Workspace creation currently consumes
+The desktop app Projects settings page includes an advanced customization TOML
+block for these `[customization]` sections. Workspace creation currently consumes
 `customization.workspace_defaults.base_branch`, `branch_prefix`, and
 `port_block_size`. Runtime setup/run/archive scripts, terminal commands, and
 agent sessions consume `working_directory` as a relative path inside the
 worktree. PR merge consumes `customization.naming.default_merge_method` and
 merge blockers for open todos, open local review comments, failed checks, and
-pending checks. GTK workspace startup and sidebar selection consume
+pending checks. The desktop app workspace startup and sidebar selection consume
 `default_visible_tab` unless an explicit launch tab is provided, and apply the
-configured `theme`, `accent_color`, and `density` as stylesheet classes. GTK
+configured `theme`, `accent_color`, and `density`. The desktop app
 also consumes `keybindings` for global refresh, sidebar, and command-palette
 shortcuts, applies `terminal_font` plus `terminal_scrollback` to terminal
 surfaces, and expands `command_palette_presets` into terminal preset buttons
@@ -367,8 +350,6 @@ sudo chmod +x /usr/local/bin/appimagetool
 
 install -Dm755 target/release/archductor \
   packaging/appimage/archductor.AppDir/usr/bin/archductor
-install -Dm755 target/release/archductor-gtk \
-  packaging/appimage/archductor.AppDir/usr/bin/archductor-gtk
 
 appimagetool --appimage-extract-and-run \
   packaging/appimage/archductor.AppDir \
@@ -378,6 +359,5 @@ appimagetool --appimage-extract-and-run \
 Smoke the AppImage:
 
 ```bash
-./dist/archductor-0.1.0-x86_64.AppImage
 ./dist/archductor-0.1.0-x86_64.AppImage doctor
 ```

@@ -11,10 +11,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 ## Build And Launch
 
 - [ ] `cargo fmt --all -- --check`
-- [ ] `cargo test -p archductor-core -p archductor -p archductor-gtk`
+- [ ] `cargo test -p archductor-core -p archductor`
 - [ ] `cargo build --workspace --release --locked`
+- [ ] `cd desktop && pnpm install && pnpm typecheck && pnpm test && pnpm build`
 - [ ] `./target/release/archductor doctor` prints distro guidance.
-- [ ] `./target/release/archductor-gtk` opens the GTK app.
+- [ ] The Archductor desktop app (Electron, `desktop/`) opens
+      (`cd desktop && pnpm dev`, or an installed build). NOTE: the deeper
+      GTK-specific manual steps below still need an Electron rewrite.
 
 ## Repository Setup
 

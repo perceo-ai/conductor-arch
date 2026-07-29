@@ -16,7 +16,7 @@ until its real Windows checklist passes. macOS is not a release target.
 
 ## Typography assets
 
-The GTK theme uses the bundled `Mona Sans` variable font for UI text and
+The app theme uses the bundled `Mona Sans` variable font for UI text and
 `Commit Mono` for code-like surfaces. Native packages install these fonts into
 their platform font-data location; the Windows portable bundle loads its font
 directory privately when the app starts.
@@ -70,11 +70,9 @@ curl -fsSL -o /usr/local/bin/appimagetool \
   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
 chmod +x /usr/local/bin/appimagetool
 
-# Copy binaries into AppDir
+# Copy binary into AppDir
 install -Dm755 target/release/archductor \
   packaging/appimage/archductor.AppDir/usr/bin/archductor
-install -Dm755 target/release/archductor-gtk \
-  packaging/appimage/archductor.AppDir/usr/bin/archductor-gtk
 
 # Build AppImage
 appimagetool --appimage-extract-and-run \
@@ -82,8 +80,8 @@ appimagetool --appimage-extract-and-run \
   dist/archductor-0.1.0-x86_64.AppImage
 ```
 
-With no arguments, the AppImage launches the GTK GUI. With arguments, it passes
-through to the CLI, for example:
+The AppImage runs the `archductor` CLI and forwards any arguments to it, for
+example:
 
 ```bash
 ./dist/archductor-0.1.0-x86_64.AppImage doctor
@@ -102,10 +100,9 @@ makepkg -si
 ```bash
 nix build
 nix run .#archductor -- doctor
-nix run .#archductor-gtk
 ```
 
-Use `nix develop` for a Rust + GTK development shell.
+Use `nix develop` for a Rust development shell.
 
 ### Homebrew Tap (Linuxbrew)
 
@@ -144,12 +141,11 @@ flatpak run ai.perceo.Archductor
 
 ### Windows portable ZIP (preview)
 
-The tag workflow builds `archductor-<version>-windows-x86_64.zip` with the CLI,
-GTK app, archcar sidecar, GTK/libadwaita DLLs, loaders, schemas, icons, and MIME
-data. Extract the full archive before launching `archductor-gtk.exe`; do not
-copy only the executable. The workflow also emits `SHA256SUMS-windows.txt`.
+The tag workflow builds `archductor-<version>-windows-x86_64.zip` with the CLI
+and archcar sidecar. The workflow also emits `SHA256SUMS-windows.txt`. The
+Archductor desktop app is packaged separately as an Electron app.
 
-Before promotion beyond preview, validate extraction, GUI launch, CLI doctor,
+Before promotion beyond preview, validate extraction, CLI doctor,
 project/workspace creation, PTY sessions, provider sessions, stop/restart,
 upgrade-over-extracted-install, and checksum verification on real Windows.
 

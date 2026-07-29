@@ -35,7 +35,7 @@ workspaces, run multiple chats/sessions, review work, create/merge PRs, archive,
 and repeat for the same repository.
 
 Do not market scaffolding as a feature. Distinguish clearly between core, CLI,
-GTK controls, and verified end-to-end app behavior.
+the Electron desktop app, and verified end-to-end app behavior.
 
 ## Product Structure
 
@@ -74,8 +74,8 @@ Practical rule:
 - Do not add backend-only commands unless they unblock the app workflow.
 - Implement, verify, and keep going.
 - Fix stale docs when you find them.
-- Do not call a feature done without current evidence from code, tests, CLI
-  smoke, and GTK smoke where applicable.
+- Do not call a feature done without current evidence from code, tests, and CLI
+  smoke where applicable.
 - If auth, API keys, display server, network, local tools, or test data are
   missing, say exactly what was not verified.
 
@@ -83,25 +83,25 @@ Practical rule:
 
 Every behavior change must be verified at the layers it touches:
 
-- Written tests: run the narrowest automated tests that cover the edited core,
-  CLI, and/or GTK code. Use focused tests first and broader package tests when
+- Written tests: run the narrowest automated tests that cover the edited core
+  and/or CLI code. Use focused tests first and broader package tests when
   the change crosses boundaries.
 - CLI smoke: run the relevant `archductor` command or CLI test path that proves
   the behavior reaches the command boundary.
-- GTK smoke: run the relevant `archductor-gtk` test or runtime path that
-  proves the behavior reaches the app surface. For visible UI changes, use GTK
-  smoke tests or a real GTK launch path when the environment supports it.
 
-Keep CLI and GTK inline:
+The desktop UI is the Electron app in `desktop/`; verify UI-facing changes
+there when applicable.
 
-- User-visible core behavior should not land in only one surface. Update CLI and
-  GTK together, or report the missing side as incomplete.
+Keep CLI and the desktop app inline:
+
+- User-visible core behavior should not land in only one surface. Update the CLI
+  and the desktop app together, or report the missing side as incomplete.
 - Shared parsing, projection, state, and provider behavior should live in core
-  when practical so CLI and GTK render the same semantics.
-- CLI and GTK should use the same names, statuses, filters, and lifecycle
-  assumptions for providers, sessions, workspaces, and runtime events.
-- Before final response, name the written tests, CLI smoke, and GTK smoke that
-  ran. If any layer was skipped, say why.
+  when practical so the CLI and desktop app render the same semantics.
+- CLI and the desktop app should use the same names, statuses, filters, and
+  lifecycle assumptions for providers, sessions, workspaces, and runtime events.
+- Before final response, name the written tests and CLI smoke that ran. If any
+  layer was skipped, say why.
 
 ## Always-on Project Rules
 
@@ -139,8 +139,8 @@ source. The practical summary:
   directories, stable port ranges, runtime controls, review surfaces, and
   archive/restore/history paths.
 - The workspace page can start Shell, Codex, Claude, and Cursor session launch
-  paths from GTK. CLI session commands currently support Shell, Codex, and
-  Claude.
+  paths from the desktop app. CLI session commands currently support Shell,
+  Codex, and Claude.
 - Agent/session work is PTY/provider-event backed. Prefer structured session
   events, `chat_threads`, `chat_messages`, and native provider IDs over raw
   terminal-log inference.
@@ -160,12 +160,8 @@ Before changing architecture, know where things live:
   - Codex TUI parsing
   - harness argument building
   - thread/message persistence
-- `crates/gtk-app`
-  - workspace UI
-  - chat/session surface
-  - history view
-  - terminal view
-  - app state
+- `desktop/`
+  - Electron desktop UI (workspace UI, chat/session surface, history, terminal)
 - `crates/cli`
   - fallback CLI
   - session helper flows used by app/runtime paths
@@ -190,6 +186,6 @@ Default design direction:
 - Do not revert user or other-agent changes unless explicitly asked.
 - Use `rg`/`rg --files` for search.
 - Keep changes scoped to the requested task.
-- Run written tests plus relevant CLI and GTK smoke for the change.
-- If a frontend/GTK change affects visible UI, run or build enough to prove it
-  still works.
+- Run written tests plus relevant CLI smoke for the change.
+- If a change to the desktop app affects visible UI, run or build enough to
+  prove it still works.
