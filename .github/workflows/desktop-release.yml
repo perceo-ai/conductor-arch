@@ -84,8 +84,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
 
       # Rust tests for the crates the desktop UI depends on (archcar RPCs + CLI),
       # plus a CLI smoke of the read RPCs. The full GTK workspace suite runs in
@@ -183,8 +181,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
 
       - name: Set package version
         working-directory: desktop
