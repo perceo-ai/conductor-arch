@@ -16,9 +16,10 @@ use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
-    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarEvent, ArchcarMessage,
-    ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse,
-    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChecksSummary,
+    ArchcarEvent, ArchcarMessage, ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest,
+    ArchcarResponse, ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
+    WorkspaceChangeScope,
 };
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
@@ -772,6 +773,37 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetChecksSummary { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.checks_summary(&workspace)) {
+                Ok(summary) => ArchcarResponse::ChecksSummary {
+                    workspace: workspace.clone(),
+                    summary: ArchcarChecksSummary {
+                        workspace,
+                        changed_files: summary.changed_files,
+                        run_status: summary.run_status.map(|s| s.as_str().to_owned()),
+                        check_status: summary.check_status.map(|s| s.as_str().to_owned()),
+                        session_status: summary.session_status.map(|s| s.as_str().to_owned()),
+                        active_sessions: summary.active_sessions,
+                        open_todos: summary.open_todos,
+                        total_todos: summary.total_todos,
+                        open_review_comments: summary.open_review_comments,
+                        source_branch_ahead: summary.source_branch_ahead,
+                        branch_ahead: summary.branch_push_state.as_ref().map(|s| s.ahead),
+                        branch_behind: summary.branch_push_state.as_ref().map(|s| s.behind),
+                        pull_request_number: summary.pull_request.as_ref().map(|pr| pr.number),
+                        pull_request_state: summary
+                            .pull_request
+                            .as_ref()
+                            .map(|pr| pr.state.clone()),
+                        conflicting_workspaces: summary.conflicting_workspaces.len(),
+                    },
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -1168,6 +1200,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
             | ArchcarRequest::ListReviewComments { .. }
+            | ArchcarRequest::GetChecksSummary { .. }
     )
 }
 

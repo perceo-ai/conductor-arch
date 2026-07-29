@@ -293,6 +293,10 @@ enum ArchcarCommand {
     Review {
         workspace: String,
     },
+    /// Print the DB-only checks summary for a workspace.
+    Checks {
+        workspace: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1004,6 +1008,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::Review { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListReviewComments { workspace })?,
+                    );
+                }
+                ArchcarCommand::Checks { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetChecksSummary { workspace })?,
                     );
                 }
             }
@@ -1985,6 +1994,22 @@ fn print_archcar_response(response: ArchcarResponse) {
                 let loc = c.line_number.map(|n| format!(":{n}")).unwrap_or_default();
                 println!("#{} [{}] {}{} {}", c.id, c.status, c.file_path, loc, c.body);
             }
+        }
+        ArchcarResponse::ChecksSummary { workspace, summary } => {
+            println!("checks_summary {workspace}");
+            println!(
+                "changed_files={} run={} check={} session={} active_sessions={} todos={}/{} review={} ahead={} conflicts={}",
+                summary.changed_files,
+                summary.run_status.as_deref().unwrap_or("-"),
+                summary.check_status.as_deref().unwrap_or("-"),
+                summary.session_status.as_deref().unwrap_or("-"),
+                summary.active_sessions,
+                summary.open_todos,
+                summary.total_todos,
+                summary.open_review_comments,
+                summary.source_branch_ahead,
+                summary.conflicting_workspaces,
+            );
         }
         ArchcarResponse::Repositories { repositories } => {
             println!("repositories {}", repositories.len());

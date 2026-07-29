@@ -52,6 +52,7 @@ export type ArchcarRequest =
   | { type: "restore_checkpoint"; workspace: string; checkpoint_id: number }
   | { type: "get_workspace_processes"; workspace: string }
   | { type: "list_review_comments"; workspace: string }
+  | { type: "get_checks_summary"; workspace: string }
   | { type: "subscribe" };
 
 export type WorkspaceChangeScope = "all" | "uncommitted";
@@ -158,6 +159,24 @@ export interface ReviewComment {
   updated_at: string;
 }
 
+export interface ArchcarChecksSummary {
+  workspace: string;
+  changed_files: number;
+  run_status?: string;
+  check_status?: string;
+  session_status?: string;
+  active_sessions: number;
+  open_todos: number;
+  total_todos: number;
+  open_review_comments: number;
+  source_branch_ahead: number;
+  branch_ahead?: number;
+  branch_behind?: number;
+  pull_request_number?: number;
+  pull_request_state?: string;
+  conflicting_workspaces: number;
+}
+
 export interface DiffFileSummary {
   path: string;
   additions?: number;
@@ -226,6 +245,7 @@ export type ArchcarResponse =
   | { type: "checkpoint_saved"; checkpoint: Checkpoint }
   | { type: "workspace_processes"; workspace: string; text: string }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
+  | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

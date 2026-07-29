@@ -180,6 +180,9 @@ pub enum ArchcarRequest {
     ListReviewComments {
         workspace: String,
     },
+    GetChecksSummary {
+        workspace: String,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -292,6 +295,10 @@ pub enum ArchcarResponse {
     ReviewComments {
         workspace: String,
         comments: Vec<ReviewComment>,
+    },
+    ChecksSummary {
+        workspace: String,
+        summary: ArchcarChecksSummary,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -435,6 +442,34 @@ pub struct ArchcarProjectionItem {
     pub body: String,
     pub status: String,
     pub stream_state: String,
+}
+
+/// Flat DB-only checks summary (compact projection of ChecksSummary; the
+/// network `gh pr checks` portion is not included).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChecksSummary {
+    pub workspace: String,
+    pub changed_files: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+    pub active_sessions: usize,
+    pub open_todos: usize,
+    pub total_todos: usize,
+    pub open_review_comments: usize,
+    pub source_branch_ahead: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_ahead: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_behind: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_state: Option<String>,
+    pub conflicting_workspaces: usize,
 }
 
 /// Chat thread row for a workspace's chat-tab strip.
@@ -598,6 +633,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListReviewComments { workspace } => {
             format!("list_review_comments workspace={workspace}")
         }
+        ArchcarRequest::GetChecksSummary { workspace } => {
+            format!("get_checks_summary workspace={workspace}")
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -739,6 +777,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ReviewComments { workspace, comments } => {
             format!("review_comments workspace={workspace} count={}", comments.len())
+        }
+        ArchcarResponse::ChecksSummary { workspace, .. } => {
+            format!("checks_summary workspace={workspace}")
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",

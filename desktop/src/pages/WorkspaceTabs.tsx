@@ -1,6 +1,6 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
-import type { Checkpoint, ReviewComment, Todo } from "@/bridge/protocol";
+import type { ArchcarChecksSummary, Checkpoint, ReviewComment, Todo } from "@/bridge/protocol";
 
 // Read-only workspace command-center tabs — ports of workspace_todos_panel,
 // workspace_checkpoint_panel, workspace_processes_text, workspace_review_panel
@@ -169,6 +169,66 @@ export function ProcessesPanel(props: { workspace: string }) {
     <div class="ws-diff-view">
       <Show when={!text.loading} fallback={<div class="empty-state">Loading…</div>}>
         <pre class="ws-diff-text">{text()}</pre>
+      </Show>
+    </div>
+  );
+}
+
+// ---- Checks (DB-only summary) ---------------------------------------------
+
+export function ChecksPanel(props: { workspace: string }) {
+  const [summary] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarChecksSummary | null> => {
+      try {
+        const res = await send({ type: "get_checks_summary", workspace: ws });
+        return res.type === "checks_summary" ? res.summary : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+
+  const rows = (s: ArchcarChecksSummary): [string, string][] => [
+    ["Changed files", String(s.changed_files)],
+    ["Run", s.run_status ?? "—"],
+    ["Checks", s.check_status ?? "—"],
+    ["Session", `${s.session_status ?? "—"} (${s.active_sessions} active)`],
+    ["Todos", `${s.open_todos} open / ${s.total_todos} total`],
+    ["Open review comments", String(s.open_review_comments)],
+    [
+      "Pull request",
+      s.pull_request_number != null
+        ? `#${s.pull_request_number} ${s.pull_request_state ?? ""}`.trim()
+        : "No PR",
+    ],
+    [
+      "Branch",
+      s.branch_ahead != null
+        ? `${s.branch_ahead} ahead / ${s.branch_behind ?? 0} behind`
+        : "—",
+    ],
+    ["Source branch ahead", String(s.source_branch_ahead)],
+    ["Conflicting workspaces", String(s.conflicting_workspaces)],
+  ];
+
+  return (
+    <div class="ws-tab-panel command-panel">
+      <div class="section-title">Checks</div>
+      <Show
+        when={summary()}
+        fallback={<div class="empty-state">{summary.loading ? "Loading…" : "No summary"}</div>}
+      >
+        {(s) => (
+          <For each={rows(s())}>
+            {([label, value]) => (
+              <div class="detail-row">
+                <span class="detail-label">{label}</span>
+                <span class="detail-value">{value}</span>
+              </div>
+            )}
+          </For>
+        )}
       </Show>
     </div>
   );

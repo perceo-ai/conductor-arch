@@ -749,7 +749,8 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         | ArchcarRequest::CreateCheckpoint { .. }
         | ArchcarRequest::RestoreCheckpoint { .. }
         | ArchcarRequest::GetWorkspaceProcesses { .. }
-        | ArchcarRequest::ListReviewComments { .. } => {
+        | ArchcarRequest::ListReviewComments { .. }
+        | ArchcarRequest::GetChecksSummary { .. } => {
             AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
         }
     }
