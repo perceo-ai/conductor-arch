@@ -1,0 +1,80 @@
+# electron-builder config. Produces self-contained installers that bundle
+# Chromium + Node + the Rust sidecars, so a target machine needs NO Archductor-
+# specific runtime libraries (unlike the GTK build, which required
+# libgtk-4/libadwaita to be installed). Runtime deps are limited to tools the
+# agent shells out to (git, gh, ssh) — declared for deb/rpm below.
+appId: ai.perceo.archductor
+productName: Archductor
+copyright: Copyright © Perceo
+
+directories:
+  output: release
+  buildResources: build
+
+# Renderer + main/preload bundles produced by `vite build`.
+files:
+  - dist/**/*
+  - dist-electron/**/*
+
+# Bundle the Rust sidecars alongside the app. main resolves
+# resources/bin/archcar at runtime (see electron/archcar.ts). Built by
+# `cargo build --release` before packaging.
+extraResources:
+  - from: ../target/release/archcar
+    to: bin/archcar
+  - from: ../target/release/archductor
+    to: bin/archductor
+
+linux:
+  target:
+    - AppImage
+    - deb
+    - rpm
+  category: Development
+  icon: build/icon.png
+  synopsis: Parallel coding-agent workflow tool built around Git worktrees.
+  description: Archductor desktop UI. Talks to the archcar daemon over a Unix socket.
+  desktop:
+    entry:
+      Name: Archductor
+      Categories: Development;IDE;
+
+deb:
+  # Only tools the agent runtime shells out to; Chromium/Node are bundled.
+  depends:
+    - git
+    - gh
+    - openssh-client
+
+rpm:
+  depends:
+    - git
+    - gh
+    - openssh-clients
+
+# AppImage is fully self-contained (bundles its own libs); ideal for "runs on
+# any Linux PC" with minimal external deps.
+appImage:
+  artifactName: ${productName}-${version}-${arch}.AppImage
+
+mac:
+  target:
+    - dmg
+  category: public.app-category.developer-tools
+  icon: build/icon.png
+
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
+  # Windows sidecar is archcar.exe (override the unix extraResources entry).
+  extraResources:
+    - from: ../target/release/archcar.exe
+      to: bin/archcar.exe
+    - from: ../target/release/archductor.exe
+      to: bin/archductor.exe
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

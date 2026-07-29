@@ -38,7 +38,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config \
+            pkg-config \
             fuse libfuse2 git sqlite3
 
       - name: Show toolchain
@@ -75,10 +75,7 @@ jobs:
         run: |
           BUNDLE="dist/archductor-${VERSION}-linux-x86_64"
           install -Dm755 target/release/archductor "$BUNDLE/bin/archductor"
-          install -Dm755 target/release/archductor-gtk "$BUNDLE/bin/archductor-gtk"
           install -Dm755 target/release/archcar "$BUNDLE/bin/archcar"
-          install -Dm644 packaging/archductor-gtk.desktop \
-            "$BUNDLE/share/applications/archductor-gtk.desktop"
           install -Dm644 packaging/assets/archductor.png \
             "$BUNDLE/share/icons/hicolor/256x256/apps/archductor.png"
           install -d "$BUNDLE/share/fonts/archductor"
@@ -124,7 +121,6 @@ jobs:
           set -euxo pipefail
           APPDIR="packaging/appimage/archductor.AppDir"
           install -Dm755 target/release/archductor "$APPDIR/usr/bin/archductor"
-          install -Dm755 target/release/archductor-gtk "$APPDIR/usr/bin/archductor-gtk"
           # PNG icon and font pack are committed in the AppDir.
 
       - name: Build AppImage
@@ -217,8 +213,6 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
 
       - name: Configure Windows GTK environment
         shell: pwsh
@@ -240,7 +234,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu
 
-      - name: Verify Windows GTK pkg-config
+      - name: Verify Windows pkg-config
         shell: pwsh
         run: |
           pkgconf --version
@@ -276,20 +270,10 @@ jobs:
           $bundle = "dist\archductor-$env:VERSION-windows-x86_64"
           New-Item -ItemType Directory -Force -Path $bundle | Out-Null
           Copy-Item target\x86_64-pc-windows-gnu\release\archductor.exe $bundle
-          Copy-Item target\x86_64-pc-windows-gnu\release\archductor-gtk.exe $bundle
           Copy-Item target\x86_64-pc-windows-gnu\release\archcar.exe $bundle
           Copy-Item packaging\assets\archductor.png $bundle
           Copy-Item packaging\assets\fonts "$bundle\fonts" -Recurse
           Copy-Item "$env:UCRT64_ROOT\bin\*.dll" $bundle
-          New-Item -ItemType Directory -Force -Path "$bundle\lib" | Out-Null
-          Copy-Item "$env:UCRT64_ROOT\lib\gdk-pixbuf-2.0" "$bundle\lib" -Recurse
-          if (Test-Path "$env:UCRT64_ROOT\lib\gtk-4.0") {
-            Copy-Item "$env:UCRT64_ROOT\lib\gtk-4.0" "$bundle\lib" -Recurse
-          }
-          New-Item -ItemType Directory -Force -Path "$bundle\share" | Out-Null
-          Copy-Item "$env:UCRT64_ROOT\share\glib-2.0" "$bundle\share" -Recurse
-          Copy-Item "$env:UCRT64_ROOT\share\icons" "$bundle\share" -Recurse
-          Copy-Item "$env:UCRT64_ROOT\share\mime" "$bundle\share" -Recurse
           $originalPath = $env:PATH
           $env:PATH = (($env:PATH -split ';') | Where-Object {
             $_ -and ($_ -notlike "$env:UCRT64_ROOT\bin*")
@@ -380,17 +364,12 @@ jobs:
             bash -lc '
               set -euxo pipefail
               pacman -Syu --noconfirm \
-                cargo dbus git github-cli gtk4 libadwaita openssh pkgconf rust sqlite xorg-server-xvfb
+                cargo dbus git github-cli openssh pkgconf rust sqlite xorg-server-xvfb
               useradd -m builder
               chown -R builder:builder /pkg
               su builder -c "cd /pkg && makepkg --noconfirm"
               pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*
               archductor doctor
-              gtk_status=0
-              xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
-              if [ "$gtk_status" -ne 0 ] && [ "$gtk_status" -ne 124 ]; then
-                exit "$gtk_status"
-              fi
             '
           sudo chown -R "$(id -u):$(id -g)" aur-package
           chmod -R u+rwX,go+rX aur-package
@@ -503,11 +482,6 @@ jobs:
           brew install --build-from-source perceo-ai/tap/archductor
           brew test perceo-ai/tap/archductor
           archductor doctor
-          gtk_status=0
-          xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
-          if [ "$gtk_status" -ne 0 ] && [ "$gtk_status" -ne 124 ]; then
-            exit "$gtk_status"
-          fi
 
       - name: Publish formula to tap
         env:

@@ -26,12 +26,9 @@
 
             nativeBuildInputs = with pkgs; [
               pkg-config
-              wrapGAppsHook4
             ];
 
             buildInputs = with pkgs; [
-              gtk4
-              libadwaita
               sqlite
             ];
 
@@ -43,10 +40,7 @@
               runHook preInstall
 
               install -Dm755 target/release/archductor "$out/bin/archductor"
-              install -Dm755 target/release/archductor-gtk "$out/bin/archductor-gtk"
               install -Dm755 target/release/archcar "$out/bin/archcar"
-              install -Dm644 packaging/archductor-gtk.desktop \
-                "$out/share/applications/archductor-gtk.desktop"
               install -Dm644 packaging/assets/archductor.png \
                 "$out/share/icons/hicolor/256x256/apps/archductor.png"
               install -d "$out/share/fonts/archductor"
@@ -77,10 +71,6 @@
           type = "app";
           program = "${self.packages.${system}.archductor}/bin/archductor";
         };
-        archductor-gtk = {
-          type = "app";
-          program = "${self.packages.${system}.archductor}/bin/archductor-gtk";
-        };
         default = self.apps.${system}.archductor;
       });
 
@@ -96,8 +86,6 @@
               rustfmt
               clippy
               pkg-config
-              gtk4
-              libadwaita
               git
               gh
               sqlite

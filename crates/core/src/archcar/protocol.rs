@@ -6,7 +6,10 @@ use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
 use crate::session_state::AgentSessionState;
-use crate::workspace::{ChatEventRecord, ChatMessageRecord, SessionHarnessOptions, SessionKind};
+use crate::workspace::{
+    ChatEventRecord, ChatMessageRecord, Checkpoint, DiffFileSummary, ReviewComment,
+    SessionHarnessOptions, SessionKind, Todo,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RpcEnvelope<T> {
@@ -42,6 +45,16 @@ impl ArchcarInputDelivery {
             Self::Immediate => "immediate",
         }
     }
+}
+
+/// Which set of file changes a workspace-changes query returns.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceChangeScope {
+    /// All changes against the review base ref (working tree vs base).
+    All,
+    /// Uncommitted staged + unstaged + untracked changes.
+    Uncommitted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,6 +136,69 @@ pub enum ArchcarRequest {
     KillSession {
         session_id: i64,
     },
+    ListWorkspaces,
+    ListRepositories,
+    ListChatThreads {
+        workspace: String,
+    },
+    GetChatProjection {
+        thread_id: i64,
+    },
+    ListWorkspaceFiles {
+        workspace: String,
+    },
+    GetWorkspaceChanges {
+        workspace: String,
+        scope: WorkspaceChangeScope,
+    },
+    GetWorkspaceDiff {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    ListTodos {
+        workspace: String,
+    },
+    AddTodo {
+        workspace: String,
+        text: String,
+    },
+    ListCheckpoints {
+        workspace: String,
+    },
+    CreateCheckpoint {
+        workspace: String,
+        message: String,
+    },
+    RestoreCheckpoint {
+        workspace: String,
+        checkpoint_id: i64,
+    },
+    GetWorkspaceProcesses {
+        workspace: String,
+    },
+    ListReviewComments {
+        workspace: String,
+    },
+    GetChecksSummary {
+        workspace: String,
+    },
+    GetSettings {
+        /// Repository name for repo-scoped settings; None = global app settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+    },
+    CreateChatThread {
+        workspace: String,
+        provider: String,
+        title: String,
+    },
+    CloseChatThread {
+        thread_id: i64,
+    },
+    ReopenChatThread {
+        thread_id: i64,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -186,6 +262,68 @@ pub enum ArchcarResponse {
     QueuedChatInputs {
         thread_id: i64,
         inputs: Vec<QueuedArchcarInput>,
+    },
+    Workspaces {
+        workspaces: Vec<ArchcarWorkspaceSummary>,
+    },
+    Repositories {
+        repositories: Vec<ArchcarRepositorySummary>,
+    },
+    ChatThreads {
+        workspace: String,
+        threads: Vec<ArchcarChatThread>,
+    },
+    ChatProjection {
+        thread_id: i64,
+        items: Vec<ArchcarProjectionItem>,
+    },
+    WorkspaceFiles {
+        workspace: String,
+        files: Vec<String>,
+    },
+    WorkspaceChanges {
+        workspace: String,
+        scope: WorkspaceChangeScope,
+        files: Vec<DiffFileSummary>,
+    },
+    WorkspaceDiff {
+        workspace: String,
+        diff: String,
+    },
+    Todos {
+        workspace: String,
+        todos: Vec<Todo>,
+    },
+    TodoAdded {
+        todo: Todo,
+    },
+    Checkpoints {
+        workspace: String,
+        checkpoints: Vec<Checkpoint>,
+    },
+    CheckpointSaved {
+        checkpoint: Checkpoint,
+    },
+    WorkspaceProcesses {
+        workspace: String,
+        text: String,
+    },
+    ReviewComments {
+        workspace: String,
+        comments: Vec<ReviewComment>,
+    },
+    ChecksSummary {
+        workspace: String,
+        summary: ArchcarChecksSummary,
+    },
+    Settings {
+        /// "global" or the repository name.
+        scope: String,
+        /// Effective settings serialized as pretty TOML.
+        toml: String,
+    },
+    ChatThreadCreated {
+        thread: ArchcarChatThread,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -282,6 +420,105 @@ pub struct ArchcarChatLiveSession {
     pub ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionHarnessCapabilities>,
+}
+
+/// Flat workspace row for the desktop sidebar (compact projection of
+/// `WorkspaceStatusLine`). Heavy nested records (full PR, push state) are
+/// reduced to the scalar fields the UI actually renders.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarWorkspaceSummary {
+    pub id: i64,
+    pub name: String,
+    pub repository_name: String,
+    pub branch: String,
+    pub base_ref: String,
+    pub status: String,
+    pub open_todos: usize,
+    pub active_sessions: usize,
+    pub run_running: bool,
+    pub changed_files: usize,
+    pub diff_additions: usize,
+    pub diff_deletions: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_ahead: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_behind: Option<usize>,
+    pub updated_at: String,
+}
+
+/// Render-ready projected timeline item (flat projection of
+/// provider_projection::ProviderProjectionItem). The heavy projection/dedup
+/// logic stays in core so both surfaces render the same conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarProjectionItem {
+    pub id: String,
+    pub sequence: u64,
+    /// Snake-case render class (user_chat, assistant_chat, reasoning_card, …).
+    pub render_class: String,
+    /// Role/category label ("user", "assistant", "reasoning", "command", …).
+    pub role_label: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub stream_state: String,
+}
+
+/// Flat DB-only checks summary (compact projection of ChecksSummary; the
+/// network `gh pr checks` portion is not included).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChecksSummary {
+    pub workspace: String,
+    pub changed_files: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+    pub active_sessions: usize,
+    pub open_todos: usize,
+    pub total_todos: usize,
+    pub open_review_comments: usize,
+    pub source_branch_ahead: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_ahead: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_behind: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_state: Option<String>,
+    pub conflicting_workspaces: usize,
+}
+
+/// Chat thread row for a workspace's chat-tab strip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChatThread {
+    pub id: i64,
+    pub provider: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+}
+
+/// Repository row for the desktop sidebar projects list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarRepositorySummary {
+    pub id: i64,
+    pub name: String,
+    pub root_path: String,
+    pub default_branch: String,
+    pub remote_name: String,
+    pub active_workspaces: usize,
+    pub total_workspaces: usize,
 }
 
 pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
@@ -383,6 +620,58 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::KillSession { session_id } => {
             format!("kill_session session_id={session_id}")
+        }
+        ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
+        ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
+        ArchcarRequest::ListChatThreads { workspace } => {
+            format!("list_chat_threads workspace={workspace}")
+        }
+        ArchcarRequest::GetChatProjection { thread_id } => {
+            format!("get_chat_projection thread_id={thread_id}")
+        }
+        ArchcarRequest::ListWorkspaceFiles { workspace } => {
+            format!("list_workspace_files workspace={workspace}")
+        }
+        ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
+            format!("get_workspace_changes workspace={workspace} scope={scope:?}")
+        }
+        ArchcarRequest::GetWorkspaceDiff { workspace, path } => format!(
+            "get_workspace_diff workspace={workspace} path={}",
+            path.as_deref().unwrap_or("*")
+        ),
+        ArchcarRequest::ListTodos { workspace } => format!("list_todos workspace={workspace}"),
+        ArchcarRequest::AddTodo { workspace, text } => {
+            format!("add_todo workspace={workspace} chars={}", text.chars().count())
+        }
+        ArchcarRequest::ListCheckpoints { workspace } => {
+            format!("list_checkpoints workspace={workspace}")
+        }
+        ArchcarRequest::CreateCheckpoint { workspace, message } => {
+            format!("create_checkpoint workspace={workspace} chars={}", message.chars().count())
+        }
+        ArchcarRequest::RestoreCheckpoint { workspace, checkpoint_id } => {
+            format!("restore_checkpoint workspace={workspace} checkpoint_id={checkpoint_id}")
+        }
+        ArchcarRequest::GetWorkspaceProcesses { workspace } => {
+            format!("get_workspace_processes workspace={workspace}")
+        }
+        ArchcarRequest::ListReviewComments { workspace } => {
+            format!("list_review_comments workspace={workspace}")
+        }
+        ArchcarRequest::GetChecksSummary { workspace } => {
+            format!("get_checks_summary workspace={workspace}")
+        }
+        ArchcarRequest::GetSettings { repository } => {
+            format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
+        }
+        ArchcarRequest::CreateChatThread { workspace, provider, .. } => {
+            format!("create_chat_thread workspace={workspace} provider={provider}")
+        }
+        ArchcarRequest::CloseChatThread { thread_id } => {
+            format!("close_chat_thread thread_id={thread_id}")
+        }
+        ArchcarRequest::ReopenChatThread { thread_id } => {
+            format!("reopen_chat_thread thread_id={thread_id}")
         }
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
@@ -488,6 +777,52 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::QueuedChatInputs { thread_id, inputs } => {
             format!("queued_chat_inputs thread_id={thread_id} count={}", inputs.len())
+        }
+        ArchcarResponse::Workspaces { workspaces } => {
+            format!("workspaces count={}", workspaces.len())
+        }
+        ArchcarResponse::Repositories { repositories } => {
+            format!("repositories count={}", repositories.len())
+        }
+        ArchcarResponse::ChatThreads { workspace, threads } => {
+            format!("chat_threads workspace={workspace} count={}", threads.len())
+        }
+        ArchcarResponse::ChatProjection { thread_id, items } => {
+            format!("chat_projection thread_id={thread_id} items={}", items.len())
+        }
+        ArchcarResponse::WorkspaceFiles { workspace, files } => {
+            format!("workspace_files workspace={workspace} count={}", files.len())
+        }
+        ArchcarResponse::WorkspaceChanges { workspace, files, .. } => {
+            format!("workspace_changes workspace={workspace} count={}", files.len())
+        }
+        ArchcarResponse::WorkspaceDiff { workspace, diff } => {
+            format!("workspace_diff workspace={workspace} bytes={}", diff.len())
+        }
+        ArchcarResponse::Todos { workspace, todos } => {
+            format!("todos workspace={workspace} count={}", todos.len())
+        }
+        ArchcarResponse::TodoAdded { todo } => format!("todo_added id={}", todo.id),
+        ArchcarResponse::Checkpoints { workspace, checkpoints } => {
+            format!("checkpoints workspace={workspace} count={}", checkpoints.len())
+        }
+        ArchcarResponse::CheckpointSaved { checkpoint } => {
+            format!("checkpoint_saved id={}", checkpoint.id)
+        }
+        ArchcarResponse::WorkspaceProcesses { workspace, text } => {
+            format!("workspace_processes workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::ReviewComments { workspace, comments } => {
+            format!("review_comments workspace={workspace} count={}", comments.len())
+        }
+        ArchcarResponse::ChecksSummary { workspace, .. } => {
+            format!("checks_summary workspace={workspace}")
+        }
+        ArchcarResponse::Settings { scope, toml } => {
+            format!("settings scope={scope} bytes={}", toml.len())
+        }
+        ArchcarResponse::ChatThreadCreated { thread } => {
+            format!("chat_thread_created id={}", thread.id)
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",

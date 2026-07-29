@@ -16,8 +16,10 @@ use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
-    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarEvent, ArchcarMessage, ArchcarRequest,
-    ArchcarResponse, QueuedArchcarInput, RpcEnvelope,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChecksSummary,
+    ArchcarEvent, ArchcarMessage, ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest,
+    ArchcarResponse, ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
+    WorkspaceChangeScope,
 };
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
@@ -30,6 +32,8 @@ use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
 };
+use crate::repository::RepositoryStore;
+use crate::workspace::WorkspaceStatusLine;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
@@ -546,6 +550,323 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkspaces => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                let lines = store.list_status()?;
+                Ok(lines
+                    .into_iter()
+                    .map(|line| {
+                        // Match the GTK dashboard card: changed-file count for the
+                        // diff badge (only meaningful for active checkouts).
+                        let changed_files = if line.workspace.status == "active" {
+                            store
+                                .changed_files(&line.workspace.name)
+                                .map(|files| files.len())
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        workspace_summary_from_status_line(line, changed_files)
+                    })
+                    .collect::<Vec<_>>())
+            }) {
+                Ok(workspaces) => ArchcarResponse::Workspaces { workspaces },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListRepositories => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match RepositoryStore::open(&db_path)
+                .and_then(|store| store.list_with_workspace_counts())
+            {
+                Ok(rows) => ArchcarResponse::Repositories {
+                    repositories: rows
+                        .into_iter()
+                        .map(|(repo, active, total)| ArchcarRepositorySummary {
+                            id: repo.id,
+                            name: repo.name,
+                            root_path: repo.root_path.to_string_lossy().into_owned(),
+                            default_branch: repo.default_branch,
+                            remote_name: repo.remote_name,
+                            active_workspaces: active,
+                            total_workspaces: total,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListChatThreads { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_chat_threads(&workspace))
+            {
+                Ok(threads) => ArchcarResponse::ChatThreads {
+                    workspace,
+                    threads: threads
+                        .into_iter()
+                        .map(|t| ArchcarChatThread {
+                            id: t.id,
+                            provider: t.provider,
+                            title: t.title,
+                            status: t.status,
+                            updated_at: t.updated_at,
+                            archived_at: t.archived_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChatProjection { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) {
+                Ok(records) => {
+                    let projection = provider_projection_from_records(&records);
+                    ArchcarResponse::ChatProjection {
+                        thread_id,
+                        items: projection
+                            .items
+                            .into_iter()
+                            .map(|item| ArchcarProjectionItem {
+                                id: item.id,
+                                sequence: item.sequence,
+                                render_class: item.render_class.as_str().to_owned(),
+                                role_label: item.render_class.role_label().to_owned(),
+                                title: item.title,
+                                body: item.body,
+                                status: item.status.as_str().to_owned(),
+                                stream_state: item.stream_state.as_str().to_owned(),
+                            })
+                            .collect(),
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListWorkspaceFiles { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_files(&workspace, 400))
+            {
+                Ok(files) => ArchcarResponse::WorkspaceFiles { workspace, files },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| match scope {
+                WorkspaceChangeScope::All => store.all_file_change_summaries(&workspace),
+                WorkspaceChangeScope::Uncommitted => store.diff_file_summaries(&workspace),
+            }) {
+                Ok(files) => ArchcarResponse::WorkspaceChanges {
+                    workspace,
+                    scope,
+                    files,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceDiff { workspace, path } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path) {
+                Ok(store) => ArchcarResponse::WorkspaceDiff {
+                    diff: workspace_diff_sections(&store, &workspace, path.as_deref()),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListTodos { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.list_todos(&workspace)) {
+                Ok(todos) => ArchcarResponse::Todos { workspace, todos },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::AddTodo { workspace, text } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.add_todo(&workspace, &text)) {
+                Ok(todo) => ArchcarResponse::TodoAdded { todo },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListCheckpoints { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.checkpoint_list(&workspace)) {
+                Ok(checkpoints) => ArchcarResponse::Checkpoints {
+                    workspace,
+                    checkpoints,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CreateCheckpoint { workspace, message } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_create(&workspace, &message, None))
+            {
+                Ok(checkpoint) => ArchcarResponse::CheckpointSaved { checkpoint },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RestoreCheckpoint {
+            workspace,
+            checkpoint_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_restore(&workspace, checkpoint_id))
+            {
+                Ok(checkpoint) => ArchcarResponse::CheckpointSaved { checkpoint },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceProcesses { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path) {
+                Ok(store) => ArchcarResponse::WorkspaceProcesses {
+                    text: workspace_processes_text(&store, &workspace),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListReviewComments { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.list_review_comments(&workspace))
+            {
+                Ok(comments) => ArchcarResponse::ReviewComments {
+                    workspace,
+                    comments,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChecksSummary { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.checks_summary(&workspace)) {
+                Ok(summary) => ArchcarResponse::ChecksSummary {
+                    workspace: workspace.clone(),
+                    summary: ArchcarChecksSummary {
+                        workspace,
+                        changed_files: summary.changed_files,
+                        run_status: summary.run_status.map(|s| s.as_str().to_owned()),
+                        check_status: summary.check_status.map(|s| s.as_str().to_owned()),
+                        session_status: summary.session_status.map(|s| s.as_str().to_owned()),
+                        active_sessions: summary.active_sessions,
+                        open_todos: summary.open_todos,
+                        total_todos: summary.total_todos,
+                        open_review_comments: summary.open_review_comments,
+                        source_branch_ahead: summary.source_branch_ahead,
+                        branch_ahead: summary.branch_push_state.as_ref().map(|s| s.ahead),
+                        branch_behind: summary.branch_push_state.as_ref().map(|s| s.behind),
+                        pull_request_number: summary.pull_request.as_ref().map(|pr| pr.number),
+                        pull_request_state: summary
+                            .pull_request
+                            .as_ref()
+                            .map(|pr| pr.state.clone()),
+                        conflicting_workspaces: summary.conflicting_workspaces.len(),
+                    },
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetSettings { repository } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let shared = AppPaths::from_env().shared_settings_path();
+            let loaded = match &repository {
+                None => crate::settings::load_effective_app_shared_settings(&shared),
+                Some(repo) => RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(repo))
+                    .and_then(|r| {
+                        crate::settings::load_effective_repository_settings(&r.root_path, &shared)
+                    }),
+            };
+            match loaded.and_then(|s| crate::settings::repository_settings_to_toml(&s)) {
+                Ok(toml) => ArchcarResponse::Settings {
+                    scope: repository.unwrap_or_else(|| "global".to_owned()),
+                    toml,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CreateChatThread {
+            workspace,
+            provider,
+            title,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.create_chat_thread(&workspace, &provider, &title, None))
+            {
+                Ok(t) => ArchcarResponse::ChatThreadCreated {
+                    thread: ArchcarChatThread {
+                        id: t.id,
+                        provider: t.provider,
+                        title: t.title,
+                        status: t.status,
+                        updated_at: t.updated_at,
+                        archived_at: t.archived_at,
+                    },
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CloseChatThread { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.close_chat_thread(thread_id)) {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ReopenChatThread { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.reopen_chat_thread(thread_id)) {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -931,7 +1252,194 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionMessages { .. }
             | ArchcarRequest::GetChatSnapshot { .. }
             | ArchcarRequest::ListQueuedChatInputs { .. }
+            | ArchcarRequest::ListWorkspaces
+            | ArchcarRequest::ListRepositories
+            | ArchcarRequest::ListChatThreads { .. }
+            | ArchcarRequest::GetChatProjection { .. }
+            | ArchcarRequest::ListWorkspaceFiles { .. }
+            | ArchcarRequest::GetWorkspaceChanges { .. }
+            | ArchcarRequest::GetWorkspaceDiff { .. }
+            | ArchcarRequest::ListTodos { .. }
+            | ArchcarRequest::ListCheckpoints { .. }
+            | ArchcarRequest::GetWorkspaceProcesses { .. }
+            | ArchcarRequest::ListReviewComments { .. }
+            | ArchcarRequest::GetChecksSummary { .. }
+            | ArchcarRequest::GetSettings { .. }
     )
+}
+
+const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
+
+/// Compose the three-section unified diff (working tree / unstaged / staged)
+/// the GTK Changes tab shows. Ported from workspace_command_center::
+/// workspace_diff_sections so both surfaces render identical diff text.
+fn workspace_diff_sections(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+    let path_ref = path.map(Path::new);
+    let target = path.unwrap_or("workspace");
+    let base_ref = store
+        .workspace_base_ref(name)
+        .unwrap_or_else(|_| "base".to_owned());
+    let mut out =
+        format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
+    out.push_str(&format_diff_section(
+        "Working tree changes",
+        store.unified_diff_against_base(name, path_ref),
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Unstaged changes",
+        store.unified_diff(name, path_ref),
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Staged changes",
+        store.staged_diff(name, path_ref),
+    ));
+    out
+}
+
+fn format_diff_section(title: &str, result: Result<String>) -> String {
+    let text = match result {
+        Ok(text) => text,
+        Err(err) => return format!("{title}\nCould not read diff: {err:#}\n"),
+    };
+    if text.trim().is_empty() {
+        return format!("{title}\nNo changes.\n");
+    }
+    if text.len() > DIFF_RENDER_LIMIT_BYTES {
+        let mut end = DIFF_RENDER_LIMIT_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!(
+            "{title}\n{}\n[Diff truncated after {DIFF_RENDER_LIMIT_BYTES} bytes. Open the file for full context.]\n",
+            &text[..end]
+        )
+    } else {
+        format!("{title}\n{text}")
+    }
+}
+
+fn exit_code_label(exit_code: Option<i32>) -> String {
+    exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+/// Compose the Processes tab text (Setups / Runs / Checks / Sessions). Ported
+/// from workspace_command_center::workspace_processes_text.
+fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
+    let mut out = String::new();
+    let section = |out: &mut String,
+                   title: &str,
+                   result: Result<Vec<crate::workspace::ProcessRecord>>,
+                   empty: &str,
+                   with_command: bool| {
+        out.push_str(title);
+        out.push('\n');
+        match result {
+            Ok(records) if records.is_empty() => {
+                out.push_str(empty);
+                out.push('\n');
+            }
+            Ok(records) => {
+                for r in records {
+                    if with_command {
+                        out.push_str(&format!(
+                            "#{} {} {} pid={} exit={} started={} log={}\n",
+                            r.id,
+                            r.command,
+                            r.status.as_str(),
+                            r.pid,
+                            exit_code_label(r.exit_code),
+                            r.started_at,
+                            r.log_path.display()
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "#{} {} pid={} exit={} started={} log={}\n",
+                            r.id,
+                            r.status.as_str(),
+                            r.pid,
+                            exit_code_label(r.exit_code),
+                            r.started_at,
+                            r.log_path.display()
+                        ));
+                    }
+                }
+            }
+            Err(err) => out.push_str(&format!("Could not read: {err:#}\n")),
+        }
+    };
+    section(
+        &mut out,
+        "Setups",
+        store.list_setups(name),
+        "No setup runs recorded.",
+        false,
+    );
+    out.push('\n');
+    section(
+        &mut out,
+        "Runs",
+        store.list_runs(name),
+        "No runs recorded.",
+        false,
+    );
+    out.push('\n');
+    section(
+        &mut out,
+        "Checks",
+        store.list_checks(name),
+        "No check runs recorded.",
+        false,
+    );
+    out.push('\n');
+    section(
+        &mut out,
+        "Sessions",
+        store.list_sessions(name),
+        "No sessions recorded.",
+        true,
+    );
+    out
+}
+
+fn workspace_summary_from_status_line(
+    line: WorkspaceStatusLine,
+    changed_files: usize,
+) -> ArchcarWorkspaceSummary {
+    let WorkspaceStatusLine {
+        workspace,
+        repository_name,
+        open_todos,
+        pull_request,
+        run_running,
+        active_sessions,
+        branch_push_state,
+        diff_additions,
+        diff_deletions,
+    } = line;
+    ArchcarWorkspaceSummary {
+        id: workspace.id,
+        name: workspace.name,
+        repository_name,
+        branch: workspace.branch,
+        base_ref: workspace.base_ref,
+        status: workspace.status,
+        open_todos,
+        active_sessions,
+        run_running,
+        changed_files,
+        diff_additions,
+        diff_deletions,
+        pull_request_number: pull_request.as_ref().map(|pr| pr.number),
+        pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
+        pull_request_url: pull_request.map(|pr| pr.url),
+        branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
+        branch_behind: branch_push_state.map(|s| s.behind),
+        updated_at: workspace.updated_at,
+    }
 }
 
 fn begin_shutdown(state: &Arc<Mutex<ServerState>>) {

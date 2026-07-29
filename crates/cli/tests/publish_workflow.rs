@@ -129,7 +129,7 @@ fn publish_build_uses_ci_verified_release_packaging() {
     }
 
     assert!(
-        publish.contains("Verify Windows GTK pkg-config"),
+        publish.contains("Verify Windows pkg-config"),
         "Windows release should smoke-test pkgconf before cargo build"
     );
     assert!(
@@ -179,10 +179,8 @@ fn publish_build_uses_ci_verified_release_packaging() {
     assert!(
         publish.contains("Validate AUR package")
             && publish.contains("makepkg --noconfirm")
-            && publish.contains("pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*")
-            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
-            && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
-        "publish should build, install, and smoke-test the AUR package before publishing"
+            && publish.contains("pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*"),
+        "publish should build and install the AUR package before publishing"
     );
     assert!(
         publish.contains("Validate Homebrew formula")
@@ -190,10 +188,8 @@ fn publish_build_uses_ci_verified_release_packaging() {
             && publish.contains("git config --global user.name \"Archductor Release Bot\"")
             && publish.contains("brew tap-new perceo-ai/tap")
             && publish.contains("brew install --build-from-source perceo-ai/tap/archductor")
-            && publish.contains("brew test perceo-ai/tap/archductor")
-            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
-            && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
-        "publish should audit, install, test, and smoke-test the Homebrew formula before publishing"
+            && publish.contains("brew test perceo-ai/tap/archductor"),
+        "publish should audit, install, and test the Homebrew formula before publishing"
     );
     assert!(
         aur.contains("export LIBSQLITE3_SYS_USE_PKG_CONFIG=1")
@@ -210,36 +206,31 @@ fn publish_build_uses_ci_verified_release_packaging() {
         !publish.contains("C:\\msys64\\ucrt64") && !ci.contains("C:\\msys64\\ucrt64"),
         "Windows workflows should not assume setup-msys2 installs under C:\\msys64"
     );
-    for (name, manifest, archductor_tokens, gtk_tokens) in [
+    for (name, manifest, archductor_tokens) in [
         (
             "nfpm",
             &nfpm,
             vec!["src: target/release/archductor\n    dst: /usr/bin/archductor"],
-            vec!["src: target/release/archductor-gtk\n    dst: /usr/bin/archductor-gtk"],
         ),
         (
             "AppRun",
             &app_run,
             vec!["exec \"$SELF_DIR/usr/bin/archductor\" \"$@\""],
-            vec!["exec \"$SELF_DIR/usr/bin/archductor-gtk\""],
         ),
         (
             "flatpak",
             &flatpak,
             vec!["install -Dm755 target/release/archductor /app/bin/archductor"],
-            vec!["install -Dm755 target/release/archductor-gtk /app/bin/archductor-gtk"],
         ),
         (
             "nix",
             &nix,
             vec!["install -Dm755 target/release/archductor \"$out/bin/archductor\""],
-            vec!["install -Dm755 target/release/archductor-gtk \"$out/bin/archductor-gtk\""],
         ),
         (
             "homebrew",
             &homebrew,
             vec!["std_cargo_args(path: \"crates/cli\")"],
-            vec!["std_cargo_args(path: \"crates/gtk-app\")"],
         ),
         (
             "publish",
@@ -248,10 +239,6 @@ fn publish_build_uses_ci_verified_release_packaging() {
                 "target/release/archductor \"$BUNDLE/bin/archductor\"",
                 "install -Dm755 target/release/archductor \"$APPDIR/usr/bin/archductor\"",
                 "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor.exe $bundle",
-            ],
-            vec![
-                "install -Dm755 target/release/archductor-gtk \"$APPDIR/usr/bin/archductor-gtk\"",
-                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor-gtk.exe $bundle",
             ],
         ),
         (
@@ -263,11 +250,6 @@ fn publish_build_uses_ci_verified_release_packaging() {
                 "install -Dm755 target/release/archductor \"$APPDIR/usr/bin/archductor\"",
                 "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor.exe $bundle",
             ],
-            vec![
-                "cp target/debug/archductor-gtk ci-artifacts/bin/",
-                "install -Dm755 target/release/archductor-gtk \"$APPDIR/usr/bin/archductor-gtk\"",
-                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor-gtk.exe $bundle",
-            ],
         ),
     ] {
         assert!(
@@ -277,8 +259,8 @@ fn publish_build_uses_ci_verified_release_packaging() {
             "{name} should ship the plain archductor binary through exact package paths or tokens"
         );
         assert!(
-            gtk_tokens.iter().all(|token| manifest.contains(token)),
-            "{name} should ship the archductor-gtk binary"
+            !manifest.contains("archductor-gtk"),
+            "{name} should no longer reference the retired archductor-gtk binary"
         );
         assert!(
             !manifest.contains("archductor-cli"),

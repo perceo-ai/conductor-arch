@@ -2,7 +2,7 @@
 Name=Archductor
 GenericName=Coding Agent Workflow
 Comment=Parallel coding-agent workflow tool built around Git worktrees
-Exec=archductor-gtk
+Exec=archductor
 Icon=ai.perceo.Archductor
 Terminal=false
 Type=Application

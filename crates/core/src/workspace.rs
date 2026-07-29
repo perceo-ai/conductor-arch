@@ -958,10 +958,12 @@ fn configured_check_commands_from_settings(
     .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffFileSummary {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletions: Option<usize>,
     pub staged: bool,
     pub unstaged: bool,
@@ -1059,7 +1061,7 @@ pub struct MergePullRequestResult {
     pub archived_workspace: Option<Workspace>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Todo {
     pub id: i64,
     pub workspace_id: i64,
@@ -1070,7 +1072,7 @@ pub struct Todo {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub id: i64,
     pub workspace_id: i64,
@@ -1127,7 +1129,7 @@ pub struct WorkspaceStatusLine {
     pub diff_deletions: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: i64,
     pub workspace_id: i64,
@@ -3301,6 +3303,51 @@ impl WorkspaceStore {
             return Ok(Vec::new());
         }
         Ok(conflict_paths.into_iter().collect())
+    }
+
+    /// Flat, sorted list of tracked-ish files under the workspace checkout
+    /// (skips .git/target/node_modules), capped at `cap`. The desktop file
+    /// browser builds the tree client-side from this. Ported from the GTK
+    /// `list_workspace_files` helper.
+    pub fn list_files(&self, name: &str, cap: usize) -> Result<Vec<String>> {
+        let workspace = self.get_by_name(name)?;
+        let mut files = Vec::new();
+        Self::list_files_recursive(&workspace.path, &workspace.path, &mut files);
+        files.sort();
+        files.truncate(cap);
+        Ok(files)
+    }
+
+    fn list_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(current) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+                continue;
+            }
+            // Inspect the entry's own type (does not follow symlinks). Skip
+            // symlinks entirely so a directory symlink is neither traversed
+            // (avoids loops / escaping the checkout) nor listed.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                Self::list_files_recursive(root, &path, files);
+                continue;
+            }
+            if file_type.is_file() {
+                if let Ok(relative) = path.strip_prefix(root) {
+                    files.push(relative.to_string_lossy().to_string());
+                }
+            }
+        }
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {

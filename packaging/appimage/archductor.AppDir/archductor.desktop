@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Archductor
 GenericName=Coding Agent Workspace Manager
-Exec=archductor-gtk
+Exec=archductor
 Icon=archductor
 Type=Application
 Categories=Development;IDE;

@@ -317,7 +317,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client
+            pkg-config git sqlite3 openssh-client
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -350,8 +350,6 @@ jobs:
         include:
           - suite: core-cli-archcar
             command: cargo test -p archductor-core -p archductor -p archcar --locked -- --test-threads=1
-          - suite: gtk
-            command: xvfb-run -a cargo test -p archductor-gtk --locked -- --test-threads=1
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -363,7 +361,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client xvfb
+            pkg-config git sqlite3 openssh-client xvfb
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -399,7 +397,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config git sqlite3 openssh-client xvfb
+            pkg-config git sqlite3 openssh-client xvfb
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -421,21 +419,10 @@ jobs:
       - name: Smoke CLI doctor
         run: cargo run -p archductor --locked -- doctor
 
-      - name: Smoke GTK launch
-        run: |
-          set +e
-          xvfb-run -a timeout 15s target/debug/archductor-gtk --page dashboard
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
-            exit "$status"
-          fi
-
       - name: Package debug binaries
         run: |
           mkdir -p ci-artifacts/bin
           cp target/debug/archductor ci-artifacts/bin/
-          cp target/debug/archductor-gtk ci-artifacts/bin/
           cp target/debug/archcar ci-artifacts/bin/
 
       - name: Upload debug binaries
@@ -463,7 +450,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config \
+            pkg-config \
             fuse libfuse2 git sqlite3 openssh-client
 
       - name: Install Rust toolchain
@@ -488,10 +475,7 @@ jobs:
         run: |
           BUNDLE="dist/archductor-${VERSION}-linux-x86_64"
           install -Dm755 target/release/archductor "$BUNDLE/bin/archductor"
-          install -Dm755 target/release/archductor-gtk "$BUNDLE/bin/archductor-gtk"
           install -Dm755 target/release/archcar "$BUNDLE/bin/archcar"
-          install -Dm644 packaging/archductor-gtk.desktop \
-            "$BUNDLE/share/applications/archductor-gtk.desktop"
           install -Dm644 packaging/assets/archductor.png \
             "$BUNDLE/share/icons/hicolor/256x256/apps/archductor.png"
           install -d "$BUNDLE/share/fonts/archductor"
@@ -533,7 +517,6 @@ jobs:
           set -euxo pipefail
           APPDIR="packaging/appimage/archductor.AppDir"
           install -Dm755 target/release/archductor "$APPDIR/usr/bin/archductor"
-          install -Dm755 target/release/archductor-gtk "$APPDIR/usr/bin/archductor-gtk"
 
       - name: Build AppImage
         env:
@@ -647,8 +630,6 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
 
       - name: Configure Windows GTK environment
         shell: pwsh
@@ -681,7 +662,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-windows-release-cargo-
 
-      - name: Verify Windows GTK pkg-config
+      - name: Verify Windows pkg-config
         shell: pwsh
         run: |
           pkgconf --version
@@ -705,20 +686,10 @@ jobs:
           $bundle = "dist\archductor-$env:VERSION-windows-x86_64"
           New-Item -ItemType Directory -Force -Path $bundle | Out-Null
           Copy-Item target\x86_64-pc-windows-gnu\release\archductor.exe $bundle
-          Copy-Item target\x86_64-pc-windows-gnu\release\archductor-gtk.exe $bundle
           Copy-Item target\x86_64-pc-windows-gnu\release\archcar.exe $bundle
           Copy-Item packaging\assets\archductor.png $bundle
           Copy-Item packaging\assets\fonts "$bundle\fonts" -Recurse
           Copy-Item "$env:UCRT64_ROOT\bin\*.dll" $bundle
-          New-Item -ItemType Directory -Force -Path "$bundle\lib" | Out-Null
-          Copy-Item "$env:UCRT64_ROOT\lib\gdk-pixbuf-2.0" "$bundle\lib" -Recurse
-          if (Test-Path "$env:UCRT64_ROOT\lib\gtk-4.0") {
-            Copy-Item "$env:UCRT64_ROOT\lib\gtk-4.0" "$bundle\lib" -Recurse
-          }
-          New-Item -ItemType Directory -Force -Path "$bundle\share" | Out-Null
-          Copy-Item "$env:UCRT64_ROOT\share\glib-2.0" "$bundle\share" -Recurse
-          Copy-Item "$env:UCRT64_ROOT\share\icons" "$bundle\share" -Recurse
-          Copy-Item "$env:UCRT64_ROOT\share\mime" "$bundle\share" -Recurse
           $originalPath = $env:PATH
           $env:PATH = (($env:PATH -split ';') | Where-Object {
             $_ -and ($_ -notlike "$env:UCRT64_ROOT\bin*")
@@ -798,23 +769,23 @@ jobs:
         if: matrix.family == 'debian'
         run: |
           apt-get update -q
-          apt-get install -y --no-install-recommends ca-certificates curl git gcc libgtk-4-dev libadwaita-1-dev pkg-config
+          apt-get install -y --no-install-recommends ca-certificates curl git gcc libc6-dev pkg-config
 
       - name: Install Fedora dependencies
         if: matrix.family == 'fedora'
-        run: dnf install -y ca-certificates curl git gcc gtk4-devel libadwaita-devel pkgconf-pkg-config
+        run: dnf install -y ca-certificates curl git gcc glibc-devel pkgconf-pkg-config
 
       - name: Install Arch dependencies
         if: matrix.family == 'arch'
-        run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc gtk4 libadwaita pkgconf
+        run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc glibc pkgconf
 
       - name: Install openSUSE dependencies
         if: matrix.family == 'opensuse'
-        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc gtk4-devel libadwaita-devel pkg-config rust
+        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc glibc-devel pkg-config rust
 
       - name: Install Alpine dependencies
         if: matrix.family == 'alpine'
-        run: apk add --no-cache bash ca-certificates curl gcompat git gcc musl-dev rustup gtk4.0-dev libadwaita-dev pkgconf
+        run: apk add --no-cache bash ca-certificates curl gcompat git gcc musl-dev rustup pkgconf
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

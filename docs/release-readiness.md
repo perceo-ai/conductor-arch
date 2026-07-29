@@ -79,14 +79,14 @@ and rollback or yank paths are validated for that channel.
 
 | Channel | Launch Requirement |
 | --- | --- |
-| GitHub/AppImage | Tag workflow attaches AppImage and checksum; AppImage opens GUI with no args and forwards CLI args. |
-| Debian/Ubuntu | `.deb` installs with `dpkg` or `apt`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
-| Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
+| GitHub/AppImage | Tag workflow attaches AppImage and checksum; AppImage runs the `archductor` CLI and forwards args. |
+| Debian/Ubuntu | `.deb` installs with `dpkg` or `apt`, runs `archductor doctor`, and has upgrade/removal notes. |
+| Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, runs `archductor doctor`, and has upgrade/removal notes. |
 | AUR | `PKGBUILD` uses the release tag and real checksum, `makepkg -si` passes on Arch, and update/yank process is documented. |
-| Flatpak/Flathub | `packaging/flatpak/ai.perceo.Archductor.yml` builds locally, metadata validates, screenshots are current, Flathub review accepts the broad filesystem access requirement, and the Flathub package launches the GUI. |
+| Flatpak/Flathub | `packaging/flatpak/ai.perceo.Archductor.yml` builds locally, metadata validates, screenshots are current, Flathub review accepts the broad filesystem access requirement, and the Flathub package runs `archductor doctor`. |
 | Nix | `nix build` and `nix run .#archductor -- doctor` pass on Linux, and the flake is referenced from install docs before a nixpkgs submission. |
 | Homebrew | `perceo-ai/homebrew-tap` formula installs on Linuxbrew, `brew test archductor` passes, and tag publish refreshes the formula checksum. |
-| Windows ZIP | Archive contains all GTK runtime files, extracts cleanly, launches GUI and CLI, verifies checksum, upgrades safely, and passes the Windows workflow checklist. Preview until proven on real Windows. |
+| Windows ZIP | Archive contains the CLI and archcar sidecar, extracts cleanly, runs CLI, verifies checksum, upgrades safely, and passes the Windows workflow checklist. Preview until proven on real Windows. |
 
 ## Website Gate
 
@@ -122,9 +122,6 @@ Then install and smoke the AUR package on Arch before publishing:
 cd packaging/aur
 makepkg -si
 archductor doctor
-gtk_status=0
-xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
-test "$gtk_status" -eq 0 -o "$gtk_status" -eq 124
 ```
 
 AUR publishes from a Git repository at
@@ -151,9 +148,6 @@ brew audit --strict --online --formula packaging/homebrew/Formula/archductor.rb
 brew install --build-from-source packaging/homebrew/Formula/archductor.rb
 brew test archductor
 archductor doctor
-gtk_status=0
-xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
-test "$gtk_status" -eq 0 -o "$gtk_status" -eq 124
 ```
 
 After the checks pass, commit and push the tap repository.
@@ -165,7 +159,6 @@ The flake exposes:
 ```bash
 nix build
 nix run .#archductor -- doctor
-nix run .#archductor-gtk
 nix develop
 ```
 

@@ -3,7 +3,7 @@ use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
-    QueuedArchcarInput,
+    QueuedArchcarInput, WorkspaceChangeScope,
 };
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::doctor;
@@ -42,10 +42,6 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
-    Gtk {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     Settings {
         #[command(subcommand)]
         command: AppSettingsCommand,
@@ -233,6 +229,90 @@ enum ArchcarCommand {
     },
     Kill {
         session_id: i64,
+    },
+    /// List all workspaces with status counts.
+    Workspaces,
+    /// List repositories with workspace counts.
+    Repositories,
+    /// List chat threads for a workspace.
+    ChatThreads {
+        workspace: String,
+    },
+    /// Print the projected chat timeline for a thread.
+    ChatProjection {
+        thread_id: i64,
+    },
+    /// List files in a workspace checkout (for the file browser).
+    WorkspaceFiles {
+        workspace: String,
+    },
+    /// List changed-file summaries for a workspace.
+    WorkspaceChanges {
+        workspace: String,
+        /// Show all changes vs the review base (default: uncommitted only).
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print the three-section unified diff for a workspace.
+    WorkspaceDiff {
+        workspace: String,
+        path: Option<String>,
+    },
+    /// List todos for a workspace.
+    Todos {
+        workspace: String,
+    },
+    /// Add a todo to a workspace.
+    AddTodo {
+        workspace: String,
+        text: String,
+    },
+    /// List checkpoints for a workspace.
+    Checkpoints {
+        workspace: String,
+    },
+    /// Create a checkpoint in a workspace.
+    CreateCheckpoint {
+        workspace: String,
+        message: String,
+    },
+    /// Restore a workspace to a checkpoint.
+    RestoreCheckpoint {
+        workspace: String,
+        checkpoint_id: i64,
+    },
+    /// Print the processes text (setups/runs/checks/sessions) for a workspace.
+    Processes {
+        workspace: String,
+    },
+    /// List review comments for a workspace.
+    Review {
+        workspace: String,
+    },
+    /// Print the DB-only checks summary for a workspace.
+    Checks {
+        workspace: String,
+    },
+    /// Print effective settings as JSON (global, or --repository <name>).
+    Settings {
+        #[arg(long)]
+        repository: Option<String>,
+    },
+    /// Create a new chat thread in a workspace.
+    CreateChat {
+        workspace: String,
+        #[arg(long, default_value = "codex")]
+        provider: String,
+        #[arg(long, default_value = "New chat")]
+        title: String,
+    },
+    /// Close (archive) a chat thread.
+    CloseChat {
+        thread_id: i64,
+    },
+    /// Reopen a closed chat thread.
+    ReopenChat {
+        thread_id: i64,
     },
 }
 
@@ -623,7 +703,6 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
-        Command::Gtk { args } => launch_gtk(&args)?,
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
                 let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
@@ -872,6 +951,110 @@ fn main() -> Result<()> {
                 ArchcarCommand::Kill { session_id } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::KillSession { session_id })?,
+                    );
+                }
+                ArchcarCommand::Workspaces => {
+                    print_archcar_response(client.send(ArchcarRequest::ListWorkspaces)?);
+                }
+                ArchcarCommand::Repositories => {
+                    print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
+                }
+                ArchcarCommand::ChatThreads { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListChatThreads { workspace })?,
+                    );
+                }
+                ArchcarCommand::ChatProjection { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetChatProjection { thread_id })?,
+                    );
+                }
+                ArchcarCommand::WorkspaceFiles { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceFiles { workspace })?,
+                    );
+                }
+                ArchcarCommand::WorkspaceChanges { workspace, all } => {
+                    let scope = if all {
+                        WorkspaceChangeScope::All
+                    } else {
+                        WorkspaceChangeScope::Uncommitted
+                    };
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetWorkspaceChanges { workspace, scope })?,
+                    );
+                }
+                ArchcarCommand::WorkspaceDiff { workspace, path } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetWorkspaceDiff { workspace, path })?,
+                    );
+                }
+                ArchcarCommand::Todos { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::ListTodos { workspace })?);
+                }
+                ArchcarCommand::AddTodo { workspace, text } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::AddTodo { workspace, text })?,
+                    );
+                }
+                ArchcarCommand::Checkpoints { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListCheckpoints { workspace })?,
+                    );
+                }
+                ArchcarCommand::CreateCheckpoint { workspace, message } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::CreateCheckpoint { workspace, message })?,
+                    );
+                }
+                ArchcarCommand::RestoreCheckpoint {
+                    workspace,
+                    checkpoint_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::RestoreCheckpoint {
+                        workspace,
+                        checkpoint_id,
+                    })?);
+                }
+                ArchcarCommand::Processes { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetWorkspaceProcesses { workspace })?,
+                    );
+                }
+                ArchcarCommand::Review { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListReviewComments { workspace })?,
+                    );
+                }
+                ArchcarCommand::Checks { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetChecksSummary { workspace })?,
+                    );
+                }
+                ArchcarCommand::Settings { repository } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSettings { repository })?,
+                    );
+                }
+                ArchcarCommand::CreateChat {
+                    workspace,
+                    provider,
+                    title,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::CreateChatThread {
+                        workspace,
+                        provider,
+                        title,
+                    })?);
+                }
+                ArchcarCommand::CloseChat { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::CloseChatThread { thread_id })?,
+                    );
+                }
+                ArchcarCommand::ReopenChat { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ReopenChatThread { thread_id })?,
                     );
                 }
             }
@@ -1761,6 +1944,139 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::ProviderInteractions { interactions } => {
             print!("{}", render_provider_interactions(&interactions, false));
         }
+        ArchcarResponse::Workspaces { workspaces } => {
+            println!("workspaces {}", workspaces.len());
+            for ws in workspaces {
+                println!(
+                    "{} repo={} branch={} status={} +{} -{} todos={} sessions={}{}",
+                    ws.name,
+                    ws.repository_name,
+                    ws.branch,
+                    ws.status,
+                    ws.diff_additions,
+                    ws.diff_deletions,
+                    ws.open_todos,
+                    ws.active_sessions,
+                    ws.pull_request_number
+                        .map(|n| format!(" pr=#{n}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        ArchcarResponse::ChatThreads { workspace, threads } => {
+            println!("chat_threads {} {}", workspace, threads.len());
+            for t in threads {
+                println!(
+                    "{} provider={} status={} updated={} {}",
+                    t.id, t.provider, t.status, t.updated_at, t.title
+                );
+            }
+        }
+        ArchcarResponse::ChatProjection { thread_id, items } => {
+            println!("chat_projection thread {} items {}", thread_id, items.len());
+            for item in items {
+                let preview = item.body.replace('\n', " ");
+                let preview: String = preview.chars().take(80).collect();
+                println!("[{}] {} {}", item.render_class, item.status, preview);
+            }
+        }
+        ArchcarResponse::WorkspaceFiles { workspace, files } => {
+            println!("workspace_files {} {}", workspace, files.len());
+            for f in files {
+                println!("{f}");
+            }
+        }
+        ArchcarResponse::WorkspaceChanges {
+            workspace, files, ..
+        } => {
+            println!("workspace_changes {} {}", workspace, files.len());
+            for f in files {
+                let counts = match (f.additions, f.deletions) {
+                    (Some(a), Some(d)) => format!("+{a} -{d}"),
+                    _ => "binary".to_owned(),
+                };
+                println!("{} {}", f.path, counts);
+            }
+        }
+        ArchcarResponse::WorkspaceDiff { workspace, diff } => {
+            println!("workspace_diff {} {} bytes", workspace, diff.len());
+            print!("{diff}");
+        }
+        ArchcarResponse::Todos { workspace, todos } => {
+            println!("todos {} {}", workspace, todos.len());
+            for t in todos {
+                println!("#{} [{}] {}", t.id, t.status, t.text);
+            }
+        }
+        ArchcarResponse::TodoAdded { todo } => {
+            println!("todo_added #{} {}", todo.id, todo.text);
+        }
+        ArchcarResponse::Checkpoints {
+            workspace,
+            checkpoints,
+        } => {
+            println!("checkpoints {} {}", workspace, checkpoints.len());
+            for c in checkpoints {
+                println!("#{} {} {}", c.id, c.created_at, c.message);
+            }
+        }
+        ArchcarResponse::CheckpointSaved { checkpoint } => {
+            println!("checkpoint_saved #{} {}", checkpoint.id, checkpoint.message);
+        }
+        ArchcarResponse::WorkspaceProcesses { workspace, text } => {
+            println!("workspace_processes {}", workspace);
+            print!("{text}");
+        }
+        ArchcarResponse::ReviewComments {
+            workspace,
+            comments,
+        } => {
+            println!("review_comments {} {}", workspace, comments.len());
+            for c in comments {
+                let loc = c.line_number.map(|n| format!(":{n}")).unwrap_or_default();
+                println!("#{} [{}] {}{} {}", c.id, c.status, c.file_path, loc, c.body);
+            }
+        }
+        ArchcarResponse::Settings { scope, toml } => {
+            println!("settings {scope}");
+            print!("{toml}");
+        }
+        ArchcarResponse::ChatThreadCreated { thread } => {
+            println!(
+                "chat_thread_created id={} provider={} {}",
+                thread.id, thread.provider, thread.title
+            );
+        }
+        ArchcarResponse::ChecksSummary { workspace, summary } => {
+            println!("checks_summary {workspace}");
+            println!(
+                "changed_files={} run={} check={} session={} active_sessions={} todos={}/{} review={} ahead={} conflicts={}",
+                summary.changed_files,
+                summary.run_status.as_deref().unwrap_or("-"),
+                summary.check_status.as_deref().unwrap_or("-"),
+                summary.session_status.as_deref().unwrap_or("-"),
+                summary.active_sessions,
+                summary.open_todos,
+                summary.total_todos,
+                summary.open_review_comments,
+                summary.source_branch_ahead,
+                summary.conflicting_workspaces,
+            );
+        }
+        ArchcarResponse::Repositories { repositories } => {
+            println!("repositories {}", repositories.len());
+            for repo in repositories {
+                println!(
+                    "{} branch={} remote={} workspaces={}/{} path={}",
+                    repo.name,
+                    repo.default_branch,
+                    repo.remote_name,
+                    repo.active_workspaces,
+                    repo.total_workspaces,
+                    repo.root_path
+                );
+            }
+        }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
@@ -2186,36 +2502,6 @@ fn cli_input_delivery(immediate: bool) -> ArchcarInputDelivery {
     } else {
         ArchcarInputDelivery::Auto
     }
-}
-
-fn launch_gtk(args: &[String]) -> Result<()> {
-    let binary = gtk_binary_path();
-    let status = ProcessCommand::new(&binary)
-        .args(args)
-        .status()
-        .with_context(|| format!("launch GTK app {}", binary.display()))?;
-    anyhow::ensure!(status.success(), "GTK app exited with status {status}");
-    Ok(())
-}
-
-fn gtk_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("ARCHDUCTOR_GTK_BIN") {
-        return PathBuf::from(path);
-    }
-    gtk_binary_path_for_cli_exe(std::env::current_exe().ok())
-}
-
-fn gtk_binary_path_for_cli_exe(cli_exe: Option<PathBuf>) -> PathBuf {
-    let binary_name = format!("archductor-gtk{}", std::env::consts::EXE_SUFFIX);
-    if let Some(cli_exe) = cli_exe {
-        if let Some(parent) = cli_exe.parent() {
-            let sibling = parent.join(&binary_name);
-            if sibling.exists() {
-                return sibling;
-            }
-        }
-    }
-    PathBuf::from(binary_name)
 }
 
 fn open_interactive_session(launch: &SessionLaunch, terminal: Option<&str>) -> Result<()> {
@@ -2825,12 +3111,6 @@ fn print_doctor(report: doctor::DoctorReport) {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
-
-    fn cli_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn parses_app_shared_settings_export() {
@@ -3625,34 +3905,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_gtk_launcher_with_passthrough_args() {
-        let parse = Cli::try_parse_from([
-            "archductor",
-            "gtk",
-            "--workspace",
-            "berlin",
-            "--tab",
-            "checks",
-        ])
-        .unwrap();
-
-        match parse.command {
-            Command::Gtk { args } => {
-                assert_eq!(
-                    args,
-                    vec![
-                        "--workspace".to_owned(),
-                        "berlin".to_owned(),
-                        "--tab".to_owned(),
-                        "checks".to_owned(),
-                    ]
-                );
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
     fn server_mode_detection_ignores_gtk_trailing_archcar_serve() {
         assert!(should_run_archcar_server_mode([
             "archductor",
@@ -3663,100 +3915,6 @@ mod tests {
             "gtk",
             "--archcar-serve"
         ]));
-    }
-
-    #[test]
-    fn gtk_binary_path_prefers_env_override() {
-        let _guard = cli_env_lock().lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let override_path = temp.path().join("custom-gtk");
-        let previous = std::env::var_os("ARCHDUCTOR_GTK_BIN");
-        std::env::set_var("ARCHDUCTOR_GTK_BIN", &override_path);
-
-        let selected = gtk_binary_path();
-
-        match previous {
-            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_BIN", previous),
-            None => std::env::remove_var("ARCHDUCTOR_GTK_BIN"),
-        }
-        assert_eq!(selected, override_path);
-    }
-
-    #[test]
-    fn gtk_binary_path_prefers_existing_sibling() {
-        let temp = tempfile::tempdir().unwrap();
-        let cli = temp
-            .path()
-            .join(format!("archductor{}", std::env::consts::EXE_SUFFIX));
-        let gtk = temp
-            .path()
-            .join(format!("archductor-gtk{}", std::env::consts::EXE_SUFFIX));
-        fs::write(&gtk, "").unwrap();
-
-        assert_eq!(gtk_binary_path_for_cli_exe(Some(cli)), gtk);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn launch_gtk_forwards_child_arguments_unchanged() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = cli_env_lock().lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let fake = temp.path().join("archductor-gtk");
-        let args_out = temp.path().join("args.txt");
-        fs::write(
-            &fake,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARCHDUCTOR_GTK_ARGS_OUT\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        let previous_bin = std::env::var_os("ARCHDUCTOR_GTK_BIN");
-        let previous_out = std::env::var_os("ARCHDUCTOR_GTK_ARGS_OUT");
-        std::env::set_var("ARCHDUCTOR_GTK_BIN", &fake);
-        std::env::set_var("ARCHDUCTOR_GTK_ARGS_OUT", &args_out);
-
-        launch_gtk(&[
-            "--workspace".to_owned(),
-            "berlin".to_owned(),
-            "--archcar-serve".to_owned(),
-        ])
-        .unwrap();
-
-        match previous_bin {
-            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_BIN", previous),
-            None => std::env::remove_var("ARCHDUCTOR_GTK_BIN"),
-        }
-        match previous_out {
-            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_ARGS_OUT", previous),
-            None => std::env::remove_var("ARCHDUCTOR_GTK_ARGS_OUT"),
-        }
-        assert_eq!(
-            fs::read_to_string(args_out).unwrap(),
-            "--workspace\nberlin\n--archcar-serve\n"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn launch_gtk_reports_nonzero_child_exit() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = cli_env_lock().lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let fake = temp.path().join("archductor-gtk");
-        fs::write(&fake, "#!/bin/sh\nexit 17\n").unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        let previous = std::env::var_os("ARCHDUCTOR_GTK_BIN");
-        std::env::set_var("ARCHDUCTOR_GTK_BIN", &fake);
-
-        let err = launch_gtk(&[]).unwrap_err();
-
-        match previous {
-            Some(previous) => std::env::set_var("ARCHDUCTOR_GTK_BIN", previous),
-            None => std::env::remove_var("ARCHDUCTOR_GTK_BIN"),
-        }
-        assert!(format!("{err:#}").contains("GTK app exited with status"));
     }
 
     #[test]

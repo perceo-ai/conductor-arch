@@ -115,7 +115,7 @@ fi
 run mkdir -p dist
 
 run tar -czf "dist/archductor-${version}-linux-x86_64.tar.gz" \
-    -C target/release archductor archductor-gtk
+    -C target/release archductor
 
 if ! command -v nfpm >/dev/null 2>&1; then
     echo "error: nfpm is required for --package on Linux" >&2
@@ -136,7 +136,6 @@ VERSION="$version" nfpm package --packager rpm --target dist/
 
 appdir="packaging/appimage/archductor.AppDir"
 run install -Dm755 target/release/archductor "$appdir/usr/bin/archductor"
-run install -Dm755 target/release/archductor-gtk "$appdir/usr/bin/archductor-gtk"
 run appimagetool --appimage-extract-and-run "$appdir" \
     "dist/archductor-${version}-x86_64.AppImage"
 
