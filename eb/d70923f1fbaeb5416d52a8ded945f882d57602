@@ -1,0 +1,81 @@
+desktop/src/store/workspaces.ts
+  s_248d41ce7a4a6d::t_5746dea158b8ae 3-4,11,14-16,19-25,34-53,76-82
+  s_248d41ce7a4a6d::t_9cb750a518f27c 1-2,5-10,12-13,17-18,26-33,54-75,83-84
+desktop/src/store/chat.ts
+  s_248d41ce7a4a6d::t_ad1a86af05cc0b 1-126
+desktop/src/components/WindowControls.tsx
+  s_248d41ce7a4a6d::t_262e1cb06da8e7 1-20
+desktop/src/store/index.ts
+  s_248d41ce7a4a6d::t_ec59885400e70e 1-3,6-11,14-17,23-26,33,35
+  s_248d41ce7a4a6d::t_e82472ab1ccbfe 4-5,12-13,18-22,27-32,34
+desktop/.gitignore
+  s_248d41ce7a4a6d::t_3d28f03b08db55 1-6
+desktop/src/components/Sidebar.tsx
+  s_248d41ce7a4a6d::t_25722c42635f4b 1-97
+desktop/src/styles/base.css
+  s_248d41ce7a4a6d::t_84fcd6e7d526f8 1-214
+docs/electron-rewrite-architecture.md
+  s_248d41ce7a4a6d::t_a8747595dcb758 1-153
+desktop/src/store/repositories.ts
+  s_248d41ce7a4a6d::t_2206a14c857ced 1-57
+desktop/src/App.tsx
+  s_248d41ce7a4a6d::t_a28280ed2976ff 1-36
+desktop/electron/preload.ts
+  s_248d41ce7a4a6d::t_184116dcee9545 1-41
+desktop/src/vite-env.d.ts
+  s_248d41ce7a4a6d::t_df321fb6bc0e95 1
+desktop/tsconfig.json
+  s_248d41ce7a4a6d::t_f00c637f060e6f 1-26
+desktop/electron/main.ts
+  s_248d41ce7a4a6d::t_ca673390484abd 1-99
+desktop/vite.config.ts
+  s_248d41ce7a4a6d::t_5c003c21fa7bf8 1-36
+desktop/index.html
+  s_248d41ce7a4a6d::t_c4b09825a2ed2b 1-16
+desktop/electron/archcar.ts
+  s_248d41ce7a4a6d::t_32c5206518356a 1-173
+desktop/src/store/nav.ts
+  s_248d41ce7a4a6d::t_93854bd09afc19 1-124
+desktop/src/styles/theme.css
+  s_248d41ce7a4a6d::t_5a95c58f97f546 1-3472
+desktop/src/index.tsx
+  s_248d41ce7a4a6d::t_7435f939221095 1-10
+desktop/src/pages/index.tsx
+  s_248d41ce7a4a6d::t_88299e58a6b7dc 1-83
+desktop/src/bridge/protocol.ts
+  s_248d41ce7a4a6d::t_5b53e0c822b574 133-134
+  s_248d41ce7a4a6d::t_e5c8becdc8c80c 41-42
+  s_248d41ce7a4a6d::t_26a3fe7b9bd047 1-40,43-94,125-132,135-148
+  s_248d41ce7a4a6d::t_e5fefe50e1536c 95-124
+desktop/src/bridge/client.ts
+  s_248d41ce7a4a6d::t_efc16197460532 1-35
+desktop/src/components/MetricsOverlay.tsx
+  s_248d41ce7a4a6d::t_c482d0c59c9376 1-21
+desktop/pnpm-workspace.yaml
+  s_248d41ce7a4a6d::t_761cb2e764b59c 1
+  s_248d41ce7a4a6d::t_012ed640328798 2-3
+desktop/package.json
+  s_248d41ce7a4a6d::t_7aeb893e7e04c2 1-28
+desktop/src/store/reducer.ts
+  s_248d41ce7a4a6d::t_79a8e388ac6aec 1-81
+desktop/src/store/metrics.ts
+  s_248d41ce7a4a6d::t_2c096cd8699cab 1-23
+desktop/pnpm-lock.yaml
+  s_248d41ce7a4a6d::t_294cc6ba60677b 1-2317
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ebd70923f1fbaeb5416d52a8ded945f882d57602",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
