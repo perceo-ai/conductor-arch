@@ -42,22 +42,77 @@ function UserBubble(props: { body: string }) {
   );
 }
 
+// Render a diff/patch body with per-line +/- coloring (mirrors the GTK
+// inline-event code rows).
+function DiffBody(props: { body: string }) {
+  const lines = () => props.body.replace(/\n$/, "").split("\n");
+  return (
+    <div class="chat-inline-event-code chat-inline-event-code-rows">
+      <For each={lines()}>
+        {(line) => {
+          const added = line.startsWith("+") && !line.startsWith("+++");
+          const removed = line.startsWith("-") && !line.startsWith("---");
+          const hunk = line.startsWith("@@");
+          return (
+            <div
+              class="chat-inline-event-code-row"
+              classList={{
+                "chat-inline-event-code-row-added": added,
+                "chat-inline-event-code-row-removed": removed,
+                "chat-inline-event-code-row-hunk": hunk,
+                "chat-inline-event-code-row-context": !added && !removed && !hunk,
+              }}
+            >
+              <span class="chat-inline-event-code-sign">{added ? "+" : removed ? "-" : ""}</span>
+              <span class="chat-inline-event-code-text">
+                {added || removed ? line.slice(1) : line}
+              </span>
+            </div>
+          );
+        }}
+      </For>
+    </div>
+  );
+}
+
+// Non-chat projection item (command/tool/diff/file/plan/reasoning/status/…)
+// rendered as a collapsible inline-event card, styled by render class.
+function InlineCard(props: { item: ArchcarProjectionItem }) {
+  const [open, setOpen] = createSignal(true);
+  const cls = () => props.item.render_class;
+  const label = () => props.item.title || cls().replace(/_card$/, "").replace(/_/g, " ");
+  const isDiff = () => cls() === "diff_card";
+  const isTerminal = () => cls() === "command_card" || cls() === "process_card";
+  return (
+    <div
+      class="chat-inline-event"
+      classList={{
+        "chat-inline-event-failed": props.item.status === "failed",
+        "chat-inline-event-loading": props.item.status === "running",
+      }}
+    >
+      <button class="chat-inline-event-action" onClick={() => setOpen((o) => !o)}>
+        <span class="chat-inline-event-expander">{open() ? "▾" : "▸"}</span>
+        {label()}
+      </button>
+      <Show when={open() && props.item.body.trim()}>
+        <Switch fallback={<div class="chat-inline-event-body">{props.item.body}</div>}>
+          <Match when={isDiff()}>
+            <DiffBody body={props.item.body} />
+          </Match>
+          <Match when={isTerminal()}>
+            <pre class="chat-inline-event-terminal">{props.item.body}</pre>
+          </Match>
+        </Switch>
+      </Show>
+    </div>
+  );
+}
+
 function TimelineItem(props: { item: ArchcarProjectionItem }) {
   const cls = () => props.item.render_class;
   return (
-    <Switch
-      fallback={
-        // generic card: command / tool / diff / file / status / …
-        <div class="chat-inline-event" classList={{ [`is-${props.item.status}`]: true }}>
-          <Show when={props.item.title}>
-            <div class="chat-inline-event-action">{props.item.title}</div>
-          </Show>
-          <Show when={props.item.body.trim()}>
-            <div class="chat-inline-event-body">{props.item.body}</div>
-          </Show>
-        </div>
-      }
-    >
+    <Switch fallback={<InlineCard item={props.item} />}>
       <Match when={cls() === "user_chat"}>
         <UserBubble body={props.item.body} />
       </Match>

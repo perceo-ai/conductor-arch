@@ -678,6 +678,67 @@ body {
   height: 100%;
 }
 
+/* ---- Chat inline-event cards ---- */
+.chat-inline-event {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-inline-event-action {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--lc-text, #d4d4d4);
+  cursor: pointer;
+  font-weight: 500;
+}
+.chat-inline-event-expander {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  width: 12px;
+}
+.chat-inline-event-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-inline-event-code,
+.chat-inline-event-code-rows {
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-x: auto;
+}
+.chat-inline-event-code-row {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  white-space: pre;
+}
+.chat-inline-event-code-sign {
+  flex: 0 0 auto;
+  width: 10px;
+  text-align: center;
+  color: var(--lc-text-muted, #8a8a8a);
+}
+.chat-inline-event-code-text {
+  white-space: pre;
+}
+.chat-inline-event-terminal {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre;
+  overflow-x: auto;
+  margin: 0;
+}
+
 /* dev update-metrics overlay */
 .metrics-overlay {
   position: fixed;
