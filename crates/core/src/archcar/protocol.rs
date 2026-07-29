@@ -306,6 +306,7 @@ pub struct ArchcarWorkspaceSummary {
     pub open_todos: usize,
     pub active_sessions: usize,
     pub run_running: bool,
+    pub changed_files: usize,
     pub diff_additions: usize,
     pub diff_deletions: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]

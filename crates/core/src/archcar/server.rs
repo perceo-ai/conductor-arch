@@ -550,13 +550,26 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListWorkspaces => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path).and_then(|store| store.list_status()) {
-                Ok(lines) => ArchcarResponse::Workspaces {
-                    workspaces: lines
-                        .into_iter()
-                        .map(workspace_summary_from_status_line)
-                        .collect(),
-                },
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                let lines = store.list_status()?;
+                Ok(lines
+                    .into_iter()
+                    .map(|line| {
+                        // Match the GTK dashboard card: changed-file count for the
+                        // diff badge (only meaningful for active checkouts).
+                        let changed_files = if line.workspace.status == "active" {
+                            store
+                                .changed_files(&line.workspace.name)
+                                .map(|files| files.len())
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        workspace_summary_from_status_line(line, changed_files)
+                    })
+                    .collect::<Vec<_>>())
+            }) {
+                Ok(workspaces) => ArchcarResponse::Workspaces { workspaces },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -976,7 +989,10 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
     )
 }
 
-fn workspace_summary_from_status_line(line: WorkspaceStatusLine) -> ArchcarWorkspaceSummary {
+fn workspace_summary_from_status_line(
+    line: WorkspaceStatusLine,
+    changed_files: usize,
+) -> ArchcarWorkspaceSummary {
     let WorkspaceStatusLine {
         workspace,
         repository_name,
@@ -998,6 +1014,7 @@ fn workspace_summary_from_status_line(line: WorkspaceStatusLine) -> ArchcarWorks
         open_todos,
         active_sessions,
         run_running,
+        changed_files,
         diff_additions,
         diff_deletions,
         pull_request_number: pull_request.as_ref().map(|pr| pr.number),

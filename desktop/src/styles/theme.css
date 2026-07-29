@@ -158,6 +158,11 @@ body,
     font-weight: 600;
 }
 
+.dashboard-subtitle {
+    color: #8a8a8a;
+    font-size: 13px;
+}
+
 .section-title,
 .sidebar-header,
 .repo-section-header {

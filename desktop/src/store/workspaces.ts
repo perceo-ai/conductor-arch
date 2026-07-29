@@ -19,6 +19,7 @@ export interface WorkspaceRow {
   openTodos: number;
   activeSessions: number;
   runRunning: boolean;
+  changedFiles: number;
   prNumber?: number;
   prState?: string;
   prUrl?: string;
@@ -45,6 +46,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
     openTodos: s.open_todos,
     activeSessions: s.active_sessions,
     runRunning: s.run_running,
+    changedFiles: s.changed_files,
     prNumber: s.pull_request_number,
     prState: s.pull_request_state,
     prUrl: s.pull_request_url,

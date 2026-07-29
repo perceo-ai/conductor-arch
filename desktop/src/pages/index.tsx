@@ -1,5 +1,6 @@
 import { Show } from "solid-js";
 import { nav } from "@/store";
+import { DashboardPage } from "./Dashboard";
 
 // Placeholder pages for phase 1. Each is a self-contained page shell; later
 // phases fill them with the real dashboard/workspace/chat surfaces. Only the
@@ -14,14 +15,6 @@ function PageShell(props: { title: string; children?: any }) {
       </div>
       <div class="page-body">{props.children}</div>
     </div>
-  );
-}
-
-export function DashboardPage() {
-  return (
-    <PageShell title="Dashboard">
-      <div class="empty-state">Kanban board — phase 3.</div>
-    </PageShell>
   );
 }
 

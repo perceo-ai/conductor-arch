@@ -102,6 +102,7 @@ export interface ArchcarWorkspaceSummary {
   open_todos: number;
   active_sessions: number;
   run_running: boolean;
+  changed_files: number;
   diff_additions: number;
   diff_deletions: number;
   pull_request_number?: number;

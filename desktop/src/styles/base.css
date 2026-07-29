@@ -195,6 +195,83 @@ body {
   text-align: center;
 }
 
+/* ---- Dashboard / kanban structural layout (GTK box orientation -> flex) ---- */
+.dashboard-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.project-tabs {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  overflow-x: auto;
+}
+.kanban-board {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: flex-start;
+  overflow: auto;
+}
+.kanban-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 0;
+}
+.kanban-column-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.column-title {
+  flex: 1 1 auto;
+}
+.workspace-card-action {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dashboard-card-top,
+.dashboard-card-footer {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.card-branch,
+.card-activity {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-title {
+  overflow-wrap: anywhere;
+}
+.card-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-tab-shell {
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* dev update-metrics overlay */
 .metrics-overlay {
   position: fixed;
