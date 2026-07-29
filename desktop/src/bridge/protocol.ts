@@ -54,6 +54,9 @@ export type ArchcarRequest =
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
+  | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
+  | { type: "close_chat_thread"; thread_id: number }
+  | { type: "reopen_chat_thread"; thread_id: number }
   | { type: "subscribe" };
 
 export type WorkspaceChangeScope = "all" | "uncommitted";
@@ -248,6 +251,7 @@ export type ArchcarResponse =
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "chat_thread_created"; thread: ArchcarChatThread }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

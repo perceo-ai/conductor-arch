@@ -825,6 +825,48 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::CreateChatThread {
+            workspace,
+            provider,
+            title,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.create_chat_thread(&workspace, &provider, &title, None))
+            {
+                Ok(t) => ArchcarResponse::ChatThreadCreated {
+                    thread: ArchcarChatThread {
+                        id: t.id,
+                        provider: t.provider,
+                        title: t.title,
+                        status: t.status,
+                        updated_at: t.updated_at,
+                        archived_at: t.archived_at,
+                    },
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CloseChatThread { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.close_chat_thread(thread_id)) {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ReopenChatThread { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.reopen_chat_thread(thread_id)) {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();

@@ -751,7 +751,10 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         | ArchcarRequest::GetWorkspaceProcesses { .. }
         | ArchcarRequest::ListReviewComments { .. }
         | ArchcarRequest::GetChecksSummary { .. }
-        | ArchcarRequest::GetSettings { .. } => {
+        | ArchcarRequest::GetSettings { .. }
+        | ArchcarRequest::CreateChatThread { .. }
+        | ArchcarRequest::CloseChatThread { .. }
+        | ArchcarRequest::ReopenChatThread { .. } => {
             AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
         }
     }

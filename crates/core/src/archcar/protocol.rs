@@ -188,6 +188,17 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    CreateChatThread {
+        workspace: String,
+        provider: String,
+        title: String,
+    },
+    CloseChatThread {
+        thread_id: i64,
+    },
+    ReopenChatThread {
+        thread_id: i64,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -310,6 +321,9 @@ pub enum ArchcarResponse {
         scope: String,
         /// Effective settings serialized as pretty TOML.
         toml: String,
+    },
+    ChatThreadCreated {
+        thread: ArchcarChatThread,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -650,6 +664,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::CreateChatThread { workspace, provider, .. } => {
+            format!("create_chat_thread workspace={workspace} provider={provider}")
+        }
+        ArchcarRequest::CloseChatThread { thread_id } => {
+            format!("close_chat_thread thread_id={thread_id}")
+        }
+        ArchcarRequest::ReopenChatThread { thread_id } => {
+            format!("reopen_chat_thread thread_id={thread_id}")
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -797,6 +820,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::Settings { scope, toml } => {
             format!("settings scope={scope} bytes={}", toml.len())
+        }
+        ArchcarResponse::ChatThreadCreated { thread } => {
+            format!("chat_thread_created id={}", thread.id)
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",

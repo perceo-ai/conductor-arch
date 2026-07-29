@@ -302,6 +302,22 @@ enum ArchcarCommand {
         #[arg(long)]
         repository: Option<String>,
     },
+    /// Create a new chat thread in a workspace.
+    CreateChat {
+        workspace: String,
+        #[arg(long, default_value = "codex")]
+        provider: String,
+        #[arg(long, default_value = "New chat")]
+        title: String,
+    },
+    /// Close (archive) a chat thread.
+    CloseChat {
+        thread_id: i64,
+    },
+    /// Reopen a closed chat thread.
+    ReopenChat {
+        thread_id: i64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1023,6 +1039,27 @@ fn main() -> Result<()> {
                 ArchcarCommand::Settings { repository } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSettings { repository })?,
+                    );
+                }
+                ArchcarCommand::CreateChat {
+                    workspace,
+                    provider,
+                    title,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::CreateChatThread {
+                        workspace,
+                        provider,
+                        title,
+                    })?);
+                }
+                ArchcarCommand::CloseChat { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::CloseChatThread { thread_id })?,
+                    );
+                }
+                ArchcarCommand::ReopenChat { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ReopenChatThread { thread_id })?,
                     );
                 }
             }
@@ -2008,6 +2045,12 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::ChatThreadCreated { thread } => {
+            println!(
+                "chat_thread_created id={} provider={} {}",
+                thread.id, thread.provider, thread.title
+            );
         }
         ArchcarResponse::ChecksSummary { workspace, summary } => {
             println!("checks_summary {workspace}");

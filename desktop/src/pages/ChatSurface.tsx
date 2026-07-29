@@ -20,17 +20,33 @@ function providerToKind(provider: string): SessionKind {
   return "codex";
 }
 
-function ThreadTab(props: { thread: ArchcarChatThread; active: boolean; onClick: () => void }) {
+function ThreadTab(props: {
+  thread: ArchcarChatThread;
+  active: boolean;
+  onClick: () => void;
+  onClose: () => void;
+}) {
   const generating = () => props.thread.status === "running" || props.thread.status === "generating";
   return (
-    <button
+    <div
       class="ws-chat-tab-shell ws-tab-shell"
       classList={{ "ws-tab-active": props.active }}
       onClick={props.onClick}
+      role="button"
     >
       <span class="ws-chat-tab-dot" classList={{ "ws-chat-tab-spinner": generating() }} />
       <span class="ws-tab-label">{props.thread.title || `Chat ${props.thread.id}`}</span>
-    </button>
+      <button
+        class="ws-tab-close-button"
+        title="Close chat"
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onClose();
+        }}
+      >
+        ×
+      </button>
+    </div>
   );
 }
 
@@ -269,6 +285,36 @@ export default function ChatSurface(props: { workspace: string }) {
     threads().find((t) => t.id === nav.selectedChatThread()),
   );
 
+  async function newChat() {
+    try {
+      const res = await send({
+        type: "create_chat_thread",
+        workspace: props.workspace,
+        provider: "codex",
+        title: "New chat",
+      });
+      const list = await threadsStore.refresh(props.workspace);
+      if (res.type === "chat_thread_created") {
+        const created = list.find((t) => t.id === res.thread.id);
+        if (created) selectThread(created);
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function closeThread(thread: ArchcarChatThread) {
+    try {
+      await send({ type: "close_chat_thread", thread_id: thread.id });
+      const list = await threadsStore.refresh(props.workspace);
+      if (nav.selectedChatThread() === thread.id) {
+        nav.selectChatThread(list.length > 0 ? list[0].id : null);
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+
   return (
     <div class="chat-surface">
       <div class="ws-chat-tabs-scroll ws-tab-bar">
@@ -279,9 +325,13 @@ export default function ChatSurface(props: { workspace: string }) {
                 thread={thread}
                 active={nav.selectedChatThread() === thread.id}
                 onClick={() => selectThread(thread)}
+                onClose={() => void closeThread(thread)}
               />
             )}
           </For>
+          <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
+            +
+          </button>
           <Show when={threads().length === 0}>
             <span class="empty-label">No chats in {titleCaseWorkspace(props.workspace)} yet</span>
           </Show>
