@@ -13,6 +13,7 @@ export type { WorkspaceRow } from "./workspaces";
 export { repositoriesStore } from "./repositories";
 export type { RepositoryRow } from "./repositories";
 export { threadsStore } from "./threads";
+export { terminalStore } from "./terminal";
 export { updateMetrics, metricsEnabled } from "./metrics";
 
 let focusWired = false;

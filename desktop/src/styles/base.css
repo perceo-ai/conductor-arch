@@ -665,6 +665,19 @@ body {
   flex: 0 0 auto;
 }
 
+/* ---- Terminal tab (xterm.js) ---- */
+.ws-terminal {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  padding: 8px 10px;
+  background: #151515;
+  overflow: hidden;
+}
+.ws-terminal .xterm {
+  height: 100%;
+}
+
 /* dev update-metrics overlay */
 .metrics-overlay {
   position: fixed;

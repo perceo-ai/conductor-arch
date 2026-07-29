@@ -1,6 +1,16 @@
 import type { ArchcarEvent, ChatSnapshot } from "@/bridge/protocol";
 import { send } from "@/bridge/client";
 import { chatStore } from "./chat";
+import { terminalStore } from "./terminal";
+
+async function refreshTerminalScreen(sessionId: number) {
+  try {
+    const res = await send({ type: "get_session_screen", session_id: sessionId });
+    if (res.type === "session_screen") terminalStore.setScreen(sessionId, res.screen);
+  } catch {
+    // transient; the next update event retries
+  }
+}
 
 // Event → targeted store mutation. This is the readable equivalent of
 // refresh.rs::refresh_event fanout: instead of a switch that fires callback
@@ -60,13 +70,30 @@ export function applyEvent(event: ArchcarEvent) {
       break;
 
     case "session_started": {
-      const e = event as { thread_id: number; session_id: number };
-      chatStore.setSession(e.thread_id, {
-        session_id: e.session_id,
-        status: "starting",
-        runtime_state: "starting",
-        ready: false,
-      });
+      const e = event as {
+        thread_id: number;
+        session_id: number;
+        workspace: string;
+        kind: string;
+      };
+      // Shell sessions back the Terminal tab; correlate the async spawn to its
+      // workspace and pull the first screen.
+      if (e.kind === "shell") {
+        terminalStore.setSession(e.workspace, e.session_id);
+        void refreshTerminalScreen(e.session_id);
+      } else {
+        chatStore.setSession(e.thread_id, {
+          session_id: e.session_id,
+          status: "starting",
+          runtime_state: "starting",
+          ready: false,
+        });
+      }
+      break;
+    }
+
+    case "session_screen_updated": {
+      void refreshTerminalScreen((event as { session_id: number }).session_id);
       break;
     }
 

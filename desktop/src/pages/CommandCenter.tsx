@@ -6,6 +6,7 @@ import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import ChangesTab, { ChangesRows } from "./WorkspaceChanges";
 import { CheckpointsPanel, ProcessesPanel, ReviewPanel, TodosPanel } from "./WorkspaceTabs";
+import TerminalPanel from "./TerminalPanel";
 
 // Workspace command center — port of workspace_command_center.rs. Header +
 // workspace tab strip + a center/right split (right panel is the 340px fixed
@@ -111,6 +112,9 @@ export default function CommandCenter() {
                   </Match>
                   <Match when={nav.activeWorkspaceTab() === "review"}>
                     <ReviewPanel workspace={ws()} />
+                  </Match>
+                  <Match when={nav.activeWorkspaceTab() === "terminal"}>
+                    <TerminalPanel workspace={ws()} />
                   </Match>
                 </Switch>
               </div>
