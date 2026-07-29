@@ -1,0 +1,38 @@
+crates/gtk-app/src/archcar_async.rs
+  s_248d41ce7a4a6d::t_80e4a7af5b76d9 754-757
+crates/core/src/archcar/protocol.rs
+  s_248d41ce7a4a6d::t_1c5f321e3d01e9 325-327
+  s_248d41ce7a4a6d::t_4d9664f68a2e15 667-675
+  s_248d41ce7a4a6d::t_a33dd06987cb7c 824-826
+  s_248d41ce7a4a6d::t_e21465abd7cb00 191-201
+crates/cli/src/main.rs
+  s_248d41ce7a4a6d::t_c4c3028c2e69ba 314-316,318-320
+  s_248d41ce7a4a6d::t_632af608fad645 1044-1064
+  s_248d41ce7a4a6d::t_f77328c3fe25ba 2049-2054
+  s_248d41ce7a4a6d::t_496eb2efe7b6bb 305-313,317
+desktop/src/bridge/protocol.ts
+  s_248d41ce7a4a6d::t_36ed8b64bd853e 254
+  s_248d41ce7a4a6d::t_295b1766df5ae6 57-59
+crates/core/src/archcar/server.rs
+  s_248d41ce7a4a6d::t_3da64e9ce910b1 828-869
+desktop/src/pages/ChatSurface.tsx
+  s_248d41ce7a4a6d::t_70ddbc49b7c8f2 23-28
+  s_248d41ce7a4a6d::t_787781e4c4fd14 31,35,39-49
+  s_248d41ce7a4a6d::t_cc2d2d5efb71be 288-317,328,332-334
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7b24198ea758ea9d06e01c45566affbc6d096bf8",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
