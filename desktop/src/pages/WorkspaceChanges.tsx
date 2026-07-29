@@ -36,8 +36,12 @@ export function ChangesRows(props: { workspace: string; defaultScope?: Workspace
   const [changes] = createResource(
     () => [props.workspace, scope()] as const,
     async ([ws, sc]) => {
-      const res = await send({ type: "get_workspace_changes", workspace: ws, scope: sc });
-      return res.type === "workspace_changes" ? res.files : [];
+      try {
+        const res = await send({ type: "get_workspace_changes", workspace: ws, scope: sc });
+        return res.type === "workspace_changes" ? res.files : [];
+      } catch {
+        return [];
+      }
     },
   );
   return (
@@ -77,8 +81,12 @@ export function DiffView(props: { workspace: string }) {
   const [diff] = createResource(
     () => props.workspace,
     async (ws) => {
-      const res = await send({ type: "get_workspace_diff", workspace: ws });
-      return res.type === "workspace_diff" ? res.diff : "";
+      try {
+        const res = await send({ type: "get_workspace_diff", workspace: ws });
+        return res.type === "workspace_diff" ? res.diff : "";
+      } catch {
+        return "";
+      }
     },
   );
   return (
@@ -91,9 +99,12 @@ export function DiffView(props: { workspace: string }) {
 }
 
 export default function ChangesTab(props: { workspace: string }) {
+  // The diff below renders all three scopes (working tree / unstaged / staged),
+  // so the summary rows default to "all" for a consistent picture. The
+  // right-panel ChangesRows keeps its own default independently.
   return (
     <div class="ws-changes-tab">
-      <ChangesRows workspace={props.workspace} />
+      <ChangesRows workspace={props.workspace} defaultScope="all" />
       <DiffView workspace={props.workspace} />
     </div>
   );

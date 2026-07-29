@@ -961,7 +961,9 @@ fn configured_check_commands_from_settings(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffFileSummary {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletions: Option<usize>,
     pub staged: bool,
     pub unstaged: bool,
@@ -3327,12 +3329,23 @@ impl WorkspaceStore {
             if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
                 continue;
             }
-            if path.is_dir() {
+            // Inspect the entry's own type (does not follow symlinks). Skip
+            // symlinks entirely so a directory symlink is neither traversed
+            // (avoids loops / escaping the checkout) nor listed.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 Self::list_files_recursive(root, &path, files);
                 continue;
             }
-            if let Ok(relative) = path.strip_prefix(root) {
-                files.push(relative.to_string_lossy().to_string());
+            if file_type.is_file() {
+                if let Ok(relative) = path.strip_prefix(root) {
+                    files.push(relative.to_string_lossy().to_string());
+                }
             }
         }
     }

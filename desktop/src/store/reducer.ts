@@ -11,11 +11,18 @@ import { chatStore } from "./chat";
 // changes we pull the authoritative snapshot (get_chat_snapshot) and reconcile —
 // reconcile(key:"id") means unchanged rows keep identity and don't re-render.
 
-let inflightSnapshot = new Map<number, boolean>();
+const inflightSnapshot = new Set<number>();
+const pendingSnapshot = new Set<number>();
 
 async function refreshThreadSnapshot(threadId: number) {
-  if (inflightSnapshot.get(threadId)) return;
-  inflightSnapshot.set(threadId, true);
+  // Coalesce: if a pull is already running for this thread, mark it for one
+  // follow-up so the final state (messages/queue/projection) isn't lost when a
+  // notification arrives mid-flight — but never stack more than one.
+  if (inflightSnapshot.has(threadId)) {
+    pendingSnapshot.add(threadId);
+    return;
+  }
+  inflightSnapshot.add(threadId);
   try {
     const [snap, proj] = await Promise.all([
       send({ type: "get_chat_snapshot", thread_id: threadId }),
@@ -30,7 +37,10 @@ async function refreshThreadSnapshot(threadId: number) {
   } catch {
     // page owns its own error surface; ignore transient failures
   } finally {
-    inflightSnapshot.set(threadId, false);
+    inflightSnapshot.delete(threadId);
+    if (pendingSnapshot.delete(threadId)) {
+      void refreshThreadSnapshot(threadId);
+    }
   }
 }
 

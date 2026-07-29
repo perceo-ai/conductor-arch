@@ -29,9 +29,13 @@ function buildTree(paths: string[]): TreeNode[] {
       node = child;
     }
   }
-  // dirs before files, alphabetical (mirrors BTreeMap ordering)
+  // dirs before files, then byte-wise name order to match the backend's Rust
+  // BTreeMap/String ordering (localeCompare would diverge on case/locale).
   const sortRec = (n: TreeNode) => {
-    n.children.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+    n.children.sort((a, b) => {
+      if (a.dir !== b.dir) return a.dir ? -1 : 1;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    });
     n.children.forEach(sortRec);
   };
   sortRec(root);
@@ -83,8 +87,13 @@ export default function WorkspaceFiles(props: { workspace: string; openFile?: (p
   const [files] = createResource(
     () => props.workspace,
     async (ws) => {
-      const res = await send({ type: "list_workspace_files", workspace: ws });
-      return res.type === "workspace_files" ? res.files : [];
+      try {
+        const res = await send({ type: "list_workspace_files", workspace: ws });
+        return res.type === "workspace_files" ? res.files : [];
+      } catch {
+        // Daemon/socket unavailable — render an empty tree instead of throwing.
+        return [];
+      }
     },
   );
   const tree = createMemo(() => buildTree(files() ?? []));

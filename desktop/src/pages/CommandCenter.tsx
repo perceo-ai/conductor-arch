@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { For, Match, Show, Switch } from "solid-js";
 import { nav, workspacesStore } from "@/store";
 import type { WorkspaceTab } from "@/store/nav";
 import { titleCaseWorkspace } from "@/lib/text";
@@ -59,62 +59,54 @@ function RightPanel(props: { workspace: string }) {
 
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
-  const row = () => workspacesStore.row(workspace());
+  const activeLabel = () => TABS.find((t) => t.tab === nav.activeWorkspaceTab())?.label ?? "";
 
   return (
-    <div class="ws-command-center page-shell">
-      <div class="ws-center">
-        <div class="ws-header page-header">
-          <div class="ws-header-title">{titleCaseWorkspace(workspace())}</div>
-          <Show when={row()}>
-            {(r) => <div class="ws-header-branch">{r().branch}</div>}
-          </Show>
-        </div>
+    <Show
+      when={workspace()}
+      fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}
+    >
+      {(ws) => {
+        const row = () => workspacesStore.row(ws());
+        return (
+          <div class="ws-command-center page-shell">
+            <div class="ws-center">
+              <div class="ws-header page-header">
+                <div class="ws-header-title">{titleCaseWorkspace(ws())}</div>
+                <Show when={row()}>{(r) => <div class="ws-header-branch">{r().branch}</div>}</Show>
+              </div>
 
-        <div class="ws-tab-bar ws-main-tabs">
-          <For each={TABS}>
-            {(t) => (
-              <button
-                class="ws-tab-shell"
-                classList={{ "ws-tab-active": nav.activeWorkspaceTab() === t.tab }}
-                onClick={() => nav.selectWorkspaceTab(t.tab)}
-              >
-                <span class="ws-tab-label">{t.label}</span>
-              </button>
-            )}
-          </For>
-        </div>
-        <div class="ws-tab-sep" />
+              <div class="ws-tab-bar ws-main-tabs">
+                <For each={TABS}>
+                  {(t) => (
+                    <button
+                      class="ws-tab-shell"
+                      classList={{ "ws-tab-active": nav.activeWorkspaceTab() === t.tab }}
+                      onClick={() => nav.selectWorkspaceTab(t.tab)}
+                    >
+                      <span class="ws-tab-label">{t.label}</span>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="ws-tab-sep" />
 
-        <div class="ws-center-content">
-          <Show when={nav.activeWorkspaceTab() === "chats"}>
-            <ChatSurface workspace={workspace()} />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "changes"}>
-            <ChangesTab workspace={workspace()} />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "review"}>
-            <Placeholder label="Review" />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "checkpoints"}>
-            <Placeholder label="Checkpoints" />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "checks"}>
-            <Placeholder label="Checks" />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "todos"}>
-            <Placeholder label="Todos" />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "processes"}>
-            <Placeholder label="Processes" />
-          </Show>
-          <Show when={nav.activeWorkspaceTab() === "terminal"}>
-            <Placeholder label="Terminal" />
-          </Show>
-        </div>
-      </div>
+              <div class="ws-center-content">
+                <Switch fallback={<Placeholder label={activeLabel()} />}>
+                  <Match when={nav.activeWorkspaceTab() === "chats"}>
+                    <ChatSurface workspace={ws()} />
+                  </Match>
+                  <Match when={nav.activeWorkspaceTab() === "changes"}>
+                    <ChangesTab workspace={ws()} />
+                  </Match>
+                </Switch>
+              </div>
+            </div>
 
-      <RightPanel workspace={workspace()} />
-    </div>
+            <RightPanel workspace={ws()} />
+          </div>
+        );
+      }}
+    </Show>
   );
 }

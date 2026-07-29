@@ -15,7 +15,7 @@ export default function App() {
 
   return (
     <>
-      <Show when={import.meta.env.PROD || navigator.platform.indexOf("Mac") === -1}>
+      <Show when={navigator.platform.indexOf("Mac") === -1}>
         <WindowControls />
       </Show>
       <div class="window-content">

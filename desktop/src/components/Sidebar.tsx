@@ -79,7 +79,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
 
       <div class="projects-header">
         <span class="title">Projects</span>
-        <button class="ui-button-icon" title="Add repository">
+        <button class="ui-button-icon" title="Add repository (coming soon)" disabled>
           +
         </button>
       </div>

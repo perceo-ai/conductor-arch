@@ -11,6 +11,8 @@ Load other docs only when the task needs them:
   `docs/mvp-scope.md`
 - Manual release/app verification: `docs/manual-testing-checklist.md`
 - Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
+- Electron desktop UI rewrite (architecture, reactivity model, archcar bridge):
+  `docs/electron-rewrite-architecture.md`
 - User-facing install, workflow, or configuration docs: `README.md`
 
 Use official Conductor behavior as the parity baseline when working on parity:

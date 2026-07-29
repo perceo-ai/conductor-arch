@@ -162,7 +162,10 @@ export interface ArchcarRepositorySummary {
 // --- Responses -------------------------------------------------------------
 export type ArchcarResponse =
   | { type: "ack" }
+  | { type: "session_spawn_queued"; workspace: string; kind: SessionKind }
   | { type: "session_spawned"; session_id: number; thread_id: number; workspace: string; kind: SessionKind; pid: number }
+  | { type: "session_messages"; thread_id: number; messages: ArchcarMessage[] }
+  | { type: "queued_chat_input"; input: QueuedArchcarInput }
   | { type: "session_status"; session_id: number; status: string; runtime_state: string; ready: boolean }
   | { type: "session_screen"; session_id: number; screen: string }
   | { type: "chat_snapshot"; snapshot: ChatSnapshot }

@@ -67,7 +67,24 @@ function archcarBinary(): string {
   return "archcar";
 }
 
-async function ensureDaemon(endpoint: string): Promise<void> {
+// Concurrent request + subscribe both call ensureDaemon at startup. Memoize the
+// in-flight spawn-and-poll per endpoint so they share ONE archcar process
+// instead of racing to spawn competing daemons. Cleared on settle so a later
+// call can retry (and re-verify the connection) after a failure.
+const daemonAttempts = new Map<string, Promise<void>>();
+
+function ensureDaemon(endpoint: string): Promise<void> {
+  let attempt = daemonAttempts.get(endpoint);
+  if (!attempt) {
+    attempt = ensureDaemonOnce(endpoint).finally(() => {
+      daemonAttempts.delete(endpoint);
+    });
+    daemonAttempts.set(endpoint, attempt);
+  }
+  return attempt;
+}
+
+async function ensureDaemonOnce(endpoint: string): Promise<void> {
   try {
     const s = await connectOnce(endpoint);
     s.destroy();

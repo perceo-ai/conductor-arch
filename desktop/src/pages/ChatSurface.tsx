@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on } from "solid-js";
 import { chatStore, threadsStore, nav, loadThread } from "@/store";
 import { send } from "@/bridge/client";
 import type { ArchcarChatThread, ArchcarProjectionItem, SessionKind } from "@/bridge/protocol";
@@ -45,30 +45,29 @@ function UserBubble(props: { body: string }) {
 function TimelineItem(props: { item: ArchcarProjectionItem }) {
   const cls = () => props.item.render_class;
   return (
-    <Show
-      when={cls() !== "user_chat"}
-      fallback={<UserBubble body={props.item.body} />}
+    <Switch
+      fallback={
+        // generic card: command / tool / diff / file / status / …
+        <div class="chat-inline-event" classList={{ [`is-${props.item.status}`]: true }}>
+          <Show when={props.item.title}>
+            <div class="chat-inline-event-action">{props.item.title}</div>
+          </Show>
+          <Show when={props.item.body.trim()}>
+            <div class="chat-inline-event-body">{props.item.body}</div>
+          </Show>
+        </div>
+      }
     >
-      <Show
-        when={cls() !== "assistant_chat"}
-        fallback={<div class="chat-agent-text">{props.item.body}</div>}
-      >
-        <Show
-          when={cls() !== "reasoning_card"}
-          fallback={<div class="chat-reasoning-text">{props.item.body}</div>}
-        >
-          {/* generic card: command / tool / diff / file / status / … */}
-          <div class="chat-inline-event" classList={{ [`is-${props.item.status}`]: true }}>
-            <Show when={props.item.title}>
-              <div class="chat-inline-event-action">{props.item.title}</div>
-            </Show>
-            <Show when={props.item.body.trim()}>
-              <div class="chat-inline-event-body">{props.item.body}</div>
-            </Show>
-          </div>
-        </Show>
-      </Show>
-    </Show>
+      <Match when={cls() === "user_chat"}>
+        <UserBubble body={props.item.body} />
+      </Match>
+      <Match when={cls() === "assistant_chat"}>
+        <div class="chat-agent-text">{props.item.body}</div>
+      </Match>
+      <Match when={cls() === "reasoning_card"}>
+        <div class="chat-reasoning-text">{props.item.body}</div>
+      </Match>
+    </Switch>
   );
 }
 
@@ -186,7 +185,12 @@ export default function ChatSurface(props: { workspace: string }) {
       () => props.workspace,
       (ws) => {
         void threadsStore.refresh(ws).then((list) => {
-          if (list.length > 0 && nav.selectedChatThread() == null) {
+          if (list.length === 0) return;
+          // Select the first thread when nothing is selected OR the current
+          // selection isn't in this workspace's list (e.g. after switching
+          // workspaces the stale thread id must not stick).
+          const current = nav.selectedChatThread();
+          if (current == null || !list.some((t) => t.id === current)) {
             selectThread(list[0]);
           }
         });

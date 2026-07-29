@@ -45,7 +45,7 @@ additive; add per page, not up front.
 
 ## Process topology
 
-```
+```text
 Electron main (Node)                        Rust
 ┌───────────────────────────┐   Unix socket ┌──────────────┐
 │ archcar client (1 conn)   │◄─────JSON-RPC─►│ archcar      │──► core ──► SQLite
@@ -127,7 +127,7 @@ arrives (mirrors `resolve_pending_chat_target`).
 
 ## Phases
 
-0. Scaffold `desktop/` (Vite + Solid + Electron + TS). ✅ target of first PR.
+0. Scaffold `desktop/` (Vite + Solid + Electron + TS).
 1. Reactive store core + archcar bridge (main + preload + TS client) + theme CSS.
 2. App shell: window chrome, sidebar, page stack, projects/workspace list.
 3. Dashboard (kanban) + navigation.
@@ -150,4 +150,3 @@ Each phase: extend archcar RPC only as needed, keep CLI+GTK behavior claims hone
   on the renderer.
 - Smoke: `pnpm dev` launches, connects to archcar, lists real workspaces, opens a
   chat, streams a turn.
-```

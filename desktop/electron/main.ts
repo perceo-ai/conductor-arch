@@ -27,7 +27,9 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // Sandboxed renderer; the preload only require()s electron
+      // (contextBridge/ipcRenderer), which sandboxed preloads may use.
+      sandbox: true,
     },
   });
 

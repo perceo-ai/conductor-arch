@@ -106,7 +106,7 @@ body,
 .app-root {
     background-color: var(--lc-bg);
     color: var(--lc-text);
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
 }
 
 .dev-instance-banner {
@@ -180,7 +180,7 @@ body,
 .card-branch,
 .workspace-path-label,
 .detail-label {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 
 .card-meta,
@@ -227,7 +227,7 @@ body,
 
 .text-mono {
     color: #b4b4b4;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
 }
 
@@ -405,7 +405,7 @@ textarea:disabled {
 
 .workspace-row-diff-added,
 .workspace-row-diff-removed {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
     font-weight: 700;
 }
@@ -497,7 +497,7 @@ button {
     text-shadow: none;
     padding: 7px 12px;
     min-height: 34px;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
@@ -512,7 +512,7 @@ button.icon-button {
     border-radius: 7px;
     box-shadow: none;
     text-shadow: none;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
@@ -526,7 +526,7 @@ button.ui-button {
     border-radius: 7px;
     box-shadow: none;
     text-shadow: none;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
@@ -857,7 +857,7 @@ button.ui-button-destructive:hover {
     background-color: #151515;
     color: #e4e4e4;
     font-size: 12px;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 
 .session-surface .card-meta,
@@ -1342,7 +1342,7 @@ button.ui-button-destructive:hover {
 .settings-editor text,
 .settings-editor .view,
 .settings-editor .widget {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 
 .settings-editor-shell {
@@ -1582,7 +1582,7 @@ button.ui-button-destructive:hover {
 
 /* ── Sidebar row timestamp ── */
 .workspace-row-timestamp {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
     color: #8a8a8a;
 }
@@ -1791,7 +1791,7 @@ button.ws-tab-shell {
     font-weight: 600;
 }
 .ws-mode-switcher button {
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 12px;
     padding: 3px 10px;
     border-radius: 5px;
@@ -1813,7 +1813,7 @@ button.ws-tab-shell {
     border: none;
     border-radius: 7px;
     padding: 4px 11px;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
     color: #8e8e8e;
 }
@@ -1844,7 +1844,7 @@ button.ws-tab-shell {
     color: #e6e6e6;
 }
 .ws-pr-number {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 13px;
     font-weight: 700;
     color: #d9d9d9;
@@ -1915,7 +1915,7 @@ button.ws-tab-shell {
 .ws-pr-action-button {
     min-height: 32px;
     padding: 0 14px;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
 }
 .ws-pr-action-button.ws-pr-status-muted,
@@ -1946,7 +1946,7 @@ button.ws-tab-shell {
     border: none;
     box-shadow: none;
     color: #8e8e8e;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
     min-width: 30px;
     min-height: 30px;
@@ -1995,12 +1995,12 @@ button.ws-tab-shell {
 }
 .ws-changes-menu-subtitle {
     color: #8f8f8f;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
 }
 .ws-changes-menu-counts {
     color: #bfc7d5;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     font-weight: 700;
 }
@@ -2035,7 +2035,7 @@ button.ws-tab-shell {
 }
 .ws-file-summary-counts {
     color: #bfc7d5;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     font-weight: 700;
 }
@@ -2065,7 +2065,7 @@ button.ws-tab-shell {
     font-size: 12px;
 }
 .ws-folder-name {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     font-weight: 500;
     color: #b0b0b0;
@@ -2079,12 +2079,12 @@ button.ws-tab-shell {
     min-height: 13px;
 }
 .ws-file-name {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     color: #c0c0c0;
 }
 .ws-file-dir {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
     color: #5d5d5d;
 }
@@ -2186,7 +2186,7 @@ button.ws-tab-shell {
 .ws-run-output text {
     background-color: #111111;
     color: #c8c8c8;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     border-radius: 0;
 }
@@ -2195,7 +2195,7 @@ button.ws-tab-shell {
 }
 .ws-terminal-prompt {
     color: #d8d8d8;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 13px;
     padding: 0 2px 0 4px;
 }
@@ -2203,7 +2203,7 @@ button.ws-tab-shell {
     background-color: #111111;
     border: 1px solid #303030;
     color: #e4e4e4;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 13px;
 }
 
@@ -2490,7 +2490,7 @@ button.ws-tab-shell {
     border-radius: 2px;
     box-shadow: none;
     color: #bdbdbd;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 9px;
     font-weight: 500;
     min-height: 0;
@@ -2510,7 +2510,7 @@ button.ws-tab-shell {
     border-radius: 2px;
     box-shadow: none;
     color: #8f8f8f;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 10px;
     font-weight: 700;
     min-height: 16px;
@@ -2546,7 +2546,7 @@ button.chat-inline-event-expander label {
 }
 .chat-inline-event-chip-label {
     color: #bdbdbd;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 9px;
     margin: 0;
     min-height: 0;
@@ -2556,7 +2556,7 @@ button.chat-inline-event-expander label {
 .chat-markdown-inline-view text {
     background-color: transparent;
     color: #c6c6c6;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
     font-size: 13px;
     line-height: 1.55;
     margin: 0;
@@ -2579,7 +2579,7 @@ button.chat-inline-event-expander label {
 }
 .chat-markdown-chip-label {
     color: #bdbdbd;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
     margin: 0;
     min-height: 0;
@@ -2591,7 +2591,7 @@ button.chat-inline-event-expander label {
 }
 .chat-markdown-file-chip-label {
     color: #c39b50;
-    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
+    font-family: "Mona Sans", Inter, "Segoe UI", system-ui, sans-serif;
     font-size: 11px;
     font-weight: 600;
 }
@@ -2605,7 +2605,7 @@ button.chat-inline-event-expander label {
     border-radius: 4px;
     box-shadow: none;
     color: #e7e7e7;
-    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
+    font-family: "Mona Sans", Inter, "Segoe UI", system-ui, sans-serif;
     font-size: 13px;
     font-weight: 600;
     min-height: 22px;
@@ -2624,7 +2624,7 @@ button.chat-inline-event-expander label {
 }
 .chat-inline-event-meta {
     color: #8f8f8f;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
 }
 .chat-inline-event-body {
@@ -2632,7 +2632,7 @@ button.chat-inline-event-expander label {
     border: 1px solid #2a2a2a;
     border-radius: 5px;
     color: #c9c9c9;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 10px;
     line-height: 1.25;
     padding: 0 2px;
@@ -2676,21 +2676,21 @@ button.chat-inline-event-expander label {
 .chat-inline-event-code-gutter {
     border-right: 1px solid #30363d;
     color: #6e7681;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 10px;
     min-width: 42px;
     padding: 0 8px;
 }
 .chat-inline-event-code-sign {
     color: #8b949e;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 10px;
     min-width: 18px;
     padding: 0 4px;
 }
 .chat-inline-event-code-text {
     color: inherit;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 10px;
     padding: 0 8px;
 }
@@ -2823,7 +2823,7 @@ button.chat-inline-event-expander label {
     border-radius: 8px;
     background-color: #181818;
     color: #a6a6a6;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 11px;
     font-weight: 700;
     min-width: 60px;
@@ -2906,7 +2906,7 @@ button.chat-inline-event-expander label {
 .ws-diff-view text {
     background-color: #131313;
     color: #c0c0c0;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     line-height: 1.5;
 }
@@ -2916,7 +2916,7 @@ button.chat-inline-event-expander label {
 .ws-file-code-view text {
     background-color: #161616;
     color: #c8c8c8;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 13px;
     line-height: 1.6;
 }
@@ -2951,7 +2951,7 @@ button.chat-inline-event-expander label {
 .ws-check-icon {
     font-size: 11px;
     min-width: 22px;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 .ws-check-icon-muted {
     color: #5a5a5a;
@@ -2969,7 +2969,7 @@ button.chat-inline-event-expander label {
     min-width: 140px;
 }
 .ws-check-val {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 12px;
     color: #c0c0c0;
     padding-left: 8px;
@@ -2977,7 +2977,7 @@ button.chat-inline-event-expander label {
 .ws-check-sub {
     font-size: 11px;
     color: #666666;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
     padding-top: 1px;
     padding-bottom: 1px;
 }
@@ -2994,7 +2994,7 @@ body,
 .settings-shell {
     background-color: #101010;
     color: #f8fafc;
-    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
 }
 
 .page-header,
@@ -3080,7 +3080,7 @@ body,
 .ws-diff-view text,
 .ws-file-code-view,
 .ws-file-code-view text {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 
 .sidebar-icon-button,

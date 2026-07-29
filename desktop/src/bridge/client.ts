@@ -27,7 +27,13 @@ export function send<R extends ArchcarResponse = ArchcarResponse>(
 /** Ensure the event stream is running and route events to a handler. */
 export async function connectEvents(onEvent: (event: ArchcarEvent) => void): Promise<() => void> {
   const off = api().onEvent((e) => onEvent(e as ArchcarEvent));
-  await api().ensureEvents();
+  try {
+    await api().ensureEvents();
+  } catch (err) {
+    // Don't leak the listener when startup fails; a retry re-registers cleanly.
+    off();
+    throw err;
+  }
   return off;
 }
 
