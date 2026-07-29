@@ -1,0 +1,35 @@
+desktop/src/pages/TerminalPanel.tsx
+  s_248d41ce7a4a6d::t_430bc2596690ed 1-77
+desktop/src/styles/base.css
+  s_248d41ce7a4a6d::t_033e315a9d01ff 668-680
+desktop/src/store/reducer.ts
+  s_248d41ce7a4a6d::t_8020c5e2e239e9 4-13
+  s_248d41ce7a4a6d::t_380fce05e968c0 73-96
+desktop/src/pages/CommandCenter.tsx
+  s_248d41ce7a4a6d::t_f99fe35f84ca34 9
+  s_248d41ce7a4a6d::t_9c03267f704212 116-118
+desktop/src/store/terminal.ts
+  s_248d41ce7a4a6d::t_74c074290c8892 1-50
+desktop/package.json
+  s_248d41ce7a4a6d::t_11e4825ffe1c01 21-22
+desktop/src/store/index.ts
+  s_248d41ce7a4a6d::t_069e79216d0f72 16
+desktop/pnpm-lock.yaml
+  s_248d41ce7a4a6d::t_76eebf247fa04c 11-16,798-803,3108-3111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4f428b49ee582cd4bb5f51f5ff653f2843efd75f",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
