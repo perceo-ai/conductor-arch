@@ -80,11 +80,6 @@ jobs:
         with:
           version: 11
 
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
-
       # Rust tests for the crates the desktop UI depends on (archcar RPCs + CLI),
       # plus a CLI smoke of the read RPCs. The full GTK workspace suite runs in
       # ci.yml; the GTK app is being retired.
@@ -176,11 +171,6 @@ jobs:
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11
-
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
 
       - name: Set package version
         working-directory: desktop
