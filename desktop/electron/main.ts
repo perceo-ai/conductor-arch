@@ -5,6 +5,15 @@ import { ArchcarBridge } from "./archcar.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// On Linux the Chromium zygote fails to fork child processes on some
+// kernel/sandbox combos (kernel 7.x + Electron 33), cascading into GPU and
+// network-service launch failures and a black window. Skipping the zygote
+// spawns children directly and keeps the sandbox intact. Must run before the
+// app is ready. See gpu_process_host "GPU process isn't usable. Goodbye." loop.
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("no-zygote");
+}
+
 // Vite injects these in dev; undefined in a packaged build.
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 
@@ -24,12 +33,14 @@ function createWindow() {
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: path.join(__dirname, "preload.mjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      // Sandboxed renderer; the preload only require()s electron
-      // (contextBridge/ipcRenderer), which sandboxed preloads may use.
-      sandbox: true,
+      // ESM preload (.mjs): Electron only loads ES-module preloads when the
+      // renderer is unsandboxed. contextIsolation still fully isolates the
+      // preload's context from page JS, and the preload only touches
+      // contextBridge/ipcRenderer — no untrusted code runs here.
+      sandbox: false,
     },
   });
 

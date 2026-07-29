@@ -14,6 +14,13 @@ body,
   overflow: hidden;
 }
 
+/* The Solid app mounts into #root, so #root — not body — is the real flex
+ * column that lets .window-content (flex: 1) fill the window height. */
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
 body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
