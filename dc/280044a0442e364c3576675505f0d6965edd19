@@ -1,0 +1,22 @@
+desktop/electron/archcar.ts
+  s_248d41ce7a4a6d::t_2bbd9de8837957 173-178,181-187,191-193
+  s_248d41ce7a4a6d::t_2211194f944968 226-228
+desktop/src/App.tsx
+  s_248d41ce7a4a6d::t_4865985f1bf2df 18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "dc280044a0442e364c3576675505f0d6965edd19",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
