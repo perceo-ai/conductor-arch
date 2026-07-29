@@ -1,0 +1,88 @@
+packaging/aur/PKGBUILD
+  s_248d41ce7a4a6d::t_abff09de124b60 9
+docs/deploy-and-local-test.md
+  s_248d41ce7a4a6d::t_4473db9edb0b9b 193-194
+  s_248d41ce7a4a6d::t_8a2262b36cd58f 16,22,28
+  s_248d41ce7a4a6d::t_64bc68e3600f07 53,71-72
+  s_248d41ce7a4a6d::t_165b358c752f58 3-4
+  s_248d41ce7a4a6d::t_0807dd7e14f57e 200,202
+.github/workflows/publish.yml
+  s_248d41ce7a4a6d::t_374b43a62f7be9 41
+  s_248d41ce7a4a6d::t_62aff7e3b86dcb 367
+  s_248d41ce7a4a6d::t_9d2f0420ed47b1 237
+claude/CLAUDE.md
+  s_248d41ce7a4a6d::t_dbd4a7de346b82 142-143
+  s_248d41ce7a4a6d::t_b6489a7f61cc6a 86-87,92-93,95-98,100-104
+  s_248d41ce7a4a6d::t_051e0b251bcfe1 38
+  s_248d41ce7a4a6d::t_11009db9e258ba 189-191
+  s_248d41ce7a4a6d::t_692df6c618eeb3 77-78
+  s_248d41ce7a4a6d::t_a2def1604e6d96 163-164
+packaging/appimage/archductor.AppDir/archductor.desktop
+  s_248d41ce7a4a6d::t_23c788007833bf 4
+packaging/flatpak/ai.perceo.Archductor.yml
+  s_248d41ce7a4a6d::t_d7842fab0e237e 8
+Makefile
+  s_248d41ce7a4a6d::t_d370d0340a1ef4 9
+  s_248d41ce7a4a6d::t_af2ce80dc8c153 38-39
+README.md
+  s_248d41ce7a4a6d::t_44bbb3a77e32c4 111-112
+  s_248d41ce7a4a6d::t_8706ea1f3b3dab 78
+  s_248d41ce7a4a6d::t_7a03259595eee8 532-533
+  s_248d41ce7a4a6d::t_0daeac53072201 133,138,141,144
+  s_248d41ce7a4a6d::t_8a7f7e75b22a9b 509-513
+  s_248d41ce7a4a6d::t_f59831e840360c 11-13
+  s_248d41ce7a4a6d::t_340131ec7ee641 538
+  s_248d41ce7a4a6d::t_fd8b6a1150073b 156,159-160,172-175
+  s_248d41ce7a4a6d::t_8c858378ce49a6 185-188,190-192
+docs/manual-testing-checklist.md
+  s_248d41ce7a4a6d::t_2be214f58e16a3 14,16,18-20
+packaging/flatpak/ai.perceo.Archductor.desktop
+  s_248d41ce7a4a6d::t_bed4e782173fb3 5
+packaging/README.md
+  s_248d41ce7a4a6d::t_8dc71aa1f556e2 105
+  s_248d41ce7a4a6d::t_2282dd2c56f79e 73,83-84
+  s_248d41ce7a4a6d::t_4e05c4421ff0df 19
+  s_248d41ce7a4a6d::t_23153b81fd6566 144-146,148
+scripts/release-readiness.sh
+  s_248d41ce7a4a6d::t_20ebe8dc078be1 118
+docs/release-readiness.md
+  s_248d41ce7a4a6d::t_de3ffd9f14fd90 82-84
+  s_248d41ce7a4a6d::t_a210f1a007e52f 86,89
+crates/cli/tests/makefile_dev.rs
+  s_248d41ce7a4a6d::t_83cafa3b617374 9-11,14-15,17-18,23,25-26
+packaging/appimage/archductor.AppDir/AppRun
+  s_248d41ce7a4a6d::t_e984ae511d3f59 4,7
+.github/workflows/ci.yml
+  s_248d41ce7a4a6d::t_a04c210ed90860 400
+  s_248d41ce7a4a6d::t_c5310332d50a57 665
+  s_248d41ce7a4a6d::t_62aff7e3b86dcb 772,776,780,784,788
+  s_248d41ce7a4a6d::t_73fc2f153ca144 364
+  s_248d41ce7a4a6d::t_aab7173d6a6ecb 320
+  s_248d41ce7a4a6d::t_46c38868cbb523 453
+crates/cli/tests/publish_workflow.rs
+  s_248d41ce7a4a6d::t_e2aff39dff06c5 191-192
+  s_248d41ce7a4a6d::t_b4814c38a48152 182-183
+  s_248d41ce7a4a6d::t_a8720a16babd16 132
+  s_248d41ce7a4a6d::t_806efd1d63adef 209,262-263
+.codex/AGENTS.md
+  s_248d41ce7a4a6d::t_cbbd7ba599ccd9 82-85
+  s_248d41ce7a4a6d::t_7fe533eab5e2cc 177-179
+Cargo.lock
+  s_248d41ce7a4a6d::t_a4641c9bbee674 50,61,309,331,408,680,719,972,1062,1114,1195,1614
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "1fe0cd46fa1df50299a29d9744e2b36b18890c2f",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
