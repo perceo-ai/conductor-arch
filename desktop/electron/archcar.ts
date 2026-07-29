@@ -31,9 +31,17 @@ function stateDir(): string {
 // name when the direct path is too long. For dev/typical installs the direct
 // path fits. Allow an explicit override to stay in lockstep with core when it
 // does hash (ARCHDUCTOR_ARCHCAR_ENDPOINT).
+const isWindows = process.platform === "win32";
+
 export function endpointPath(): string {
   const override = process.env.ARCHDUCTOR_ARCHCAR_ENDPOINT;
   if (override && override.trim().length > 0) return override;
+  if (isWindows) {
+    // Windows core has no Unix sockets: it writes a `.endpoint` descriptor
+    // (address + token) and serves over loopback TCP (see paths.rs +
+    // transport.rs).
+    return path.join(stateDir(), "archcar.endpoint");
+  }
   const direct = path.join(stateDir(), "archcar.sock");
   if (Buffer.byteLength(direct) < 100) return direct;
   // Long path: core uses archcar-<hash>.sock. We can't reproduce the hash here
@@ -44,10 +52,41 @@ export function endpointPath(): string {
 }
 
 function connectOnce(endpoint: string): Promise<net.Socket> {
+  if (isWindows) return connectWindows(endpoint);
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(endpoint);
     socket.once("connect", () => resolve(socket));
     socket.once("error", reject);
+  });
+}
+
+// Windows transport (mirrors transport.rs::connect on Windows): the `.endpoint`
+// file holds "host:port\n<token>\n". Connect over loopback TCP and send the
+// token line before any framing so the sidecar authenticates the connection.
+function connectWindows(endpoint: string): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    let contents: string;
+    try {
+      contents = fs.readFileSync(endpoint, "utf8");
+    } catch (err) {
+      reject(err as Error);
+      return;
+    }
+    const [address, token] = contents.split(/\r?\n/);
+    if (!address || !token) {
+      reject(new Error(`malformed archcar endpoint descriptor at ${endpoint}`));
+      return;
+    }
+    // core binds 127.0.0.1 (IPv4), so the last colon separates host and port.
+    const sep = address.lastIndexOf(":");
+    const host = address.slice(0, sep);
+    const port = Number(address.slice(sep + 1));
+    const socket = net.createConnection({ host, port });
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      socket.write(`${token}\n`);
+      resolve(socket);
+    });
   });
 }
 

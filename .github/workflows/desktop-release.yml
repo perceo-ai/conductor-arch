@@ -27,8 +27,120 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  # Derive + validate the release version once, so every downstream job agrees.
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+    steps:
+      - name: Derive version
+        id: derive
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            VERSION="${REF_NAME#v}"
+          fi
+          # npm-compatible SemVer: MAJOR.MINOR.PATCH with optional -prerelease
+          # and +build metadata. Rejects malformed values like 1.2.3.foo.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if ! grep -Eq "$semver" <<< "$VERSION"; then
+            echo "version must be npm-compatible SemVer MAJOR.MINOR.PATCH, got: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+  # Gate packaging on the tests + smokes. Packaging cannot start until this
+  # passes (see `needs` on the package job).
+  verify:
+    name: Verify
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      # Rust tests for the crates the desktop UI depends on (archcar RPCs + CLI),
+      # plus a CLI smoke of the read RPCs. The full GTK workspace suite runs in
+      # ci.yml; the GTK app is being retired.
+      - name: Rust tests (core + cli)
+        run: cargo test --locked -p archductor-core -p archductor
+
+      - name: Build sidecars for smoke
+        run: cargo build --release --locked --bin archcar --bin archductor
+
+      - name: CLI smoke (archcar read RPCs)
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/release:$PATH"
+          ./target/release/archductor archcar repositories
+          ./target/release/archductor archcar workspaces
+
+      - name: Desktop install
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Desktop typecheck + unit tests + build
+        working-directory: desktop
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
+  # Create or reuse the GitHub release the installers attach to, for BOTH tag
+  # pushes and manual dispatch, before any upload runs.
+  release:
+    name: Ensure release
+    needs: [version, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create or reuse release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — reusing"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes --target "$TARGET_SHA"
+          fi
+
+  package:
     name: Package (${{ matrix.os }})
+    needs: [version, verify, release]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
@@ -38,11 +150,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            dist: pnpm run dist:linux
+            platform: linux
           - os: macos-14
-            dist: pnpm run dist -- --mac
+            platform: mac
           - os: windows-2025
-            dist: pnpm run dist -- --win
+            platform: win
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -63,38 +175,22 @@ jobs:
         run: cargo build --release --locked --bin archcar --bin archductor
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: pnpm
           cache-dependency-path: desktop/pnpm-lock.yaml
 
-      - name: Derive version
-        id: version
-        shell: bash
-        env:
-          VERSION_INPUT: ${{ inputs.version }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="$VERSION_INPUT"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' <<< "$VERSION"; then
-            echo "version must look like MAJOR.MINOR.PATCH, got: $VERSION" >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Set package version
-        shell: bash
         working-directory: desktop
-        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Install desktop deps
         working-directory: desktop
@@ -102,12 +198,17 @@ jobs:
 
       - name: Package installers
         working-directory: desktop
-        # No GH_TOKEN here so electron-builder never auto-publishes; the
-        # "Attach to release" step below uploads explicitly.
-        run: ${{ matrix.dist }} --publish never
+        # No GH_TOKEN here so electron-builder never auto-publishes; the upload
+        # step below attaches artifacts explicitly.
+        env:
+          EB_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          pnpm build
+          pnpm exec electron-builder "--$EB_PLATFORM" --publish never
 
       - name: Collect artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}
           path: |
@@ -119,15 +220,18 @@ jobs:
           if-no-files-found: warn
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          MATRIX_OS: ${{ matrix.os }}
+        shell: bash
         run: |
+          set -euo pipefail
           shopt -s nullglob
           files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.exe)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "no installers produced on ${{ matrix.os }}" >&2
+            echo "no installers produced on $MATRIX_OS" >&2
             exit 0
           fi
-          gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+          gh release upload "$TAG" "${files[@]}" --clobber

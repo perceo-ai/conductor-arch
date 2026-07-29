@@ -2878,6 +2878,7 @@ fn install_workspace_terminal_output_pump(
     // into that tab; provider chat sessions stay Archcar/event owned.
     cancel_workspace_terminal_output_pump(&terminal_key);
     let pump_key = terminal_key.clone();
+    // PER-190: per-tab terminal byte pump (owned by this visible tab, not chat).
     let source_id = gtk::glib::timeout_add_local(Duration::from_millis(33), move || {
         let (output, exited) = {
             let mut terminals = run_console_terminals.borrow_mut();
