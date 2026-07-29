@@ -234,6 +234,10 @@ enum ArchcarCommand {
     Kill {
         session_id: i64,
     },
+    /// List all workspaces with status counts.
+    Workspaces,
+    /// List repositories with workspace counts.
+    Repositories,
 }
 
 #[derive(Debug, Subcommand)]
@@ -873,6 +877,12 @@ fn main() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::KillSession { session_id })?,
                     );
+                }
+                ArchcarCommand::Workspaces => {
+                    print_archcar_response(client.send(ArchcarRequest::ListWorkspaces)?);
+                }
+                ArchcarCommand::Repositories => {
+                    print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
                 }
             }
         }
@@ -1760,6 +1770,39 @@ fn print_archcar_response(response: ArchcarResponse) {
         }
         ArchcarResponse::ProviderInteractions { interactions } => {
             print!("{}", render_provider_interactions(&interactions, false));
+        }
+        ArchcarResponse::Workspaces { workspaces } => {
+            println!("workspaces {}", workspaces.len());
+            for ws in workspaces {
+                println!(
+                    "{} repo={} branch={} status={} +{} -{} todos={} sessions={}{}",
+                    ws.name,
+                    ws.repository_name,
+                    ws.branch,
+                    ws.status,
+                    ws.diff_additions,
+                    ws.diff_deletions,
+                    ws.open_todos,
+                    ws.active_sessions,
+                    ws.pull_request_number
+                        .map(|n| format!(" pr=#{n}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        ArchcarResponse::Repositories { repositories } => {
+            println!("repositories {}", repositories.len());
+            for repo in repositories {
+                println!(
+                    "{} branch={} remote={} workspaces={}/{} path={}",
+                    repo.name,
+                    repo.default_branch,
+                    repo.remote_name,
+                    repo.active_workspaces,
+                    repo.total_workspaces,
+                    repo.root_path
+                );
+            }
         }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");

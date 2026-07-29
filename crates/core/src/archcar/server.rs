@@ -16,9 +16,11 @@ use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
-    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarEvent, ArchcarMessage, ArchcarRequest,
-    ArchcarResponse, QueuedArchcarInput, RpcEnvelope,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarEvent, ArchcarMessage, ArchcarRepositorySummary,
+    ArchcarRequest, ArchcarResponse, ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
 };
+use crate::repository::RepositoryStore;
+use crate::workspace::WorkspaceStatusLine;
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
 };
@@ -546,6 +548,44 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkspaces => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| store.list_status()) {
+                Ok(lines) => ArchcarResponse::Workspaces {
+                    workspaces: lines
+                        .into_iter()
+                        .map(workspace_summary_from_status_line)
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListRepositories => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match RepositoryStore::open(&db_path)
+                .and_then(|store| store.list_with_workspace_counts())
+            {
+                Ok(rows) => ArchcarResponse::Repositories {
+                    repositories: rows
+                        .into_iter()
+                        .map(|(repo, active, total)| ArchcarRepositorySummary {
+                            id: repo.id,
+                            name: repo.name,
+                            root_path: repo.root_path.to_string_lossy().into_owned(),
+                            default_branch: repo.default_branch,
+                            remote_name: repo.remote_name,
+                            active_workspaces: active,
+                            total_workspaces: total,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -931,7 +971,42 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionMessages { .. }
             | ArchcarRequest::GetChatSnapshot { .. }
             | ArchcarRequest::ListQueuedChatInputs { .. }
+            | ArchcarRequest::ListWorkspaces
+            | ArchcarRequest::ListRepositories
     )
+}
+
+fn workspace_summary_from_status_line(line: WorkspaceStatusLine) -> ArchcarWorkspaceSummary {
+    let WorkspaceStatusLine {
+        workspace,
+        repository_name,
+        open_todos,
+        pull_request,
+        run_running,
+        active_sessions,
+        branch_push_state,
+        diff_additions,
+        diff_deletions,
+    } = line;
+    ArchcarWorkspaceSummary {
+        id: workspace.id,
+        name: workspace.name,
+        repository_name,
+        branch: workspace.branch,
+        base_ref: workspace.base_ref,
+        status: workspace.status,
+        open_todos,
+        active_sessions,
+        run_running,
+        diff_additions,
+        diff_deletions,
+        pull_request_number: pull_request.as_ref().map(|pr| pr.number),
+        pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
+        pull_request_url: pull_request.map(|pr| pr.url),
+        branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
+        branch_behind: branch_push_state.map(|s| s.behind),
+        updated_at: workspace.updated_at,
+    }
 }
 
 fn begin_shutdown(state: &Arc<Mutex<ServerState>>) {

@@ -735,6 +735,10 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             }
         }
         ArchcarRequest::Subscribe => AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 },
+        // Desktop-only read RPCs; the GTK client never issues these.
+        ArchcarRequest::ListWorkspaces | ArchcarRequest::ListRepositories => {
+            AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
+        }
     }
 }
 

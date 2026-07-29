@@ -123,6 +123,8 @@ pub enum ArchcarRequest {
     KillSession {
         session_id: i64,
     },
+    ListWorkspaces,
+    ListRepositories,
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -186,6 +188,12 @@ pub enum ArchcarResponse {
     QueuedChatInputs {
         thread_id: i64,
         inputs: Vec<QueuedArchcarInput>,
+    },
+    Workspaces {
+        workspaces: Vec<ArchcarWorkspaceSummary>,
+    },
+    Repositories {
+        repositories: Vec<ArchcarRepositorySummary>,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -282,6 +290,47 @@ pub struct ArchcarChatLiveSession {
     pub ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionHarnessCapabilities>,
+}
+
+/// Flat workspace row for the desktop sidebar (compact projection of
+/// `WorkspaceStatusLine`). Heavy nested records (full PR, push state) are
+/// reduced to the scalar fields the UI actually renders.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarWorkspaceSummary {
+    pub id: i64,
+    pub name: String,
+    pub repository_name: String,
+    pub branch: String,
+    pub base_ref: String,
+    pub status: String,
+    pub open_todos: usize,
+    pub active_sessions: usize,
+    pub run_running: bool,
+    pub diff_additions: usize,
+    pub diff_deletions: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_ahead: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_behind: Option<usize>,
+    pub updated_at: String,
+}
+
+/// Repository row for the desktop sidebar projects list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarRepositorySummary {
+    pub id: i64,
+    pub name: String,
+    pub root_path: String,
+    pub default_branch: String,
+    pub remote_name: String,
+    pub active_workspaces: usize,
+    pub total_workspaces: usize,
 }
 
 pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
@@ -384,6 +433,8 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::KillSession { session_id } => {
             format!("kill_session session_id={session_id}")
         }
+        ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
+        ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -488,6 +539,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::QueuedChatInputs { thread_id, inputs } => {
             format!("queued_chat_inputs thread_id={thread_id} count={}", inputs.len())
+        }
+        ArchcarResponse::Workspaces { workspaces } => {
+            format!("workspaces count={}", workspaces.len())
+        }
+        ArchcarResponse::Repositories { repositories } => {
+            format!("repositories count={}", repositories.len())
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",
