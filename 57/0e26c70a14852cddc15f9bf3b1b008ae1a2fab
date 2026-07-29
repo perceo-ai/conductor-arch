@@ -1,0 +1,25 @@
+desktop/src/pages/Projects.tsx
+  s_248d41ce7a4a6d::t_4b0edbac9db7be 1-62
+desktop/src/styles/base.css
+  s_248d41ce7a4a6d::t_8c835e3ba78854 623-667
+desktop/src/pages/History.tsx
+  s_248d41ce7a4a6d::t_1f52ea44aa72ab 1-93
+desktop/src/pages/index.tsx
+  s_248d41ce7a4a6d::t_daea423cb4ec92 5-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "570e26c70a14852cddc15f9bf3b1b008ae1a2fab",
+  "prompts": {},
+  "sessions": {
+    "s_248d41ce7a4a6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb4b40fc-1cac-4c27-b780-7b172f3d0f4b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
