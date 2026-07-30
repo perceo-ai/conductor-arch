@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { nav, workspacesStore } from "@/store";
+import { nav, workspacesStore, dialogs } from "@/store";
 
 // Left sidebar: nav group (Dashboard/History) + projects header + workspace list.
 // Each workspace row reads only its own store slice, so a status change on one
@@ -79,7 +79,11 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
 
       <div class="projects-header">
         <span class="title">Projects</span>
-        <button class="ui-button-icon" title="Add repository (coming soon)" disabled>
+        <button
+          class="ui-button-icon"
+          title="Add project"
+          onClick={() => dialogs.open({ kind: "add-project" })}
+        >
           +
         </button>
       </div>

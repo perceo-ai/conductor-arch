@@ -1,6 +1,7 @@
 import { createStore, reconcile } from "solid-js/store";
 import { recordUpdate } from "./metrics";
 import { send } from "@/bridge/client";
+import { logState } from "@/lib/log";
 import type { ArchcarRepositorySummary } from "@/bridge/protocol";
 
 // Keyed repository store for the sidebar projects list.
@@ -43,6 +44,7 @@ export const repositoriesStore = {
     setState("byName", reconcile(byName));
     setState("order", reconcile(rows.map((r) => r.name)));
     recordUpdate("repositories.setAll");
+    logState("repositories.setAll", { count: rows.length });
   },
 
   row(name: string): RepositoryRow | undefined {

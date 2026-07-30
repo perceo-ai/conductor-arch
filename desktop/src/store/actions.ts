@@ -1,0 +1,278 @@
+// State-changing archcar actions (parity with the in-process GTK flows).
+//
+// Every action is logged before it runs and the resulting inventory refresh is
+// logged after. archcar has no "inventory changed" event, so — like the GTK
+// sidebar's post-mutation refresh — the caller re-pulls the workspace and
+// repository lists once the mutation acks.
+
+import { send } from "@/bridge/client";
+import { logAction, logState } from "@/lib/log";
+import type { ArchcarResponse } from "@/bridge/protocol";
+import { workspacesStore } from "./workspaces";
+import { repositoriesStore } from "./repositories";
+import { nav } from "./nav";
+
+async function refreshInventory(): Promise<void> {
+  await Promise.all([workspacesStore.refresh(), repositoriesStore.refresh()]);
+  logState("inventory refreshed", {
+    workspaces: workspacesStore.state.order.length,
+    repositories: repositoriesStore.state.order.length,
+  });
+}
+
+/** Throw on an archcar error response so callers surface it to the user. */
+function ensureOk(res: ArchcarResponse): ArchcarResponse {
+  if (res.type === "error") throw new Error(res.message);
+  return res;
+}
+
+export interface AddRepositoryInput {
+  path: string;
+  name?: string;
+  remoteName?: string;
+  defaultBranch?: string;
+}
+
+export interface CreateWorkspaceInput {
+  repository: string;
+  name: string;
+  branch: string;
+  baseRef?: string;
+}
+
+export const actions = {
+  // --- Repository / project -------------------------------------------------
+  async addRepository(input: AddRepositoryInput): Promise<string | undefined> {
+    logAction("add_repository", { path: input.path, name: input.name });
+    const res = ensureOk(
+      await send({
+        type: "add_repository",
+        path: input.path,
+        name: input.name,
+        remote_name: input.remoteName,
+        default_branch: input.defaultBranch,
+      }),
+    );
+    await refreshInventory();
+    return res.type === "repository_added" ? res.name : undefined;
+  },
+
+  async cloneRepository(input: { url: string; dest: string; name?: string }): Promise<string | undefined> {
+    logAction("clone_repository", { url: input.url, dest: input.dest });
+    const res = ensureOk(
+      await send({ type: "clone_repository", url: input.url, dest: input.dest, name: input.name }),
+    );
+    await refreshInventory();
+    return res.type === "repository_added" ? res.name : undefined;
+  },
+
+  // --- Workspace creation ---------------------------------------------------
+  async createWorkspace(input: CreateWorkspaceInput): Promise<string | undefined> {
+    logAction("create_workspace", input);
+    const res = ensureOk(
+      await send({
+        type: "create_workspace",
+        repository: input.repository,
+        name: input.name,
+        branch: input.branch,
+        base_ref: input.baseRef,
+      }),
+    );
+    return this.afterCreate(res);
+  },
+
+  async createWorkspaceFromPrompt(input: {
+    repository: string;
+    prompt: string;
+    name?: string;
+    branch?: string;
+    baseRef?: string;
+  }): Promise<string | undefined> {
+    logAction("create_workspace_from_prompt", { repository: input.repository, name: input.name });
+    const res = ensureOk(
+      await send({
+        type: "create_workspace_from_prompt",
+        repository: input.repository,
+        prompt: input.prompt,
+        name: input.name,
+        branch: input.branch,
+        base_ref: input.baseRef,
+      }),
+    );
+    return this.afterCreate(res);
+  },
+
+  async createWorkspaceFromIssue(input: {
+    repository: string;
+    issueNumber: number;
+    branchPrefix?: string;
+  }): Promise<string | undefined> {
+    logAction("create_workspace_from_issue", input);
+    const res = ensureOk(
+      await send({
+        type: "create_workspace_from_issue",
+        repository: input.repository,
+        issue_number: input.issueNumber,
+        branch_prefix: input.branchPrefix,
+      }),
+    );
+    return this.afterCreate(res);
+  },
+
+  async createWorkspaceFromPullRequest(input: {
+    repository: string;
+    prNumber: number;
+    name?: string;
+    branch?: string;
+  }): Promise<string | undefined> {
+    logAction("create_workspace_from_pull_request", input);
+    const res = ensureOk(
+      await send({
+        type: "create_workspace_from_pull_request",
+        repository: input.repository,
+        pr_number: input.prNumber,
+        name: input.name,
+        branch: input.branch,
+      }),
+    );
+    return this.afterCreate(res);
+  },
+
+  // --- Workspace lifecycle --------------------------------------------------
+  async archiveWorkspace(workspace: string, removeWorktree = false): Promise<void> {
+    logAction("archive_workspace", { workspace, removeWorktree });
+    ensureOk(await send({ type: "archive_workspace", workspace, remove_worktree: removeWorktree }));
+    await refreshInventory();
+  },
+
+  async restoreWorkspace(workspace: string): Promise<void> {
+    logAction("restore_workspace", { workspace });
+    ensureOk(await send({ type: "restore_workspace", workspace }));
+    await refreshInventory();
+  },
+
+  async renameWorkspace(workspace: string, newName: string): Promise<void> {
+    logAction("rename_workspace", { workspace, newName });
+    ensureOk(await send({ type: "rename_workspace", workspace, new_name: newName }));
+    await refreshInventory();
+    if (nav.selectedWorkspace() === workspace) nav.selectWorkspace(newName);
+  },
+
+  async duplicateWorkspace(workspace: string, newName: string, branch?: string): Promise<string | undefined> {
+    logAction("duplicate_workspace", { workspace, newName, branch });
+    const res = ensureOk(
+      await send({ type: "duplicate_workspace", workspace, new_name: newName, branch }),
+    );
+    return this.afterCreate(res);
+  },
+
+  async deleteWorkspace(workspace: string, removeWorktree = false, deleteBranch = false): Promise<void> {
+    logAction("delete_workspace", { workspace, removeWorktree, deleteBranch });
+    ensureOk(
+      await send({
+        type: "delete_workspace",
+        workspace,
+        remove_worktree: removeWorktree,
+        delete_branch: deleteBranch,
+      }),
+    );
+    if (nav.selectedWorkspace() === workspace) nav.goToPage("dashboard");
+    await refreshInventory();
+  },
+
+  // --- Branch operations ----------------------------------------------------
+  async createBranch(workspace: string, branch: string): Promise<void> {
+    logAction("create_branch", { workspace, branch });
+    ensureOk(await send({ type: "create_branch", workspace, branch }));
+    await refreshInventory();
+  },
+
+  async checkoutBranch(workspace: string, branch: string): Promise<void> {
+    logAction("checkout_branch", { workspace, branch });
+    ensureOk(await send({ type: "checkout_branch", workspace, branch }));
+    await refreshInventory();
+  },
+
+  async renameBranch(workspace: string, newBranch: string): Promise<void> {
+    logAction("rename_workspace_branch", { workspace, newBranch });
+    ensureOk(await send({ type: "rename_workspace_branch", workspace, new_branch: newBranch }));
+    await refreshInventory();
+  },
+
+  async deleteBranch(workspace: string, branch: string): Promise<void> {
+    logAction("delete_branch", { workspace, branch });
+    ensureOk(await send({ type: "delete_branch", workspace, branch }));
+    await refreshInventory();
+  },
+
+  async pushBranch(workspace: string, force = false): Promise<void> {
+    logAction("push_branch", { workspace, force });
+    ensureOk(await send({ type: "push_branch", workspace, force }));
+    await refreshInventory();
+  },
+
+  async resolveReviewThread(workspace: string, threadId: string, resolved: boolean): Promise<void> {
+    logAction("resolve_review_thread", { workspace, threadId, resolved });
+    ensureOk(await send({ type: "resolve_review_thread", workspace, thread_id: threadId, resolved }));
+  },
+
+  // --- Pull request ---------------------------------------------------------
+  async refreshPullRequest(workspace: string): Promise<void> {
+    logAction("refresh_pull_request", { workspace });
+    ensureOk(await send({ type: "refresh_pull_request", workspace }));
+    await refreshInventory();
+  },
+
+  async mergePullRequest(workspace: string, method?: string): Promise<void> {
+    logAction("merge_pull_request", { workspace, method });
+    ensureOk(await send({ type: "merge_pull_request", workspace, method }));
+    await refreshInventory();
+  },
+
+  // --- Review / checkpoint / linking / provider default --------------------
+  async addReviewComment(input: {
+    workspace: string;
+    filePath: string;
+    lineNumber?: number;
+    body: string;
+  }): Promise<void> {
+    logAction("add_review_comment", { workspace: input.workspace, file: input.filePath });
+    ensureOk(
+      await send({
+        type: "add_review_comment",
+        workspace: input.workspace,
+        file_path: input.filePath,
+        line_number: input.lineNumber,
+        body: input.body,
+      }),
+    );
+  },
+
+  async deleteCheckpoint(workspace: string, checkpointId: number): Promise<void> {
+    logAction("delete_checkpoint", { workspace, checkpointId });
+    ensureOk(await send({ type: "delete_checkpoint", workspace, checkpoint_id: checkpointId }));
+  },
+
+  async linkWorkspaceDirectory(workspace: string, target: string): Promise<void> {
+    logAction("link_workspace_directory", { workspace, target });
+    ensureOk(await send({ type: "link_workspace_directory", workspace, target }));
+  },
+
+  async unlinkWorkspaceDirectory(workspace: string, target: string): Promise<void> {
+    logAction("unlink_workspace_directory", { workspace, target });
+    ensureOk(await send({ type: "unlink_workspace_directory", workspace, target }));
+  },
+
+  async setDefaultAgentProvider(workspace: string, provider: string): Promise<void> {
+    logAction("set_default_agent_provider", { workspace, provider });
+    ensureOk(await send({ type: "set_default_agent_provider", workspace, provider }));
+  },
+
+  /** Shared post-create step: refresh inventory and select the new workspace. */
+  async afterCreate(res: ArchcarResponse): Promise<string | undefined> {
+    await refreshInventory();
+    const name = res.type === "workspace_created" ? res.name : undefined;
+    if (name && workspacesStore.row(name)) nav.selectWorkspace(name);
+    return name;
+  },
+};

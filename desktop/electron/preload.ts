@@ -34,6 +34,10 @@ const api = {
     toggleMaximize: () => ipcRenderer.send("window:toggle-maximize"),
     close: () => ipcRenderer.send("window:close"),
   },
+
+  /** Forward a structured renderer log entry to the main-process logfile. */
+  log: (entry: { ts: number; category: string; message: string; data?: unknown }) =>
+    ipcRenderer.send("app:log", entry),
 };
 
 contextBridge.exposeInMainWorld("archductor", api);

@@ -763,3 +763,84 @@ body {
   overflow: auto;
   pointer-events: none;
 }
+
+/* --- Dialog / modal host (create project, workspace, lifecycle) --------- */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.dialog-card {
+  width: min(460px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+}
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.dialog-title {
+  font-weight: 700;
+  font-size: 15px;
+}
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dialog-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dialog-tabs .ui-button-sm.active {
+  background: var(--lc-surface-selected, #2a2a2a);
+}
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #9a9a9a;
+}
+.dialog-field input,
+.dialog-field textarea {
+  width: 100%;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dialog-actions-wrap {
+  flex-wrap: wrap;
+}
+.dialog-divider {
+  height: 1px;
+  background: var(--lc-border, #2a2a2a);
+  margin: 6px 0;
+}
+.dialog-error {
+  color: #ff6b6b;
+  font-size: 12px;
+}
+.project-workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.project-workspace-row .history-row {
+  flex: 1;
+}
+.repo-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

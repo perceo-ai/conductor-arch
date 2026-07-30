@@ -1,9 +1,44 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import path from "node:path";
+import os from "node:os";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ArchcarBridge } from "./archcar.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// --- Persistent desktop logfile (parity with gtk-app logger.rs) -----------
+// Every renderer action/state-change and every main-process IPC call is
+// appended here so a bug report has the full trigger→state trail off-console.
+function logDir(): string {
+  const xdg = process.env.XDG_STATE_HOME;
+  const base = xdg && xdg.trim().length > 0 ? xdg : path.join(os.homedir(), ".local/state");
+  return path.join(base, "archductor");
+}
+const LOG_PATH = path.join(logDir(), "desktop.log");
+let logStream: fs.WriteStream | null = null;
+function logLine(category: string, message: string, data?: unknown): void {
+  const iso = new Date().toISOString();
+  let line = `${iso} [${category}] ${message}`;
+  if (data !== undefined) {
+    try {
+      line += ` ${JSON.stringify(data)}`;
+    } catch {
+      line += ` ${String(data)}`;
+    }
+  }
+  // eslint-disable-next-line no-console
+  console.log(line);
+  try {
+    if (!logStream) {
+      fs.mkdirSync(logDir(), { recursive: true });
+      logStream = fs.createWriteStream(LOG_PATH, { flags: "a" });
+    }
+    logStream.write(line + "\n");
+  } catch {
+    // logging must never crash the app
+  }
+}
 
 // On Linux the Chromium zygote fails to fork child processes on some
 // kernel/sandbox combos (kernel 7.x + Electron 33), cascading into GPU and
@@ -59,12 +94,26 @@ function createWindow() {
 
 // --- IPC: renderer <-> archcar bridge -------------------------------------
 
+// Renderer → persistent logfile.
+ipcMain.on("app:log", (_evt, entry: { category: string; message: string; data?: unknown }) => {
+  if (!entry || typeof entry.message !== "string") return;
+  logLine(entry.category ?? "log", entry.message, entry.data);
+});
+
+function requestType(payload: unknown): string {
+  return (payload as { type?: string })?.type ?? "unknown";
+}
+
 // One-shot request/response.
 ipcMain.handle("archcar:request", async (_evt, payload: unknown) => {
+  const type = requestType(payload);
+  logLine("rpc", `request ${type}`);
   try {
     const res = await bridge.request(payload as never);
+    logLine("rpc", `response ${type} → ${requestType(res)}`);
     return { ok: true, value: res };
   } catch (err) {
+    logLine("error", `request ${type} failed: ${(err as Error).message}`);
     return { ok: false, error: (err as Error).message };
   }
 });
@@ -75,7 +124,10 @@ let subscribing = false;
 async function startSubscription() {
   if (subscribing) return;
   subscribing = true;
-  const forward = (event: unknown) => win?.webContents.send("archcar:event", event);
+  const forward = (event: unknown) => {
+    logLine("event", requestType(event));
+    win?.webContents.send("archcar:event", event);
+  };
   const reconnect = () => {
     subscribing = false;
     setTimeout(() => startSubscription(), 500);
@@ -104,6 +156,8 @@ app.whenReady().then(createWindow);
 
 app.on("window-all-closed", () => {
   bridge.close();
+  logStream?.end();
+  logStream = null;
   if (process.platform !== "darwin") app.quit();
 });
 
