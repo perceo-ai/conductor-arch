@@ -1,6 +1,11 @@
 # Progress
 
-Current as of 2026-07-24.
+Current as of 2026-07-29.
+
+The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
+Rust `archcar` daemon over its socket. The former in-process GTK app
+(`crates/gtk-app`) was retired; sections below describing "GTK" behavior refer
+to the historical surface and are being superseded by the Electron surface.
 
 ## Current State
 
@@ -84,7 +89,47 @@ paths and known rough edges.
 - CI compile gates for native Windows, glibc Linux, musl Linux, and GTK builds
   on Debian, Fedora, Arch, openSUSE, and Alpine families.
 
-### GTK App
+### Desktop App (Electron + Solid.js)
+
+The Electron renderer talks to `archcar` only over the socket (it has no
+in-process `core` access), so every state change must flow through an
+`ArchcarRequest`. All renderer actions and store state changes are logged via
+`desktop/src/lib/log.ts`; the Electron main process appends them plus every IPC
+request/response/event to `~/.local/state/archductor/desktop.log`. The archcar
+sidecar logs every RPC on its side (`log_archcar_rpc`).
+
+State-changing archcar parity with the retired GTK flows (protocol + server
+handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
+`desktop/src/bridge/protocol.ts`, action layer `desktop/src/store/actions.ts`):
+
+- Repository: `add_repository` (local path), `clone_repository` (git clone +
+  add). UI: sidebar "+" → Add project dialog.
+- Workspace creation: `create_workspace` (branch/base), `_from_prompt`,
+  `_from_issue`, `_from_pull_request` (Linear source not yet wired). UI:
+  Projects "+ Workspace" dialog.
+- Workspace lifecycle: `archive`/`restore`/`rename`/`duplicate`/`delete`
+  (delete uses the lifecycle job; cleanup failures are logged, row still
+  removed). UI: Projects row "⋯" → workspace actions dialog.
+- Branch: `create_branch`/`checkout_branch`/`rename_workspace_branch`/
+  `delete_branch`/`push_branch`. UI: workspace actions dialog + Checks tab.
+- Pull request: `refresh_pull_request`, `merge_pull_request`. UI: Checks tab.
+- Review: `add_review_comment`. UI: Review tab.
+- Checkpoint: `delete_checkpoint` (alongside existing create/restore). UI:
+  Checkpoints tab.
+- Linking: `link_workspace_directory`/`unlink_workspace_directory`. UI:
+  workspace actions dialog.
+- Provider default: `set_default_agent_provider`. UI: workspace actions dialog.
+
+After a mutation acks, the renderer re-pulls the workspace/repository inventory
+(archcar has no inventory-changed event), mirroring the GTK sidebar's
+post-mutation refresh. Read surfaces (chat, changes, todos, checks, review,
+checkpoints, processes, terminal) were already wired.
+
+Not yet ported to Electron from the historical GTK surface: force-push (core
+`push_request` exposes no force flag), PR review-thread resolve/reopen, richer
+settings editors, command palette, and full visual parity.
+
+Historical GTK surface (superseded, kept for reference):
 
 - GTK/libadwaita app with Dashboard, Projects, History, and Workspace pages.
   Settings, Dashboard filters, and History tabs
@@ -157,7 +202,8 @@ paths and known rough edges.
 
 ## Known Gaps
 
-- GTK app polish and visual parity are incomplete.
+- Desktop (Electron) app polish and visual parity with the old GTK surface are
+  incomplete; several historical GTK affordances are not yet ported.
 - Terminal rendering handles common ANSI/control redraws but is not a full
   terminal emulator.
 - Project onboarding/settings need more polish and clearer managed/user setting
@@ -216,6 +262,24 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Electron archcar state-change parity + logging on 2026-07-29:
+
+- Added 23 state-changing `ArchcarRequest` variants (repository add/clone,
+  workspace create ×4 sources + lifecycle ×5, branch ×5, PR ×2, review comment,
+  checkpoint delete, dir link/unlink, default provider) with server handlers,
+  TS protocol, an action layer, and UI triggers.
+- Added renderer→main→logfile logging of every action, state change, and RPC.
+- Passed `cargo test -p archductor-core archcar::` (128 tests, incl. protocol
+  round-trips and an end-to-end dispatch: add repo → create → rename →
+  archive/restore → delete).
+- Passed `cargo fmt --all -- --check` and
+  `cargo clippy -p archductor-core -p archductor -p archcar --all-targets -- -D warnings`.
+- Passed desktop `pnpm typecheck`, `pnpm test` (6 tests), `pnpm build`.
+- Live socket smoke against `target/debug/archcar` (isolated `XDG_DATA_HOME` +
+  `XDG_STATE_HOME` temp dirs, real DB untouched): add_repository,
+  create_workspace, list/delete_workspace, create_branch, checkout_branch,
+  add_review_comment (+ list), and set_default_agent_provider all round-tripped.
 
 GTK scoped refresh listener validation on 2026-07-24:
 
