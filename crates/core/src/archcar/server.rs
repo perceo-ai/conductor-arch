@@ -32,9 +32,9 @@ use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
 };
-use crate::repository::RepositoryStore;
+use crate::repository::{AddRepository, RepositoryStore};
 use crate::workspace::WorkspaceStatusLine;
-use crate::workspace::{SessionKind, WorkspaceStore};
+use crate::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
     listener: LocalListener,
@@ -867,6 +867,339 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::AddRepository {
+            path,
+            name,
+            remote_name,
+            default_branch,
+            workspace_parent,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match RepositoryStore::open(&db_path).and_then(|s| {
+                s.add(AddRepository {
+                    name,
+                    root_path: PathBuf::from(path),
+                    default_branch,
+                    remote_name: remote_name.unwrap_or_else(|| "origin".to_owned()),
+                    workspace_parent_path: workspace_parent.map(PathBuf::from),
+                })
+            }) {
+                Ok(repo) => ArchcarResponse::RepositoryAdded { name: repo.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CloneRepository { url, dest, name } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match clone_repository(&url, &dest).and_then(|()| {
+                RepositoryStore::open(&db_path).and_then(|s| {
+                    s.add(AddRepository {
+                        name,
+                        root_path: PathBuf::from(&dest),
+                        default_branch: None,
+                        remote_name: "origin".to_owned(),
+                        workspace_parent_path: None,
+                    })
+                })
+            }) {
+                Ok(repo) => ArchcarResponse::RepositoryAdded { name: repo.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CreateWorkspace {
+            repository,
+            name,
+            branch,
+            base_ref,
+        } => match open_lifecycle_workspace_store(state).and_then(|s| {
+            s.create_lifecycle_job(CreateWorkspace {
+                repository_name: repository,
+                name,
+                branch,
+                base_ref,
+            })
+        }) {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::CreateWorkspaceFromPrompt {
+            repository,
+            prompt,
+            name,
+            branch,
+            base_ref,
+        } => match open_lifecycle_workspace_store(state).and_then(|s| {
+            s.create_from_prompt(
+                &repository,
+                &prompt,
+                name.as_deref(),
+                branch.as_deref(),
+                base_ref.as_deref(),
+            )
+        }) {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::CreateWorkspaceFromIssue {
+            repository,
+            issue_number,
+            branch_prefix,
+        } => match open_lifecycle_workspace_store(state)
+            .and_then(|s| s.create_from_issue(&repository, issue_number, branch_prefix.as_deref()))
+        {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::CreateWorkspaceFromPullRequest {
+            repository,
+            pr_number,
+            name,
+            branch,
+        } => match open_lifecycle_workspace_store(state).and_then(|s| {
+            s.create_from_pull_request(&repository, pr_number, name.as_deref(), branch.as_deref())
+        }) {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::ArchiveWorkspace {
+            workspace,
+            remove_worktree,
+        } => match open_lifecycle_workspace_store(state)
+            .and_then(|s| s.archive(&workspace, remove_worktree))
+        {
+            Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::RestoreWorkspace { workspace } => {
+            match open_lifecycle_workspace_store(state).and_then(|s| s.restore(&workspace)) {
+                Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RenameWorkspace {
+            workspace,
+            new_name,
+        } => match open_lifecycle_workspace_store(state)
+            .and_then(|s| s.rename(&workspace, &new_name))
+        {
+            Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::DuplicateWorkspace {
+            workspace,
+            new_name,
+            branch,
+        } => match open_lifecycle_workspace_store(state)
+            .and_then(|s| s.duplicate(&workspace, &new_name, branch.as_deref()))
+        {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::DeleteWorkspace {
+            workspace,
+            remove_worktree,
+            delete_branch,
+        } => match open_lifecycle_workspace_store(state)
+            .and_then(|s| s.delete_lifecycle_job(&workspace, remove_worktree, delete_branch))
+        {
+            Ok(result) => {
+                if let Some(err) = &result.cleanup_error {
+                    // Metadata is already deleted; surface cleanup failure in logs
+                    // but still report removal so the UI drops the row.
+                    warn!(workspace = %result.workspace.name, error = %err, "workspace artifact cleanup failed after delete");
+                }
+                ArchcarResponse::WorkspaceRemoved {
+                    name: result.workspace.name,
+                }
+            }
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::CreateBranch { workspace, branch } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.create_branch(&workspace, &branch))
+            {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CheckoutBranch { workspace, branch } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkout_branch(&workspace, &branch))
+            {
+                Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RenameWorkspaceBranch {
+            workspace,
+            new_branch,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.rename_branch(&workspace, &new_branch))
+            {
+                Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::DeleteBranch { workspace, branch } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.delete_branch(&workspace, &branch))
+            {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::PushBranch { workspace, force } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| {
+                if force {
+                    s.force_push_branch_with_lease(&workspace)
+                } else {
+                    s.push_branch(&workspace)
+                }
+            }) {
+                Ok(_) => ArchcarResponse::WorkspaceUpdated { name: workspace },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RefreshPullRequest { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.refresh_pull_request_state(&workspace))
+            {
+                Ok(_) => ArchcarResponse::WorkspaceUpdated { name: workspace },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ResolveReviewThread {
+            workspace,
+            thread_id,
+            resolved,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| {
+                s.set_pull_request_review_thread_resolution(&workspace, &thread_id, resolved)
+            }) {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::MergePullRequest { workspace, method } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.merge_pull_request(&workspace, method.as_deref()))
+            {
+                Ok(_) => ArchcarResponse::WorkspaceUpdated { name: workspace },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::AddReviewComment {
+            workspace,
+            file_path,
+            line_number,
+            body,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.add_review_comment(&workspace, &file_path, line_number, &body))
+            {
+                Ok(comment) => ArchcarResponse::ReviewCommentAdded { comment },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::DeleteCheckpoint {
+            workspace,
+            checkpoint_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_delete(&workspace, checkpoint_id))
+            {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::LinkWorkspaceDirectory { workspace, target } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.link_workspace_directory(&workspace, &target))
+            {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::UnlinkWorkspaceDirectory { workspace, target } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.unlink_workspace_directory(&workspace, &target))
+            {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SetDefaultAgentProvider {
+            workspace,
+            provider,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::save_local_default_agent_provider_for_database(
+                &db_path, &workspace, &provider,
+            ) {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -1241,6 +1574,32 @@ fn send_session_control(
             message: err.to_string(),
         },
     }
+}
+
+/// Open the workspace store the way lifecycle-mutating CLI/GTK flows do:
+/// with the logs directory wired and pending lifecycle jobs recovered so a
+/// prior crash mid-create/delete doesn't leave the store inconsistent.
+fn open_lifecycle_workspace_store(state: &Arc<Mutex<ServerState>>) -> Result<WorkspaceStore> {
+    let (db_path, logs_dir) = {
+        let guard = state.lock().unwrap();
+        (guard.db_path.clone(), guard.logs_dir.clone())
+    };
+    let store = WorkspaceStore::open_app_with_logs(db_path, logs_dir)?;
+    store.recover_workspace_lifecycle_jobs()?;
+    Ok(store)
+}
+
+/// Clone a remote repository into `dest` using the system `git` binary. The
+/// caller then registers the cloned path with `RepositoryStore::add`.
+fn clone_repository(url: &str, dest: &str) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .arg("clone")
+        .arg(url)
+        .arg(dest)
+        .status()
+        .context("run git clone")?;
+    anyhow::ensure!(status.success(), "git clone failed ({status})");
+    Ok(())
 }
 
 fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
@@ -4029,6 +4388,111 @@ mod tests {
             .status()
             .unwrap();
         path
+    }
+
+    #[test]
+    fn repository_and_workspace_lifecycle_dispatch_end_to_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let added = dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        assert!(
+            matches!(added, ArchcarResponse::RepositoryAdded { ref name } if name == "demo"),
+            "add_repository got {added:?}"
+        );
+
+        let created = dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+        assert!(
+            matches!(created, ArchcarResponse::WorkspaceCreated { ref name } if name == "berlin"),
+            "create_workspace got {created:?}"
+        );
+
+        let renamed = dispatch_request(
+            ArchcarRequest::RenameWorkspace {
+                workspace: "berlin".to_owned(),
+                new_name: "berlin2".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(renamed, ArchcarResponse::WorkspaceUpdated { ref name } if name == "berlin2"),
+            "rename_workspace got {renamed:?}"
+        );
+
+        let archived = dispatch_request(
+            ArchcarRequest::ArchiveWorkspace {
+                workspace: "berlin2".to_owned(),
+                remove_worktree: false,
+            },
+            &state,
+        );
+        assert!(
+            matches!(archived, ArchcarResponse::WorkspaceUpdated { .. }),
+            "archive_workspace got {archived:?}"
+        );
+
+        let restored = dispatch_request(
+            ArchcarRequest::RestoreWorkspace {
+                workspace: "berlin2".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(restored, ArchcarResponse::WorkspaceUpdated { .. }),
+            "restore_workspace got {restored:?}"
+        );
+
+        let deleted = dispatch_request(
+            ArchcarRequest::DeleteWorkspace {
+                workspace: "berlin2".to_owned(),
+                remove_worktree: true,
+                delete_branch: false,
+            },
+            &state,
+        );
+        assert!(
+            matches!(deleted, ArchcarResponse::WorkspaceRemoved { ref name } if name == "berlin2"),
+            "delete_workspace got {deleted:?}"
+        );
+
+        let listed = dispatch_request(ArchcarRequest::ListWorkspaces, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::Workspaces { ref workspaces } if workspaces.is_empty()),
+            "list_workspaces got {listed:?}"
+        );
     }
 
     #[cfg(unix)]

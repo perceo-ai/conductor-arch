@@ -199,6 +199,143 @@ pub enum ArchcarRequest {
     ReopenChatThread {
         thread_id: i64,
     },
+    // --- Repository & workspace lifecycle (parity with in-process GTK flows) ---
+    AddRepository {
+        /// Local path to an existing git repository (or subdirectory of one).
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_parent: Option<String>,
+    },
+    CloneRepository {
+        url: String,
+        /// Destination directory to clone into. The cloned repo is then added.
+        dest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    CreateWorkspace {
+        repository: String,
+        name: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+    },
+    CreateWorkspaceFromPrompt {
+        repository: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+    },
+    CreateWorkspaceFromIssue {
+        repository: String,
+        issue_number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch_prefix: Option<String>,
+    },
+    CreateWorkspaceFromPullRequest {
+        repository: String,
+        pr_number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    ArchiveWorkspace {
+        workspace: String,
+        #[serde(default)]
+        remove_worktree: bool,
+    },
+    RestoreWorkspace {
+        workspace: String,
+    },
+    RenameWorkspace {
+        workspace: String,
+        new_name: String,
+    },
+    DuplicateWorkspace {
+        workspace: String,
+        new_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    DeleteWorkspace {
+        workspace: String,
+        #[serde(default)]
+        remove_worktree: bool,
+        #[serde(default)]
+        delete_branch: bool,
+    },
+    // --- Branch, PR, review, checkpoint, linking, provider default ----------
+    CreateBranch {
+        workspace: String,
+        branch: String,
+    },
+    CheckoutBranch {
+        workspace: String,
+        branch: String,
+    },
+    RenameWorkspaceBranch {
+        workspace: String,
+        new_branch: String,
+    },
+    DeleteBranch {
+        workspace: String,
+        branch: String,
+    },
+    PushBranch {
+        workspace: String,
+        /// Force-push with lease (git `--force-with-lease`) instead of a plain
+        /// push. Defaults to a plain push.
+        #[serde(default)]
+        force: bool,
+    },
+    RefreshPullRequest {
+        workspace: String,
+    },
+    ResolveReviewThread {
+        workspace: String,
+        thread_id: String,
+        /// true resolves the thread, false reopens it.
+        resolved: bool,
+    },
+    MergePullRequest {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+    },
+    AddReviewComment {
+        workspace: String,
+        file_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line_number: Option<i64>,
+        body: String,
+    },
+    DeleteCheckpoint {
+        workspace: String,
+        checkpoint_id: i64,
+    },
+    LinkWorkspaceDirectory {
+        workspace: String,
+        target: String,
+    },
+    UnlinkWorkspaceDirectory {
+        workspace: String,
+        target: String,
+    },
+    SetDefaultAgentProvider {
+        workspace: String,
+        provider: String,
+    },
     RegisterProviderInteraction {
         interaction: ProviderInteractionDraft,
     },
@@ -324,6 +461,21 @@ pub enum ArchcarResponse {
     },
     ChatThreadCreated {
         thread: ArchcarChatThread,
+    },
+    RepositoryAdded {
+        name: String,
+    },
+    WorkspaceCreated {
+        name: String,
+    },
+    WorkspaceUpdated {
+        name: String,
+    },
+    WorkspaceRemoved {
+        name: String,
+    },
+    ReviewCommentAdded {
+        comment: ReviewComment,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -673,6 +825,115 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ReopenChatThread { thread_id } => {
             format!("reopen_chat_thread thread_id={thread_id}")
         }
+        ArchcarRequest::AddRepository { path, name, .. } => format!(
+            "add_repository path={path} name={}",
+            name.as_deref().unwrap_or("<derived>")
+        ),
+        ArchcarRequest::CloneRepository { url, dest, .. } => {
+            format!("clone_repository url={url} dest={dest}")
+        }
+        ArchcarRequest::CreateWorkspace {
+            repository,
+            name,
+            branch,
+            base_ref,
+        } => format!(
+            "create_workspace repository={repository} name={name} branch={branch} base={}",
+            base_ref.as_deref().unwrap_or("<default>")
+        ),
+        ArchcarRequest::CreateWorkspaceFromPrompt {
+            repository, name, ..
+        } => format!(
+            "create_workspace_from_prompt repository={repository} name={}",
+            name.as_deref().unwrap_or("<derived>")
+        ),
+        ArchcarRequest::CreateWorkspaceFromIssue {
+            repository,
+            issue_number,
+            ..
+        } => format!("create_workspace_from_issue repository={repository} issue={issue_number}"),
+        ArchcarRequest::CreateWorkspaceFromPullRequest {
+            repository,
+            pr_number,
+            ..
+        } => format!("create_workspace_from_pull_request repository={repository} pr={pr_number}"),
+        ArchcarRequest::ArchiveWorkspace {
+            workspace,
+            remove_worktree,
+        } => format!("archive_workspace workspace={workspace} remove_worktree={remove_worktree}"),
+        ArchcarRequest::RestoreWorkspace { workspace } => {
+            format!("restore_workspace workspace={workspace}")
+        }
+        ArchcarRequest::RenameWorkspace {
+            workspace,
+            new_name,
+        } => format!("rename_workspace workspace={workspace} new_name={new_name}"),
+        ArchcarRequest::DuplicateWorkspace {
+            workspace,
+            new_name,
+            ..
+        } => format!("duplicate_workspace workspace={workspace} new_name={new_name}"),
+        ArchcarRequest::DeleteWorkspace {
+            workspace,
+            remove_worktree,
+            delete_branch,
+        } => format!(
+            "delete_workspace workspace={workspace} remove_worktree={remove_worktree} delete_branch={delete_branch}"
+        ),
+        ArchcarRequest::CreateBranch { workspace, branch } => {
+            format!("create_branch workspace={workspace} branch={branch}")
+        }
+        ArchcarRequest::CheckoutBranch { workspace, branch } => {
+            format!("checkout_branch workspace={workspace} branch={branch}")
+        }
+        ArchcarRequest::RenameWorkspaceBranch {
+            workspace,
+            new_branch,
+        } => format!("rename_workspace_branch workspace={workspace} new_branch={new_branch}"),
+        ArchcarRequest::DeleteBranch { workspace, branch } => {
+            format!("delete_branch workspace={workspace} branch={branch}")
+        }
+        ArchcarRequest::PushBranch { workspace, force } => {
+            format!("push_branch workspace={workspace} force={force}")
+        }
+        ArchcarRequest::RefreshPullRequest { workspace } => {
+            format!("refresh_pull_request workspace={workspace}")
+        }
+        ArchcarRequest::ResolveReviewThread {
+            workspace,
+            thread_id,
+            resolved,
+        } => format!(
+            "resolve_review_thread workspace={workspace} thread_id={thread_id} resolved={resolved}"
+        ),
+        ArchcarRequest::MergePullRequest { workspace, method } => format!(
+            "merge_pull_request workspace={workspace} method={}",
+            method.as_deref().unwrap_or("<default>")
+        ),
+        ArchcarRequest::AddReviewComment {
+            workspace,
+            file_path,
+            line_number,
+            body,
+        } => format!(
+            "add_review_comment workspace={workspace} file={file_path} line={} chars={}",
+            line_number.map(|n| n.to_string()).unwrap_or_else(|| "-".to_owned()),
+            body.chars().count()
+        ),
+        ArchcarRequest::DeleteCheckpoint {
+            workspace,
+            checkpoint_id,
+        } => format!("delete_checkpoint workspace={workspace} checkpoint_id={checkpoint_id}"),
+        ArchcarRequest::LinkWorkspaceDirectory { workspace, target } => {
+            format!("link_workspace_directory workspace={workspace} target={target}")
+        }
+        ArchcarRequest::UnlinkWorkspaceDirectory { workspace, target } => {
+            format!("unlink_workspace_directory workspace={workspace} target={target}")
+        }
+        ArchcarRequest::SetDefaultAgentProvider {
+            workspace,
+            provider,
+        } => format!("set_default_agent_provider workspace={workspace} provider={provider}"),
         ArchcarRequest::RegisterProviderInteraction { interaction } => format!(
             "register_provider_interaction provider={} session_id={} thread_id={} kind={:?} native_id={} request_bytes={}",
             interaction.provider_key,
@@ -823,6 +1084,13 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChatThreadCreated { thread } => {
             format!("chat_thread_created id={}", thread.id)
+        }
+        ArchcarResponse::RepositoryAdded { name } => format!("repository_added name={name}"),
+        ArchcarResponse::WorkspaceCreated { name } => format!("workspace_created name={name}"),
+        ArchcarResponse::WorkspaceUpdated { name } => format!("workspace_updated name={name}"),
+        ArchcarResponse::WorkspaceRemoved { name } => format!("workspace_removed name={name}"),
+        ArchcarResponse::ReviewCommentAdded { comment } => {
+            format!("review_comment_added id={}", comment.id)
         }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",
@@ -1269,6 +1537,290 @@ mod tests {
             serde_json::from_str::<ArchcarEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
             event
         );
+    }
+
+    #[test]
+    fn lifecycle_requests_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarRequest, &str, &str)> = vec![
+            (
+                ArchcarRequest::AddRepository {
+                    path: "/tmp/repo".to_owned(),
+                    name: Some("repo".to_owned()),
+                    remote_name: None,
+                    default_branch: None,
+                    workspace_parent: None,
+                },
+                "\"type\":\"add_repository\"",
+                "add_repository path=/tmp/repo name=repo",
+            ),
+            (
+                ArchcarRequest::CloneRepository {
+                    url: "git@example.com:o/r.git".to_owned(),
+                    dest: "/tmp/r".to_owned(),
+                    name: None,
+                },
+                "\"type\":\"clone_repository\"",
+                "clone_repository url=git@example.com:o/r.git dest=/tmp/r",
+            ),
+            (
+                ArchcarRequest::CreateWorkspace {
+                    repository: "repo".to_owned(),
+                    name: "ws".to_owned(),
+                    branch: "feature".to_owned(),
+                    base_ref: Some("main".to_owned()),
+                },
+                "\"type\":\"create_workspace\"",
+                "create_workspace repository=repo name=ws branch=feature base=main",
+            ),
+            (
+                ArchcarRequest::CreateWorkspaceFromPrompt {
+                    repository: "repo".to_owned(),
+                    prompt: "do the thing".to_owned(),
+                    name: None,
+                    branch: None,
+                    base_ref: None,
+                },
+                "\"type\":\"create_workspace_from_prompt\"",
+                "create_workspace_from_prompt repository=repo name=<derived>",
+            ),
+            (
+                ArchcarRequest::CreateWorkspaceFromIssue {
+                    repository: "repo".to_owned(),
+                    issue_number: 42,
+                    branch_prefix: None,
+                },
+                "\"type\":\"create_workspace_from_issue\"",
+                "create_workspace_from_issue repository=repo issue=42",
+            ),
+            (
+                ArchcarRequest::CreateWorkspaceFromPullRequest {
+                    repository: "repo".to_owned(),
+                    pr_number: 7,
+                    name: None,
+                    branch: None,
+                },
+                "\"type\":\"create_workspace_from_pull_request\"",
+                "create_workspace_from_pull_request repository=repo pr=7",
+            ),
+            (
+                ArchcarRequest::ArchiveWorkspace {
+                    workspace: "ws".to_owned(),
+                    remove_worktree: true,
+                },
+                "\"type\":\"archive_workspace\"",
+                "archive_workspace workspace=ws remove_worktree=true",
+            ),
+            (
+                ArchcarRequest::RestoreWorkspace {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"restore_workspace\"",
+                "restore_workspace workspace=ws",
+            ),
+            (
+                ArchcarRequest::RenameWorkspace {
+                    workspace: "ws".to_owned(),
+                    new_name: "ws2".to_owned(),
+                },
+                "\"type\":\"rename_workspace\"",
+                "rename_workspace workspace=ws new_name=ws2",
+            ),
+            (
+                ArchcarRequest::DuplicateWorkspace {
+                    workspace: "ws".to_owned(),
+                    new_name: "ws-copy".to_owned(),
+                    branch: None,
+                },
+                "\"type\":\"duplicate_workspace\"",
+                "duplicate_workspace workspace=ws new_name=ws-copy",
+            ),
+            (
+                ArchcarRequest::DeleteWorkspace {
+                    workspace: "ws".to_owned(),
+                    remove_worktree: true,
+                    delete_branch: false,
+                },
+                "\"type\":\"delete_workspace\"",
+                "delete_workspace workspace=ws remove_worktree=true delete_branch=false",
+            ),
+        ];
+
+        for (request, type_tag, summary) in cases {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+    }
+
+    #[test]
+    fn branch_pr_review_requests_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarRequest, &str, &str)> = vec![
+            (
+                ArchcarRequest::CreateBranch {
+                    workspace: "ws".to_owned(),
+                    branch: "feat".to_owned(),
+                },
+                "\"type\":\"create_branch\"",
+                "create_branch workspace=ws branch=feat",
+            ),
+            (
+                ArchcarRequest::CheckoutBranch {
+                    workspace: "ws".to_owned(),
+                    branch: "feat".to_owned(),
+                },
+                "\"type\":\"checkout_branch\"",
+                "checkout_branch workspace=ws branch=feat",
+            ),
+            (
+                ArchcarRequest::RenameWorkspaceBranch {
+                    workspace: "ws".to_owned(),
+                    new_branch: "feat2".to_owned(),
+                },
+                "\"type\":\"rename_workspace_branch\"",
+                "rename_workspace_branch workspace=ws new_branch=feat2",
+            ),
+            (
+                ArchcarRequest::DeleteBranch {
+                    workspace: "ws".to_owned(),
+                    branch: "old".to_owned(),
+                },
+                "\"type\":\"delete_branch\"",
+                "delete_branch workspace=ws branch=old",
+            ),
+            (
+                ArchcarRequest::PushBranch {
+                    workspace: "ws".to_owned(),
+                    force: false,
+                },
+                "\"type\":\"push_branch\"",
+                "push_branch workspace=ws force=false",
+            ),
+            (
+                ArchcarRequest::PushBranch {
+                    workspace: "ws".to_owned(),
+                    force: true,
+                },
+                "\"type\":\"push_branch\"",
+                "push_branch workspace=ws force=true",
+            ),
+            (
+                ArchcarRequest::RefreshPullRequest {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"refresh_pull_request\"",
+                "refresh_pull_request workspace=ws",
+            ),
+            (
+                ArchcarRequest::ResolveReviewThread {
+                    workspace: "ws".to_owned(),
+                    thread_id: "T_123".to_owned(),
+                    resolved: true,
+                },
+                "\"type\":\"resolve_review_thread\"",
+                "resolve_review_thread workspace=ws thread_id=T_123 resolved=true",
+            ),
+            (
+                ArchcarRequest::MergePullRequest {
+                    workspace: "ws".to_owned(),
+                    method: Some("squash".to_owned()),
+                },
+                "\"type\":\"merge_pull_request\"",
+                "merge_pull_request workspace=ws method=squash",
+            ),
+            (
+                ArchcarRequest::AddReviewComment {
+                    workspace: "ws".to_owned(),
+                    file_path: "src/lib.rs".to_owned(),
+                    line_number: Some(12),
+                    body: "nit".to_owned(),
+                },
+                "\"type\":\"add_review_comment\"",
+                "add_review_comment workspace=ws file=src/lib.rs line=12 chars=3",
+            ),
+            (
+                ArchcarRequest::DeleteCheckpoint {
+                    workspace: "ws".to_owned(),
+                    checkpoint_id: 5,
+                },
+                "\"type\":\"delete_checkpoint\"",
+                "delete_checkpoint workspace=ws checkpoint_id=5",
+            ),
+            (
+                ArchcarRequest::LinkWorkspaceDirectory {
+                    workspace: "ws".to_owned(),
+                    target: "other".to_owned(),
+                },
+                "\"type\":\"link_workspace_directory\"",
+                "link_workspace_directory workspace=ws target=other",
+            ),
+            (
+                ArchcarRequest::UnlinkWorkspaceDirectory {
+                    workspace: "ws".to_owned(),
+                    target: "other".to_owned(),
+                },
+                "\"type\":\"unlink_workspace_directory\"",
+                "unlink_workspace_directory workspace=ws target=other",
+            ),
+            (
+                ArchcarRequest::SetDefaultAgentProvider {
+                    workspace: "ws".to_owned(),
+                    provider: "codex".to_owned(),
+                },
+                "\"type\":\"set_default_agent_provider\"",
+                "set_default_agent_provider workspace=ws provider=codex",
+            ),
+        ];
+        for (request, type_tag, summary) in cases {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+    }
+
+    #[test]
+    fn lifecycle_responses_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarResponse, &str)> = vec![
+            (
+                ArchcarResponse::RepositoryAdded {
+                    name: "repo".to_owned(),
+                },
+                "repository_added name=repo",
+            ),
+            (
+                ArchcarResponse::WorkspaceCreated {
+                    name: "ws".to_owned(),
+                },
+                "workspace_created name=ws",
+            ),
+            (
+                ArchcarResponse::WorkspaceUpdated {
+                    name: "ws".to_owned(),
+                },
+                "workspace_updated name=ws",
+            ),
+            (
+                ArchcarResponse::WorkspaceRemoved {
+                    name: "ws".to_owned(),
+                },
+                "workspace_removed name=ws",
+            ),
+        ];
+        for (response, summary) in cases {
+            let json = serde_json::to_string(&response).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                response
+            );
+            assert_eq!(archcar_response_summary(&response), summary);
+        }
     }
 
     #[test]
