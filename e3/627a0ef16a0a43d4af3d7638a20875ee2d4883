@@ -1,0 +1,74 @@
+desktop/src/styles/base.css
+  s_c456bcba98f1f0::t_b83d560d03d1c7 766-846
+desktop/src/store/repositories.ts
+  s_c456bcba98f1f0::t_194686523bf648 47
+  s_c456bcba98f1f0::t_2d54a0425d70be 4
+desktop/src/pages/Projects.tsx
+  s_c456bcba98f1f0::t_bbfb5601971bee 23-29,37-51
+  s_c456bcba98f1f0::t_348ad4c882b607 2
+desktop/src/bridge/protocol.ts
+  s_c456bcba98f1f0::t_7992f9f2f6fff7 305
+  s_c456bcba98f1f0::t_592953e32fcee6 301-304
+  s_c456bcba98f1f0::t_167fb5caeaf09f 97,99
+  s_c456bcba98f1f0::t_c645435344bfbd 92-96,98,100-105
+  s_c456bcba98f1f0::t_1dc029c65b8a16 60-91
+desktop/src/store/actions.test.ts
+  s_c456bcba98f1f0::t_268ceaa92c8fca 1-105
+desktop/src/lib/log.ts
+  s_c456bcba98f1f0::t_50046cc4ee378d 1-50
+desktop/electron/preload.ts
+  s_c456bcba98f1f0::t_26ea58441e8836 37-40
+desktop/src/pages/WorkspaceTabs.tsx
+  s_c456bcba98f1f0::t_22ebef93dec8f1 280,291-318,322-330
+  s_c456bcba98f1f0::t_7a55869acfb440 114-123
+  s_c456bcba98f1f0::t_2e79636187cd70 343-357
+  s_c456bcba98f1f0::t_be140dab8e3079 3
+  s_c456bcba98f1f0::t_678d1cf04ea63e 194,205-215
+  s_c456bcba98f1f0::t_61861fe5c93b8d 243-246,250-257
+  s_c456bcba98f1f0::t_22a8fa083bc886 247-249
+  s_c456bcba98f1f0::t_818ad9bf51b627 157-159
+desktop/src/store/actions.ts
+  s_c456bcba98f1f0::t_86d2e55e8b6a2a 1-182,271-278
+  s_c456bcba98f1f0::t_ee68c4824e72df 183-207,211,217-270
+  s_c456bcba98f1f0::t_c8260a74f6b1be 208-210,212-216
+desktop/src/store/index.ts
+  s_c456bcba98f1f0::t_cc88a1142aab12 15
+  s_c456bcba98f1f0::t_86ff8eabf381d7 16-17
+desktop/src/store/workspaces.ts
+  s_c456bcba98f1f0::t_8f9bc02a326392 68,76
+  s_c456bcba98f1f0::t_e779fb7cf489ea 4
+desktop/src/store/dialogs.ts
+  s_c456bcba98f1f0::t_418aa26a3685fd 1-23
+desktop/electron/main.ts
+  s_c456bcba98f1f0::t_85fe06ccfa0bfe 127-130
+  s_c456bcba98f1f0::t_72d51baf3256ed 3-4,10-41
+  s_c456bcba98f1f0::t_355e11e0862744 159-160
+  s_c456bcba98f1f0::t_95058ec9556cd4 97-106,109-110,113,116
+  s_c456bcba98f1f0::t_96870aa2e488ed 42
+desktop/src/components/Dialogs.tsx
+  s_c456bcba98f1f0::t_73abbcaf70e158 199-204,211,217,222-223,225-248,257
+  s_c456bcba98f1f0::t_e110cace264470 2
+  s_c456bcba98f1f0::t_a0419fd0fb8b9a 1,3-198,205-210,212-216,218-221,224,249-256,258-292
+desktop/src/App.tsx
+  s_c456bcba98f1f0::t_69f3236c8f9c02 34
+  s_c456bcba98f1f0::t_67bc88e585143d 5
+desktop/src/components/Sidebar.tsx
+  s_c456bcba98f1f0::t_21ca5b3ae5f18c 82-86
+  s_c456bcba98f1f0::t_6b9e55632f1ae6 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e3627a0ef16a0a43d4af3d7638a20875ee2d4883",
+  "prompts": {},
+  "sessions": {
+    "s_c456bcba98f1f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cdded6d4-1d65-46ad-9e78-e5e82ad738ca",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
