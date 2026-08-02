@@ -57,6 +57,52 @@ export type ArchcarRequest =
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
   | { type: "close_chat_thread"; thread_id: number }
   | { type: "reopen_chat_thread"; thread_id: number }
+  // Repository & workspace lifecycle (parity with in-process GTK flows).
+  | {
+      type: "add_repository";
+      path: string;
+      name?: string;
+      remote_name?: string;
+      default_branch?: string;
+      workspace_parent?: string;
+    }
+  | { type: "clone_repository"; url: string; dest: string; name?: string }
+  | { type: "create_workspace"; repository: string; name: string; branch: string; base_ref?: string }
+  | {
+      type: "create_workspace_from_prompt";
+      repository: string;
+      prompt: string;
+      name?: string;
+      branch?: string;
+      base_ref?: string;
+    }
+  | { type: "create_workspace_from_issue"; repository: string; issue_number: number; branch_prefix?: string }
+  | {
+      type: "create_workspace_from_pull_request";
+      repository: string;
+      pr_number: number;
+      name?: string;
+      branch?: string;
+    }
+  | { type: "archive_workspace"; workspace: string; remove_worktree?: boolean }
+  | { type: "restore_workspace"; workspace: string }
+  | { type: "rename_workspace"; workspace: string; new_name: string }
+  | { type: "duplicate_workspace"; workspace: string; new_name: string; branch?: string }
+  | { type: "delete_workspace"; workspace: string; remove_worktree?: boolean; delete_branch?: boolean }
+  // Branch, PR, review, checkpoint, linking, provider default.
+  | { type: "create_branch"; workspace: string; branch: string }
+  | { type: "checkout_branch"; workspace: string; branch: string }
+  | { type: "rename_workspace_branch"; workspace: string; new_branch: string }
+  | { type: "delete_branch"; workspace: string; branch: string }
+  | { type: "push_branch"; workspace: string; force?: boolean }
+  | { type: "refresh_pull_request"; workspace: string }
+  | { type: "resolve_review_thread"; workspace: string; thread_id: string; resolved: boolean }
+  | { type: "merge_pull_request"; workspace: string; method?: string }
+  | { type: "add_review_comment"; workspace: string; file_path: string; line_number?: number; body: string }
+  | { type: "delete_checkpoint"; workspace: string; checkpoint_id: number }
+  | { type: "link_workspace_directory"; workspace: string; target: string }
+  | { type: "unlink_workspace_directory"; workspace: string; target: string }
+  | { type: "set_default_agent_provider"; workspace: string; provider: string }
   | { type: "subscribe" };
 
 export type WorkspaceChangeScope = "all" | "uncommitted";
@@ -252,6 +298,11 @@ export type ArchcarResponse =
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
   | { type: "chat_thread_created"; thread: ArchcarChatThread }
+  | { type: "repository_added"; name: string }
+  | { type: "workspace_created"; name: string }
+  | { type: "workspace_updated"; name: string }
+  | { type: "workspace_removed"; name: string }
+  | { type: "review_comment_added"; comment: ReviewComment }
   | { type: "error"; message: string };
 
 // --- Events (streamed after `subscribe`) -----------------------------------

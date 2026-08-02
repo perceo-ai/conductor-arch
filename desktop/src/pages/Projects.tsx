@@ -1,5 +1,5 @@
 import { For, Show, createMemo } from "solid-js";
-import { nav, repositoriesStore, workspacesStore } from "@/store";
+import { nav, repositoriesStore, workspacesStore, dialogs } from "@/store";
 import type { RepositoryRow, WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
 
@@ -20,6 +20,13 @@ function ProjectGroup(props: { repo: RepositoryRow }) {
         <span class="card-meta">
           {props.repo.activeWorkspaces}/{props.repo.totalWorkspaces} active · {props.repo.defaultBranch}
         </span>
+        <button
+          class="ui-button-sm"
+          title="New workspace"
+          onClick={() => dialogs.open({ kind: "create-workspace", repository: props.repo.name })}
+        >
+          + Workspace
+        </button>
       </div>
       <Show
         when={workspaces().length > 0}
@@ -27,12 +34,21 @@ function ProjectGroup(props: { repo: RepositoryRow }) {
       >
         <For each={workspaces()}>
           {(w) => (
-            <button class="history-row" onClick={() => nav.selectWorkspace(w.name)}>
-              <span class="workspace-name">{titleCaseWorkspace(w.name)}</span>
-              <span class="workspace-meta">
-                {w.branch} · {w.status}
-              </span>
-            </button>
+            <div class="project-workspace-row">
+              <button class="history-row" onClick={() => nav.selectWorkspace(w.name)}>
+                <span class="workspace-name">{titleCaseWorkspace(w.name)}</span>
+                <span class="workspace-meta">
+                  {w.branch} · {w.status}
+                </span>
+              </button>
+              <button
+                class="ui-button-icon"
+                title="Workspace actions"
+                onClick={() => dialogs.open({ kind: "workspace-actions", workspace: w.name })}
+              >
+                ⋯
+              </button>
+            </div>
           )}
         </For>
       </Show>

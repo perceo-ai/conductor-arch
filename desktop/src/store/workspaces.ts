@@ -1,6 +1,7 @@
 import { createStore, reconcile } from "solid-js/store";
 import { recordUpdate } from "./metrics";
 import { send } from "@/bridge/client";
+import { logState } from "@/lib/log";
 import type { ArchcarWorkspaceSummary } from "@/bridge/protocol";
 
 // Keyed workspace store. Row components read `workspaces.byName[name].status` so a
@@ -64,6 +65,7 @@ export const workspacesStore = {
     setState("byName", reconcile(byName));
     setState("order", reconcile(rows.map((r) => r.name)));
     recordUpdate("workspaces.setAll");
+    logState("workspaces.setAll", { count: rows.length });
   },
 
   /** Patch a single field on one row — touches only that row. */
@@ -71,6 +73,7 @@ export const workspacesStore = {
     if (!state.byName[name]) return;
     setState("byName", name, patch);
     recordUpdate(`workspaces.patch.${name}`);
+    logState("workspaces.patch", { name, patch });
   },
 
   row(name: string): WorkspaceRow | undefined {

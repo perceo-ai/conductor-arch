@@ -1,5 +1,6 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
+import { actions } from "@/store";
 import type { ArchcarChecksSummary, Checkpoint, ReviewComment, Todo } from "@/bridge/protocol";
 
 // Read-only workspace command-center tabs — ports of workspace_todos_panel,
@@ -110,6 +111,16 @@ export function CheckpointsPanel(props: { workspace: string }) {
     }
   }
 
+  async function remove(id: number) {
+    try {
+      await actions.deleteCheckpoint(props.workspace, id);
+      setFeedback(`Deleted checkpoint #${id}`);
+      await refetch();
+    } catch (err) {
+      setFeedback(`Delete checkpoint failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Checkpoints</div>
@@ -142,6 +153,9 @@ export function CheckpointsPanel(props: { workspace: string }) {
               </span>
               <button class="secondary-action" onClick={() => void restore(c.id)}>
                 Restore
+              </button>
+              <button class="ui-button-destructive" onClick={() => void remove(c.id)}>
+                Delete
               </button>
             </div>
           )}
@@ -177,7 +191,7 @@ export function ProcessesPanel(props: { workspace: string }) {
 // ---- Checks (DB-only summary) ---------------------------------------------
 
 export function ChecksPanel(props: { workspace: string }) {
-  const [summary] = createResource(
+  const [summary, { refetch }] = createResource(
     () => props.workspace,
     async (ws): Promise<ArchcarChecksSummary | null> => {
       try {
@@ -188,6 +202,17 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
+  const [feedback, setFeedback] = createSignal("");
+  const run = (label: string, fn: () => Promise<void>) => async () => {
+    setFeedback(`${label}…`);
+    try {
+      await fn();
+      setFeedback(`${label} ok`);
+      await refetch();
+    } catch (err) {
+      setFeedback(`${label} failed: ${(err as Error).message}`);
+    }
+  };
 
   const rows = (s: ArchcarChecksSummary): [string, string][] => [
     ["Changed files", String(s.changed_files)],
@@ -215,6 +240,21 @@ export function ChecksPanel(props: { workspace: string }) {
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Checks</div>
+      <div class="action-row">
+        <button class="secondary-action" onClick={run("Push branch", () => actions.pushBranch(props.workspace))}>
+          Push branch
+        </button>
+        <button class="secondary-action" onClick={run("Force push", () => actions.pushBranch(props.workspace, true))}>
+          Force push
+        </button>
+        <button class="secondary-action" onClick={run("Refresh PR", () => actions.refreshPullRequest(props.workspace))}>
+          Refresh PR
+        </button>
+        <button class="suggested-action" onClick={run("Merge PR", () => actions.mergePullRequest(props.workspace))}>
+          Merge PR
+        </button>
+      </div>
+      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <Show
         when={summary()}
         fallback={<div class="empty-state">{summary.loading ? "Loading…" : "No summary"}</div>}
@@ -237,7 +277,7 @@ export function ChecksPanel(props: { workspace: string }) {
 // ---- Review (local comments) ----------------------------------------------
 
 export function ReviewPanel(props: { workspace: string }) {
-  const [comments] = createResource(
+  const [comments, { refetch }] = createResource(
     () => props.workspace,
     async (ws): Promise<ReviewComment[]> => {
       try {
@@ -248,9 +288,46 @@ export function ReviewPanel(props: { workspace: string }) {
       }
     },
   );
+  const [file, setFile] = createSignal("");
+  const [line, setLine] = createSignal("");
+  const [body, setBody] = createSignal("");
+  const [feedback, setFeedback] = createSignal("");
+
+  async function add() {
+    if (!file().trim() || !body().trim()) {
+      setFeedback("File path and comment body are required.");
+      return;
+    }
+    const lineNum = line().trim() ? Number(line().trim()) : undefined;
+    try {
+      await actions.addReviewComment({
+        workspace: props.workspace,
+        filePath: file().trim(),
+        lineNumber: Number.isInteger(lineNum) ? lineNum : undefined,
+        body: body().trim(),
+      });
+      setFile("");
+      setLine("");
+      setBody("");
+      setFeedback("");
+      await refetch();
+    } catch (err) {
+      setFeedback(`Add review comment failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Review comments</div>
+      <div class="action-row">
+        <input class="ws-text-input" placeholder="file path" value={file()} onInput={(e) => setFile(e.currentTarget.value)} />
+        <input class="ws-text-input" style={{ "max-width": "80px" }} placeholder="line" value={line()} onInput={(e) => setLine(e.currentTarget.value)} />
+      </div>
+      <div class="action-row">
+        <input class="ws-text-input" placeholder="comment…" value={body()} onInput={(e) => setBody(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void add()} />
+        <button class="suggested-action" onClick={() => void add()}>Add</button>
+      </div>
+      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <Show
         when={(comments() ?? []).length > 0}
         fallback={<div class="empty-state">{comments.loading ? "Loading…" : "No review comments"}</div>}
@@ -263,6 +340,21 @@ export function ReviewPanel(props: { workspace: string }) {
                 {c.line_number != null ? `:${c.line_number}` : ""} [{c.status}]
               </span>
               <span class="detail-value">{c.body}</span>
+              <Show when={c.github_thread_id}>
+                {(tid) => (
+                  <button
+                    class="secondary-action"
+                    onClick={() =>
+                      void actions
+                        .resolveReviewThread(props.workspace, tid(), c.status !== "resolved")
+                        .then(refetch)
+                        .catch((err) => setFeedback(`Resolve failed: ${(err as Error).message}`))
+                    }
+                  >
+                    {c.status === "resolved" ? "Reopen" : "Resolve"}
+                  </button>
+                )}
+              </Show>
             </div>
           )}
         </For>

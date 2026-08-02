@@ -2077,6 +2077,16 @@ fn print_archcar_response(response: ArchcarResponse) {
                 );
             }
         }
+        ArchcarResponse::RepositoryAdded { name } => println!("repository_added {name}"),
+        ArchcarResponse::WorkspaceCreated { name } => println!("workspace_created {name}"),
+        ArchcarResponse::WorkspaceUpdated { name } => println!("workspace_updated {name}"),
+        ArchcarResponse::WorkspaceRemoved { name } => println!("workspace_removed {name}"),
+        ArchcarResponse::ReviewCommentAdded { comment } => {
+            println!(
+                "review_comment_added id={} file={}",
+                comment.id, comment.file_path
+            )
+        }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
