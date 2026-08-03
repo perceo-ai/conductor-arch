@@ -37,6 +37,9 @@ export type ArchcarRequest =
     }
   | { type: "list_queued_chat_inputs"; thread_id: number }
   | { type: "remove_queued_chat_input"; queue_id: number }
+  | { type: "move_queued_chat_input"; queue_id: number; up: boolean }
+  | { type: "save_chat_paste"; thread_id: number; text: string }
+  | { type: "resolve_provider_interaction"; interaction_id: string; resolution: ProviderInteractionResolution }
   | { type: "kill_session"; session_id: number }
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
@@ -54,6 +57,7 @@ export type ArchcarRequest =
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
+  | { type: "get_setup_readiness"; recheck?: boolean }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
   | { type: "close_chat_thread"; thread_id: number }
   | { type: "reopen_chat_thread"; thread_id: number }
@@ -67,6 +71,7 @@ export type ArchcarRequest =
       workspace_parent?: string;
     }
   | { type: "clone_repository"; url: string; dest: string; name?: string }
+  | { type: "remove_repository"; repository: string }
   | { type: "create_workspace"; repository: string; name: string; branch: string; base_ref?: string }
   | {
       type: "create_workspace_from_prompt";
@@ -266,6 +271,22 @@ export interface ArchcarRepositorySummary {
   total_workspaces: number;
 }
 
+export type SetupRowState = "ready" | "action" | "missing";
+
+export interface SetupRow {
+  name: string;
+  detail: string;
+  state: SetupRowState;
+  required: boolean;
+}
+
+export interface SetupReport {
+  rows: SetupRow[];
+  feedback: string;
+  complete: boolean;
+  refresh_error?: string;
+}
+
 // --- Responses -------------------------------------------------------------
 export type ArchcarResponse =
   | { type: "ack" }
@@ -297,8 +318,11 @@ export type ArchcarResponse =
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "setup_readiness"; report: SetupReport }
   | { type: "chat_thread_created"; thread: ArchcarChatThread }
   | { type: "repository_added"; name: string }
+  | { type: "repository_removed"; name: string }
+  | { type: "chat_paste_saved"; relative_path: string; label: string }
   | { type: "workspace_created"; name: string }
   | { type: "workspace_updated"; name: string }
   | { type: "workspace_removed"; name: string }
@@ -316,4 +340,27 @@ export type ArchcarEvent =
   | { type: "chat_queue_updated"; thread_id: number }
   | { type: "session_exited"; session_id: number; exit_code?: number }
   | { type: "session_error"; session_id?: number; thread_id?: number; message: string }
+  | { type: "provider_interaction_requested"; interaction: ProviderInteractionRecord }
+  | { type: "provider_interaction_resolved"; interaction: ProviderInteractionRecord }
   | { type: string; [k: string]: unknown };
+
+// Agent-driven interaction (permission / question / plan approval) surfaced to
+// the user mid-turn. Mirrors crates/core/src/provider_interactions.rs.
+export type ProviderInteractionKind = "permission" | "user_question" | "plan_approval";
+export interface ProviderInteractionRecord {
+  id: string;
+  provider_key: string;
+  workspace: string;
+  thread_id: number;
+  session_id: number;
+  kind: ProviderInteractionKind;
+  title: string;
+  detail: string;
+  choices: string[];
+  status: string;
+}
+export type ProviderInteractionResolution =
+  | { type: "approve" }
+  | { type: "deny"; reason?: string }
+  | { type: "answer"; answers: [string, string][] }
+  | { type: "defer" };

@@ -1,6 +1,7 @@
 use crate::agent_tools::{
     all_tools, launchable_agent_tools, launchable_provider_key, tool_by_provider, ToolSpec,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -253,6 +254,117 @@ pub fn setup_blockers_for_provider(
         }
     }
     blockers
+}
+
+/// Ready = tool works; Action = installed but needs sign-in/auth; Missing =
+/// not installed. Mirrors the pill states the setup modal renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupRowState {
+    Ready,
+    Action,
+    Missing,
+}
+
+/// One dependency row in the setup report (GitHub CLI, an agent, or the
+/// selected provider).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupRow {
+    pub name: String,
+    pub detail: String,
+    pub state: SetupRowState,
+    pub required: bool,
+}
+
+/// UI-ready setup readiness snapshot. Built server-side so the feedback and
+/// provider-selection logic stays tested in one place (ported from the GTK
+/// setup flow).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupReport {
+    pub rows: Vec<SetupRow>,
+    pub feedback: String,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<String>,
+}
+
+impl SetupReport {
+    pub fn from_readiness(readiness: &SetupReadiness, refresh_error: Option<String>) -> Self {
+        let rows = vec![
+            setup_row("GitHub CLI", &readiness.gh, true),
+            setup_row("Codex", &readiness.codex, false),
+            setup_row("Claude", &readiness.claude, false),
+            setup_row("OpenCode", &readiness.opencode, false),
+            setup_row("Selected provider", &selected_provider_check(readiness), true),
+        ];
+        Self {
+            complete: setup_blockers(readiness).is_empty(),
+            feedback: setup_feedback(readiness),
+            rows,
+            refresh_error,
+        }
+    }
+}
+
+/// Probe host setup readiness and build a UI-ready report. When `recheck` is
+/// true, refresh the process environment first so a just-installed tool is
+/// picked up (mirrors the GTK "Recheck" button).
+pub fn setup_report(recheck: bool) -> SetupReport {
+    let refresh_error = if recheck {
+        refresh_process_environment().err()
+    } else {
+        None
+    };
+    SetupReport::from_readiness(&SetupReadiness::from_host(), refresh_error)
+}
+
+fn setup_row(name: &str, check: &SetupCheck, required: bool) -> SetupRow {
+    let state = if check.ready {
+        SetupRowState::Ready
+    } else if check.installed {
+        SetupRowState::Action
+    } else {
+        SetupRowState::Missing
+    };
+    SetupRow {
+        name: name.to_owned(),
+        detail: check.detail.clone(),
+        state,
+        required,
+    }
+}
+
+fn setup_feedback(readiness: &SetupReadiness) -> String {
+    match setup_blockers(readiness).as_slice() {
+        [] => "Setup is complete.".to_owned(),
+        [SetupBlocker::GithubUnavailable] if readiness.gh.installed => {
+            "Authenticate GitHub CLI, then press Recheck.".to_owned()
+        }
+        [SetupBlocker::GithubUnavailable] => {
+            "Install and authenticate GitHub CLI, then press Recheck.".to_owned()
+        }
+        [SetupBlocker::MissingAgent] if readiness.codex.installed || readiness.claude.installed => {
+            "Sign in to Codex or Claude, then press Recheck.".to_owned()
+        }
+        [SetupBlocker::MissingAgent] => {
+            "Install and sign in to Codex or Claude, then press Recheck.".to_owned()
+        }
+        [SetupBlocker::SelectedProviderUnavailable] => {
+            "Choose a ready provider or sign in to the selected provider, then press Recheck."
+                .to_owned()
+        }
+        _ => "Install or authenticate GitHub CLI and Codex or Claude, then press Recheck.".to_owned(),
+    }
+}
+
+fn selected_provider_check(readiness: &SetupReadiness) -> SetupCheck {
+    match readiness.first_ready_launchable_provider() {
+        Some(provider) => SetupCheck::ready(format!("{provider} will be selected for new chats.")),
+        None if readiness.opencode.ready => SetupCheck::blocked(
+            "OpenCode is ready, but this build cannot launch OpenCode chat sessions yet.",
+        ),
+        None => SetupCheck::missing("No launchable chat provider is ready."),
+    }
 }
 
 pub fn report_from_os_release(os_release: &str) -> DoctorReport {
@@ -884,5 +996,90 @@ ID_LIKE=arch
             .collect::<Vec<_>>();
 
         assert!(names.contains(&"opencode"));
+    }
+
+    #[test]
+    fn setup_feedback_summarizes_missing_github_cli() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::missing("missing"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
+        };
+
+        assert_eq!(
+            setup_feedback(&readiness),
+            "Install and authenticate GitHub CLI, then press Recheck."
+        );
+    }
+
+    #[test]
+    fn setup_feedback_summarizes_missing_agent() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
+        };
+
+        assert_eq!(
+            setup_feedback(&readiness),
+            "Install and sign in to Codex or Claude, then press Recheck."
+        );
+    }
+
+    #[test]
+    fn setup_feedback_summarizes_installed_but_blocked_agent() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::blocked("blocked"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        assert_eq!(
+            setup_feedback(&readiness),
+            "Sign in to Codex or Claude, then press Recheck."
+        );
+    }
+
+    #[test]
+    fn setup_report_marks_ready_host_complete() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("Authenticated with GitHub."),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::missing("missing"),
+        };
+
+        let report = SetupReport::from_readiness(&readiness, None);
+
+        assert!(report.complete);
+        assert_eq!(report.feedback, "Setup is complete.");
+        // gh, codex, claude, opencode, selected provider.
+        assert_eq!(report.rows.len(), 5);
+        assert_eq!(report.rows[0].name, "GitHub CLI");
+        assert_eq!(report.rows[0].state, SetupRowState::Ready);
+        let selected = report.rows.last().unwrap();
+        assert_eq!(selected.name, "Selected provider");
+        assert_eq!(selected.state, SetupRowState::Ready);
+        assert!(selected.detail.contains("claude"));
+    }
+
+    #[test]
+    fn setup_report_flags_missing_required_rows() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::missing("Install GitHub CLI."),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
+        };
+
+        let report = SetupReport::from_readiness(&readiness, Some("refresh failed".to_owned()));
+
+        assert!(!report.complete);
+        assert_eq!(report.refresh_error.as_deref(), Some("refresh failed"));
+        assert_eq!(report.rows[0].state, SetupRowState::Missing);
+        assert!(report.rows[0].required);
     }
 }

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::archcar::harness_contract::HarnessDescriptor;
 use crate::archcar::harness_contract::{ProviderInteractionDraft, ProviderInteractionResolution};
 use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
+use crate::doctor::SetupReport;
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
 use crate::session_state::AgentSessionState;
@@ -133,6 +134,18 @@ pub enum ArchcarRequest {
     RemoveQueuedChatInput {
         queue_id: i64,
     },
+    /// Reorder a queued chat input one slot up (toward the front) or down.
+    MoveQueuedChatInput {
+        queue_id: i64,
+        up: bool,
+    },
+    /// Save a large pasted blob under the thread's workspace
+    /// (.context/archductor/{thread_id}/) so the composer can reference it as a
+    /// file attachment instead of inlining a huge string.
+    SaveChatPaste {
+        thread_id: i64,
+        text: String,
+    },
     KillSession {
         session_id: i64,
     },
@@ -188,6 +201,13 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    /// Probe host setup readiness (GitHub CLI + agent providers). `recheck`
+    /// refreshes the process environment before probing so a just-installed
+    /// tool is picked up.
+    GetSetupReadiness {
+        #[serde(default)]
+        recheck: bool,
+    },
     CreateChatThread {
         workspace: String,
         provider: String,
@@ -218,6 +238,12 @@ pub enum ArchcarRequest {
         dest: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+    },
+    /// Drop a repository registration (and its workspace records) from the
+    /// database without touching the filesystem. Used to prune a repository
+    /// whose root path no longer exists on disk.
+    RemoveRepository {
+        repository: String,
     },
     CreateWorkspace {
         repository: String,
@@ -396,6 +422,10 @@ pub enum ArchcarResponse {
     QueuedChatInput {
         input: QueuedArchcarInput,
     },
+    ChatPasteSaved {
+        relative_path: String,
+        label: String,
+    },
     QueuedChatInputs {
         thread_id: i64,
         inputs: Vec<QueuedArchcarInput>,
@@ -459,10 +489,16 @@ pub enum ArchcarResponse {
         /// Effective settings serialized as pretty TOML.
         toml: String,
     },
+    SetupReadiness {
+        report: SetupReport,
+    },
     ChatThreadCreated {
         thread: ArchcarChatThread,
     },
     RepositoryAdded {
+        name: String,
+    },
+    RepositoryRemoved {
         name: String,
     },
     WorkspaceCreated {
@@ -770,6 +806,12 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::RemoveQueuedChatInput { queue_id } => {
             format!("remove_queued_chat_input queue_id={queue_id}")
         }
+        ArchcarRequest::MoveQueuedChatInput { queue_id, up } => {
+            format!("move_queued_chat_input queue_id={queue_id} up={up}")
+        }
+        ArchcarRequest::SaveChatPaste { thread_id, text } => {
+            format!("save_chat_paste thread_id={thread_id} chars={}", text.chars().count())
+        }
         ArchcarRequest::KillSession { session_id } => {
             format!("kill_session session_id={session_id}")
         }
@@ -816,6 +858,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::GetSetupReadiness { recheck } => {
+            format!("get_setup_readiness recheck={recheck}")
+        }
         ArchcarRequest::CreateChatThread { workspace, provider, .. } => {
             format!("create_chat_thread workspace={workspace} provider={provider}")
         }
@@ -831,6 +876,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ),
         ArchcarRequest::CloneRepository { url, dest, .. } => {
             format!("clone_repository url={url} dest={dest}")
+        }
+        ArchcarRequest::RemoveRepository { repository } => {
+            format!("remove_repository repository={repository}")
         }
         ArchcarRequest::CreateWorkspace {
             repository,
@@ -1082,10 +1130,21 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::Settings { scope, toml } => {
             format!("settings scope={scope} bytes={}", toml.len())
         }
+        ArchcarResponse::SetupReadiness { report } => {
+            format!(
+                "setup_readiness complete={} rows={}",
+                report.complete,
+                report.rows.len()
+            )
+        }
         ArchcarResponse::ChatThreadCreated { thread } => {
             format!("chat_thread_created id={}", thread.id)
         }
         ArchcarResponse::RepositoryAdded { name } => format!("repository_added name={name}"),
+        ArchcarResponse::RepositoryRemoved { name } => format!("repository_removed name={name}"),
+        ArchcarResponse::ChatPasteSaved { relative_path, .. } => {
+            format!("chat_paste_saved path={relative_path}")
+        }
         ArchcarResponse::WorkspaceCreated { name } => format!("workspace_created name={name}"),
         ArchcarResponse::WorkspaceUpdated { name } => format!("workspace_updated name={name}"),
         ArchcarResponse::WorkspaceRemoved { name } => format!("workspace_removed name={name}"),

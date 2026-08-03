@@ -1,7 +1,8 @@
-import type { ArchcarEvent, ChatSnapshot } from "@/bridge/protocol";
+import type { ArchcarEvent, ChatSnapshot, ProviderInteractionRecord } from "@/bridge/protocol";
 import { send } from "@/bridge/client";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
+import { interactionsStore } from "./interactions";
 
 async function refreshTerminalScreen(sessionId: number) {
   try {
@@ -79,7 +80,7 @@ export function applyEvent(event: ArchcarEvent) {
       // Shell sessions back the Terminal tab; correlate the async spawn to its
       // workspace and pull the first screen.
       if (e.kind === "shell") {
-        terminalStore.setSession(e.workspace, e.session_id);
+        terminalStore.attachSession(e.workspace, e.session_id);
         void refreshTerminalScreen(e.session_id);
       } else {
         chatStore.setSession(e.thread_id, {
@@ -88,7 +89,32 @@ export function applyEvent(event: ArchcarEvent) {
           runtime_state: "starting",
           ready: false,
         });
+        // A fresh session starting clears any stale "failed" phase from a prior
+        // turn so the composer doesn't keep showing an error.
+        if (chatStore.slice(e.thread_id).phase.kind === "failed") {
+          chatStore.setPhase(e.thread_id, { kind: "ready" });
+        }
       }
+      break;
+    }
+
+    case "session_exited": {
+      // Clear the exited session so running/busy spinners don't stick on.
+      chatStore.markSessionExited((event as { session_id: number }).session_id);
+      break;
+    }
+
+    case "provider_interaction_requested": {
+      interactionsStore.request(
+        (event as { interaction: ProviderInteractionRecord }).interaction,
+      );
+      break;
+    }
+
+    case "provider_interaction_resolved": {
+      interactionsStore.resolve(
+        (event as { interaction: ProviderInteractionRecord }).interaction,
+      );
       break;
     }
 

@@ -20,6 +20,9 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "anser": "^2.3.5",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.7",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

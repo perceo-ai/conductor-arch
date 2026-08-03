@@ -1,6 +1,8 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
 import type { DiffFileSummary, WorkspaceChangeScope } from "@/bridge/protocol";
+import Diff from "@/components/Diff";
+import { langFromPath } from "@/lib/highlight";
 
 // Changes views — port of workspace_changes_panel + workspace_diff_sections.
 // The right panel shows the summary rows; the main Changes tab shows rows plus
@@ -18,20 +20,24 @@ function stateLabel(f: DiffFileSummary): string {
   return "[clean]";
 }
 
-function ChangeRow(props: { file: DiffFileSummary; showState: boolean }) {
+function ChangeRow(props: { file: DiffFileSummary; showState: boolean; onOpen?: (path: string) => void }) {
   return (
-    <div class="ws-file-summary-row-content">
+    <button class="ws-file-summary-row-content" onClick={() => props.onOpen?.(props.file.path)}>
       <span class="ws-file-icon">·</span>
       <span class="ws-file-name">{props.file.path}</span>
       <Show when={props.showState}>
         <span class="ws-file-summary-state">{stateLabel(props.file)}</span>
       </Show>
       <span class="ws-file-summary-counts">{countsText(props.file)}</span>
-    </div>
+    </button>
   );
 }
 
-export function ChangesRows(props: { workspace: string; defaultScope?: WorkspaceChangeScope }) {
+export function ChangesRows(props: {
+  workspace: string;
+  defaultScope?: WorkspaceChangeScope;
+  openFile?: (path: string) => void;
+}) {
   const [scope, setScope] = createSignal<WorkspaceChangeScope>(props.defaultScope ?? "uncommitted");
   const [changes] = createResource(
     () => [props.workspace, scope()] as const,
@@ -70,19 +76,21 @@ export function ChangesRows(props: { workspace: string; defaultScope?: Workspace
         fallback={<div class="empty-state">{changes.loading ? "Loading…" : "No changes"}</div>}
       >
         <For each={changes()}>
-          {(file) => <ChangeRow file={file} showState={scope() === "uncommitted"} />}
+          {(file) => (
+            <ChangeRow file={file} showState={scope() === "uncommitted"} onOpen={props.openFile} />
+          )}
         </For>
       </Show>
     </div>
   );
 }
 
-export function DiffView(props: { workspace: string }) {
+export function DiffView(props: { workspace: string; path?: string }) {
   const [diff] = createResource(
-    () => props.workspace,
-    async (ws) => {
+    () => [props.workspace, props.path] as const,
+    async ([ws, path]) => {
       try {
-        const res = await send({ type: "get_workspace_diff", workspace: ws });
+        const res = await send({ type: "get_workspace_diff", workspace: ws, path });
         return res.type === "workspace_diff" ? res.diff : "";
       } catch {
         return "";
@@ -92,7 +100,9 @@ export function DiffView(props: { workspace: string }) {
   return (
     <div class="ws-diff-view">
       <Show when={!diff.loading} fallback={<div class="empty-state">Loading diff…</div>}>
-        <pre class="ws-diff-text">{diff()}</pre>
+        <Show when={(diff() ?? "").trim()} fallback={<div class="empty-state">No diff</div>}>
+          <Diff text={diff()!} defaultLang={props.path ? langFromPath(props.path) : undefined} />
+        </Show>
       </Show>
     </div>
   );

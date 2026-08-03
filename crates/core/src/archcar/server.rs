@@ -529,6 +529,51 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::MoveQueuedChatInput { queue_id, up } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path).and_then(|store| {
+                match store.move_queued_chat_input(queue_id, up)? {
+                    Some(thread_id) => {
+                        let inputs = store.list_queued_chat_inputs(thread_id)?;
+                        Ok(Some((thread_id, inputs)))
+                    }
+                    None => Ok(None),
+                }
+            });
+            match result {
+                Ok(Some((thread_id, inputs))) => {
+                    broadcast(
+                        &mut state.lock().unwrap(),
+                        ArchcarEvent::ChatQueueUpdated { thread_id },
+                    );
+                    ArchcarResponse::QueuedChatInputs {
+                        thread_id,
+                        inputs: inputs
+                            .into_iter()
+                            .map(queued_archcar_input_from_record)
+                            .collect(),
+                    }
+                }
+                Ok(None) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveChatPaste { thread_id, text } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.save_thread_paste_attachment(thread_id, &text))
+            {
+                Ok(saved) => ArchcarResponse::ChatPasteSaved {
+                    relative_path: saved.relative_path,
+                    label: "pasted text".to_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::KillSession { session_id } => {
             match load_or_restore_session_handle(state, session_id) {
                 Ok(Some(handle)) => {
@@ -825,6 +870,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetSetupReadiness { recheck } => ArchcarResponse::SetupReadiness {
+            report: crate::doctor::setup_report(recheck),
+        },
         ArchcarRequest::CreateChatThread {
             workspace,
             provider,
@@ -904,6 +952,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 })
             }) {
                 Ok(repo) => ArchcarResponse::RepositoryAdded { name: repo.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RemoveRepository { repository } => {
+            match open_lifecycle_workspace_store(state)
+                .and_then(|s| s.remove_repository(&repository))
+            {
+                Ok(()) => ArchcarResponse::RepositoryRemoved { name: repository },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1624,6 +1682,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::GetSetupReadiness { .. }
     )
 }
 
