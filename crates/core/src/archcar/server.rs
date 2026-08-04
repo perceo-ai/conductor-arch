@@ -975,8 +975,13 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             }
         }
         ArchcarRequest::RemoveRepository { repository } => {
-            match open_lifecycle_workspace_store(state)
-                .and_then(|s| s.remove_repository(&repository))
+            // DB-only record removal — use the plain app store, NOT the lifecycle
+            // store. open_lifecycle_workspace_store() runs pending create/delete
+            // job recovery first, which touches the (possibly missing) worktree and
+            // can error out before we ever reach the delete, silently stranding a
+            // dead project that can't be removed.
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.remove_repository(&repository))
             {
                 Ok(()) => ArchcarResponse::RepositoryRemoved { name: repository },
                 Err(err) => ArchcarResponse::Error {

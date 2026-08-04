@@ -1,8 +1,54 @@
 import { createResource, createSignal, For, Show } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, actions } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore } from "@/store";
 import { repoAvatar } from "@/bridge/client";
+import { openContextMenu } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+
+// Run a lifecycle action and surface any failure as a toast rather than
+// swallowing it — a silently-failing remove/delete is how a dead workspace ends
+// up un-removable.
+function runAction(label: string, p: Promise<unknown>): void {
+  void p.catch((err) => toastsStore.error(`${label} failed: ${(err as Error).message}`));
+}
+
+function workspaceMenuItems(name: string) {
+  return [
+    {
+      label: "Rename…",
+      run: () => {
+        const next = window.prompt("Rename workspace to", name)?.trim();
+        if (next && next !== name) runAction("Rename", actions.renameWorkspace(name, next));
+      },
+    },
+    {
+      label: "Duplicate…",
+      run: () => {
+        const next = window.prompt("Duplicate workspace as", `${name}-copy`)?.trim();
+        if (next) runAction("Duplicate", actions.duplicateWorkspace(name, next));
+      },
+    },
+    {
+      label: "Archive",
+      run: () => {
+        if (window.confirm(`Archive "${name}"?`)) runAction("Archive", actions.archiveWorkspace(name));
+      },
+    },
+    {
+      label: "Delete",
+      destructive: true,
+      run: () => {
+        if (
+          window.confirm(
+            `Delete "${name}"? Removes the worktree and deletes the local branch (can discard unmerged commits).`,
+          )
+        ) {
+          runAction("Delete", actions.deleteWorkspace(name, true, true));
+        }
+      },
+    },
+  ];
+}
 
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 520;
@@ -20,10 +66,7 @@ function WorkspaceRow(props: { name: string }) {
       class="workspace-row-shell"
       classList={{ selected: selected() }}
       onClick={() => nav.selectWorkspace(props.name)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        dialogs.open({ kind: "workspace-actions", workspace: props.name });
-      }}
+      onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
     >
       <span class="row-name">{props.name}</span>
       <span class="row-meta">
@@ -74,12 +117,27 @@ function ProjectGroup(props: { repo: string }) {
     <div class="project-group">
       <div
         class="project-row"
-        onContextMenu={(e) => {
-          e.preventDefault();
-          if (window.confirm(`Remove project "${props.repo}"? This drops it (and its workspace records) from Archductor. Local files are left alone.`)) {
-            void actions.removeRepository(props.repo).catch(() => {});
-          }
-        }}
+        onContextMenu={(e) =>
+          openContextMenu(e, [
+            {
+              label: "New workspace",
+              run: () => dialogs.open({ kind: "create-workspace", repository: props.repo }),
+            },
+            {
+              label: "Remove project",
+              destructive: true,
+              run: () => {
+                if (
+                  window.confirm(
+                    `Remove project "${props.repo}"? Drops it (and its workspace records) from Archductor. Local files are left alone.`,
+                  )
+                ) {
+                  runAction("Remove project", actions.removeRepository(props.repo));
+                }
+              },
+            },
+          ])
+        }
       >
         <ProjectAvatar repo={props.repo} />
         <span class="project-name">{props.repo}</span>
