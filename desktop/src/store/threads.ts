@@ -28,7 +28,10 @@ export const threadsStore = {
   async refresh(workspace: string): Promise<ArchcarChatThread[]> {
     const res = await send({ type: "list_chat_threads", workspace });
     if (res.type !== "chat_threads") return [];
-    this.setThreads(workspace, res.threads);
-    return res.threads;
+    // Closing a thread only marks it status="closed" in the DB; the backend list
+    // still returns it, so drop closed threads here or their tab never goes away.
+    const open = res.threads.filter((t) => t.status !== "closed");
+    this.setThreads(workspace, open);
+    return open;
   },
 };

@@ -1,5 +1,6 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
-import { chatStore, threadsStore, nav, loadThread, interactionsStore, actions } from "@/store";
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { chatStore, threadsStore, nav, loadThread, interactionsStore, actions, prefsStore } from "@/store";
+import { MODELS, EFFORTS } from "@/lib/models";
 import { send } from "@/bridge/client";
 import type {
   ArchcarChatThread,
@@ -15,6 +16,7 @@ import { registerOpenFile } from "./openFileBridge";
 import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
 import { ansiToHtml } from "@/lib/ansi";
+import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -26,16 +28,6 @@ function providerToKind(provider: string): SessionKind {
   if (provider === "codex" || provider === "claude" || provider === "shell") return provider;
   return "codex";
 }
-
-// Model choices per provider. There is no enumeration RPC, so these mirror the
-// providers archcar supports; switching sends set_session_model to the live
-// session.
-const MODELS: Record<string, string[]> = {
-  claude: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  codex: ["gpt-5-codex", "gpt-5", "o4-mini"],
-  shell: [],
-};
-const EFFORTS = ["low", "medium", "high"];
 
 function ThreadTab(props: {
   thread: ArchcarChatThread;
@@ -96,40 +88,24 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
 function UserBubble(props: { body: string }) {
   return (
     <div class="chat-user-row">
-      <div class="chat-user-bubble">{props.body}</div>
+      <div
+        class="chat-user-bubble markdown-body"
+        innerHTML={renderMarkdown(stripArchductorMetadata(props.body))}
+      />
     </div>
   );
 }
 
-// Glyph per projected render class so tool/skill/command/etc. cards read as
-// intentional categories rather than an undifferentiated blob.
-const CARD_ICONS: Record<string, string> = {
-  tool_card: "🔧",
-  skill_card: "✨",
-  plugin_card: "🧩",
-  hook_card: "🪝",
-  command_card: "❯",
-  process_card: "❯",
-  diff_card: "±",
-  file_card: "📄",
-  plan_card: "◫",
-  web_card: "🌐",
-  image_card: "🖼",
-  subagent_card: "🤖",
-  usage_card: "∑",
-  status_card: "•",
-  error_card: "⚠",
-  warning_card: "⚠",
-  reasoning_card: "💭",
-};
-
+// Inline "chip-card" event — GTK's inline_event_widget: a flat row of expander +
+// verb (action label) + a small monospace content chip (the command/filename),
+// with the body revealed only on expand. No category badge; the row carries no
+// card chrome of its own. Bodies stay collapsed until the user asks for them.
 function InlineCard(props: { item: ArchcarProjectionItem }) {
-  const [open, setOpen] = createSignal(true);
-  const cls = () => props.item.render_class;
-  const icon = () => CARD_ICONS[cls()] ?? "▸";
-  const label = () => props.item.title || cls().replace(/_card$/, "").replace(/_/g, " ");
-  const isDiff = () => cls() === "diff_card";
-  const isTerminal = () => cls() === "command_card" || cls() === "process_card";
+  const [open, setOpen] = createSignal(false);
+  const parsed = () => inlineEventVerbChip(props.item.render_class, props.item.title);
+  const verb = () => parsed().verb;
+  const chip = () => parsed().chip;
+  const hasBody = () => props.item.body.trim().length > 0;
   return (
     <div
       class="chat-inline-event"
@@ -138,17 +114,28 @@ function InlineCard(props: { item: ArchcarProjectionItem }) {
         "chat-inline-event-loading": props.item.status === "running",
       }}
     >
-      <button class="chat-inline-event-action" onClick={() => setOpen((o) => !o)}>
-        <span class="chat-inline-event-expander">{open() ? "▾" : "▸"}</span>
-        <span class="chat-inline-event-icon">{icon()}</span>
-        {label()}
-      </button>
-      <Show when={open() && props.item.body.trim()}>
+      <div class="chat-inline-event-header">
+        <button
+          class="chat-inline-event-expander"
+          title={hasBody() ? "Show details" : undefined}
+          disabled={!hasBody()}
+          onClick={() => setOpen((o) => !o)}
+        >
+          {hasBody() ? (open() ? "−" : "+") : "·"}
+        </button>
+        <span class="chat-inline-event-action">{verb()}</span>
+        <Show when={chip()}>
+          <span class="chat-inline-event-chip">
+            <span class="chat-inline-event-chip-label">{chip()}</span>
+          </span>
+        </Show>
+      </div>
+      <Show when={open() && hasBody()}>
         <Switch fallback={<div class="chat-inline-event-body">{props.item.body}</div>}>
-          <Match when={isDiff()}>
+          <Match when={isDiffCard(props.item)}>
             <Diff text={props.item.body} />
           </Match>
-          <Match when={isTerminal()}>
+          <Match when={isTerminalCard(props.item)}>
             <pre class="chat-inline-event-terminal" innerHTML={ansiToHtml(props.item.body)} />
           </Match>
         </Switch>
@@ -210,7 +197,10 @@ function TimelineItem(props: { item: ArchcarProjectionItem }) {
         <UserBubble body={props.item.body} />
       </Match>
       <Match when={cls() === "assistant_chat"}>
-        <div class="chat-agent-text markdown-body" innerHTML={renderMarkdown(props.item.body)} />
+        <div
+          class="chat-agent-text markdown-body"
+          innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
+        />
       </Match>
       <Match when={cls() === "reasoning_card"}>
         <div class="chat-reasoning-text markdown-body" innerHTML={renderMarkdown(props.item.body)} />
@@ -257,6 +247,10 @@ function Composer(props: {
   threadId: number;
   provider: string;
   onChangeProvider: (provider: string) => void;
+  // Model to apply to this chat's session once it first becomes ready. Set only
+  // for freshly created chats so existing chats keep their own model choice.
+  seedModel?: string;
+  onSeeded?: () => void;
 }) {
   const [text, setText] = createSignal("");
   // Pasted blobs saved to the workspace as files; sent as path references so the
@@ -269,8 +263,34 @@ function Composer(props: {
   const sessionId = () => slice().session?.session_id ?? null;
   const models = () => MODELS[props.provider] ?? [];
 
-  const [model, setModel] = createSignal("");
+  // Readiness watchdog: a session that never reports ready (e.g. the agent CLI
+  // hangs on a first-run prompt) shouldn't read as an infinite "starting…" dead
+  // end. After a grace period we say so plainly — sending still works, since a
+  // message typed while starting is queued and delivered once the turn goes idle.
+  const [slowStart, setSlowStart] = createSignal(false);
+  createEffect(() => {
+    if (!busy()) {
+      setSlowStart(false);
+      return;
+    }
+    const timer = setTimeout(() => setSlowStart(true), 15000);
+    onCleanup(() => clearTimeout(timer));
+  });
+
+  const [model, setModel] = createSignal(props.seedModel ?? "");
   const [effort, setEffort] = createSignal("high");
+
+  // Seed a new chat's model: once its session is live, push the default model so
+  // the chat has something to go off of. Runs once, then hands back to the user.
+  let seeded = false;
+  createEffect(() => {
+    const sid = sessionId();
+    if (seeded || !props.seedModel || sid == null) return;
+    seeded = true;
+    setModel(props.seedModel);
+    void send({ type: "set_session_model", session_id: sid, model: props.seedModel }).catch(() => {});
+    props.onSeeded?.();
+  });
 
   const contextPercent = createMemo(() => {
     const msgs = slice().messages;
@@ -518,7 +538,13 @@ function Composer(props: {
               </span>
             </Show>
             <span class="chat-status-hint">
-              {running() ? "running…" : busy() ? "starting…" : "Enter to queue · ⌘/Ctrl+Enter to steer"}
+              {running()
+                ? "running…"
+                : busy()
+                  ? slowStart()
+                    ? "still starting — messages you send will be queued"
+                    : "starting…"
+                  : "Enter to queue · ⌘/Ctrl+Enter to steer"}
             </span>
             <Show when={running()}>
               <button
@@ -573,7 +599,16 @@ export default function ChatSurface(props: { workspace: string }) {
   );
   const [openFiles, setOpenFiles] = createSignal<string[]>([]);
   const [view, setView] = createSignal<CenterView>({ kind: "chat" });
-  const [newProvider, setNewProvider] = createSignal<string>("codex");
+  const [newProvider, setNewProvider] = createSignal<string>(prefsStore.state.defaultProvider);
+  // threadId -> model to apply once that (freshly created) chat's session is live.
+  const [pendingSeed, setPendingSeed] = createSignal<Record<number, string>>({});
+  function clearSeed(threadId: number) {
+    setPendingSeed((p) => {
+      if (!(threadId in p)) return p;
+      const { [threadId]: _drop, ...rest } = p;
+      return rest;
+    });
+  }
 
   // Let the right-panel Browse/Changes open files into the center.
   onMount(() => registerOpenFile((ws, path) => {
@@ -598,7 +633,13 @@ export default function ChatSurface(props: { workspace: string }) {
         setView({ kind: "chat" });
         void threadsStore.refresh(ws).then((all) => {
           const list = all.filter((t) => t.provider !== "shell");
-          if (list.length === 0) return;
+          // Every workspace always has at least one chat: if none exist yet
+          // (freshly created, or all closed), start one so the chat UI is never
+          // empty.
+          if (list.length === 0) {
+            void newChat();
+            return;
+          }
           const current = nav.selectedChatThread();
           if (current == null || !list.some((t) => t.id === current)) {
             selectThread(list[0]);
@@ -634,6 +675,9 @@ export default function ChatSurface(props: { workspace: string }) {
       });
       const list = await threadsStore.refresh(props.workspace);
       if (res.type === "chat_thread_created") {
+        // Seed the new chat with the default model so it opens ready to run.
+        const seed = prefsStore.seedModelFor(chosen);
+        if (seed) setPendingSeed((p) => ({ ...p, [res.thread.id]: seed }));
         const created = list.find((t) => t.id === res.thread.id);
         if (created) selectThread(created);
       }
@@ -645,9 +689,16 @@ export default function ChatSurface(props: { workspace: string }) {
   async function closeThread(thread: ArchcarChatThread) {
     try {
       await send({ type: "close_chat_thread", thread_id: thread.id });
-      const list = await threadsStore.refresh(props.workspace);
+      const all = await threadsStore.refresh(props.workspace);
+      const list = all.filter((t) => t.provider !== "shell");
+      // A workspace always keeps at least one chat: closing the last one opens a
+      // fresh one rather than dropping to an empty surface.
+      if (list.length === 0) {
+        void newChat();
+        return;
+      }
       if (nav.selectedChatThread() === thread.id) {
-        nav.selectChatThread(list.length > 0 ? list[0].id : null);
+        nav.selectChatThread(list[0].id);
       }
     } catch {
       // non-fatal
@@ -685,11 +736,11 @@ export default function ChatSurface(props: { workspace: string }) {
             )}
           </For>
           <Show when={threads().length === 0 && openFiles().length === 0}>
-            <span class="empty-label">No chats in {titleCaseWorkspace(props.workspace)} yet</span>
+            <span class="empty-label">Starting chat in {titleCaseWorkspace(props.workspace)}…</span>
           </Show>
         </div>
       </div>
-      <Switch fallback={<div class="empty-state">Select or start a chat.</div>}>
+      <Switch fallback={<div class="empty-state">Starting chat…</div>}>
         <Match when={view().kind === "file"}>
           <FileView workspace={props.workspace} path={(view() as { path: string }).path} />
         </Match>
@@ -701,6 +752,8 @@ export default function ChatSurface(props: { workspace: string }) {
           <Composer
             threadId={activeThread()!.id}
             provider={activeThread()!.provider}
+            seedModel={pendingSeed()[activeThread()!.id]}
+            onSeeded={() => clearSeed(activeThread()!.id)}
             onChangeProvider={(p) => {
               if (p !== activeThread()!.provider) void newChat(p);
             }}

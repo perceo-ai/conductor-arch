@@ -54,6 +54,7 @@ export type ArchcarRequest =
   | { type: "create_checkpoint"; workspace: string; message: string }
   | { type: "restore_checkpoint"; workspace: string; checkpoint_id: number }
   | { type: "get_workspace_processes"; workspace: string }
+  | { type: "get_workspace_script_prompt"; workspace: string; kind: "setup" | "run" }
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
@@ -315,6 +316,7 @@ export type ArchcarResponse =
   | { type: "checkpoints"; workspace: string; checkpoints: Checkpoint[] }
   | { type: "checkpoint_saved"; checkpoint: Checkpoint }
   | { type: "workspace_processes"; workspace: string; text: string }
+  | { type: "workspace_script_prompt"; workspace: string; kind: string; prompt: string }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }

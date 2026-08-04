@@ -13,6 +13,7 @@ interface MockApi {
   ensureEvents: ReturnType<typeof vi.fn>;
   onEvent: ReturnType<typeof vi.fn>;
   onWindowFocus: ReturnType<typeof vi.fn>;
+  pathExists: ReturnType<typeof vi.fn>;
   window: { minimize: () => void; toggleMaximize: () => void; close: () => void };
 }
 
@@ -27,6 +28,7 @@ beforeEach(() => {
     ensureEvents: vi.fn(async () => ({ ok: true })),
     onEvent: vi.fn(() => offEvent),
     onWindowFocus: vi.fn(() => () => {}),
+    pathExists: vi.fn(async () => ({ exists: true })),
     window: { minimize: () => {}, toggleMaximize: () => {}, close: () => {} },
   };
   (globalThis as unknown as { window: { archductor: MockApi } }).window = { archductor: api };
@@ -58,5 +60,49 @@ describe("startStore", () => {
     // A subsequent call re-attempts (memo was cleared) and now succeeds.
     await expect(startStore()).resolves.toBeUndefined();
     expect(api.ensureEvents).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("refreshInventory: missing-on-disk repositories", () => {
+  const repoSummary = (id: number, name: string, root: string) => ({
+    id,
+    name,
+    root_path: root,
+    default_branch: "main",
+    remote_name: "origin",
+    active_workspaces: 0,
+    total_workspaces: 0,
+  });
+
+  beforeEach(() => {
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "list_repositories") {
+        return {
+          type: "repositories",
+          repositories: [
+            repoSummary(1, "here", "/exists/here"),
+            repoSummary(2, "gone", "/deleted/gone"),
+          ],
+        };
+      }
+      return { type: "workspaces", workspaces: [] };
+    });
+    api.pathExists.mockImplementation(async (p: string) => ({
+      exists: p === "/exists/here",
+    }));
+  });
+
+  it("keeps repos whose root is missing visible so they can be removed", async () => {
+    const { refreshInventory, repositoriesStore } = await import("./index");
+    await refreshInventory();
+
+    // A missing-on-disk repo stays in the sidebar (not hidden) so the user can
+    // remove the dead project via the right-click "Remove project" action.
+    expect(repositoriesStore.state.order).toEqual(["here", "gone"]);
+    expect(repositoriesStore.row("gone")).toBeTruthy();
+    // refreshInventory itself does not send any destructive remove_repository RPC.
+    expect(api.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "remove_repository" }),
+    );
   });
 });

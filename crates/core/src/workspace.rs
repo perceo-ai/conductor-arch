@@ -6402,7 +6402,7 @@ mutation($threadId: ID!) {{
         let mut stmt = self.conn.prepare(
             "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
              FROM chat_threads
-             WHERE workspace_id = ?1
+             WHERE workspace_id = ?1 AND status != 'closed'
              ORDER BY updated_at DESC, id DESC",
         )?;
         let threads = stmt

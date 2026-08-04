@@ -70,7 +70,11 @@ body {
   position: fixed;
   top: 0;
   left: 0;
+  /* Match the 52px sidebar-chrome band and center within it so the window
+     buttons line up vertically with the back/forward/toggle buttons. */
+  height: 52px;
   display: flex;
+  align-items: center;
   gap: 2px;
   z-index: 100;
   -webkit-app-region: no-drag;
@@ -99,6 +103,7 @@ body {
 
 /* --- sidebar --- */
 .sidebar {
+  position: relative;
   width: 320px;
   min-width: 320px;
   display: flex;
@@ -106,6 +111,41 @@ body {
   min-height: 0;
   border-right: 1px solid var(--lc-border);
   background: var(--lc-surface-muted);
+}
+
+/* --- draggable column resize handle --- */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 10;
+  cursor: col-resize;
+}
+.resize-handle-right {
+  right: -4px;
+}
+.resize-handle-left {
+  left: -4px;
+}
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.resize-handle:hover::after,
+body.resizing-col .resize-handle::after {
+  background: var(--lc-accent, #4b7bec);
+}
+body.resizing-col {
+  cursor: col-resize;
+  user-select: none;
 }
 .sidebar.collapsed {
   width: 0;
@@ -298,10 +338,11 @@ body {
 }
 .kanban-board {
   flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: row;
   gap: 12px;
-  align-items: flex-start;
+  align-items: stretch;
   overflow: auto;
 }
 .kanban-column {
@@ -309,6 +350,8 @@ body {
   flex-direction: column;
   gap: 8px;
   flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 .kanban-column-header {
   display: flex;
@@ -404,6 +447,7 @@ body {
   overflow: hidden;
 }
 .ws-right-panel {
+  position: relative;
   flex: 0 0 340px;
   width: 340px;
   display: flex;
@@ -772,29 +816,82 @@ body {
 .chat-inline-event {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  margin-bottom: 3px;
 }
-.chat-inline-event-action {
+.chat-inline-event-header {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 6px;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  color: var(--lc-text, #d4d4d4);
-  cursor: pointer;
-  font-weight: 500;
+  gap: 4px;
 }
+/* Small square toggle (GTK inline_event expander). */
 .chat-inline-event-expander {
   flex: 0 0 auto;
-  color: var(--lc-text-muted, #8a8a8a);
-  width: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid #303030;
+  background: #171717;
+  color: #8f8f8f;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.chat-inline-event-expander:hover:not(:disabled) {
+  background: #202020;
+  border-color: #424242;
+  color: #e7e7e7;
+}
+.chat-inline-event-expander:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Verb (Ran / Read / Edited …). */
+.chat-inline-event-action {
+  flex: 0 0 auto;
+  color: #8f8f8f;
+  font-size: 11px;
+  font-weight: 600;
+}
+/* Content chip: the command / filename in mono, GTK chip look. */
+.chat-inline-event-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  border: 1px solid #343434;
+  border-radius: 3px;
+  background: #191919;
+  padding: 0 5px;
+  overflow: hidden;
+}
+.chat-inline-event-chip-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bdbdbd;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
 }
 .chat-inline-event-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  margin-left: 20px;
+  border: 1px solid #2a2a2a;
+  border-radius: 5px;
+  background: #181818;
+  color: #c9c9c9;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 6px 8px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 .chat-inline-event-code,
 .chat-inline-event-code-rows {
@@ -1093,6 +1190,21 @@ body {
   flex: 1;
   word-break: break-word;
 }
+.toast-item-action {
+  flex: none;
+  background: var(--lc-hover, rgba(255, 255, 255, 0.08));
+  border: none;
+  border-radius: 6px;
+  color: var(--lc-text, #e6e6e6);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+.toast-item-action:hover {
+  background: var(--lc-hover-strong, rgba(255, 255, 255, 0.14));
+}
 .toast-item-close {
   flex: none;
   background: none;
@@ -1161,7 +1273,6 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--lc-border, #2a2a2a);
 }
 
 /* ---- PR status bar ---- */
@@ -1173,7 +1284,7 @@ body {
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
-  background: #1c1c1c;
+  background: transparent;
 }
 .ws-pr-chip {
   flex: 0 0 auto;
@@ -1251,48 +1362,123 @@ body {
 }
 
 /* ---- Terminal dock (collapsible, tabbed) ---- */
-.ws-term-dock {
+/* ---- Run console (Setup / Run / terminals) — GTK ws_run_console ---- */
+.ws-run-section {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   border-top: 1px solid var(--lc-border, #2a2a2a);
 }
-.ws-term-dock-expanded {
-  flex: 0 0 40%;
-  min-height: 160px;
+.ws-run-section-expanded {
+  flex: 0 0 42%;
+  min-height: 180px;
 }
-.ws-term-tabbar {
+.ws-run-tab-bar {
   flex: 0 0 auto;
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  background: #1a1a1a;
+  background: #181818;
+  border-bottom: 1px solid var(--lc-border, #232323);
 }
-.ws-term-tab {
+.ws-run-tabs-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+}
+/* Setup/Run/terminal tab buttons — flat pill, GTK ws-run-tab-btn. */
+.ws-run-tab-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: 6px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8e8e8e;
   font-size: 12px;
-  color: var(--lc-text-muted, #9a9a9a);
-  cursor: pointer;
+  font-weight: 600;
   white-space: nowrap;
+  cursor: pointer;
 }
-.ws-term-tab-active {
-  background: #262626;
-  color: var(--lc-text, #e4e4e4);
+.ws-run-tab-btn:hover {
+  background: #242424;
+  color: #e4e4e4;
 }
-.ws-term-tabbar-spacer {
-  flex: 1 1 auto;
+.ws-run-tab-active {
+  background: #232323;
+  color: #e8e8e8;
 }
-.ws-term-body {
+.ws-run-terminal-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-run-collapse-btn {
+  flex: 0 0 auto;
+  min-width: 30px;
+  min-height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8e8e8e;
+  cursor: pointer;
+}
+.ws-run-collapse-btn:hover {
+  background: #242424;
+  color: #e4e4e4;
+}
+.ws-run-body {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   position: relative;
+  overflow: hidden;
+}
+/* Setup/Run prompt tab (GTK ws-run-panel). */
+.ws-run-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+.ws-run-prompt {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 8px;
+  background: #131313;
+  color: #c0c0c0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+}
+.ws-run-prompt-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.ws-run-modal-title {
+  flex: 1 1 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 12px;
+  font-weight: 600;
 }
 .ws-term-pane {
   flex: 1 1 auto;
@@ -1306,12 +1492,24 @@ body {
 /* ---- Composer pickers ---- */
 .chat-picker {
   font-size: 11px;
-  padding: 2px 4px;
+  /* Room on the right for our own caret; the native arrow is removed below. */
+  padding: 3px 20px 3px 8px;
   border-radius: 6px;
   border: 1px solid var(--lc-border, #2f2f2f);
-  background: #1e1e1e;
+  background-color: #1e1e1e;
   color: var(--lc-text, #d4d4d4);
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  /* Chevron drawn as an inline SVG so it renders identically everywhere (no
+     font/emoji dependency) and sits aligned inside the padding. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a8a8a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+.chat-picker:hover {
+  border-color: var(--lc-border-strong, #3a3a3a);
 }
 .ws-new-provider {
   margin-left: 4px;
@@ -1476,13 +1674,12 @@ body {
   padding: 0;
 }
 
-/* Inline-event card category glyph. */
-.chat-inline-event-icon {
-  display: inline-block;
-  width: 1.2em;
-  text-align: center;
-  margin-right: 4px;
-  opacity: 0.85;
+/* Inline-event status tints (GTK chat-inline-event-loading/-failed). */
+.chat-inline-event-failed .chat-inline-event-action {
+  color: #f0a8a8;
+}
+.chat-inline-event-loading .chat-inline-event-action {
+  color: #b6c7e8;
 }
 
 /* Composer attachment chips (large pastes saved as files). */

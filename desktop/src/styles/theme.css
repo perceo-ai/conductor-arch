@@ -349,7 +349,9 @@ body,
 input {
     background-color: #151515;
     color: #e4e4e4;
-    border: 1px solid #343434;
+    /* Flat, filled inputs (GTK look): the fill provides the affordance, so the
+       border stays invisible until focus instead of boxing every field. */
+    border: 1px solid transparent;
     border-radius: 8px;
     font-size: 13px;
     padding: 7px 10px;
@@ -358,7 +360,7 @@ input {
 .sidebar-search:focus,
 .composer-bar input:focus,
 input:focus {
-    border-color: #8a8a8a;
+    border-color: #4b7bec;
     box-shadow: none;
 }
 
@@ -1890,7 +1892,7 @@ button.ws-tab-shell {
 .ws-run-header {
     min-height: 42px;
     padding: 10px 12px;
-    background-color: #181818;
+    background-color: transparent;
     border-bottom: 1px solid #232323;
 }
 .chat-header-row {

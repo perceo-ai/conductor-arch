@@ -190,6 +190,10 @@ pub enum ArchcarRequest {
     GetWorkspaceProcesses {
         workspace: String,
     },
+    GetWorkspaceScriptPrompt {
+        workspace: String,
+        kind: String,
+    },
     ListReviewComments {
         workspace: String,
     },
@@ -474,6 +478,11 @@ pub enum ArchcarResponse {
     WorkspaceProcesses {
         workspace: String,
         text: String,
+    },
+    WorkspaceScriptPrompt {
+        workspace: String,
+        kind: String,
+        prompt: String,
     },
     ReviewComments {
         workspace: String,
@@ -849,6 +858,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetWorkspaceProcesses { workspace } => {
             format!("get_workspace_processes workspace={workspace}")
         }
+        ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
+            format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
+        }
         ArchcarRequest::ListReviewComments { workspace } => {
             format!("list_review_comments workspace={workspace}")
         }
@@ -1120,6 +1132,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             format!("workspace_processes workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::WorkspaceScriptPrompt { workspace, kind, prompt } => {
+            format!("workspace_script_prompt workspace={workspace} kind={kind} bytes={}", prompt.len())
         }
         ArchcarResponse::ReviewComments { workspace, comments } => {
             format!("review_comments workspace={workspace} count={}", comments.len())

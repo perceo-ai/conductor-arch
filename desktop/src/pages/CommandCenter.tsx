@@ -8,6 +8,11 @@ import { ChangesRows } from "./WorkspaceChanges";
 import WorkspacePrBar from "./WorkspacePrBar";
 import TerminalDock from "./TerminalDock";
 import { openFileInCenter } from "./openFileBridge";
+import ResizeHandle from "@/components/ResizeHandle";
+import { createPersistedWidth } from "@/lib/persistedWidth";
+
+const RIGHT_MIN = 280;
+const RIGHT_MAX = 640;
 
 // Workspace command center — port of workspace_command_center.rs. Three regions:
 //   center  : draggable top bar (repo > branch) + chat/file surface + composer
@@ -48,8 +53,10 @@ function TopBar(props: {
 }
 
 function RightPanel(props: { workspace: string }) {
+  const [width, setWidth] = createPersistedWidth("rightPanel.width", 340, RIGHT_MIN, RIGHT_MAX);
   return (
-    <aside class="ws-right-panel">
+    <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
+      <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
       <WorkspacePrBar workspace={props.workspace} />
       <div class="ws-right-mid">
         <div class="command-center-strip">

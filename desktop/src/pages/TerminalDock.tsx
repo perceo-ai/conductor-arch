@@ -1,94 +1,188 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
-import { terminalStore } from "@/store";
+import { terminalStore, nav, threadsStore, toastsStore } from "@/store";
 import TerminalPanel from "./TerminalPanel";
 
-// Right-panel bottom region — port of the GTK run console (ws_run_console).
-// A collapsible dock with a tab strip of PTY-backed terminals. Shells are
-// spawned lazily (on first expand or "+"), so an unopened workspace never
-// starts a process. Terminal panels stay mounted across tab switches to keep
-// their xterm buffers and sessions alive; only the active tab is shown.
+// Right-panel bottom region — port of the GTK run console (ws_run_console). A
+// collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
+// number of PTY-backed terminals. Setup/Run show the generated "build this
+// script" prompt and queue it into the active chat; terminals are spawned lazily
+// so an unopened workspace never starts a process.
 
 const MAX_TERMINALS = 6;
 
+// Active tab is either a prompt tab or a specific terminal id.
+type RunTab = "setup" | "run" | { term: string };
+
+function providerKind(provider: string): "codex" | "claude" | "shell" {
+  return provider === "claude" || provider === "shell" ? provider : "codex";
+}
+
+// Setup/Run prompt tab: fetches the workspace's script-build prompt and queues it
+// into the selected chat as a draft (GTK's workspace_prompt_tab_view).
+function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
+  const [prompt] = createResource(
+    () => [props.workspace, props.kind] as const,
+    async ([ws, kind]) => {
+      try {
+        const res = await send({ type: "get_workspace_script_prompt", workspace: ws, kind });
+        return res.type === "workspace_script_prompt" ? res.prompt : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+  const heading = () => (props.kind === "setup" ? "Setup Prompt" : "Run Prompt");
+  const modalTitle = () => (props.kind === "setup" ? "Build Setup Script" : "Build Run Script");
+  const buttonLabel = () => (props.kind === "setup" ? "Queue Bootstrap Draft" : "Queue Launch Draft");
+
+  function queueDraft() {
+    const text = (prompt() ?? "").trim();
+    if (!text) return;
+    const tid = nav.selectedChatThread();
+    const thread = tid != null ? threadsStore.list(props.workspace).find((t) => t.id === tid) : undefined;
+    if (!thread) {
+      toastsStore.push("Open a chat to queue this prompt.", "info");
+      return;
+    }
+    void send({
+      type: "queue_chat_input",
+      thread_id: thread.id,
+      input: text,
+      visible_input: text,
+      kind: "user",
+      session_kind: providerKind(thread.provider),
+    })
+      .then(() => toastsStore.push(`${heading()} queued to chat.`, "info"))
+      .catch(() => {});
+  }
+
+  return (
+    <div class="ws-run-panel">
+      <div class="detail-label">{heading()}</div>
+      <pre class="ws-run-prompt">{prompt.loading ? "Loading…" : prompt()}</pre>
+      <div class="ws-run-prompt-actions">
+        <span class="ws-run-modal-title">{modalTitle()}</span>
+        <button class="suggested-action" onClick={queueDraft} disabled={!(prompt() ?? "").trim()}>
+          {buttonLabel()}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function TerminalDock(props: { workspace: string }) {
-  // Expanded by default so the terminal dock is visible in the workspace panel
-  // (matches the old GTK run console). Shells are still spawned lazily — the
-  // dock shows an empty-state prompt until the first terminal is opened.
+  // Expanded by default so the run console is visible (matches GTK). Terminals
+  // are still spawned lazily; the Setup tab is the default landing tab.
   const [expanded, setExpanded] = createSignal(true);
+  const [tab, setTab] = createSignal<RunTab>("setup");
   const terms = () => terminalStore.terminals(props.workspace);
-  const active = () => terminalStore.activeId(props.workspace);
+  const activeTermId = () => {
+    const t = tab();
+    return typeof t === "object" ? t.term : null;
+  };
 
   function addTerm() {
     if (terms().length >= MAX_TERMINALS) return;
-    terminalStore.addTerminal(props.workspace);
+    const id = terminalStore.addTerminal(props.workspace);
     void send({ type: "spawn_session", workspace: props.workspace, kind: "shell" }).catch(() => {});
+    setTab({ term: id });
+    setExpanded(true);
   }
 
   function closeTerm(tabId: string) {
     const sid = terminalStore.sessionId(props.workspace, tabId);
     if (sid != null) void send({ type: "kill_session", session_id: sid }).catch(() => {});
     terminalStore.removeTerminal(props.workspace, tabId);
+    if (activeTermId() === tabId) setTab("setup");
   }
 
   function toggle() {
-    const next = !expanded();
-    setExpanded(next);
-    if (next && terms().length === 0) addTerm();
+    setExpanded((e) => !e);
   }
 
   return (
-    <div class="ws-term-dock" classList={{ "ws-term-dock-expanded": expanded() }}>
-      <div class="ws-term-tabbar">
-        <For each={terms()}>
-          {(t, i) => (
-            <div
-              class="ws-term-tab"
-              classList={{ "ws-term-tab-active": active() === t.id }}
-              onClick={() => {
-                terminalStore.setActive(props.workspace, t.id);
-                setExpanded(true);
-              }}
-            >
-              <span class="ws-term-tab-label">Terminal {i() + 1}</span>
-              <button
-                class="ws-tab-close-button"
-                title="Close terminal"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTerm(t.id);
+    <div class="ws-run-section" classList={{ "ws-run-section-expanded": expanded() }}>
+      <div class="ws-run-tab-bar">
+        <div class="ws-run-tabs-row">
+          <button
+            class="ws-run-tab-btn"
+            classList={{ "ws-run-tab-active": tab() === "setup" }}
+            onClick={() => {
+              setTab("setup");
+              setExpanded(true);
+            }}
+          >
+            Setup
+          </button>
+          <button
+            class="ws-run-tab-btn"
+            classList={{ "ws-run-tab-active": tab() === "run" }}
+            onClick={() => {
+              setTab("run");
+              setExpanded(true);
+            }}
+          >
+            Run
+          </button>
+          <For each={terms()}>
+            {(t, i) => (
+              <div
+                class="ws-run-tab-btn ws-run-terminal-tab"
+                classList={{ "ws-run-tab-active": activeTermId() === t.id }}
+                onClick={() => {
+                  setTab({ term: t.id });
+                  setExpanded(true);
                 }}
               >
-                ×
-              </button>
-            </div>
-          )}
-        </For>
-        <button
-          class="ui-button-icon ws-term-add"
-          title="New terminal"
-          disabled={terms().length >= MAX_TERMINALS}
-          onClick={addTerm}
-        >
-          +
-        </button>
-        <div class="ws-term-tabbar-spacer" />
-        <button class="ui-button-icon ws-term-collapse" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
+                <span class="ws-run-terminal-tab-label">Terminal {i() + 1}</span>
+                <button
+                  class="ws-tab-close-button"
+                  title="Close terminal"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeTerm(t.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+          </For>
+          <button
+            class="ui-button-icon ws-run-add"
+            title="New terminal"
+            disabled={terms().length >= MAX_TERMINALS}
+            onClick={addTerm}
+          >
+            +
+          </button>
+        </div>
+        <button class="ws-run-collapse-btn" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
           {expanded() ? "▾" : "▴"}
         </button>
       </div>
       <Show when={expanded()}>
-        <div class="ws-term-body">
-          <For each={terms()}>
-            {(t) => (
-              <div class="ws-term-pane" classList={{ "ws-term-pane-hidden": active() !== t.id }}>
-                <TerminalPanel workspace={props.workspace} tabId={t.id} />
-              </div>
-            )}
-          </For>
-          <Show when={terms().length === 0}>
-            <div class="empty-state">No terminals. Press + to open one.</div>
-          </Show>
+        <div class="ws-run-body">
+          <Switch>
+            <Match when={tab() === "setup"}>
+              <PromptTab workspace={props.workspace} kind="setup" />
+            </Match>
+            <Match when={tab() === "run"}>
+              <PromptTab workspace={props.workspace} kind="run" />
+            </Match>
+            <Match when={activeTermId() != null}>
+              {/* Keep every terminal mounted so xterm buffers/sessions survive tab
+                  switches; only the active pane is shown. */}
+              <For each={terms()}>
+                {(t) => (
+                  <div class="ws-term-pane" classList={{ "ws-term-pane-hidden": activeTermId() !== t.id }}>
+                    <TerminalPanel workspace={props.workspace} tabId={t.id} />
+                  </div>
+                )}
+              </For>
+            </Match>
+          </Switch>
         </div>
       </Show>
     </div>

@@ -1,6 +1,11 @@
 import { createResource, createSignal, For, Show } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, actions } from "@/store";
 import { repoAvatar } from "@/bridge/client";
+import ResizeHandle from "./ResizeHandle";
+import { createPersistedWidth } from "@/lib/persistedWidth";
+
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 520;
 
 // Left sidebar: nav group (Dashboard/History) + projects list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
@@ -15,6 +20,10 @@ function WorkspaceRow(props: { name: string }) {
       class="workspace-row-shell"
       classList={{ selected: selected() }}
       onClick={() => nav.selectWorkspace(props.name)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        dialogs.open({ kind: "workspace-actions", workspace: props.name });
+      }}
     >
       <span class="row-name">{props.name}</span>
       <span class="row-meta">
@@ -63,7 +72,15 @@ function ProjectGroup(props: { repo: string }) {
     );
   return (
     <div class="project-group">
-      <div class="project-row">
+      <div
+        class="project-row"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (window.confirm(`Remove project "${props.repo}"? This drops it (and its workspace records) from Archductor. Local files are left alone.`)) {
+            void actions.removeRepository(props.repo).catch(() => {});
+          }
+        }}
+      >
         <ProjectAvatar repo={props.repo} />
         <span class="project-name">{props.repo}</span>
         <button
@@ -80,8 +97,13 @@ function ProjectGroup(props: { repo: string }) {
 }
 
 export default function Sidebar(props: { collapsed: boolean; onToggle: () => void }) {
+  const [width, setWidth] = createPersistedWidth("sidebar.width", 320, SIDEBAR_MIN, SIDEBAR_MAX);
   return (
-    <aside class="sidebar" classList={{ collapsed: props.collapsed }}>
+    <aside
+      class="sidebar"
+      classList={{ collapsed: props.collapsed }}
+      style={props.collapsed ? undefined : { width: `${width()}px`, "min-width": `${width()}px` }}
+    >
       <div class="sidebar-chrome drag-region">
         {/* Left third of this row is left clear for the window controls (see
             .window-controls, top-left). Back/forward + the sidebar toggle sit on
@@ -146,6 +168,10 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           <For each={repositoriesStore.state.order}>{(repo) => <ProjectGroup repo={repo} />}</For>
         </Show>
       </div>
+
+      <Show when={!props.collapsed}>
+        <ResizeHandle edge="right" width={width} min={SIDEBAR_MIN} max={SIDEBAR_MAX} onChange={setWidth} />
+      </Show>
     </aside>
   );
 }
