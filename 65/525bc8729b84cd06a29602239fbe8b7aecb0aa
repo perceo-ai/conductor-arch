@@ -1,0 +1,120 @@
+desktop/src/pages/ChatSurface.tsx
+  s_765332bbaba62a::t_cf9e28fbb1d32c 19
+  s_765332bbaba62a::t_ad76ee7b164f1d 99-102,104,117-132,135,138
+  s_a758cda7668b4d::t_60c2915aafbbea 636-642
+  s_a758cda7668b4d::t_c21e6c812348d3 250-253,280,283-293
+  s_a758cda7668b4d::t_344411a7f8e43e 692-699,701
+  s_765332bbaba62a::t_ec223023d77a5a 108,133
+  s_a758cda7668b4d::t_6a94bbd475aa97 755-756
+  s_765332bbaba62a::t_54336bce036e48 1
+  s_765332bbaba62a::t_02a285775df9dc 541-547
+  s_a758cda7668b4d::t_2f41209adaff95 678-680
+  s_765332bbaba62a::t_2d57e8d35eaa27 200-203
+  s_a758cda7668b4d::t_bf605c1356aa8a 2-3
+  s_765332bbaba62a::t_00ac3145b5cbf9 91-94
+  s_a758cda7668b4d::t_002c322496c675 739,743
+  s_765332bbaba62a::t_dc33d559ecf474 266-279
+  s_765332bbaba62a::t_5d241c097520fe 105-107
+  s_a758cda7668b4d::t_ff1fde0280221e 602-611
+  s_a758cda7668b4d::t_aaeebd3cf81483 294
+desktop/src/store/toasts.ts
+  s_765332bbaba62a::t_6609b83db46e28 6-10,15,24,26
+desktop/src/store/index.ts
+  s_a758cda7668b4d::t_4bcf39755fa8c5 24-25
+  s_765332bbaba62a::t_fc8531a7118a0e 32-36
+  s_765332bbaba62a::t_fcd5b8c8d0fa9b 1
+desktop/src/store/startStore.test.ts
+  s_765332bbaba62a::t_ff1f7fd38c604d 95,99-101,103
+  s_a758cda7668b4d::t_f78f5769bcb800 31
+  s_a758cda7668b4d::t_a62629255c2e22 65-94,96-98,102,104-108
+  s_a758cda7668b4d::t_1ecb1744d0457a 16
+desktop/src/components/ResizeHandle.tsx
+  s_765332bbaba62a::t_99cb1b943f8e7f 1-39
+desktop/src/styles/theme.css
+  s_765332bbaba62a::t_aa88369ee17abf 352-354,363
+  s_765332bbaba62a::t_b0235dde7a7582 1895
+crates/core/src/archcar/server.rs
+  s_765332bbaba62a::t_3594301ca6efde 811-823
+  s_765332bbaba62a::t_6d67260dfe3831 683-686
+  s_765332bbaba62a::t_3ce32b32ede00b 1766-1807
+desktop/src/store/repositories.ts
+  s_a758cda7668b4d::t_6294c378c80470 54-66
+desktop/src/bridge/protocol.ts
+  s_765332bbaba62a::t_022472f6c0037f 319
+  s_765332bbaba62a::t_9d1b2493627282 57
+desktop/src/styles/base.css
+  s_765332bbaba62a::t_9c64ca7d675a74 1287
+  s_765332bbaba62a::t_de392fdf6f06e1 450
+  s_765332bbaba62a::t_c0f592cef6f88f 819-820,822,826,828,831-880,885-894
+  s_765332bbaba62a::t_205ac59b16a197 1193-1207
+  s_765332bbaba62a::t_5958ed31a1fa83 106,115-148
+  s_765332bbaba62a::t_b1515be83d5f3a 1495-1496,1499,1502-1512
+  s_765332bbaba62a::t_05f058d53d71d0 149,1677-1682
+  s_765332bbaba62a::t_c44f83edf33aed 73-75,77
+  s_765332bbaba62a::t_f032b392245d6b 1365-1366,1370,1373-1375,1377,1384-1385,1387-1397,1401-1405,1407,1409,1411-1413,1415-1417,1419-1437,1442-1481
+  s_765332bbaba62a::t_8e979ceb2b74a3 341,345,353-354
+desktop/src/pages/TerminalDock.tsx
+  s_765332bbaba62a::t_9d6ff1172fab3f 1,3,6-10,14-73,75-76,78,80-83,87,89-90,97,101,105-135,138-161,166-185
+desktop/src/pages/Settings.tsx
+  s_a758cda7668b4d::t_83be2f3093a3dc 2,4
+  s_a758cda7668b4d::t_f69923977309c0 34,36-37,39-52
+  s_a758cda7668b4d::t_0a93cf31c50315 35,38
+desktop/src/components/Sidebar.tsx
+  s_765332bbaba62a::t_f7a6f7292a7be4 171-174
+  s_765332bbaba62a::t_79496a15f25879 75-83
+  s_765332bbaba62a::t_16b35359c57fcd 100,102-106
+  s_765332bbaba62a::t_df1cd0f06343ea 2
+  s_765332bbaba62a::t_f3981f8d70090c 4-8
+  s_765332bbaba62a::t_fc6ab5d91a5d80 23-26
+desktop/src/pages/CommandCenter.tsx
+  s_765332bbaba62a::t_77fe4a5ef9a63b 11-15
+  s_765332bbaba62a::t_0510f1b2663899 56,58-59
+desktop/src/lib/timeline.ts
+  s_765332bbaba62a::t_68f94678d7f042 2,10-12
+crates/core/src/archcar/protocol.rs
+  s_765332bbaba62a::t_5064f109af227d 482-486
+  s_765332bbaba62a::t_b9e6a9e44ec38f 861-863
+  s_765332bbaba62a::t_f9ca899d35dd3c 193-196
+  s_765332bbaba62a::t_48caec662bd658 1136-1138
+desktop/src/components/Toasts.tsx
+  s_765332bbaba62a::t_2e876c76a59bfe 1,12-24
+desktop/src/lib/models.ts
+  s_a758cda7668b4d::t_74294a5f435c70 1-25
+desktop/src/store/prefs.test.ts
+  s_a758cda7668b4d::t_efc943f58fbc0e 1-31
+desktop/src/lib/persistedWidth.ts
+  s_765332bbaba62a::t_65f11ffac84d4c 1-26
+desktop/src/store/threads.ts
+  s_765332bbaba62a::t_340f47b453dee5 31-35
+desktop/src/store/prefs.ts
+  s_a758cda7668b4d::t_a4b016f26531fb 1-69
+crates/core/src/workspace.rs
+  s_765332bbaba62a::t_06cbb71ccc60c9 6405
+desktop/src/lib/chatFormat.ts
+  s_765332bbaba62a::t_e0e1ca7540a65b 1-10,15-19,25-26,41,43-49,64-91
+  s_765332bbaba62a::t_868e324049f5bd 11-14,20-24,27-40,42,50-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "65525bc8729b84cd06a29602239fbe8b7aecb0aa",
+  "prompts": {},
+  "sessions": {
+    "s_765332bbaba62a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3da24f26-c069-4cb7-8ac9-d999c4a016dc",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_a758cda7668b4d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7782c2e1-759e-4687-8223-1392566d863e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
