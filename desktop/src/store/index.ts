@@ -15,14 +15,26 @@ export type { RepositoryRow } from "./repositories";
 export { actions } from "./actions";
 export { dialogs } from "./dialogs";
 export type { DialogSpec } from "./dialogs";
+export { setupStore } from "./setup";
 export { threadsStore } from "./threads";
 export { terminalStore } from "./terminal";
+export { interactionsStore } from "./interactions";
+export { toastsStore } from "./toasts";
+export type { Toast } from "./toasts";
+export { prefsStore } from "./prefs";
+export type { Prefs } from "./prefs";
 export { updateMetrics, metricsEnabled } from "./metrics";
 
 let focusWired = false;
 let startPromise: Promise<void> | null = null;
 
-/** Load the workspace/repository inventory from archcar. */
+/**
+ * Load the workspace/repository inventory from archcar.
+ *
+ * A project whose root is missing on disk is intentionally left visible (not
+ * hidden) so it can be removed via the sidebar's right-click "Remove project"
+ * action — hiding it stranded a dead workspace with no way to delete it.
+ */
 export async function refreshInventory(): Promise<void> {
   await Promise.all([workspacesStore.refresh(), repositoriesStore.refresh()]);
 }

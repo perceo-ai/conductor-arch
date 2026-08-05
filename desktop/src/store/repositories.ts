@@ -51,6 +51,19 @@ export const repositoriesStore = {
     return state.byName[name];
   },
 
+  /**
+   * Drop repos from the visible order (e.g. their root is missing on disk)
+   * without deleting the record. A later refresh re-adds them, so a repo whose
+   * path returns (remounted drive, restored checkout) reappears on its own.
+   */
+  hide(names: string[]) {
+    if (names.length === 0) return;
+    const drop = new Set(names);
+    setState("order", (order) => order.filter((n) => !drop.has(n)));
+    recordUpdate("repositories.hide");
+    logState("repositories.hide", { names });
+  },
+
   async refresh(): Promise<void> {
     const res = await send({ type: "list_repositories" });
     if (res.type !== "repositories") return;

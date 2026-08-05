@@ -15,6 +15,31 @@ const api = {
   /** Ensure the event subscription is running. Idempotent. */
   ensureEvents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("archcar:subscribe"),
 
+  /** Open a native folder picker; resolves to the chosen path or null if cancelled. */
+  selectFolder: (opts?: { title?: string; defaultPath?: string }): Promise<string | null> =>
+    ipcRenderer.invoke("dialog:select-folder", opts),
+
+  /** List the signed-in user's GitHub repos via the gh CLI. */
+  listGithubRepos: (): Promise<
+    | { ok: true; repos: { nameWithOwner: string; name: string; sshUrl: string; url: string; pushedAt: string; owner: string; avatarUrl: string }[] }
+    | { ok: false; error: string }
+  > => ipcRenderer.invoke("gh:list-repos"),
+
+  /** List open GitHub issues + PRs for a repo via the gh CLI. */
+  listGithubWork: (opts: { rootPath: string }): Promise<
+    | { ok: true; items: { kind: "issue" | "pr"; number: number; title: string; updatedAt: string; author: string }[] }
+    | { ok: false; error: string }
+  > => ipcRenderer.invoke("gh:list-work", opts),
+
+  /** Check whether a filesystem path currently exists. */
+  pathExists: (p: string): Promise<{ exists: boolean }> =>
+    ipcRenderer.invoke("fs:path-exists", p),
+
+  /** Resolve a local repo's owner avatar URL from its git remote. */
+  repoAvatar: (opts: { rootPath: string; remoteName?: string }): Promise<
+    { ok: true; avatarUrl: string } | { ok: false; error: string }
+  > => ipcRenderer.invoke("gh:repo-avatar", opts),
+
   /** Register a listener for the archcar event stream. Returns an unsubscribe fn. */
   onEvent: (cb: (event: unknown) => void): (() => void) => {
     const handler = (_e: unknown, event: unknown) => cb(event);
@@ -28,6 +53,10 @@ const api = {
     ipcRenderer.on("window:focus", handler);
     return () => ipcRenderer.off("window:focus", handler);
   },
+
+  /** Open a URL in the browser or a path in the OS default app. */
+  openExternal: (target: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("shell:open-external", target),
 
   window: {
     minimize: () => ipcRenderer.send("window:minimize"),

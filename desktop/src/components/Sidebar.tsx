@@ -1,9 +1,16 @@
-import { For, Show } from "solid-js";
-import { nav, workspacesStore, dialogs } from "@/store";
+import { createResource, createSignal, For, Show } from "solid-js";
+import { nav, workspacesStore, repositoriesStore, dialogs, actions } from "@/store";
+import { repoAvatar } from "@/bridge/client";
+import ResizeHandle from "./ResizeHandle";
+import { createPersistedWidth } from "@/lib/persistedWidth";
 
-// Left sidebar: nav group (Dashboard/History) + projects header + workspace list.
-// Each workspace row reads only its own store slice, so a status change on one
-// workspace re-renders that row alone.
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 520;
+
+// Left sidebar: nav group (Dashboard/History) + projects list. Repositories are
+// the top-level rows; each repo's workspaces are nested beneath it so a repo
+// with no workspaces yet still appears. Each workspace row reads only its own
+// store slice, so a status change on one workspace re-renders that row alone.
 
 function WorkspaceRow(props: { name: string }) {
   const row = () => workspacesStore.row(props.name);
@@ -13,6 +20,10 @@ function WorkspaceRow(props: { name: string }) {
       class="workspace-row-shell"
       classList={{ selected: selected() }}
       onClick={() => nav.selectWorkspace(props.name)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        dialogs.open({ kind: "workspace-actions", workspace: props.name });
+      }}
     >
       <span class="row-name">{props.name}</span>
       <span class="row-meta">
@@ -32,13 +43,71 @@ function WorkspaceRow(props: { name: string }) {
   );
 }
 
-export default function Sidebar(props: { collapsed: boolean; onToggle: () => void }) {
+// Same owner avatar as the add-project picker, resolved from the repo's git
+// remote. Falls back to a monogram glyph while loading or for non-GitHub repos.
+function ProjectAvatar(props: { repo: string }) {
+  const row = () => repositoriesStore.row(props.repo);
+  const [broken, setBroken] = createSignal(false);
+  const [avatar] = createResource(
+    () => row(),
+    async (r) => {
+      const res = await repoAvatar({ rootPath: r.rootPath, remoteName: r.remoteName });
+      return res.ok ? res.avatarUrl : "";
+    },
+  );
   return (
-    <aside class="sidebar" classList={{ collapsed: props.collapsed }}>
-      <div class="sidebar-chrome drag-region">
-        <button class="ui-button-icon" onClick={props.onToggle} title="Hide sidebar">
-          ⇤
+    <Show
+      when={avatar() && !broken()}
+      fallback={<span class="project-avatar project-avatar-fallback">{props.repo[0]?.toUpperCase() ?? "?"}</span>}
+    >
+      <img class="project-avatar" src={avatar()} alt="" loading="lazy" onError={() => setBroken(true)} />
+    </Show>
+  );
+}
+
+function ProjectGroup(props: { repo: string }) {
+  const names = () =>
+    workspacesStore.state.order.filter(
+      (name) => workspacesStore.row(name)?.repository === props.repo,
+    );
+  return (
+    <div class="project-group">
+      <div
+        class="project-row"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (window.confirm(`Remove project "${props.repo}"? This drops it (and its workspace records) from Archductor. Local files are left alone.`)) {
+            void actions.removeRepository(props.repo).catch(() => {});
+          }
+        }}
+      >
+        <ProjectAvatar repo={props.repo} />
+        <span class="project-name">{props.repo}</span>
+        <button
+          class="ui-button-icon project-add"
+          title="New workspace"
+          onClick={() => dialogs.open({ kind: "create-workspace", repository: props.repo })}
+        >
+          +
         </button>
+      </div>
+      <For each={names()}>{(name) => <WorkspaceRow name={name} />}</For>
+    </div>
+  );
+}
+
+export default function Sidebar(props: { collapsed: boolean; onToggle: () => void }) {
+  const [width, setWidth] = createPersistedWidth("sidebar.width", 320, SIDEBAR_MIN, SIDEBAR_MAX);
+  return (
+    <aside
+      class="sidebar"
+      classList={{ collapsed: props.collapsed }}
+      style={props.collapsed ? undefined : { width: `${width()}px`, "min-width": `${width()}px` }}
+    >
+      <div class="sidebar-chrome drag-region">
+        {/* Left third of this row is left clear for the window controls (see
+            .window-controls, top-left). Back/forward + the sidebar toggle sit on
+            the right, with the toggle to the right of the arrows. */}
         <div class="spacer" />
         <button
           class="ui-button-icon"
@@ -55,6 +124,9 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           title="Forward"
         >
           ›
+        </button>
+        <button class="ui-button-icon" onClick={props.onToggle} title="Hide sidebar">
+          ⇤
         </button>
       </div>
 
@@ -90,12 +162,16 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
 
       <div class="workspace-list">
         <Show
-          when={workspacesStore.state.order.length > 0}
-          fallback={<div class="empty-state">No workspaces yet</div>}
+          when={repositoriesStore.state.order.length > 0}
+          fallback={<div class="empty-state">No projects yet</div>}
         >
-          <For each={workspacesStore.state.order}>{(name) => <WorkspaceRow name={name} />}</For>
+          <For each={repositoriesStore.state.order}>{(repo) => <ProjectGroup repo={repo} />}</For>
         </Show>
       </div>
+
+      <Show when={!props.collapsed}>
+        <ResizeHandle edge="right" width={width} min={SIDEBAR_MIN} max={SIDEBAR_MAX} onChange={setWidth} />
+      </Show>
     </aside>
   );
 }

@@ -529,6 +529,51 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::MoveQueuedChatInput { queue_id, up } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path).and_then(|store| {
+                match store.move_queued_chat_input(queue_id, up)? {
+                    Some(thread_id) => {
+                        let inputs = store.list_queued_chat_inputs(thread_id)?;
+                        Ok(Some((thread_id, inputs)))
+                    }
+                    None => Ok(None),
+                }
+            });
+            match result {
+                Ok(Some((thread_id, inputs))) => {
+                    broadcast(
+                        &mut state.lock().unwrap(),
+                        ArchcarEvent::ChatQueueUpdated { thread_id },
+                    );
+                    ArchcarResponse::QueuedChatInputs {
+                        thread_id,
+                        inputs: inputs
+                            .into_iter()
+                            .map(queued_archcar_input_from_record)
+                            .collect(),
+                    }
+                }
+                Ok(None) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveChatPaste { thread_id, text } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.save_thread_paste_attachment(thread_id, &text))
+            {
+                Ok(saved) => ArchcarResponse::ChatPasteSaved {
+                    relative_path: saved.relative_path,
+                    label: "pasted text".to_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::KillSession { session_id } => {
             match load_or_restore_session_handle(state, session_id) {
                 Ok(Some(handle)) => {
@@ -635,6 +680,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         items: projection
                             .items
                             .into_iter()
+                            // Drop parser noise (MCP loading/loaded, skill/diff
+                            // duplicates, fallback + irrelevant status cards) so the
+                            // desktop timeline matches the GTK surface.
+                            .filter(provider_projection_item_is_relevant_chat_event)
                             .map(|item| ArchcarProjectionItem {
                                 id: item.id,
                                 sequence: item.sequence,
@@ -759,6 +808,19 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path) {
+                Ok(store) => ArchcarResponse::WorkspaceScriptPrompt {
+                    prompt: workspace_script_prompt(&store, &workspace, &kind),
+                    kind,
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListReviewComments { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
@@ -825,6 +887,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetSetupReadiness { recheck } => ArchcarResponse::SetupReadiness {
+            report: crate::doctor::setup_report(recheck),
+        },
         ArchcarRequest::CreateChatThread {
             workspace,
             provider,
@@ -904,6 +969,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 })
             }) {
                 Ok(repo) => ArchcarResponse::RepositoryAdded { name: repo.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RemoveRepository { repository } => {
+            match open_lifecycle_workspace_store(state)
+                .and_then(|s| s.remove_repository(&repository))
+            {
+                Ok(()) => ArchcarResponse::RepositoryRemoved { name: repository },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1624,6 +1699,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::GetSetupReadiness { .. }
     )
 }
 
@@ -1687,6 +1763,48 @@ fn exit_code_label(exit_code: Option<i32>) -> String {
 
 /// Compose the Processes tab text (Setups / Runs / Checks / Sessions). Ported
 /// from workspace_command_center::workspace_processes_text.
+// Build the Setup/Run tab prompt — port of the GTK run console's
+// workspace_script_prompt. Instructs the agent to (re)write scripts.setup/run in
+// .archductor/settings.toml, seeding it with any script already configured, then
+// appends the repo's configured Setup/Run prompt as extra instructions.
+fn workspace_script_prompt(store: &WorkspaceStore, name: &str, kind: &str) -> String {
+    use crate::settings::PromptKind;
+    let (script_key, label, prompt_kind) = match kind {
+        "run" => ("run", "Run", PromptKind::RunScript),
+        _ => ("setup", "Setup", PromptKind::SetupScript),
+    };
+    let current = store
+        .workspace_repo_settings(name)
+        .ok()
+        .and_then(|settings| match script_key {
+            "run" => settings.scripts.run,
+            _ => settings.scripts.setup,
+        });
+    let mut prompt = match current {
+        Some(script) if !script.trim().is_empty() => format!(
+            "Create or update .archductor/settings.toml for workspace {name}.\n\
+             Set scripts.{script_key} to this multiline shell block of successive commands:\n\n{script}\n"
+        ),
+        _ => format!(
+            "Create or update .archductor/settings.toml for workspace {name}.\n\
+             Define scripts.{script_key} as a multiline shell block so the {label} tab can run successive commands in order.\n\
+             Keep the commands short, reliable, and checked into the repo."
+        ),
+    };
+    if let Some(configured) = store
+        .resolved_prompt(name, prompt_kind)
+        .ok()
+        .flatten()
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        prompt.push_str("\n\nRepository instructions:\n");
+        prompt.push_str(configured);
+    }
+    prompt
+}
+
 fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     let mut out = String::new();
     let section = |out: &mut String,

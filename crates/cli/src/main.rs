@@ -42,6 +42,14 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
+    /// Probe host setup readiness (GitHub CLI + agent providers). Mirrors the
+    /// desktop first-run setup gate.
+    Setup {
+        /// Refresh the process environment before probing so a just-installed
+        /// tool is picked up.
+        #[arg(long)]
+        recheck: bool,
+    },
     Settings {
         #[command(subcommand)]
         command: AppSettingsCommand,
@@ -703,6 +711,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
+        Command::Setup { recheck } => print_setup(doctor::setup_report(recheck)),
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
                 let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
@@ -2041,6 +2050,21 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("settings {scope}");
             print!("{toml}");
         }
+        ArchcarResponse::SetupReadiness { report } => {
+            println!(
+                "setup_readiness complete={} — {}",
+                report.complete, report.feedback
+            );
+            for row in report.rows {
+                let state = match row.state {
+                    archductor_core::doctor::SetupRowState::Ready => "ready",
+                    archductor_core::doctor::SetupRowState::Action => "action",
+                    archductor_core::doctor::SetupRowState::Missing => "missing",
+                };
+                let flag = if row.required { "required" } else { "optional" };
+                println!("  [{state}] {} ({flag}) — {}", row.name, row.detail);
+            }
+        }
         ArchcarResponse::ChatThreadCreated { thread } => {
             println!(
                 "chat_thread_created id={} provider={} {}",
@@ -2078,6 +2102,13 @@ fn print_archcar_response(response: ArchcarResponse) {
             }
         }
         ArchcarResponse::RepositoryAdded { name } => println!("repository_added {name}"),
+        ArchcarResponse::RepositoryRemoved { name } => println!("repository_removed {name}"),
+        ArchcarResponse::ChatPasteSaved {
+            relative_path,
+            label,
+        } => {
+            println!("chat_paste_saved path={relative_path} label={label}")
+        }
         ArchcarResponse::WorkspaceCreated { name } => println!("workspace_created {name}"),
         ArchcarResponse::WorkspaceUpdated { name } => println!("workspace_updated {name}"),
         ArchcarResponse::WorkspaceRemoved { name } => println!("workspace_removed {name}"),
@@ -2086,6 +2117,14 @@ fn print_archcar_response(response: ArchcarResponse) {
                 "review_comment_added id={} file={}",
                 comment.id, comment.file_path
             )
+        }
+        ArchcarResponse::WorkspaceScriptPrompt {
+            workspace,
+            kind,
+            prompt,
+        } => {
+            println!("workspace_script_prompt workspace={workspace} kind={kind}");
+            println!("{prompt}");
         }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
@@ -3114,6 +3153,25 @@ fn print_doctor(report: doctor::DoctorReport) {
             "missing"
         };
         println!("{:<8} {:<8} {}", dependency.name, required, status);
+    }
+}
+
+fn print_setup(report: doctor::SetupReport) {
+    println!(
+        "setup_readiness complete={} — {}",
+        report.complete, report.feedback
+    );
+    for row in report.rows {
+        let state = match row.state {
+            doctor::SetupRowState::Ready => "ready",
+            doctor::SetupRowState::Action => "action",
+            doctor::SetupRowState::Missing => "missing",
+        };
+        let flag = if row.required { "required" } else { "optional" };
+        println!("  [{state:<7}] {:<18} ({flag}) — {}", row.name, row.detail);
+    }
+    if let Some(error) = report.refresh_error {
+        eprintln!("environment refresh failed: {error}");
     }
 }
 

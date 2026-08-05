@@ -349,7 +349,9 @@ body,
 input {
     background-color: #151515;
     color: #e4e4e4;
-    border: 1px solid #343434;
+    /* Flat, filled inputs (GTK look): the fill provides the affordance, so the
+       border stays invisible until focus instead of boxing every field. */
+    border: 1px solid transparent;
     border-radius: 8px;
     font-size: 13px;
     padding: 7px 10px;
@@ -358,7 +360,7 @@ input {
 .sidebar-search:focus,
 .composer-bar input:focus,
 input:focus {
-    border-color: #8a8a8a;
+    border-color: #4b7bec;
     box-shadow: none;
 }
 
@@ -1001,15 +1003,29 @@ button.ui-button-destructive:hover {
     padding: 18px;
 }
 
+/* Blocking first-run setup gate. */
+.setup-scrim {
+    /* Opaque backdrop — nothing behind the gate should be interactive. */
+    background: rgba(10, 10, 10, 0.82);
+    backdrop-filter: blur(3px);
+}
+
 .setup-modal {
-    background-color: #1a1a1a;
-    border: 1px solid #2f2f2f;
-    border-radius: 14px;
-    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: min(520px, 92vw);
+    max-height: 88vh;
+    overflow: auto;
+    background-color: var(--lc-surface, #1a1a1a);
+    border: 1px solid var(--lc-border-strong, #2f2f2f);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
 }
 
 .setup-title {
-    color: #f2f2f2;
+    color: var(--lc-text-strong, #f2f2f2);
     font-size: 20px;
     font-weight: 700;
 }
@@ -1017,26 +1033,49 @@ button.ui-button-destructive:hover {
 .setup-copy,
 .setup-feedback,
 .setup-status-detail {
-    color: #9a9a9a;
+    color: var(--lc-text-muted, #9a9a9a);
     font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
 }
 
-.setup-status-list,
-.setup-guidance {
-    background-color: #151515;
-    border: 1px solid #2a2a2a;
+.setup-feedback {
+    font-size: 13px;
+}
+
+.setup-error {
+    color: var(--lc-danger, #ff8a8a);
+}
+
+.setup-status-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background-color: var(--lc-surface-muted, #151515);
+    border: 1px solid var(--lc-border, #2a2a2a);
     border-radius: 12px;
     padding: 10px;
 }
 
 .setup-status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     border-radius: 10px;
-    padding: 10px;
+    padding: 10px 12px;
+}
+
+.setup-status-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
 }
 
 .setup-status-ready {
-    background-color: #181818;
-    border: 1px solid #2b2b2b;
+    background-color: #16211a;
+    border: 1px solid #2a4033;
 }
 
 .setup-status-missing-required {
@@ -1045,37 +1084,60 @@ button.ui-button-destructive:hover {
 }
 
 .setup-status-missing {
-    background-color: #181818;
-    border: 1px solid #2b2b2b;
+    background-color: var(--lc-surface-muted, #181818);
+    border: 1px solid var(--lc-border, #2b2b2b);
 }
 
 .setup-status-pill {
+    flex-shrink: 0;
     min-width: 58px;
-    color: #e4e4e4;
-    background-color: #2c2c2c;
+    text-align: center;
+    color: #0f0f0f;
     border-radius: 999px;
-    padding: 3px 8px;
+    padding: 3px 10px;
     font-size: 11px;
     font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.setup-pill-ready {
+    background-color: #6fcf97;
+}
+
+.setup-pill-action {
+    background-color: var(--lc-warning, #f59e0b);
+}
+
+.setup-pill-missing {
+    background-color: var(--lc-danger, #ff8a8a);
 }
 
 .setup-status-name {
-    color: #f2f2f2;
+    color: var(--lc-text-strong, #f2f2f2);
     font-size: 13px;
     font-weight: 700;
 }
 
 .setup-link {
-    color: #f2f2f2;
-    background-color: #202020;
-    border: 1px solid #303030;
+    flex-shrink: 0;
+    color: var(--lc-text, #f2f2f2);
+    background-color: var(--lc-surface-raised, #202020);
+    border: 1px solid var(--lc-border-strong, #303030);
     border-radius: 9px;
-    padding: 9px 10px;
+    padding: 6px 10px;
+    font-size: 12px;
+    text-decoration: none;
+    white-space: nowrap;
 }
 
 .setup-link:hover {
-    background-color: #2a2a2a;
+    background-color: var(--lc-hover, #2a2a2a);
     border-color: #3a3a3a;
+}
+
+.setup-actions {
+    display: flex;
+    justify-content: flex-end;
 }
 
 .project-create-menu {
@@ -1830,7 +1892,7 @@ button.ws-tab-shell {
 .ws-run-header {
     min-height: 42px;
     padding: 10px 12px;
-    background-color: #181818;
+    background-color: transparent;
     border-bottom: 1px solid #232323;
 }
 .chat-header-row {
@@ -2758,7 +2820,7 @@ button.chat-inline-event-expander label {
     background-color: #262626;
 }
 .chat-composer-box {
-    border: 1px solid #2a2a2a;
+    border: none;
     border-radius: 14px;
     background-color: #202020;
 }
@@ -3237,9 +3299,13 @@ input:focus,
 .settings-editor:focus,
 .combobox:focus,
 .combobox button:focus,
-textarea:focus,
-.chat-composer-box:focus-within {
+textarea:focus {
     border-color: #8a8a8a;
+    box-shadow: none;
+}
+/* Composer has no boxed outline — keep it flat even when focused. */
+.chat-composer-box:focus-within {
+    border: none;
     box-shadow: none;
 }
 
@@ -3252,8 +3318,7 @@ textarea:focus,
 
 .workspace-modal-field:focus,
 .settings-machine-entry:focus,
-.settings-editor:focus,
-.chat-composer-box:focus-within {
+.settings-editor:focus {
     border-color: #8a8a8a;
     box-shadow: none;
 }

@@ -1,6 +1,7 @@
 import { For, Show, createResource, createSignal } from "solid-js";
-import { repositoriesStore } from "@/store";
+import { repositoriesStore, prefsStore } from "@/store";
 import { send } from "@/bridge/client";
+import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
 
 // Settings page — read-only view of the effective settings (global app layer or
 // a repository's merged layers), rendered as TOML. A structured editor
@@ -29,6 +30,25 @@ export function SettingsPage() {
         <div class="dashboard-title">Settings</div>
         <div class="dashboard-subtitle">
           Effective configuration (read-only). Editing is coming soon.
+        </div>
+        <div class="settings-field">
+          <div class="settings-field-title">Default model for new chats</div>
+          <select
+            id="default-model"
+            class="chat-picker"
+            value={prefsStore.state.defaultModel}
+            onChange={(e) => prefsStore.setDefaultModel(e.currentTarget.value)}
+          >
+            <For each={CHAT_PROVIDERS}>
+              {(provider) => (
+                <optgroup label={provider}>
+                  <For each={MODELS[provider] ?? []}>
+                    {(m) => <option value={m}>{m}</option>}
+                  </For>
+                </optgroup>
+              )}
+            </For>
+          </select>
         </div>
         <div class="project-tabs">
           <button

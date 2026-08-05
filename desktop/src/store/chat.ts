@@ -129,6 +129,18 @@ export const chatStore = {
     recordUpdate(`chat.phase.${threadId}`);
   },
 
+  /** A session process exited — clear it from whichever thread owned it so the
+   *  running/busy indicators don't get stuck on. */
+  markSessionExited(sessionId: number) {
+    for (const key of Object.keys(chat)) {
+      const threadId = Number(key);
+      if (chat[threadId]?.session?.session_id === sessionId) {
+        setChat(threadId, "session", null);
+        recordUpdate(`chat.sessionExited.${threadId}`);
+      }
+    }
+  },
+
   /** Local optimistic append (before the durable event arrives). */
   optimisticAppend(threadId: number, message: ArchcarMessage) {
     ensure(threadId);

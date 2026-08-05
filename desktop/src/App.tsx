@@ -3,15 +3,18 @@ import Sidebar from "./components/Sidebar";
 import WindowControls from "./components/WindowControls";
 import MetricsOverlay from "./components/MetricsOverlay";
 import Dialogs from "./components/Dialogs";
+import SetupModal from "./components/SetupModal";
+import Toasts from "./components/Toasts";
 import { PageStack } from "./pages";
-import { startStore } from "./store";
+import { startStore, setupStore } from "./store";
 
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
 
   onMount(() => {
-    // Connect the archcar event stream into the reactive store.
-    void startStore();
+    // Connect the archcar event stream into the reactive store, then probe host
+    // setup readiness. A blocking modal gates the app until setup is complete.
+    void startStore().then(() => setupStore.check().catch(() => undefined));
   });
 
   return (
@@ -32,6 +35,8 @@ export default function App() {
         <PageStack />
       </div>
       <Dialogs />
+      <SetupModal />
+      <Toasts />
       <MetricsOverlay />
     </>
   );

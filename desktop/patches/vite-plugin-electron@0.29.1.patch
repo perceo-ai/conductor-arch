@@ -1,0 +1,26 @@
+diff --git a/dist/index.js b/dist/index.js
+index ab26886fc0228f55e446fdf373b55ef9bb49a590..8af2b57444cccd21730965f433fdb472429f503f 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -170,7 +170,7 @@ function treeKillSync(pid) {
+   if (process.platform === "win32") {
+     cp.execSync(`taskkill /pid ${pid} /T /F`);
+   } else {
+-    killTree(pidTree({ pid, ppid: process.pid }));
++    killTree(pidTree({ pid, ppid: pid }));
+   }
+ }
+ function pidTree(tree) {
+diff --git a/dist/index.mjs b/dist/index.mjs
+index bcaa226368671caee0ad4eb876bfb7372b4e8d82..f1004b08c78de1b19a0e3cb3341ebd9d5ea60780 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -146,7 +146,7 @@ function treeKillSync(pid) {
+   if (process.platform === "win32") {
+     cp.execSync(`taskkill /pid ${pid} /T /F`);
+   } else {
+-    killTree(pidTree({ pid, ppid: process.pid }));
++    killTree(pidTree({ pid, ppid: pid }));
+   }
+ }
+ function pidTree(tree) {
