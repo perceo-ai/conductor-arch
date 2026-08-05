@@ -1,0 +1,30 @@
+desktop/src/components/Sidebar.tsx
+  s_765332bbaba62a::t_b5d6640cf5c30b 3-4,15-21,23,26-36,40-50,52-64,66-90,92-93,97,99-107
+  s_765332bbaba62a::t_3e16bf468067c1 177
+desktop/src/store/dialogs.ts
+  s_765332bbaba62a::t_53c09c427aa748 11-25
+desktop/src/components/Dialogs.tsx
+  s_765332bbaba62a::t_b59f31d9e17d35 456-495
+  s_765332bbaba62a::t_ee57b2957d27b3 2
+  s_765332bbaba62a::t_5e07a1189ac0bf 518-522
+desktop/src/styles/base.css
+  s_765332bbaba62a::t_461440e627d466 977-981
+desktop/src/store/index.ts
+  s_765332bbaba62a::t_680565969be8df 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ba391efc5a7d98d777282a05d2e2b548ed2b001f",
+  "prompts": {},
+  "sessions": {
+    "s_765332bbaba62a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3da24f26-c069-4cb7-8ac9-d999c4a016dc",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
