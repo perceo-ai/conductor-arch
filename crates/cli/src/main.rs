@@ -2103,7 +2103,10 @@ fn print_archcar_response(response: ArchcarResponse) {
         }
         ArchcarResponse::RepositoryAdded { name } => println!("repository_added {name}"),
         ArchcarResponse::RepositoryRemoved { name } => println!("repository_removed {name}"),
-        ArchcarResponse::ChatPasteSaved { relative_path, label } => {
+        ArchcarResponse::ChatPasteSaved {
+            relative_path,
+            label,
+        } => {
             println!("chat_paste_saved path={relative_path} label={label}")
         }
         ArchcarResponse::WorkspaceCreated { name } => println!("workspace_created {name}"),
@@ -2114,6 +2117,14 @@ fn print_archcar_response(response: ArchcarResponse) {
                 "review_comment_added id={} file={}",
                 comment.id, comment.file_path
             )
+        }
+        ArchcarResponse::WorkspaceScriptPrompt {
+            workspace,
+            kind,
+            prompt,
+        } => {
+            println!("workspace_script_prompt workspace={workspace} kind={kind}");
+            println!("{prompt}");
         }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");

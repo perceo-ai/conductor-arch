@@ -295,7 +295,11 @@ impl SetupReport {
             setup_row("Codex", &readiness.codex, false),
             setup_row("Claude", &readiness.claude, false),
             setup_row("OpenCode", &readiness.opencode, false),
-            setup_row("Selected provider", &selected_provider_check(readiness), true),
+            setup_row(
+                "Selected provider",
+                &selected_provider_check(readiness),
+                true,
+            ),
         ];
         Self {
             complete: setup_blockers(readiness).is_empty(),
@@ -353,7 +357,9 @@ fn setup_feedback(readiness: &SetupReadiness) -> String {
             "Choose a ready provider or sign in to the selected provider, then press Recheck."
                 .to_owned()
         }
-        _ => "Install or authenticate GitHub CLI and Codex or Claude, then press Recheck.".to_owned(),
+        _ => {
+            "Install or authenticate GitHub CLI and Codex or Claude, then press Recheck.".to_owned()
+        }
     }
 }
 
