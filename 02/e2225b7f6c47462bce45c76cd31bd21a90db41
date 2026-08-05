@@ -1,0 +1,30 @@
+desktop/src/components/SetupModal.tsx
+  s_a758cda7668b4d::t_bdbba6a867bf8c 4
+  s_a758cda7668b4d::t_16523f28dea68c 42-44,46
+desktop/src/pages/ChatSurface.tsx
+  s_a758cda7668b4d::t_899504c7164a88 358-361,373-374
+  s_a758cda7668b4d::t_22a45d71e3a9dd 388-389,401-402
+  s_a758cda7668b4d::t_a03f96a1893ccb 422-436
+crates/core/src/workspace.rs
+  s_a758cda7668b4d::t_4b61db0dc23bfd 12303-12309,12312-12318,12321-12327,12339-12342,12372-12376
+  s_a758cda7668b4d::t_f37ab96e6c2a79 1732-1755
+desktop/src/lib/markdown.ts
+  s_a758cda7668b4d::t_b99ebffc0e2489 7-14,26-29
+  s_a758cda7668b4d::t_713defea1878b2 30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "02e2225b7f6c47462bce45c76cd31bd21a90db41",
+  "prompts": {},
+  "sessions": {
+    "s_a758cda7668b4d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7782c2e1-759e-4687-8223-1392566d863e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
