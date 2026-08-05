@@ -1,0 +1,21 @@
+desktop/electron/main.ts
+  s_765332bbaba62a::t_4cd7f5611eec01 222-225
+crates/core/src/workspace.rs
+  s_765332bbaba62a::t_d819ea3a50becd 6684-6700
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "a08da89ed445498bfe07afe1bed98c866013c4bd",
+  "prompts": {},
+  "sessions": {
+    "s_765332bbaba62a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3da24f26-c069-4cb7-8ac9-d999c4a016dc",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
