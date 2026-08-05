@@ -974,6 +974,11 @@ body.resizing-col {
   flex-direction: column;
   gap: 10px;
 }
+.dialog-message {
+  color: var(--lc-text, #d4d4d4);
+  font-size: 13px;
+  line-height: 1.5;
+}
 .dialog-tabs {
   display: flex;
   gap: 6px;

@@ -8,7 +8,21 @@ import { createSignal } from "solid-js";
 export type DialogSpec =
   | { kind: "add-project" }
   | { kind: "create-workspace"; repository: string }
-  | { kind: "workspace-actions"; workspace: string };
+  | { kind: "workspace-actions"; workspace: string }
+  // Reliable in-app confirm / prompt (window.confirm/prompt are unreliable in
+  // Electron renderers). With `input` it collects a value; without, it's a plain
+  // confirm. onConfirm runs the action; the caller surfaces any error.
+  | {
+      kind: "confirm";
+      title: string;
+      message: string;
+      confirmLabel: string;
+      destructive?: boolean;
+      input?: { label: string; initialValue?: string };
+      onConfirm: (value?: string) => void;
+    };
+
+export type ConfirmSpec = Extract<DialogSpec, { kind: "confirm" }>;
 
 const [dialog, setDialog] = createSignal<DialogSpec | null>(null);
 

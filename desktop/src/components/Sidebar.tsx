@@ -1,7 +1,7 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore } from "@/store";
-import { repoAvatar } from "@/bridge/client";
-import { openContextMenu } from "./ContextMenu";
+import { repoAvatar, openExternal } from "@/bridge/client";
+import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 
@@ -12,40 +12,99 @@ function runAction(label: string, p: Promise<unknown>): void {
   void p.catch((err) => toastsStore.error(`${label} failed: ${(err as Error).message}`));
 }
 
-function workspaceMenuItems(name: string) {
+// Right-click actions for a workspace row — GTK parity (Rename / Duplicate /
+// Archive|Restore / Delete) plus Open and a "More…" escape hatch to the full
+// actions dialog (branch ops, link dir, default provider). Uses in-app dialogs
+// rather than window.prompt/confirm, which are unreliable in the Electron
+// renderer (that's why "Remove" appeared to do nothing).
+function workspaceMenuItems(name: string): ContextMenuItem[] {
+  const archived = () => workspacesStore.row(name)?.status === "archived";
   return [
+    { label: "Open", run: () => nav.selectWorkspace(name) },
     {
       label: "Rename…",
-      run: () => {
-        const next = window.prompt("Rename workspace to", name)?.trim();
-        if (next && next !== name) runAction("Rename", actions.renameWorkspace(name, next));
-      },
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Rename ${name}`,
+          message: "Give the workspace a new name.",
+          confirmLabel: "Rename",
+          input: { label: "New name", initialValue: name },
+          onConfirm: (v) => {
+            if (v && v !== name) runAction("Rename", actions.renameWorkspace(name, v));
+          },
+        }),
     },
     {
       label: "Duplicate…",
-      run: () => {
-        const next = window.prompt("Duplicate workspace as", `${name}-copy`)?.trim();
-        if (next) runAction("Duplicate", actions.duplicateWorkspace(name, next));
-      },
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Duplicate ${name}`,
+          message: "Create a copy of this workspace under a new name.",
+          confirmLabel: "Duplicate",
+          input: { label: "New name", initialValue: `${name}-copy` },
+          onConfirm: (v) => {
+            if (v) runAction("Duplicate", actions.duplicateWorkspace(name, v));
+          },
+        }),
     },
-    {
-      label: "Archive",
-      run: () => {
-        if (window.confirm(`Archive "${name}"?`)) runAction("Archive", actions.archiveWorkspace(name));
-      },
-    },
+    archived()
+      ? { label: "Restore", run: () => runAction("Restore", actions.restoreWorkspace(name)) }
+      : {
+          label: "Archive",
+          run: () =>
+            dialogs.open({
+              kind: "confirm",
+              title: `Archive ${name}`,
+              message: `Archive "${name}"? It moves out of the active board but keeps its worktree.`,
+              confirmLabel: "Archive",
+              onConfirm: () => runAction("Archive", actions.archiveWorkspace(name)),
+            }),
+        },
     {
       label: "Delete",
       destructive: true,
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Delete ${name}`,
+          message: `Delete "${name}"? Removes the worktree and deletes the local branch (can discard unmerged commits).`,
+          confirmLabel: "Delete",
+          destructive: true,
+          onConfirm: () => runAction("Delete", actions.deleteWorkspace(name, true, true)),
+        }),
+    },
+    { label: "More actions…", run: () => dialogs.open({ kind: "workspace-actions", workspace: name }) },
+  ];
+}
+
+// Right-click actions for a project (repository) row.
+function repoMenuItems(repo: string): ContextMenuItem[] {
+  return [
+    {
+      label: "New workspace",
+      run: () => dialogs.open({ kind: "create-workspace", repository: repo }),
+    },
+    {
+      label: "Open in editor",
       run: () => {
-        if (
-          window.confirm(
-            `Delete "${name}"? Removes the worktree and deletes the local branch (can discard unmerged commits).`,
-          )
-        ) {
-          runAction("Delete", actions.deleteWorkspace(name, true, true));
-        }
+        const root = repositoriesStore.row(repo)?.rootPath;
+        if (root) runAction("Open", openExternal(root));
       },
+    },
+    {
+      label: "Remove project",
+      destructive: true,
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Remove ${repo}`,
+          message: `Remove project "${repo}"? Drops it (and its workspace records) from Archductor. Local files are left alone.`,
+          confirmLabel: "Remove project",
+          destructive: true,
+          onConfirm: () => runAction("Remove project", actions.removeRepository(repo)),
+        }),
     },
   ];
 }
@@ -115,30 +174,7 @@ function ProjectGroup(props: { repo: string }) {
     );
   return (
     <div class="project-group">
-      <div
-        class="project-row"
-        onContextMenu={(e) =>
-          openContextMenu(e, [
-            {
-              label: "New workspace",
-              run: () => dialogs.open({ kind: "create-workspace", repository: props.repo }),
-            },
-            {
-              label: "Remove project",
-              destructive: true,
-              run: () => {
-                if (
-                  window.confirm(
-                    `Remove project "${props.repo}"? Drops it (and its workspace records) from Archductor. Local files are left alone.`,
-                  )
-                ) {
-                  runAction("Remove project", actions.removeRepository(props.repo));
-                }
-              },
-            },
-          ])
-        }
-      >
+      <div class="project-row" onContextMenu={(e) => openContextMenu(e, repoMenuItems(props.repo))}>
         <ProjectAvatar repo={props.repo} />
         <span class="project-name">{props.repo}</span>
         <button
