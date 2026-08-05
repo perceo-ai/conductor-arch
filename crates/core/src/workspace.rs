@@ -1729,14 +1729,31 @@ impl WorkspaceStore {
             .query_map([repository.id], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
-        for workspace_id in workspace_ids {
-            self.delete_workspace_rows(workspace_id)?;
+
+        // Delete the workspaces + the repository row atomically. Without a
+        // transaction a failure partway through the loop would strand some
+        // workspaces deleted while the repository (and the rest) survive.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            for workspace_id in workspace_ids {
+                self.delete_workspace_rows(workspace_id)?;
+            }
+            let changed = self
+                .conn
+                .execute("DELETE FROM repositories WHERE id = ?1", [repository.id])?;
+            anyhow::ensure!(changed > 0, "repository '{name}' not found");
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
         }
-        let changed = self
-            .conn
-            .execute("DELETE FROM repositories WHERE id = ?1", [repository.id])?;
-        anyhow::ensure!(changed > 0, "repository '{name}' not found");
-        Ok(())
     }
 
     pub fn delete_lifecycle_job(
@@ -12283,13 +12300,31 @@ branch_prefix = "team"
             .create_chat_thread("berlin", "codex", "New Chat", None)
             .unwrap();
         let a = store
-            .enqueue_chat_input(thread.id, "a", None, ArchcarInputKind::User, SessionKind::Codex)
+            .enqueue_chat_input(
+                thread.id,
+                "a",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
             .unwrap();
         let _b = store
-            .enqueue_chat_input(thread.id, "b", Some("b vis"), ArchcarInputKind::User, SessionKind::Codex)
+            .enqueue_chat_input(
+                thread.id,
+                "b",
+                Some("b vis"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
             .unwrap();
         let c = store
-            .enqueue_chat_input(thread.id, "c", None, ArchcarInputKind::User, SessionKind::Codex)
+            .enqueue_chat_input(
+                thread.id,
+                "c",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
             .unwrap();
 
         let order = |s: &WorkspaceStore| -> Vec<String> {
@@ -12301,7 +12336,10 @@ branch_prefix = "team"
         };
 
         // Move "c" up one slot -> a, c, b.
-        assert_eq!(store.move_queued_chat_input(c.id, true).unwrap(), Some(thread.id));
+        assert_eq!(
+            store.move_queued_chat_input(c.id, true).unwrap(),
+            Some(thread.id)
+        );
         assert_eq!(order(&store), vec!["a", "c", "b"]);
 
         // Move "a" down one slot -> c, a, b.
@@ -12331,9 +12369,11 @@ branch_prefix = "team"
 
         let ws_path: String = store
             .conn
-            .query_row("SELECT path FROM workspaces WHERE name = 'berlin'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT path FROM workspaces WHERE name = 'berlin'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let full = Path::new(&ws_path).join(&saved.relative_path);
         assert_eq!(fs::read_to_string(full).unwrap(), "a very long pasted blob");

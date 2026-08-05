@@ -1,6 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 
 import { setupStore } from "@/store";
+import { openExternal } from "@/bridge/client";
 import type { SetupRow, SetupRowState } from "@/bridge/protocol";
 
 // Blocking first-run setup gate. Shown while archcar reports outstanding setup
@@ -38,9 +39,11 @@ function StatusRow(props: { row: SetupRow }) {
         <span class="setup-status-detail">{props.row.detail}</span>
       </div>
       <Show when={props.row.state !== "ready" && link()}>
-        <a class="setup-link" href={link()} target="_blank" rel="noreferrer">
+        {/* Electron blocks target=_blank / window.open by default, so route the
+            install link through the shell:open-external IPC instead of an <a>. */}
+        <button class="setup-link" onClick={() => void openExternal(link()!)}>
           Install ↗
-        </a>
+        </button>
       </Show>
     </div>
   );

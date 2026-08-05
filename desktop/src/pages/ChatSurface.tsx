@@ -355,6 +355,10 @@ function Composer(props: {
   async function queueSend() {
     const payload = buildPayload();
     if (!payload) return;
+    // Snapshot composer state so a send failure restores the chips too, not just
+    // the raw text (payload.input inlines file-reference paths).
+    const prevText = text();
+    const prevAtts = attachments();
     clearComposer();
     try {
       await send({
@@ -366,7 +370,8 @@ function Composer(props: {
         session_kind: sessionKind(),
       });
     } catch {
-      setText(payload.input);
+      setText(prevText);
+      setAttachments(prevAtts);
     }
   }
 
@@ -380,6 +385,8 @@ function Composer(props: {
     }
     const payload = buildPayload();
     if (!payload) return;
+    const prevText = text();
+    const prevAtts = attachments();
     clearComposer();
     try {
       await send({
@@ -391,7 +398,8 @@ function Composer(props: {
         delivery: "immediate",
       });
     } catch {
-      setText(payload.input);
+      setText(prevText);
+      setAttachments(prevAtts);
     }
   }
 
@@ -411,15 +419,21 @@ function Composer(props: {
   async function steerQueued(q: { id: number; input: string; visible_input?: string }) {
     const sid = sessionId();
     if (sid == null) return;
-    await send({
-      type: "send_input",
-      session_id: sid,
-      input: q.input,
-      visible_input: q.visible_input,
-      kind: "user",
-      delivery: "immediate",
-    }).catch(() => {});
-    await removeQueued(q.id);
+    try {
+      await send({
+        type: "send_input",
+        session_id: sid,
+        input: q.input,
+        visible_input: q.visible_input,
+        kind: "user",
+        delivery: "immediate",
+      });
+      // Only drop from the queue once delivery succeeded — otherwise a failed
+      // send would silently discard the user's message.
+      await removeQueued(q.id);
+    } catch {
+      // keep the item queued so the user can retry
+    }
   }
 
   function onKeyDown(e: KeyboardEvent) {
