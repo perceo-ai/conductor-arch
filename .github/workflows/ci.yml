@@ -162,6 +162,11 @@ jobs:
           min-severity: high
           advanced-security: false
           annotations: true
+          # Online audits (stale-action-refs) started false-flagging every pinned
+          # action SHA as "commit with no history in referenced repository" after
+          # zizmor v1.27.0 — failing repo-wide (main included). Offline audits
+          # (template-injection, unpinned-uses, etc.) still run.
+          online-audits: false
 
   dependency-scan:
     name: Dependency Scan
