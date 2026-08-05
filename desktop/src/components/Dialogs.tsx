@@ -1,5 +1,5 @@
 import { createSignal, createResource, Show, Switch, Match, For } from "solid-js";
-import { actions, dialogs, workspacesStore, repositoriesStore } from "@/store";
+import { actions, dialogs, workspacesStore, repositoriesStore, type ConfirmSpec } from "@/store";
 import {
   selectFolder,
   listGithubRepos,
@@ -453,6 +453,46 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
   );
 }
 
+function ConfirmForm(props: { spec: ConfirmSpec; onDone: () => void }) {
+  const [value, setValue] = createSignal(props.spec.input?.initialValue ?? "");
+  const ok = () => !props.spec.input || value().trim().length > 0;
+  const run = () => {
+    if (!ok()) return;
+    props.spec.onConfirm(props.spec.input ? value().trim() : undefined);
+    props.onDone();
+  };
+  return (
+    <div class="dialog-form">
+      <div class="dialog-message">{props.spec.message}</div>
+      <Show when={props.spec.input}>
+        {(inp) => (
+          <label class="dialog-field">
+            <span>{inp().label}</span>
+            <input
+              value={value()}
+              ref={(el) => setTimeout(() => el.focus(), 0)}
+              onInput={(e) => setValue(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()}
+            />
+          </label>
+        )}
+      </Show>
+      <div class="dialog-actions">
+        <button class="ui-button" onClick={props.onDone}>
+          Cancel
+        </button>
+        <button
+          class={props.spec.destructive ? "ui-button-destructive" : "ui-button"}
+          disabled={!ok()}
+          onClick={run}
+        >
+          {props.spec.confirmLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Dialogs() {
   const spec = dialogs.current;
   const close = () => dialogs.close();
@@ -473,6 +513,11 @@ export default function Dialogs() {
           <Match when={s().kind === "workspace-actions"}>
             <Modal title={`Workspace: ${(s() as { workspace: string }).workspace}`} onClose={close}>
               <WorkspaceActionsForm workspace={(s() as { workspace: string }).workspace} onDone={close} />
+            </Modal>
+          </Match>
+          <Match when={s().kind === "confirm"}>
+            <Modal title={(s() as ConfirmSpec).title} onClose={close}>
+              <ConfirmForm spec={s() as ConfirmSpec} onDone={close} />
             </Modal>
           </Match>
         </Switch>

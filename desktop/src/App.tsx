@@ -5,6 +5,7 @@ import MetricsOverlay from "./components/MetricsOverlay";
 import Dialogs from "./components/Dialogs";
 import SetupModal from "./components/SetupModal";
 import Toasts from "./components/Toasts";
+import ContextMenu from "./components/ContextMenu";
 import { PageStack } from "./pages";
 import { startStore, setupStore } from "./store";
 
@@ -37,6 +38,7 @@ export default function App() {
       <Dialogs />
       <SetupModal />
       <Toasts />
+      <ContextMenu />
       <MetricsOverlay />
     </>
   );

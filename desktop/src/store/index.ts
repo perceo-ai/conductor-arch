@@ -14,7 +14,7 @@ export { repositoriesStore } from "./repositories";
 export type { RepositoryRow } from "./repositories";
 export { actions } from "./actions";
 export { dialogs } from "./dialogs";
-export type { DialogSpec } from "./dialogs";
+export type { DialogSpec, ConfirmSpec } from "./dialogs";
 export { setupStore } from "./setup";
 export { threadsStore } from "./threads";
 export { terminalStore } from "./terminal";

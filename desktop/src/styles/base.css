@@ -974,6 +974,11 @@ body.resizing-col {
   flex-direction: column;
   gap: 10px;
 }
+.dialog-message {
+  color: var(--lc-text, #d4d4d4);
+  font-size: 13px;
+  line-height: 1.5;
+}
 .dialog-tabs {
   display: flex;
   gap: 6px;
@@ -1757,4 +1762,43 @@ body.resizing-col {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* ---- Right-click context menu (sidebar rows) ---- */
+.context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+}
+.context-menu {
+  position: fixed;
+  min-width: 180px;
+  max-width: 280px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: #1e1e1e;
+  border: 1px solid #313131;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.context-menu-item {
+  text-align: left;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lc-text, #e4e4e4);
+  font-size: 13px;
+  cursor: pointer;
+}
+.context-menu-item:hover {
+  background: var(--lc-hover, rgba(255, 255, 255, 0.08));
+}
+.context-menu-item-destructive {
+  color: #f0a8a8;
+}
+.context-menu-item-destructive:hover {
+  background: rgba(255, 120, 120, 0.14);
 }
