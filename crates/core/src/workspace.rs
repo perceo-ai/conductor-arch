@@ -6681,9 +6681,23 @@ mutation($threadId: ID!) {{
         };
         let current = &list[pos];
         let now = timestamp();
-        self.write_queued_payload(neighbor.id, current, &now)?;
-        self.write_queued_payload(current.id, neighbor, &now)?;
-        self.touch_chat_thread(thread_id, &now)?;
+        // Swap the two payloads atomically: if the second write failed on its own
+        // the first would already be committed, leaving both rows holding the same
+        // content and losing the neighbor's payload permanently.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            self.write_queued_payload(neighbor.id, current, &now)?;
+            self.write_queued_payload(current.id, neighbor, &now)?;
+            self.touch_chat_thread(thread_id, &now)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(err);
+            }
+        }
         Ok(Some(thread_id))
     }
 

@@ -219,6 +219,10 @@ ipcMain.handle("gh:list-repos", async () => {
       [
         "api",
         "--paginate",
+        // --slurp merges the per-page arrays into one; without it `gh` emits
+        // `[...][...]` (one array per page), which is invalid JSON and makes
+        // JSON.parse throw for anyone with >100 matching repos.
+        "--slurp",
         "user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member",
       ],
       { env: spawnEnv(), maxBuffer: 64 * 1024 * 1024 },
