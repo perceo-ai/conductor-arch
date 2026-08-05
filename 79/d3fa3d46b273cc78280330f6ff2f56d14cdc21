@@ -1,0 +1,22 @@
+crates/cli/src/main.rs
+  s_a758cda7668b4d::t_8dcc7c03318bd0 2126-2128
+  s_a758cda7668b4d::t_4b61db0dc23bfd 2106-2109,2121-2125
+crates/core/src/doctor.rs
+  s_a758cda7668b4d::t_4b61db0dc23bfd 298-302,360-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "79d3fa3d46b273cc78280330f6ff2f56d14cdc21",
+  "prompts": {},
+  "sessions": {
+    "s_a758cda7668b4d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7782c2e1-759e-4687-8223-1392566d863e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
