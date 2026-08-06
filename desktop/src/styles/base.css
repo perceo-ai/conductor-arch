@@ -914,6 +914,19 @@ body.resizing-col {
   text-align: center;
   color: var(--lc-text-muted, #8a8a8a);
 }
+.diff-lineno {
+  flex: 0 0 auto;
+  width: 3ch;
+  text-align: right;
+  color: var(--lc-text-muted, #6a6a6a);
+  opacity: 0.7;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.diff-lineno-new {
+  padding-right: 4px;
+  border-right: 1px solid var(--lc-border, #2a2a2a);
+}
 .chat-inline-event-code-text {
   white-space: pre;
 }

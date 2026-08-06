@@ -1,62 +1,12 @@
 import { For, createMemo } from "solid-js";
-import { highlightLine, escapeHtml, langFromPath } from "@/lib/highlight";
+import { computeDiffRows, type DiffRow } from "@/lib/diff";
 
-// Unified-diff renderer with a +/- gutter and syntax-highlighted code. Works for
-// single-file and multi-file diffs: file headers (`+++ b/path`) switch the
-// active language so each file's hunks highlight correctly. `defaultLang` seeds
-// the language when a bare (headerless) diff is passed, e.g. a single file's
-// diff fetched with a known path.
-
-type Kind = "added" | "removed" | "hunk" | "meta" | "context";
-
-interface Row {
-  kind: Kind;
-  html: string; // highlighted inner HTML for the code text
-}
-
-function classify(line: string): Kind {
-  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
-  if (line.startsWith("@@")) return "hunk";
-  if (
-    line.startsWith("diff ") ||
-    line.startsWith("index ") ||
-    line.startsWith("new file") ||
-    line.startsWith("deleted file") ||
-    line.startsWith("rename ") ||
-    line.startsWith("similarity ") ||
-    line.startsWith("\\ No newline")
-  )
-    return "meta";
-  if (line.startsWith("+")) return "added";
-  if (line.startsWith("-")) return "removed";
-  return "context";
-}
+// Unified-diff renderer with old/new line-number gutters, a +/- sign column,
+// and syntax-highlighted code. Row computation (incl. line numbering) lives in
+// the pure, unit-tested @/lib/diff module; this component only renders.
 
 export default function Diff(props: { text: string; defaultLang?: string }) {
-  const rows = createMemo<Row[]>(() => {
-    const out: Row[] = [];
-    let lang = props.defaultLang;
-    const lines = props.text.replace(/\n$/, "").split("\n");
-    for (const line of lines) {
-      const kind = classify(line);
-      if (kind === "meta") {
-        // Track the target file to pick the language for following hunks.
-        if (line.startsWith("+++ ")) {
-          const p = line.slice(4).replace(/^b\//, "").trim();
-          if (p && p !== "/dev/null") lang = langFromPath(p) ?? lang;
-        }
-        out.push({ kind, html: escapeHtml(line) });
-        continue;
-      }
-      if (kind === "hunk") {
-        out.push({ kind, html: escapeHtml(line) });
-        continue;
-      }
-      const code = kind === "added" || kind === "removed" ? line.slice(1) : line;
-      out.push({ kind, html: highlightLine(code, lang) });
-    }
-    return out;
-  });
+  const rows = createMemo<DiffRow[]>(() => computeDiffRows(props.text, props.defaultLang));
 
   return (
     <div class="chat-inline-event-code chat-inline-event-code-rows hljs">
@@ -72,6 +22,8 @@ export default function Diff(props: { text: string; defaultLang?: string }) {
               "chat-inline-event-code-row-context": row.kind === "context",
             }}
           >
+            <span class="diff-lineno diff-lineno-old">{row.oldNo ?? ""}</span>
+            <span class="diff-lineno diff-lineno-new">{row.newNo ?? ""}</span>
             <span class="chat-inline-event-code-sign">
               {row.kind === "added" ? "+" : row.kind === "removed" ? "-" : ""}
             </span>
