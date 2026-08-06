@@ -721,6 +721,26 @@ body.resizing-col {
   max-height: 180px;
   overflow: auto;
 }
+.ws-commit-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--lc-text-muted, #9a9a9a);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.ws-commit-row:hover {
+  background: var(--lc-hover-soft, rgba(255, 255, 255, 0.05));
+  color: var(--lc-text, #e6e6e6);
+}
 .ws-changes-title {
   flex: 1 1 auto;
   font-weight: 600;

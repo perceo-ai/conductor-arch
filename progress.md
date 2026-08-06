@@ -140,7 +140,9 @@ Commit from the app: `commit_workspace_changes` RPC (CLI `archcar commit
 Changes panel gained a commit box (message + "Stage all & commit") plus a
 "Suggest" button backed by `get_commit_message_draft` (heuristic message from
 changed files; CLI `archcar commit-draft`), and a Recent-commits view
-(`get_recent_commits`) — a complete in-app git review/commit surface.
+(`get_recent_commits`) whose rows are clickable to open that commit's diff in the
+center (`get_commit_diff` / git show, CLI `archcar commit-diff`) — a complete
+in-app git review/commit surface.
 
 Workspace creation from branch/base: the create-workspace dialog gained a
 "Branch" source (name + branch + optional base) alongside Prompt and Github,

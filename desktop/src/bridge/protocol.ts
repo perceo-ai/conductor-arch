@@ -58,6 +58,7 @@ export type ArchcarRequest =
   | { type: "get_workspace_processes"; workspace: string }
   | { type: "get_recent_commits"; workspace: string; limit?: number }
   | { type: "get_commit_message_draft"; workspace: string }
+  | { type: "get_commit_diff"; workspace: string; commit: string }
   | { type: "run_workspace_script"; workspace: string }
   | { type: "stop_workspace_script"; workspace: string }
   | { type: "get_run_log"; workspace: string }
@@ -342,6 +343,7 @@ export type ArchcarResponse =
   | { type: "workspace_processes"; workspace: string; text: string }
   | { type: "recent_commits"; workspace: string; log: string }
   | { type: "commit_message_draft"; workspace: string; message: string }
+  | { type: "commit_diff"; workspace: string; commit: string; diff: string }
   | { type: "run_script_started"; workspace: string; pid: number; log_path: string }
   | { type: "run_script_stopped"; workspace: string; pid: number }
   | { type: "run_log"; workspace: string; log: string }

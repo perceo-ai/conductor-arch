@@ -276,6 +276,11 @@ enum ArchcarCommand {
     CommitDraft {
         workspace: String,
     },
+    /// Show a single commit's stat + patch for a workspace.
+    CommitDiff {
+        workspace: String,
+        commit: String,
+    },
     /// List a workspace's configured check commands.
     CheckList {
         workspace: String,
@@ -1087,6 +1092,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::CommitDraft { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetCommitMessageDraft { workspace })?,
+                    );
+                }
+                ArchcarCommand::CommitDiff { workspace, commit } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetCommitDiff { workspace, commit })?,
                     );
                 }
                 ArchcarCommand::CheckList { workspace } => {
@@ -2254,6 +2264,14 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::CommitMessageDraft { workspace, message } => {
             println!("commit_message_draft {workspace}");
             print!("{message}");
+        }
+        ArchcarResponse::CommitDiff {
+            workspace,
+            commit,
+            diff,
+        } => {
+            println!("commit_diff {workspace} {commit}");
+            print!("{diff}");
         }
         ArchcarResponse::RunScriptStarted {
             workspace,

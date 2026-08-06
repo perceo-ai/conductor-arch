@@ -3,6 +3,7 @@ import { send } from "@/bridge/client";
 import type { DiffFileSummary, WorkspaceChangeScope } from "@/bridge/protocol";
 import Diff from "@/components/Diff";
 import { langFromPath } from "@/lib/highlight";
+import { openCommitInCenter } from "./openFileBridge";
 
 // Changes views — port of workspace_changes_panel + workspace_diff_sections.
 // The right panel shows the summary rows; the main Changes tab shows rows plus
@@ -156,7 +157,21 @@ export function ChangesRows(props: {
             <span class="section-title">Recent commits</span>
             <button class="ui-button-icon" title="Refresh" onClick={() => void refetchCommits()}>⟳</button>
           </div>
-          <pre class="ws-commits-log">{commits()}</pre>
+          <For each={(commits() ?? "").split("\n").filter((l) => l.trim())}>
+            {(line) => {
+              // First whitespace-delimited token is the short SHA.
+              const sha = line.trim().split(/\s+/)[0];
+              return (
+                <button
+                  class="ws-commit-row"
+                  title="View this commit's diff"
+                  onClick={() => sha && openCommitInCenter(props.workspace, sha)}
+                >
+                  {line}
+                </button>
+              );
+            }}
+          </For>
         </div>
       </Show>
     </div>

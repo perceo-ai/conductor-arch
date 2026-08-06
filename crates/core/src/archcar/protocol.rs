@@ -209,6 +209,11 @@ pub enum ArchcarRequest {
     GetCommitMessageDraft {
         workspace: String,
     },
+    /// Show a single commit's stat + patch (git show) for a workspace.
+    GetCommitDiff {
+        workspace: String,
+        commit: String,
+    },
     /// Start the workspace's configured run script as a tracked process.
     RunWorkspaceScript {
         workspace: String,
@@ -579,6 +584,11 @@ pub enum ArchcarResponse {
     CommitMessageDraft {
         workspace: String,
         message: String,
+    },
+    CommitDiff {
+        workspace: String,
+        commit: String,
+        diff: String,
     },
     RunScriptStarted {
         workspace: String,
@@ -1038,6 +1048,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetCommitMessageDraft { workspace } => {
             format!("get_commit_message_draft workspace={workspace}")
         }
+        ArchcarRequest::GetCommitDiff { workspace, commit } => {
+            format!("get_commit_diff workspace={workspace} commit={commit}")
+        }
         ArchcarRequest::RunWorkspaceScript { workspace } => {
             format!("run_workspace_script workspace={workspace}")
         }
@@ -1379,6 +1392,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::CommitMessageDraft { workspace, message } => {
             format!("commit_message_draft workspace={workspace} bytes={}", message.len())
+        }
+        ArchcarResponse::CommitDiff { workspace, commit, diff } => {
+            format!("commit_diff workspace={workspace} commit={commit} bytes={}", diff.len())
         }
         ArchcarResponse::RunScriptStarted { workspace, pid, log_path } => {
             format!("run_script_started workspace={workspace} pid={pid} log={log_path}")
@@ -2204,6 +2220,34 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&draft_resp),
             "commit_message_draft workspace=ws bytes=6"
+        );
+
+        let show_req = ArchcarRequest::GetCommitDiff {
+            workspace: "ws".to_owned(),
+            commit: "abc123".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&show_req).unwrap())
+                .unwrap(),
+            show_req
+        );
+        assert_eq!(
+            archcar_request_summary(&show_req),
+            "get_commit_diff workspace=ws commit=abc123"
+        );
+        let show_resp = ArchcarResponse::CommitDiff {
+            workspace: "ws".to_owned(),
+            commit: "abc123".to_owned(),
+            diff: "patch".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&show_resp).unwrap())
+                .unwrap(),
+            show_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&show_resp),
+            "commit_diff workspace=ws commit=abc123 bytes=5"
         );
     }
 

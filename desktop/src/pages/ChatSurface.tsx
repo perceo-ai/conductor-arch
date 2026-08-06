@@ -13,7 +13,7 @@ import { titleCaseWorkspace } from "@/lib/text";
 import { isDisplayableTimelineItem } from "@/lib/timeline";
 import { DiffView } from "./WorkspaceChanges";
 import ChangesTab from "./WorkspaceChanges";
-import { registerOpenFile } from "./openFileBridge";
+import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
 import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
@@ -750,7 +750,42 @@ function FileView(props: { workspace: string; path: string }) {
   );
 }
 
-type CenterView = { kind: "chat" } | { kind: "file"; path: string } | { kind: "changes" };
+// Commit view — a single commit's stat+patch (git show), rendered with the same
+// Diff component as file diffs.
+function CommitView(props: { workspace: string; commit: string; onClose: () => void }) {
+  const [diff] = createResource(
+    () => [props.workspace, props.commit] as const,
+    async ([ws, commit]) => {
+      try {
+        const res = await send({ type: "get_commit_diff", workspace: ws, commit });
+        return res.type === "commit_diff" ? res.diff : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+  return (
+    <div class="ws-file-view">
+      <div class="ws-file-view-header">
+        <span class="ws-file-view-path">Commit {props.commit}</span>
+        <button class="ui-button-icon" title="Close" onClick={props.onClose}>×</button>
+      </div>
+      <div class="ws-diff-view">
+        <Show when={!diff.loading} fallback={<div class="empty-state">Loading…</div>}>
+          <Show when={(diff() ?? "").trim()} fallback={<div class="empty-state">No diff</div>}>
+            <Diff text={diff()!} />
+          </Show>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+type CenterView =
+  | { kind: "chat" }
+  | { kind: "file"; path: string }
+  | { kind: "changes" }
+  | { kind: "commit"; commit: string };
 
 export default function ChatSurface(props: { workspace: string }) {
   // Only agent chats (codex/claude) belong in the tab strip. "shell" sessions
@@ -775,6 +810,11 @@ export default function ChatSurface(props: { workspace: string }) {
   onMount(() => registerOpenFile((ws, path) => {
     if (ws !== props.workspace) return;
     openFile(path);
+  }));
+  // Let the recent-commits list open a commit's diff into the center.
+  onMount(() => registerOpenCommit((ws, commit) => {
+    if (ws !== props.workspace) return;
+    setView({ kind: "commit", commit });
   }));
 
   function openFile(path: string) {
@@ -912,6 +952,13 @@ export default function ChatSurface(props: { workspace: string }) {
       <Switch fallback={<div class="empty-state">Starting chat…</div>}>
         <Match when={view().kind === "changes"}>
           <ChangesTab workspace={props.workspace} />
+        </Match>
+        <Match when={view().kind === "commit"}>
+          <CommitView
+            workspace={props.workspace}
+            commit={(view() as { commit: string }).commit}
+            onClose={() => setView({ kind: "chat" })}
+          />
         </Match>
         <Match when={view().kind === "file"}>
           <FileView workspace={props.workspace} path={(view() as { path: string }).path} />
