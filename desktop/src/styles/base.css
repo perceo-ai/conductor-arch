@@ -690,6 +690,16 @@ body.resizing-col {
   padding: 8px 10px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
 }
+.ws-commit-box {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-commit-box .ws-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .ws-changes-title {
   flex: 1 1 auto;
   font-weight: 600;

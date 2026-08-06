@@ -279,6 +279,13 @@ enum ArchcarCommand {
     CheckLog {
         workspace: String,
     },
+    /// Commit a workspace's changes (optionally staging all first).
+    Commit {
+        workspace: String,
+        message: String,
+        #[arg(long)]
+        stage_all: bool,
+    },
     /// Read a UTF-8 text file from a workspace checkout.
     ReadFile {
         workspace: String,
@@ -1074,6 +1081,19 @@ fn main() -> Result<()> {
                 }
                 ArchcarCommand::CheckLog { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::GetCheckLog { workspace })?);
+                }
+                ArchcarCommand::Commit {
+                    workspace,
+                    message,
+                    stage_all,
+                } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::CommitWorkspaceChanges {
+                            workspace,
+                            message,
+                            stage_all,
+                        },
+                    )?);
                 }
                 ArchcarCommand::ReadFile { workspace, path } => {
                     print_archcar_response(
@@ -2238,6 +2258,10 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::CheckLog { workspace, log } => {
             println!("check_log {workspace}");
             print!("{log}");
+        }
+        ArchcarResponse::WorkspaceCommitted { workspace, output } => {
+            println!("workspace_committed {workspace}");
+            print!("{output}");
         }
         ArchcarResponse::ReviewComments {
             workspace,

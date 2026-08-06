@@ -224,6 +224,14 @@ pub enum ArchcarRequest {
     GetCheckLog {
         workspace: String,
     },
+    /// Commit the workspace's changes with a message; `stage_all` runs
+    /// `git add -A` first, otherwise only already-staged files are committed.
+    CommitWorkspaceChanges {
+        workspace: String,
+        message: String,
+        #[serde(default)]
+        stage_all: bool,
+    },
     GetWorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -580,6 +588,10 @@ pub enum ArchcarResponse {
     CheckLog {
         workspace: String,
         log: String,
+    },
+    WorkspaceCommitted {
+        workspace: String,
+        output: String,
     },
     WorkspaceScriptPrompt {
         workspace: String,
@@ -1019,6 +1031,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetCheckLog { workspace } => {
             format!("get_check_log workspace={workspace}")
         }
+        ArchcarRequest::CommitWorkspaceChanges {
+            workspace,
+            message,
+            stage_all,
+        } => format!(
+            "commit_workspace_changes workspace={workspace} stage_all={stage_all} bytes={}",
+            message.len()
+        ),
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
         }
@@ -1343,6 +1363,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::CheckLog { workspace, log } => {
             format!("check_log workspace={workspace} bytes={}", log.len())
+        }
+        ArchcarResponse::WorkspaceCommitted { workspace, output } => {
+            format!("workspace_committed workspace={workspace} bytes={}", output.len())
         }
         ArchcarResponse::RunLog { workspace, log } => {
             format!("run_log workspace={workspace} bytes={}", log.len())
@@ -2087,6 +2110,37 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn commit_workspace_changes_round_trips_and_summarizes() {
+        let req = ArchcarRequest::CommitWorkspaceChanges {
+            workspace: "ws".to_owned(),
+            message: "hello".to_owned(),
+            stage_all: true,
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "commit_workspace_changes workspace=ws stage_all=true bytes=5"
+        );
+
+        let resp = ArchcarResponse::WorkspaceCommitted {
+            workspace: "ws".to_owned(),
+            output: "1 file changed".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "workspace_committed workspace=ws bytes=14"
+        );
     }
 
     #[test]

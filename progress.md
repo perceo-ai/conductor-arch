@@ -135,6 +135,11 @@ a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
 read-only Effective merge, with a Repository/Local layer toggle for repo scope.
 CLI: `archcar settings-source` / `archcar save-settings`.
 
+Commit from the app: `commit_workspace_changes` RPC (CLI `archcar commit
+<ws> <msg> --stage-all`) stages all (optional) and commits with a message. The
+Changes panel gained a commit box (message + "Stage all & commit") so you can
+commit working-tree changes without dropping to a terminal.
+
 Workspace creation from branch/base: the create-workspace dialog gained a
 "Branch" source (name + branch + optional base) alongside Prompt and Github,
 calling the existing `create_workspace` RPC — restoring the GTK branch/base

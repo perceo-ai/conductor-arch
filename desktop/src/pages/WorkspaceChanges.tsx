@@ -39,7 +39,7 @@ export function ChangesRows(props: {
   openFile?: (path: string) => void;
 }) {
   const [scope, setScope] = createSignal<WorkspaceChangeScope>(props.defaultScope ?? "uncommitted");
-  const [changes] = createResource(
+  const [changes, { refetch }] = createResource(
     () => [props.workspace, scope()] as const,
     async ([ws, sc]) => {
       try {
@@ -50,6 +50,35 @@ export function ChangesRows(props: {
       }
     },
   );
+  const [commitMsg, setCommitMsg] = createSignal("");
+  const [commitFeedback, setCommitFeedback] = createSignal("");
+  async function commit() {
+    const message = commitMsg().trim();
+    if (!message) {
+      setCommitFeedback("Enter a commit message.");
+      return;
+    }
+    setCommitFeedback("Committing…");
+    try {
+      const res = await send({
+        type: "commit_workspace_changes",
+        workspace: props.workspace,
+        message,
+        stage_all: true,
+      });
+      if (res.type === "workspace_committed") {
+        setCommitMsg("");
+        setCommitFeedback("Committed.");
+        await refetch();
+      } else if (res.type === "error") {
+        setCommitFeedback(res.message);
+      } else {
+        setCommitFeedback("Commit failed.");
+      }
+    } catch (err) {
+      setCommitFeedback(`Commit failed: ${(err as Error).message}`);
+    }
+  }
   return (
     <div class="ws-file-summary-panel">
       <div class="ws-changes-header">
@@ -80,6 +109,21 @@ export function ChangesRows(props: {
             <ChangeRow file={file} showState={scope() === "uncommitted"} onOpen={props.openFile} />
           )}
         </For>
+      </Show>
+      <Show when={(changes() ?? []).length > 0}>
+        <div class="ws-commit-box">
+          <input
+            class="ws-text-input"
+            placeholder="Commit message…"
+            value={commitMsg()}
+            onInput={(e) => setCommitMsg(e.currentTarget.value)}
+            onKeyDown={(e) => e.key === "Enter" && void commit()}
+          />
+          <button class="suggested-action" onClick={() => void commit()}>
+            Stage all &amp; commit
+          </button>
+        </div>
+        <Show when={commitFeedback()}><div class="card-meta">{commitFeedback()}</div></Show>
       </Show>
     </div>
   );

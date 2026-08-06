@@ -899,6 +899,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::CommitWorkspaceChanges {
+            workspace,
+            message,
+            stage_all,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path).and_then(|s| {
+                if stage_all {
+                    s.stage_all_workspace_files(&workspace)?;
+                }
+                s.commit_workspace_changes(&workspace, &message)
+            });
+            match result {
+                Ok(output) => ArchcarResponse::WorkspaceCommitted { workspace, output },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListWorkspaceChecks { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
