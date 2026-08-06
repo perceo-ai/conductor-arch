@@ -150,6 +150,11 @@ calling the existing `create_workspace` RPC — restoring the GTK branch/base
 creation flow. The base field autocompletes from the repo's local branches via a
 new `list_repository_branches` RPC (CLI `archcar branches`).
 
+Timeline: `list_workspace_timeline` RPC (CLI `archcar timeline`) surfaces the
+workspace lifecycle events (creation, branch changes, session lifecycle,
+PR/check actions, commits, archive, …). Restored as a Timeline right-panel tab
+(newest first), matching the GTK Timeline surface.
+
 Runtime controls: `run_workspace_script`/`stop_workspace_script`/`get_run_log`
 RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:
 `archcar run-script`/`stop-script`/`run-log`). The Processes tab gained Run/Stop

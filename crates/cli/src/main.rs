@@ -266,6 +266,10 @@ enum ArchcarCommand {
     RunLog {
         workspace: String,
     },
+    /// Print a workspace's timeline events.
+    Timeline {
+        workspace: String,
+    },
     /// Print recent commits for a workspace.
     Commits {
         workspace: String,
@@ -1083,6 +1087,11 @@ fn main() -> Result<()> {
                 }
                 ArchcarCommand::RunLog { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::GetRunLog { workspace })?);
+                }
+                ArchcarCommand::Timeline { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceTimeline { workspace })?,
+                    );
                 }
                 ArchcarCommand::Commits { workspace, limit } => {
                     print_archcar_response(
@@ -2256,6 +2265,12 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             println!("workspace_processes {}", workspace);
             print!("{text}");
+        }
+        ArchcarResponse::WorkspaceTimeline { workspace, events } => {
+            println!("workspace_timeline {workspace} {}", events.len());
+            for e in events {
+                println!("#{}\t{}\t{}\t{}", e.id, e.created_at, e.kind, e.summary);
+            }
         }
         ArchcarResponse::RecentCommits { workspace, log } => {
             println!("recent_commits {workspace}");

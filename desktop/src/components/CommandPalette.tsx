@@ -39,6 +39,7 @@ const WORKSPACE_PANELS: { tab: RightPanelTab; label: string }[] = [
   { tab: "todos", label: "Todos" },
   { tab: "checkpoints", label: "Checkpoints" },
   { tab: "processes", label: "Processes" },
+  { tab: "timeline", label: "Timeline" },
 ];
 
 export default function CommandPalette() {

@@ -199,6 +199,10 @@ pub enum ArchcarRequest {
     GetWorkspaceProcesses {
         workspace: String,
     },
+    /// List a workspace's timeline events (lifecycle history).
+    ListWorkspaceTimeline {
+        workspace: String,
+    },
     /// Recent commit oneline log for a workspace's branch.
     GetRecentCommits {
         workspace: String,
@@ -577,6 +581,10 @@ pub enum ArchcarResponse {
         workspace: String,
         text: String,
     },
+    WorkspaceTimeline {
+        workspace: String,
+        events: Vec<ArchcarTimelineEvent>,
+    },
     RecentCommits {
         workspace: String,
         log: String,
@@ -830,6 +838,16 @@ pub struct ArchcarProjectionItem {
     pub stream_state: String,
 }
 
+/// One workspace timeline event (creation, branch change, session lifecycle,
+/// PR/check action, commit, archive, …) for the Timeline surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarTimelineEvent {
+    pub id: i64,
+    pub kind: String,
+    pub summary: String,
+    pub created_at: String,
+}
+
 /// One configured check command (key/label/command) a workspace can run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArchcarConfiguredCheck {
@@ -1040,6 +1058,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::GetWorkspaceProcesses { workspace } => {
             format!("get_workspace_processes workspace={workspace}")
+        }
+        ArchcarRequest::ListWorkspaceTimeline { workspace } => {
+            format!("list_workspace_timeline workspace={workspace}")
         }
         ArchcarRequest::GetRecentCommits { workspace, limit } => format!(
             "get_recent_commits workspace={workspace} limit={}",
@@ -1386,6 +1407,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             format!("workspace_processes workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::WorkspaceTimeline { workspace, events } => {
+            format!("workspace_timeline workspace={workspace} count={}", events.len())
         }
         ArchcarResponse::RecentCommits { workspace, log } => {
             format!("recent_commits workspace={workspace} bytes={}", log.len())
@@ -2157,6 +2181,40 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn workspace_timeline_round_trips_and_summarizes() {
+        let req = ArchcarRequest::ListWorkspaceTimeline {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "list_workspace_timeline workspace=ws"
+        );
+
+        let resp = ArchcarResponse::WorkspaceTimeline {
+            workspace: "ws".to_owned(),
+            events: vec![ArchcarTimelineEvent {
+                id: 3,
+                kind: "commit.created".to_owned(),
+                summary: "Committed staged changes".to_owned(),
+                created_at: "2026-08-06T00:00:00Z".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "workspace_timeline workspace=ws count=1"
+        );
     }
 
     #[test]

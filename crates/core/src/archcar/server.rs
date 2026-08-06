@@ -836,6 +836,28 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkspaceTimeline { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.workspace_timeline(&workspace, None))
+            {
+                Ok(events) => ArchcarResponse::WorkspaceTimeline {
+                    workspace,
+                    events: events
+                        .into_iter()
+                        .map(|e| crate::archcar::protocol::ArchcarTimelineEvent {
+                            id: e.id,
+                            kind: e.kind,
+                            summary: e.summary,
+                            created_at: e.created_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetRecentCommits { workspace, limit } => {
             let db_path = state.lock().unwrap().db_path.clone();
             let n = limit.unwrap_or(20).clamp(1, 200) as usize;
@@ -2050,6 +2072,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListTodos { .. }
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
+            | ArchcarRequest::ListWorkspaceTimeline { .. }
             | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetCommitDiff { .. }

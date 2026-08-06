@@ -14,7 +14,8 @@ export type RightPanelTab =
   | "review"
   | "todos"
   | "checkpoints"
-  | "processes";
+  | "processes"
+  | "timeline";
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");

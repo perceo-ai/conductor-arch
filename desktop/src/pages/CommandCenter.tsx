@@ -13,6 +13,7 @@ import {
   TodosPanel,
   CheckpointsPanel,
   ProcessesPanel,
+  TimelinePanel,
 } from "./WorkspaceTabs";
 import type { RightPanelTab } from "@/store/nav";
 import { openFileInCenter } from "./openFileBridge";
@@ -33,6 +34,7 @@ const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = [
   { tab: "todos", label: "Todos" },
   { tab: "checkpoints", label: "Checkpoints" },
   { tab: "processes", label: "Processes" },
+  { tab: "timeline", label: "Timeline" },
 ];
 
 // Workspace command center — port of workspace_command_center.rs. Three regions:
@@ -121,6 +123,9 @@ function RightPanel(props: { workspace: string }) {
             </Match>
             <Match when={nav.rightPanelTab() === "processes"}>
               <ProcessesPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "timeline"}>
+              <TimelinePanel workspace={props.workspace} />
             </Match>
           </Switch>
         </div>

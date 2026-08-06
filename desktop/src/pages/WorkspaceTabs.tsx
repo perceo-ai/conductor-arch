@@ -4,6 +4,7 @@ import { actions } from "@/store";
 import type {
   ArchcarChecksSummary,
   ArchcarConfiguredCheck,
+  ArchcarTimelineEvent,
   Checkpoint,
   ReviewComment,
   Todo,
@@ -240,6 +241,40 @@ export function ProcessesPanel(props: { workspace: string }) {
       </Show>
       <div class="detail-label">Latest run log</div>
       <pre class="ws-run-prompt">{log.loading ? "Loading…" : log() || "No run log yet."}</pre>
+    </div>
+  );
+}
+
+// ---- Timeline (workspace lifecycle history) -------------------------------
+
+export function TimelinePanel(props: { workspace: string }) {
+  const [events] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarTimelineEvent[]> => {
+      try {
+        const res = await send({ type: "list_workspace_timeline", workspace: ws });
+        return res.type === "workspace_timeline" ? res.events : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  return (
+    <div class="ws-tab-panel command-panel">
+      <div class="section-title">Timeline</div>
+      <Show
+        when={(events() ?? []).length > 0}
+        fallback={<div class="empty-state">{events.loading ? "Loading…" : "No events yet"}</div>}
+      >
+        <For each={[...(events() ?? [])].reverse()}>
+          {(e) => (
+            <div class="detail-row">
+              <span class="detail-label">{e.created_at} · {e.kind}</span>
+              <span class="detail-value">{e.summary}</span>
+            </div>
+          )}
+        </For>
+      </Show>
     </div>
   );
 }
