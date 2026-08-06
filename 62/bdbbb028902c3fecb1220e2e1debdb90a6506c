@@ -1,0 +1,19 @@
+crates/core/src/archcar/protocol.rs
+  s_6a5ec6ec557730::t_ec15ea56265742 1824-1931
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "62bdbbb028902c3fecb1220e2e1debdb90a6506c",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
