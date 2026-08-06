@@ -59,6 +59,8 @@ export type ArchcarRequest =
   | { type: "run_workspace_script"; workspace: string }
   | { type: "stop_workspace_script"; workspace: string }
   | { type: "get_run_log"; workspace: string }
+  | { type: "list_workspace_checks"; workspace: string }
+  | { type: "run_workspace_check"; workspace: string; key: string }
   | { type: "get_workspace_script_prompt"; workspace: string; kind: "setup" | "run" }
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
@@ -222,6 +224,12 @@ export interface ReviewComment {
   updated_at: string;
 }
 
+export interface ArchcarConfiguredCheck {
+  key: string;
+  label: string;
+  command: string;
+}
+
 export interface ArchcarChecksSummary {
   workspace: string;
   changed_files: number;
@@ -328,6 +336,8 @@ export type ArchcarResponse =
   | { type: "run_script_started"; workspace: string; pid: number; log_path: string }
   | { type: "run_script_stopped"; workspace: string; pid: number }
   | { type: "run_log"; workspace: string; log: string }
+  | { type: "workspace_checks"; workspace: string; checks: ArchcarConfiguredCheck[] }
+  | { type: "check_started"; workspace: string; key: string; pid: number; log_path: string }
   | { type: "workspace_script_prompt"; workspace: string; kind: string; prompt: string }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }

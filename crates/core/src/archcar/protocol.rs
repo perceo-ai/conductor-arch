@@ -211,6 +211,15 @@ pub enum ArchcarRequest {
     GetRunLog {
         workspace: String,
     },
+    /// List the repository's configured check commands for a workspace.
+    ListWorkspaceChecks {
+        workspace: String,
+    },
+    /// Run one configured check (by key) as a tracked process.
+    RunWorkspaceCheck {
+        workspace: String,
+        key: String,
+    },
     GetWorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -540,6 +549,16 @@ pub enum ArchcarResponse {
         workspace: String,
         log: String,
     },
+    WorkspaceChecks {
+        workspace: String,
+        checks: Vec<ArchcarConfiguredCheck>,
+    },
+    CheckStarted {
+        workspace: String,
+        key: String,
+        pid: u32,
+        log_path: String,
+    },
     WorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -737,6 +756,14 @@ pub struct ArchcarProjectionItem {
     pub body: String,
     pub status: String,
     pub stream_state: String,
+}
+
+/// One configured check command (key/label/command) a workspace can run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarConfiguredCheck {
+    pub key: String,
+    pub label: String,
+    pub command: String,
 }
 
 /// Flat DB-only checks summary (compact projection of ChecksSummary; the
@@ -950,6 +977,12 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::GetRunLog { workspace } => {
             format!("get_run_log workspace={workspace}")
+        }
+        ArchcarRequest::ListWorkspaceChecks { workspace } => {
+            format!("list_workspace_checks workspace={workspace}")
+        }
+        ArchcarRequest::RunWorkspaceCheck { workspace, key } => {
+            format!("run_workspace_check workspace={workspace} key={key}")
         }
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
@@ -1257,6 +1290,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::RunScriptStopped { workspace, pid } => {
             format!("run_script_stopped workspace={workspace} pid={pid}")
+        }
+        ArchcarResponse::WorkspaceChecks { workspace, checks } => {
+            format!("workspace_checks workspace={workspace} count={}", checks.len())
+        }
+        ArchcarResponse::CheckStarted { workspace, key, pid, log_path } => {
+            format!("check_started workspace={workspace} key={key} pid={pid} log={log_path}")
         }
         ArchcarResponse::RunLog { workspace, log } => {
             format!("run_log workspace={workspace} bytes={}", log.len())
@@ -1993,6 +2032,70 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn check_requests_and_responses_round_trip_and_summarize() {
+        let list_req = ArchcarRequest::ListWorkspaceChecks {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&list_req).unwrap())
+                .unwrap(),
+            list_req
+        );
+        assert_eq!(
+            archcar_request_summary(&list_req),
+            "list_workspace_checks workspace=ws"
+        );
+
+        let run_req = ArchcarRequest::RunWorkspaceCheck {
+            workspace: "ws".to_owned(),
+            key: "lint".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&run_req).unwrap())
+                .unwrap(),
+            run_req
+        );
+        assert_eq!(
+            archcar_request_summary(&run_req),
+            "run_workspace_check workspace=ws key=lint"
+        );
+
+        let checks_resp = ArchcarResponse::WorkspaceChecks {
+            workspace: "ws".to_owned(),
+            checks: vec![ArchcarConfiguredCheck {
+                key: "lint".to_owned(),
+                label: "Lint".to_owned(),
+                command: "npm run lint".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&checks_resp).unwrap())
+                .unwrap(),
+            checks_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&checks_resp),
+            "workspace_checks workspace=ws count=1"
+        );
+
+        let started = ArchcarResponse::CheckStarted {
+            workspace: "ws".to_owned(),
+            key: "lint".to_owned(),
+            pid: 9,
+            log_path: "/t/c.log".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&started).unwrap())
+                .unwrap(),
+            started
+        );
+        assert_eq!(
+            archcar_response_summary(&started),
+            "check_started workspace=ws key=lint pid=9 log=/t/c.log"
+        );
     }
 
     #[test]

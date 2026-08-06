@@ -266,6 +266,15 @@ enum ArchcarCommand {
     RunLog {
         workspace: String,
     },
+    /// List a workspace's configured check commands.
+    CheckList {
+        workspace: String,
+    },
+    /// Run one configured check (by key) for a workspace.
+    RunCheck {
+        workspace: String,
+        key: String,
+    },
     /// Read a UTF-8 text file from a workspace checkout.
     ReadFile {
         workspace: String,
@@ -1035,6 +1044,16 @@ fn main() -> Result<()> {
                 }
                 ArchcarCommand::RunLog { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::GetRunLog { workspace })?);
+                }
+                ArchcarCommand::CheckList { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceChecks { workspace })?,
+                    );
+                }
+                ArchcarCommand::RunCheck { workspace, key } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::RunWorkspaceCheck { workspace, key })?,
+                    );
                 }
                 ArchcarCommand::ReadFile { workspace, path } => {
                     print_archcar_response(
@@ -2166,6 +2185,20 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::RunLog { workspace, log } => {
             println!("run_log {workspace}");
             print!("{log}");
+        }
+        ArchcarResponse::WorkspaceChecks { workspace, checks } => {
+            println!("workspace_checks {workspace} {}", checks.len());
+            for c in checks {
+                println!("{}\t{}\t{}", c.key, c.label, c.command);
+            }
+        }
+        ArchcarResponse::CheckStarted {
+            workspace,
+            key,
+            pid,
+            log_path,
+        } => {
+            println!("check_started {workspace} key={key} pid={pid} log={log_path}");
         }
         ArchcarResponse::ReviewComments {
             workspace,

@@ -885,6 +885,46 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkspaceChecks { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.list_workspace_checks(&workspace))
+            {
+                Ok(checks) => ArchcarResponse::WorkspaceChecks {
+                    workspace,
+                    checks: checks
+                        .into_iter()
+                        .map(|c| crate::archcar::protocol::ArchcarConfiguredCheck {
+                            key: c.key,
+                            label: c.label,
+                            command: c.command,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RunWorkspaceCheck { workspace, key } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.run_workspace_check(&workspace, &key))
+            {
+                Ok(process) => ArchcarResponse::CheckStarted {
+                    workspace,
+                    key,
+                    pid: process.pid,
+                    log_path: process.log_path.to_string_lossy().into_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path) {
@@ -1873,6 +1913,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
             | ArchcarRequest::GetRunLog { .. }
+            | ArchcarRequest::ListWorkspaceChecks { .. }
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }

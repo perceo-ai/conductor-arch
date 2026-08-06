@@ -1,7 +1,13 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
 import { actions } from "@/store";
-import type { ArchcarChecksSummary, Checkpoint, ReviewComment, Todo } from "@/bridge/protocol";
+import type {
+  ArchcarChecksSummary,
+  ArchcarConfiguredCheck,
+  Checkpoint,
+  ReviewComment,
+  Todo,
+} from "@/bridge/protocol";
 
 // Read-only workspace command-center tabs — ports of workspace_todos_panel,
 // workspace_checkpoint_panel, workspace_processes_text, workspace_review_panel
@@ -252,7 +258,35 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
+  const [checks] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarConfiguredCheck[]> => {
+      try {
+        const res = await send({ type: "list_workspace_checks", workspace: ws });
+        return res.type === "workspace_checks" ? res.checks : [];
+      } catch {
+        return [];
+      }
+    },
+  );
   const [feedback, setFeedback] = createSignal("");
+  async function runCheck(check: ArchcarConfiguredCheck) {
+    setFeedback(`Running ${check.label}…`);
+    try {
+      const res = await send({
+        type: "run_workspace_check",
+        workspace: props.workspace,
+        key: check.key,
+      });
+      setFeedback(
+        res.type === "check_started"
+          ? `${check.label} started (pid ${res.pid})`
+          : `${check.label} failed`,
+      );
+    } catch (err) {
+      setFeedback(`${check.label} failed: ${(err as Error).message}`);
+    }
+  }
   const run = (label: string, fn: () => Promise<void>) => async () => {
     setFeedback(`${label}…`);
     try {
@@ -305,6 +339,21 @@ export function ChecksPanel(props: { workspace: string }) {
         </button>
       </div>
       <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
+      <Show when={(checks() ?? []).length > 0}>
+        <div class="detail-label">Local checks</div>
+        <For each={checks()}>
+          {(check) => (
+            <div class="action-row">
+              <span class="detail-value" style={{ flex: "1 1 auto" }} title={check.command}>
+                {check.label}
+              </span>
+              <button class="secondary-action" onClick={() => void runCheck(check)}>
+                Run
+              </button>
+            </div>
+          )}
+        </For>
+      </Show>
       <Show
         when={summary()}
         fallback={<div class="empty-state">{summary.loading ? "Loading…" : "No summary"}</div>}

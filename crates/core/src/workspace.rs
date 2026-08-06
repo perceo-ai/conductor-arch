@@ -2478,6 +2478,15 @@ impl WorkspaceStore {
         Ok(configured_check_commands_from_settings(&settings))
     }
 
+    /// List the repository's configured check commands (key/label/command) for
+    /// a workspace, so a UI can offer them as runnable local checks.
+    pub fn list_workspace_checks(&self, name: &str) -> Result<Vec<ConfiguredCheckCommand>> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        Ok(configured_check_commands_from_settings(&settings))
+    }
+
     pub fn run_workspace_check(&self, name: &str, key: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
