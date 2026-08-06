@@ -162,9 +162,11 @@ and Processes as right-panel tabs; terminals in the run dock. (The Checks/
 Review/Todos/Checkpoints/Processes panel components existed earlier but were
 unrendered until wired into the right-panel tab strip.)
 
-Not yet ported to Electron from the historical GTK surface: force-push (core
-`push_request` exposes no force flag), PR review-thread resolve/reopen, richer
-settings editors, command palette, and full visual parity.
+Now ported to Electron from the historical GTK surface: force-push (Checks
+panel), PR review-thread resolve/reopen (Review panel), editable settings source
+(Settings page), and a Cmd/Ctrl+K command palette. Still outstanding: full
+visual parity is an ongoing refinement, Linear workspace source is not wired,
+and prompt-pack switching / hooks / a local check-runner UI remain unbuilt.
 
 Historical GTK surface (superseded, kept for reference):
 
@@ -246,8 +248,8 @@ Historical GTK surface (superseded, kept for reference):
 - Project onboarding/settings need more polish and clearer managed/user setting
   separation.
 - Prompt pack switching/import/export, naming templates, hooks, local check
-  runner UI, richer notifications, and deeper layout/theme controls are not
-  fully surfaced in the GUI.
+  runner UI, and richer notifications are not fully surfaced in the GUI.
+  (Theme/accent/density controls are now surfaced on the Settings page.)
 - `new_workspace`, `summarize_session`, `handoff`, `rename_branch`, and
   `refactor_style` prompts remain editable inherited defaults without dedicated
   surfaced actions.
