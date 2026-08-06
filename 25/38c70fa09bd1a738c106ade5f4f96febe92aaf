@@ -1,0 +1,26 @@
+desktop/src/pages/CommandCenter.tsx
+  s_6a5ec6ec557730::t_c7ee0a1cc7e165 25-37
+  s_6a5ec6ec557730::t_06461430305fb5 1
+  s_6a5ec6ec557730::t_233fda17951268 10-17
+  s_6a5ec6ec557730::t_1feb085835bb23 83-94,97-104,109-125
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_e2fd572817ab99 487-495
+desktop/src/store/nav.ts
+  s_6a5ec6ec557730::t_c233f183d420bb 20-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "2538c70fa09bd1a738c106ade5f4f96febe92aaf",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
