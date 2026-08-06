@@ -239,6 +239,12 @@ pub enum ArchcarRequest {
     ListPromptPacks {
         repository: String,
     },
+    /// Set the active prompt pack for a repository (writes committed settings);
+    /// responds with the refreshed PromptPacks list.
+    SetActivePromptPack {
+        repository: String,
+        pack: String,
+    },
     /// Read the raw, editable source TOML for one settings layer (not the merged
     /// effective view). `repository` None = global app-shared; otherwise the
     /// repository's own committed (`repository`) or `local` override layer.
@@ -1008,6 +1014,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::ListPromptPacks { repository } => {
             format!("list_prompt_packs repository={repository}")
+        }
+        ArchcarRequest::SetActivePromptPack { repository, pack } => {
+            format!("set_active_prompt_pack repository={repository} pack={pack}")
         }
         ArchcarRequest::GetSettingsSource { repository, layer } => format!(
             "get_settings_source repository={} layer={}",
@@ -2064,6 +2073,20 @@ mod tests {
         assert_eq!(
             archcar_request_summary(&req),
             "list_prompt_packs repository=repo"
+        );
+
+        let set_req = ArchcarRequest::SetActivePromptPack {
+            repository: "repo".to_owned(),
+            pack: "rust".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&set_req).unwrap())
+                .unwrap(),
+            set_req
+        );
+        assert_eq!(
+            archcar_request_summary(&set_req),
+            "set_active_prompt_pack repository=repo pack=rust"
         );
 
         let resp = ArchcarResponse::PromptPacks {

@@ -350,6 +350,11 @@ enum ArchcarCommand {
     PromptPacks {
         repository: String,
     },
+    /// Set a repository's active prompt pack.
+    SetPromptPack {
+        repository: String,
+        pack: String,
+    },
     /// Overwrite one settings layer's source TOML from stdin (or --content).
     SaveSettings {
         #[arg(long)]
@@ -1153,6 +1158,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::PromptPacks { repository } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListPromptPacks { repository })?,
+                    );
+                }
+                ArchcarCommand::SetPromptPack { repository, pack } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::SetActivePromptPack { repository, pack })?,
                     );
                 }
                 ArchcarCommand::SaveSettings {

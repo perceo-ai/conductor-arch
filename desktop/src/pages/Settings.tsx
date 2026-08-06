@@ -48,7 +48,7 @@ export function SettingsPage() {
 
   // Available prompt packs for the selected repository (read-only discovery;
   // switch by editing `[prompt_pack] active` in the source editor below).
-  const [promptPacks] = createResource(
+  const [promptPacks, { refetch: refetchPacks, mutate: mutatePacks }] = createResource(
     () => repo(),
     async (repository): Promise<{ packs: string[]; active?: string }> => {
       try {
@@ -59,6 +59,21 @@ export function SettingsPage() {
       }
     },
   );
+  async function switchPack(pack: string) {
+    const repository = repo();
+    if (!repository) return;
+    try {
+      const res = await send({ type: "set_active_prompt_pack", repository, pack });
+      if (res.type === "prompt_packs") {
+        mutatePacks({ packs: res.packs, active: res.active });
+        await refetchEffective();
+      } else {
+        await refetchPacks();
+      }
+    } catch {
+      await refetchPacks();
+    }
+  }
 
   const [draft, setDraft] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal("");
@@ -200,18 +215,18 @@ export function SettingsPage() {
             <div class="settings-pack-chips">
               <For each={promptPacks()?.packs ?? []}>
                 {(pack) => (
-                  <span
+                  <button
                     class="settings-pack-chip"
                     classList={{ "settings-pack-chip-active": promptPacks()?.active === pack }}
+                    disabled={promptPacks()?.active === pack}
                     title={
-                      promptPacks()?.active === pack
-                        ? "Active pack"
-                        : "Switch by setting [prompt_pack] active in the source below"
+                      promptPacks()?.active === pack ? "Active pack" : `Switch to ${pack}`
                     }
+                    onClick={() => void switchPack(pack)}
                   >
                     {pack}
                     <Show when={promptPacks()?.active === pack}> ✓</Show>
-                  </span>
+                  </button>
                 )}
               </For>
             </div>

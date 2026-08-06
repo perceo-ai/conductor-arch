@@ -1415,6 +1415,14 @@ button.ui-button-destructive:hover {
     border: 1px solid #333;
     color: #b0b0b0;
     background: #161616;
+    cursor: pointer;
+}
+.settings-pack-chip:hover:not(:disabled) {
+    border-color: #555;
+    color: #e6e6e6;
+}
+.settings-pack-chip:disabled {
+    cursor: default;
 }
 .settings-pack-chip-active {
     border-color: var(--lc-accent, #c39b50);

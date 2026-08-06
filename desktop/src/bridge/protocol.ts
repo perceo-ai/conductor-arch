@@ -67,6 +67,7 @@ export type ArchcarRequest =
   | { type: "get_settings"; repository?: string }
   | { type: "get_settings_source"; repository?: string; layer?: string }
   | { type: "list_prompt_packs"; repository: string }
+  | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
   | { type: "get_setup_readiness"; recheck?: boolean }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }

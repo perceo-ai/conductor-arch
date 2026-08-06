@@ -1006,15 +1006,41 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListPromptPacks { repository } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            let shared = AppPaths::from_env().shared_settings_path();
             let result: anyhow::Result<(Vec<String>, Option<String>)> =
                 RepositoryStore::open(&db_path)
                     .and_then(|s| s.get_by_name(&repository))
                     .and_then(|r| {
                         let packs = crate::settings::list_prompt_pack_names(&r.root_path)?;
-                        let active = crate::settings::load_effective_repository_settings(
+                        let active = crate::settings::load_repository_settings_for_layer(
                             &r.root_path,
-                            &shared,
+                            crate::settings::SettingsLayer::RepositoryShared,
+                        )
+                        .ok()
+                        .and_then(|s| s.prompt_pack.active);
+                        Ok((packs, active))
+                    });
+            match result {
+                Ok((packs, active)) => ArchcarResponse::PromptPacks {
+                    repository,
+                    packs,
+                    active,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SetActivePromptPack { repository, pack } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<(Vec<String>, Option<String>)> =
+                RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(&repository))
+                    .and_then(|r| {
+                        crate::settings::set_active_prompt_pack(&r.root_path, &pack)?;
+                        let packs = crate::settings::list_prompt_pack_names(&r.root_path)?;
+                        let active = crate::settings::load_repository_settings_for_layer(
+                            &r.root_path,
+                            crate::settings::SettingsLayer::RepositoryShared,
                         )
                         .ok()
                         .and_then(|s| s.prompt_pack.active);
