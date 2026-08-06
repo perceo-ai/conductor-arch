@@ -1822,7 +1822,7 @@ body.resizing-col {
   cursor: pointer;
 }
 .cmdk-item-active {
-  background: var(--lc-accent-soft, rgba(120, 140, 255, 0.16));
+  background: color-mix(in srgb, var(--lc-accent, #7c8cff) 16%, transparent);
 }
 .cmdk-item-group {
   flex: 0 0 auto;
