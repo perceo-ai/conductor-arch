@@ -1,0 +1,26 @@
+desktop/src/App.tsx
+  s_6a5ec6ec557730::t_f2c9328d62b0f6 106-126
+  s_6a5ec6ec557730::t_1ab82635beea54 12-22
+desktop/src/lib/shortcuts.test.ts
+  s_6a5ec6ec557730::t_c2dabc816c5bf5 41-48
+desktop/src/lib/shortcuts.ts
+  s_6a5ec6ec557730::t_801cf44f037868 81-83
+  s_6a5ec6ec557730::t_216d1c879a93a1 38-50
+  s_6a5ec6ec557730::t_98cb9afc44a679 14-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "aaceeee17c5ce04e2d01085a51cc5509b04669a8",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
