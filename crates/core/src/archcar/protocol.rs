@@ -207,6 +207,10 @@ pub enum ArchcarRequest {
     ListWorkspaceConflicts {
         workspace: String,
     },
+    /// List directories linked from other workspaces into this one.
+    ListLinkedDirectories {
+        workspace: String,
+    },
     /// Recent commit oneline log for a workspace's branch.
     GetRecentCommits {
         workspace: String,
@@ -593,6 +597,10 @@ pub enum ArchcarResponse {
         workspace: String,
         conflicts: Vec<ArchcarWorkspaceConflict>,
     },
+    LinkedDirectories {
+        workspace: String,
+        directories: Vec<ArchcarLinkedDirectory>,
+    },
     RecentCommits {
         workspace: String,
         log: String,
@@ -856,6 +864,14 @@ pub struct ArchcarTimelineEvent {
     pub created_at: String,
 }
 
+/// A directory linked from another workspace into this one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarLinkedDirectory {
+    pub target_workspace: String,
+    pub link_path: String,
+    pub created_at: String,
+}
+
 /// A sibling workspace that conflicts with this one, plus the overlapping files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArchcarWorkspaceConflict {
@@ -1079,6 +1095,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::ListWorkspaceConflicts { workspace } => {
             format!("list_workspace_conflicts workspace={workspace}")
+        }
+        ArchcarRequest::ListLinkedDirectories { workspace } => {
+            format!("list_linked_directories workspace={workspace}")
         }
         ArchcarRequest::GetRecentCommits { workspace, limit } => format!(
             "get_recent_commits workspace={workspace} limit={}",
@@ -1431,6 +1450,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceConflicts { workspace, conflicts } => {
             format!("workspace_conflicts workspace={workspace} count={}", conflicts.len())
+        }
+        ArchcarResponse::LinkedDirectories { workspace, directories } => {
+            format!("linked_directories workspace={workspace} count={}", directories.len())
         }
         ArchcarResponse::RecentCommits { workspace, log } => {
             format!("recent_commits workspace={workspace} bytes={}", log.len())
@@ -2263,6 +2285,35 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&cresp),
             "workspace_conflicts workspace=ws count=1"
+        );
+
+        let lreq = ArchcarRequest::ListLinkedDirectories {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&lreq).unwrap()).unwrap(),
+            lreq
+        );
+        assert_eq!(
+            archcar_request_summary(&lreq),
+            "list_linked_directories workspace=ws"
+        );
+        let lresp = ArchcarResponse::LinkedDirectories {
+            workspace: "ws".to_owned(),
+            directories: vec![ArchcarLinkedDirectory {
+                target_workspace: "sib".to_owned(),
+                link_path: ".context/linked-directories/sib".to_owned(),
+                created_at: "2026-08-06T00:00:00Z".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&lresp).unwrap())
+                .unwrap(),
+            lresp
+        );
+        assert_eq!(
+            archcar_response_summary(&lresp),
+            "linked_directories workspace=ws count=1"
         );
     }
 

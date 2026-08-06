@@ -150,6 +150,11 @@ calling the existing `create_workspace` RPC — restoring the GTK branch/base
 creation flow. The base field autocompletes from the repo's local branches via a
 new `list_repository_branches` RPC (CLI `archcar branches`).
 
+Linked directories: `list_linked_directories` RPC (CLI `archcar linked-dirs`)
+lists the directories linked from other workspaces into this one; the
+workspace-actions dialog now shows the current links beneath its Link/Unlink
+controls (previously link/unlink existed but there was no way to see them).
+
 Conflicts: `list_workspace_conflicts` RPC (CLI `archcar conflicts`) surfaces
 sibling workspaces whose changes overlap this one's files. Shown as a
 "Conflicting workspaces" section in the Checks tab.

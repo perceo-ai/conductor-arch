@@ -877,6 +877,27 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListLinkedDirectories { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.list_linked_directories(&workspace))
+            {
+                Ok(rows) => ArchcarResponse::LinkedDirectories {
+                    workspace,
+                    directories: rows
+                        .into_iter()
+                        .map(|d| crate::archcar::protocol::ArchcarLinkedDirectory {
+                            target_workspace: d.target_workspace_name,
+                            link_path: d.link_path.to_string_lossy().into_owned(),
+                            created_at: d.created_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetRecentCommits { workspace, limit } => {
             let db_path = state.lock().unwrap().db_path.clone();
             let n = limit.unwrap_or(20).clamp(1, 200) as usize;
@@ -2093,6 +2114,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetWorkspaceProcesses { .. }
             | ArchcarRequest::ListWorkspaceTimeline { .. }
             | ArchcarRequest::ListWorkspaceConflicts { .. }
+            | ArchcarRequest::ListLinkedDirectories { .. }
             | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetCommitDiff { .. }

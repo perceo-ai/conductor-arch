@@ -438,6 +438,17 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
   const [branch, setBranch] = createSignal("");
   const [target, setTarget] = createSignal("");
   const [provider, setProvider] = createSignal("");
+  const [links, { refetch: refetchLinks }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<{ target_workspace: string; link_path: string }[]> => {
+      try {
+        const res = await send({ type: "list_linked_directories", workspace: ws });
+        return res.type === "linked_directories" ? res.directories : [];
+      } catch {
+        return [];
+      }
+    },
+  );
   // The lifecycle actions here don't close the dialog on their own; the caller
   // stays open so several tweaks can be chained. Rename/delete change selection.
   const { busy, error, submit } = useSubmit<() => Promise<unknown>>((run) => run(), () => {});
@@ -472,9 +483,21 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
       <label class="dialog-field"><span>Link directory from workspace</span>
         <input value={target()} onInput={(e) => setTarget(e.currentTarget.value)} placeholder="target workspace name" /></label>
       <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()))}>Link</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()))}>Unlink</button>
+        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Link</button>
+        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Unlink</button>
       </div>
+      <Show when={(links() ?? []).length > 0}>
+        <div class="dialog-linked-list">
+          <For each={links()}>
+            {(d) => (
+              <div class="dialog-linked-row">
+                <span class="dialog-linked-target">{d.target_workspace}</span>
+                <span class="dialog-linked-path">{d.link_path}</span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <label class="dialog-field"><span>Default agent provider</span>
         <input value={provider()} onInput={(e) => setProvider(e.currentTarget.value)} placeholder="codex | claude | cursor" /></label>

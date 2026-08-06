@@ -274,6 +274,10 @@ enum ArchcarCommand {
     Conflicts {
         workspace: String,
     },
+    /// Print directories linked into a workspace.
+    LinkedDirs {
+        workspace: String,
+    },
     /// Print recent commits for a workspace.
     Commits {
         workspace: String,
@@ -1100,6 +1104,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::Conflicts { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListWorkspaceConflicts { workspace })?,
+                    );
+                }
+                ArchcarCommand::LinkedDirs { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListLinkedDirectories { workspace })?,
                     );
                 }
                 ArchcarCommand::Commits { workspace, limit } => {
@@ -2288,6 +2297,15 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspace_conflicts {workspace} {}", conflicts.len());
             for c in conflicts {
                 println!("{}\t{}", c.workspace, c.files.join(","));
+            }
+        }
+        ArchcarResponse::LinkedDirectories {
+            workspace,
+            directories,
+        } => {
+            println!("linked_directories {workspace} {}", directories.len());
+            for d in directories {
+                println!("{}\t{}\t{}", d.target_workspace, d.link_path, d.created_at);
             }
         }
         ArchcarResponse::RecentCommits { workspace, log } => {

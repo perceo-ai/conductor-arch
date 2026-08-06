@@ -1248,6 +1248,27 @@ body.resizing-col {
   background: var(--lc-border, #2a2a2a);
   margin: 6px 0;
 }
+.dialog-linked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+.dialog-linked-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+.dialog-linked-target {
+  color: var(--lc-text, #e6e6e6);
+  flex: 0 0 auto;
+}
+.dialog-linked-path {
+  color: var(--lc-text-muted, #8a8a8a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .dialog-error {
   color: #ff6b6b;
   font-size: 12px;
