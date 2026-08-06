@@ -1847,6 +1847,47 @@ button.ui-button-destructive:hover {
     border-color: #d9e0e8;
 }
 
+/* Sidebar in light. Without these the sidebar keeps its dark surface-muted
+   background while the main content is light — a split-theme look. */
+.lc-theme-light .sidebar {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .sidebar-footer {
+    border-color: #d9e0e8;
+}
+.lc-theme-light .sidebar-nav-label,
+.lc-theme-light .projects-header,
+.lc-theme-light .project-name {
+    color: #1f2937;
+}
+/* Resting row surfaces: the unscoped rule paints project/workspace/history rows
+   with the dark --lc-surface-muted, leaving dark bands in the light sidebar. */
+.lc-theme-light .project-row,
+.lc-theme-light .workspace-row-shell,
+.lc-theme-light .sidebar .history-row {
+    background-color: transparent;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .project-avatar,
+.lc-theme-light .project-avatar-fallback {
+    background-color: #e2e8f0;
+    color: #334155;
+}
+.lc-theme-light .sidebar-nav-button:hover,
+.lc-theme-light .project-row:hover,
+.lc-theme-light .workspace-row-shell:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .sidebar-nav-button.active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .project-add {
+    color: #667085;
+}
+
 /* Dialogs / modals in light. */
 .lc-theme-light .modal-body {
     background-color: #ffffff;
