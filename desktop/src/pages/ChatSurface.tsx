@@ -717,6 +717,75 @@ function FileEditor(props: { workspace: string; path: string }) {
   );
 }
 
+// File-scoped review comments shown beneath the diff — conductor's "comments
+// point at changed lines" model. Lists this file's local review comments (by
+// line) and lets you add one (line optional) via add_review_comment.
+function FileComments(props: { workspace: string; path: string }) {
+  const [comments, { refetch }] = createResource(
+    () => [props.workspace, props.path] as const,
+    async ([ws, path]) => {
+      try {
+        const res = await send({ type: "list_review_comments", workspace: ws });
+        return res.type === "review_comments"
+          ? res.comments.filter((c) => c.file_path === path)
+          : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const [line, setLine] = createSignal("");
+  const [body, setBody] = createSignal("");
+  async function add() {
+    if (!body().trim()) return;
+    const lineNum = line().trim() ? Number(line().trim()) : undefined;
+    try {
+      await actions.addReviewComment({
+        workspace: props.workspace,
+        filePath: props.path,
+        lineNumber: Number.isInteger(lineNum) ? lineNum : undefined,
+        body: body().trim(),
+      });
+      setLine("");
+      setBody("");
+      await refetch();
+    } catch {
+      // non-fatal
+    }
+  }
+  return (
+    <div class="ws-file-comments">
+      <div class="detail-label">Review comments</div>
+      <For each={comments() ?? []}>
+        {(c) => (
+          <div class="ws-file-comment-row">
+            <span class="ws-file-comment-loc">{c.line_number != null ? `L${c.line_number}` : "file"}</span>
+            <span class="ws-file-comment-body">{c.body}</span>
+            <span class="ws-file-comment-status">[{c.status}]</span>
+          </div>
+        )}
+      </For>
+      <div class="action-row">
+        <input
+          class="ws-text-input"
+          style={{ "max-width": "70px" }}
+          placeholder="line"
+          value={line()}
+          onInput={(e) => setLine(e.currentTarget.value)}
+        />
+        <input
+          class="ws-text-input"
+          placeholder="Add a comment on this file…"
+          value={body()}
+          onInput={(e) => setBody(e.currentTarget.value)}
+          onKeyDown={(e) => e.key === "Enter" && void add()}
+        />
+        <button class="secondary-action" onClick={() => void add()}>Add</button>
+      </div>
+    </div>
+  );
+}
+
 function FileView(props: { workspace: string; path: string }) {
   const [mode, setMode] = createSignal<"diff" | "edit">("diff");
   return (
@@ -742,7 +811,12 @@ function FileView(props: { workspace: string; path: string }) {
       </div>
       <Show
         when={mode() === "edit"}
-        fallback={<DiffView workspace={props.workspace} path={props.path} />}
+        fallback={
+          <>
+            <DiffView workspace={props.workspace} path={props.path} />
+            <FileComments workspace={props.workspace} path={props.path} />
+          </>
+        }
       >
         <FileEditor workspace={props.workspace} path={props.path} />
       </Show>

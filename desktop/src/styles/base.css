@@ -1898,6 +1898,36 @@ body.resizing-col {
   color: var(--lc-text-muted, #b0b0b0);
 }
 
+.ws-file-comments {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+  padding: 8px 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.ws-file-comment-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 12.5px;
+}
+.ws-file-comment-loc {
+  flex: 0 0 auto;
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  color: var(--lc-accent, #c39b50);
+  min-width: 34px;
+}
+.ws-file-comment-body {
+  flex: 1 1 auto;
+  color: var(--lc-text, #e6e6e6);
+}
+.ws-file-comment-status {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 11px;
+}
+
 .ws-file-editor {
   flex: 1 1 auto;
   min-height: 0;
