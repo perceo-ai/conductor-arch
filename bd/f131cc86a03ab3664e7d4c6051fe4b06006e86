@@ -1,0 +1,35 @@
+desktop/src/App.tsx
+  s_6a5ec6ec557730::t_ccb2137b57c946 1
+  s_6a5ec6ec557730::t_1d1c6dc4528fbc 11-12,17-31
+  s_6a5ec6ec557730::t_82e1aa773acd58 32
+desktop/src/styles/theme.css
+  s_6a5ec6ec557730::t_ce71d763e9941a 1400-1424
+progress.md
+  s_6a5ec6ec557730::t_abe2001b0ae378 138-143
+desktop/src/store/prefs.test.ts
+  s_6a5ec6ec557730::t_51a64d1965924b 31-53
+desktop/src/pages/Settings.tsx
+  s_6a5ec6ec557730::t_9dba6e6f1796bb 3
+  s_6a5ec6ec557730::t_7642f1f53b3211 111-162
+desktop/src/store/prefs.ts
+  s_6a5ec6ec557730::t_91d1024559e3f1 90-104
+  s_6a5ec6ec557730::t_2e16595c4a8b8d 67-73
+  s_6a5ec6ec557730::t_d1deae8247eac0 11-23,28-31,34-40
+  s_6a5ec6ec557730::t_969fb56d3a8daa 48-49,51-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "bdf131cc86a03ab3664e7d4c6051fe4b06006e86",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
