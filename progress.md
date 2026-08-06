@@ -135,6 +135,11 @@ a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
 read-only Effective merge, with a Repository/Local layer toggle for repo scope.
 CLI: `archcar settings-source` / `archcar save-settings`.
 
+Status indicators: sidebar workspace rows show a colored status dot and
+dashboard cards a matching left accent stripe (green=running, blue=open PR,
+amber=uncommitted changes, grey=idle, dim=archived) from a pure, unit-tested
+`desktop/src/lib/workspaceStatus.ts`.
+
 Appearance controls: the Settings page restores the GTK theme/accent/density
 runtime controls. `prefsStore` now persists `theme` (dark/light), `accent`
 (amber/blue/green/rose, also driving the global `--lc-accent` token), and
