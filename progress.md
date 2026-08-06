@@ -175,6 +175,14 @@ workspace lifecycle events (creation, branch changes, session lifecycle,
 PR/check actions, commits, archive, …). Restored as a Timeline right-panel tab
 (newest first), matching the GTK Timeline surface.
 
+Spotlight testing: `get_spotlight_status`/`start_spotlight`/`stop_spotlight`
+RPCs (CLI `archcar spotlight-status`/`spotlight-start`/`spotlight-stop`) expose
+core's spotlight slice — start applies the workspace's tracked patch to the
+repository root so the running app reflects it, stop reverts. The Processes tab
+shows a Spotlight status line with Start/Stop (requires `spotlight_testing` in
+settings). Restores the GTK Spotlight testing feature; conductor's "Spotlight
+testing" from the workflow doc.
+
 Runtime controls: `run_workspace_script`/`stop_workspace_script`/`get_run_log`
 RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:
 `archcar run-script`/`stop-script`/`run-log`). The Processes tab gained Run/Stop

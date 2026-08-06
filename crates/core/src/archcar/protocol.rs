@@ -251,6 +251,20 @@ pub enum ArchcarRequest {
     GetCheckLog {
         workspace: String,
     },
+    /// Spotlight testing: current status for a workspace (is its patch applied
+    /// to the repo root for live testing).
+    GetSpotlightStatus {
+        workspace: String,
+    },
+    /// Start spotlight testing — apply the workspace's tracked changes to the
+    /// repository root so the running app reflects them.
+    StartSpotlight {
+        workspace: String,
+    },
+    /// Stop spotlight testing — revert the repository root.
+    StopSpotlight {
+        workspace: String,
+    },
     /// Commit the workspace's changes with a message; `stage_all` runs
     /// `git add -A` first, otherwise only already-staged files are committed.
     CommitWorkspaceChanges {
@@ -644,6 +658,14 @@ pub enum ArchcarResponse {
     WorkspaceCommitted {
         workspace: String,
         output: String,
+    },
+    SpotlightStatus {
+        workspace: String,
+        active: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
     },
     WorkspaceScriptPrompt {
         workspace: String,
@@ -1127,6 +1149,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetCheckLog { workspace } => {
             format!("get_check_log workspace={workspace}")
         }
+        ArchcarRequest::GetSpotlightStatus { workspace } => {
+            format!("get_spotlight_status workspace={workspace}")
+        }
+        ArchcarRequest::StartSpotlight { workspace } => {
+            format!("start_spotlight workspace={workspace}")
+        }
+        ArchcarRequest::StopSpotlight { workspace } => {
+            format!("stop_spotlight workspace={workspace}")
+        }
         ArchcarRequest::CommitWorkspaceChanges {
             workspace,
             message,
@@ -1480,6 +1511,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceCommitted { workspace, output } => {
             format!("workspace_committed workspace={workspace} bytes={}", output.len())
+        }
+        ArchcarResponse::SpotlightStatus { workspace, active, .. } => {
+            format!("spotlight_status workspace={workspace} active={active}")
         }
         ArchcarResponse::RunLog { workspace, log } => {
             format!("run_log workspace={workspace} bytes={}", log.len())
@@ -2406,6 +2440,52 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&show_resp),
             "commit_diff workspace=ws commit=abc123 bytes=5"
+        );
+    }
+
+    #[test]
+    fn spotlight_round_trips_and_summarizes() {
+        for (req, summary) in [
+            (
+                ArchcarRequest::GetSpotlightStatus {
+                    workspace: "ws".to_owned(),
+                },
+                "get_spotlight_status workspace=ws",
+            ),
+            (
+                ArchcarRequest::StartSpotlight {
+                    workspace: "ws".to_owned(),
+                },
+                "start_spotlight workspace=ws",
+            ),
+            (
+                ArchcarRequest::StopSpotlight {
+                    workspace: "ws".to_owned(),
+                },
+                "stop_spotlight workspace=ws",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap())
+                    .unwrap(),
+                req
+            );
+            assert_eq!(archcar_request_summary(&req), summary);
+        }
+        let resp = ArchcarResponse::SpotlightStatus {
+            workspace: "ws".to_owned(),
+            active: true,
+            status: Some("active".to_owned()),
+            started_at: Some("123".to_owned()),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "spotlight_status workspace=ws active=true"
         );
     }
 

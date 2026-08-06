@@ -998,6 +998,58 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetSpotlightStatus { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.spotlight_status(&workspace)) {
+                Ok(session) => ArchcarResponse::SpotlightStatus {
+                    workspace,
+                    active: session.is_some(),
+                    status: session.as_ref().map(|s| s.status.clone()),
+                    started_at: session.as_ref().map(|s| s.started_at.clone()),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StartSpotlight { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.spotlight_start(&workspace))
+            {
+                Ok(session) => ArchcarResponse::SpotlightStatus {
+                    workspace,
+                    active: true,
+                    status: Some(session.status),
+                    started_at: Some(session.started_at),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StopSpotlight { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.spotlight_stop(&workspace))
+            {
+                Ok(_) => ArchcarResponse::SpotlightStatus {
+                    workspace,
+                    active: false,
+                    status: None,
+                    started_at: None,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::CommitWorkspaceChanges {
             workspace,
             message,
@@ -2115,6 +2167,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListWorkspaceTimeline { .. }
             | ArchcarRequest::ListWorkspaceConflicts { .. }
             | ArchcarRequest::ListLinkedDirectories { .. }
+            | ArchcarRequest::GetSpotlightStatus { .. }
             | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetCommitDiff { .. }

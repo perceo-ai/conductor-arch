@@ -313,6 +313,18 @@ enum ArchcarCommand {
         #[arg(long)]
         stage_all: bool,
     },
+    /// Show spotlight-testing status for a workspace.
+    SpotlightStatus {
+        workspace: String,
+    },
+    /// Start spotlight testing for a workspace.
+    SpotlightStart {
+        workspace: String,
+    },
+    /// Stop spotlight testing for a workspace.
+    SpotlightStop {
+        workspace: String,
+    },
     /// Read a UTF-8 text file from a workspace checkout.
     ReadFile {
         workspace: String,
@@ -1151,6 +1163,21 @@ fn main() -> Result<()> {
                             stage_all,
                         },
                     )?);
+                }
+                ArchcarCommand::SpotlightStatus { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSpotlightStatus { workspace })?,
+                    );
+                }
+                ArchcarCommand::SpotlightStart { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::StartSpotlight { workspace })?,
+                    );
+                }
+                ArchcarCommand::SpotlightStop { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::StopSpotlight { workspace })?,
+                    );
                 }
                 ArchcarCommand::ReadFile { workspace, path } => {
                     print_archcar_response(
@@ -2359,6 +2386,18 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::WorkspaceCommitted { workspace, output } => {
             println!("workspace_committed {workspace}");
             print!("{output}");
+        }
+        ArchcarResponse::SpotlightStatus {
+            workspace,
+            active,
+            status,
+            started_at,
+        } => {
+            println!(
+                "spotlight_status {workspace} active={active} status={} started_at={}",
+                status.as_deref().unwrap_or("-"),
+                started_at.as_deref().unwrap_or("-")
+            );
         }
         ArchcarResponse::ReviewComments {
             workspace,

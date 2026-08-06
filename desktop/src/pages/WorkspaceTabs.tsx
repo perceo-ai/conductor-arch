@@ -198,7 +198,39 @@ export function ProcessesPanel(props: { workspace: string }) {
       }
     },
   );
+  const [spotlight, { refetch: refetchSpotlight }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<boolean> => {
+      try {
+        const res = await send({ type: "get_spotlight_status", workspace: ws });
+        return res.type === "spotlight_status" ? res.active : false;
+      } catch {
+        return false;
+      }
+    },
+  );
   const [feedback, setFeedback] = createSignal("");
+
+  async function startSpotlight() {
+    setFeedback("Starting spotlight…");
+    try {
+      const res = await send({ type: "start_spotlight", workspace: props.workspace });
+      setFeedback(res.type === "spotlight_status" && res.active ? "Spotlight active" : "");
+      if (res.type === "error") setFeedback(res.message);
+      await refetchSpotlight();
+    } catch (err) {
+      setFeedback(`Spotlight failed: ${(err as Error).message}`);
+    }
+  }
+  async function stopSpotlight() {
+    try {
+      await send({ type: "stop_spotlight", workspace: props.workspace });
+      setFeedback("Spotlight stopped");
+      await refetchSpotlight();
+    } catch (err) {
+      setFeedback(`Stop spotlight failed: ${(err as Error).message}`);
+    }
+  }
 
   async function runScript() {
     setFeedback("Starting run…");
@@ -234,6 +266,17 @@ export function ProcessesPanel(props: { workspace: string }) {
         <button class="secondary-action" onClick={() => void refetchLog()}>
           Refresh log
         </button>
+      </div>
+      <div class="action-row">
+        <span class="detail-label" style={{ flex: "1 1 auto" }}>
+          Spotlight testing: {spotlight() ? "active" : "off"}
+        </span>
+        <Show
+          when={spotlight()}
+          fallback={<button class="secondary-action" onClick={() => void startSpotlight()}>Start spotlight</button>}
+        >
+          <button class="ui-button-destructive" onClick={() => void stopSpotlight()}>Stop spotlight</button>
+        </Show>
       </div>
       <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <div class="detail-label">Processes</div>
