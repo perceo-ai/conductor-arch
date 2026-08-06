@@ -1,0 +1,22 @@
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_cebfb7bcc20647 1633-1666
+desktop/src/pages/Dashboard.tsx
+  s_6a5ec6ec557730::t_6c56ea4bca892d 2
+  s_6a5ec6ec557730::t_a8bd145360a0e3 148-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "93f84946607c23e99d24fae51fce8f6004582686",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
