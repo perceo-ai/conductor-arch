@@ -133,6 +133,12 @@ a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
 read-only Effective merge, with a Repository/Local layer toggle for repo scope.
 CLI: `archcar settings-source` / `archcar save-settings`.
 
+Command palette: Cmd/Ctrl+K global launcher (`desktop/src/components/
+CommandPalette.tsx`) restores the GTK command palette. Fuzzy-filters
+(`desktop/src/lib/fuzzy.ts`, unit-tested) across page navigation, workspace
+jumps, workspace-tab switches, and create/lifecycle actions (add project, new
+workspace, workspace actions). Keyboard-first: ↑/↓ move, Enter runs, Esc closes.
+
 After a mutation acks, the renderer re-pulls the workspace/repository inventory
 (archcar has no inventory-changed event), mirroring the GTK sidebar's
 post-mutation refresh. Read surfaces (chat, changes, todos, checks, review,

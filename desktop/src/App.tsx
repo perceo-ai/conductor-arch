@@ -6,6 +6,7 @@ import Dialogs from "./components/Dialogs";
 import SetupModal from "./components/SetupModal";
 import Toasts from "./components/Toasts";
 import ContextMenu from "./components/ContextMenu";
+import CommandPalette from "./components/CommandPalette";
 import { PageStack } from "./pages";
 import { startStore, setupStore } from "./store";
 
@@ -39,6 +40,7 @@ export default function App() {
       <SetupModal />
       <Toasts />
       <ContextMenu />
+      <CommandPalette />
       <MetricsOverlay />
     </>
   );
