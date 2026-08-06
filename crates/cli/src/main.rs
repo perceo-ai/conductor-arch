@@ -270,6 +270,10 @@ enum ArchcarCommand {
     Timeline {
         workspace: String,
     },
+    /// Print sibling workspaces that conflict with this one.
+    Conflicts {
+        workspace: String,
+    },
     /// Print recent commits for a workspace.
     Commits {
         workspace: String,
@@ -1091,6 +1095,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::Timeline { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListWorkspaceTimeline { workspace })?,
+                    );
+                }
+                ArchcarCommand::Conflicts { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceConflicts { workspace })?,
                     );
                 }
                 ArchcarCommand::Commits { workspace, limit } => {
@@ -2270,6 +2279,15 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspace_timeline {workspace} {}", events.len());
             for e in events {
                 println!("#{}\t{}\t{}\t{}", e.id, e.created_at, e.kind, e.summary);
+            }
+        }
+        ArchcarResponse::WorkspaceConflicts {
+            workspace,
+            conflicts,
+        } => {
+            println!("workspace_conflicts {workspace} {}", conflicts.len());
+            for c in conflicts {
+                println!("{}\t{}", c.workspace, c.files.join(","));
             }
         }
         ArchcarResponse::RecentCommits { workspace, log } => {

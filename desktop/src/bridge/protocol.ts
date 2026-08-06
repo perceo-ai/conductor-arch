@@ -57,6 +57,7 @@ export type ArchcarRequest =
   | { type: "restore_checkpoint"; workspace: string; checkpoint_id: number }
   | { type: "get_workspace_processes"; workspace: string }
   | { type: "list_workspace_timeline"; workspace: string }
+  | { type: "list_workspace_conflicts"; workspace: string }
   | { type: "get_recent_commits"; workspace: string; limit?: number }
   | { type: "get_commit_message_draft"; workspace: string }
   | { type: "get_commit_diff"; workspace: string; commit: string }
@@ -246,6 +247,11 @@ export interface ArchcarTimelineEvent {
   created_at: string;
 }
 
+export interface ArchcarWorkspaceConflict {
+  workspace: string;
+  files: string[];
+}
+
 export interface ArchcarChecksSummary {
   workspace: string;
   changed_files: number;
@@ -350,6 +356,7 @@ export type ArchcarResponse =
   | { type: "checkpoint_saved"; checkpoint: Checkpoint }
   | { type: "workspace_processes"; workspace: string; text: string }
   | { type: "workspace_timeline"; workspace: string; events: ArchcarTimelineEvent[] }
+  | { type: "workspace_conflicts"; workspace: string; conflicts: ArchcarWorkspaceConflict[] }
   | { type: "recent_commits"; workspace: string; log: string }
   | { type: "commit_message_draft"; workspace: string; message: string }
   | { type: "commit_diff"; workspace: string; commit: string; diff: string }

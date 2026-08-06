@@ -5,6 +5,7 @@ import type {
   ArchcarChecksSummary,
   ArchcarConfiguredCheck,
   ArchcarTimelineEvent,
+  ArchcarWorkspaceConflict,
   Checkpoint,
   ReviewComment,
   Todo,
@@ -335,6 +336,17 @@ export function ChecksPanel(props: { workspace: string }) {
       setFeedback(`${check.label} failed: ${(err as Error).message}`);
     }
   }
+  const [conflicts] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarWorkspaceConflict[]> => {
+      try {
+        const res = await send({ type: "list_workspace_conflicts", workspace: ws });
+        return res.type === "workspace_conflicts" ? res.conflicts : [];
+      } catch {
+        return [];
+      }
+    },
+  );
   const run = (label: string, fn: () => Promise<void>) => async () => {
     setFeedback(`${label}…`);
     try {
@@ -410,6 +422,17 @@ export function ChecksPanel(props: { workspace: string }) {
         <pre class="ws-run-prompt">
           {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
         </pre>
+      </Show>
+      <Show when={(conflicts() ?? []).length > 0}>
+        <div class="detail-label">Conflicting workspaces</div>
+        <For each={conflicts()}>
+          {(c) => (
+            <div class="detail-row">
+              <span class="detail-label">{c.workspace}</span>
+              <span class="detail-value">{c.files.join(", ")}</span>
+            </div>
+          )}
+        </For>
       </Show>
       <Show
         when={summary()}

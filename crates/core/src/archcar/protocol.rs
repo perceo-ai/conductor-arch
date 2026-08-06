@@ -203,6 +203,10 @@ pub enum ArchcarRequest {
     ListWorkspaceTimeline {
         workspace: String,
     },
+    /// List sibling workspaces that conflict with this one (overlapping files).
+    ListWorkspaceConflicts {
+        workspace: String,
+    },
     /// Recent commit oneline log for a workspace's branch.
     GetRecentCommits {
         workspace: String,
@@ -585,6 +589,10 @@ pub enum ArchcarResponse {
         workspace: String,
         events: Vec<ArchcarTimelineEvent>,
     },
+    WorkspaceConflicts {
+        workspace: String,
+        conflicts: Vec<ArchcarWorkspaceConflict>,
+    },
     RecentCommits {
         workspace: String,
         log: String,
@@ -848,6 +856,13 @@ pub struct ArchcarTimelineEvent {
     pub created_at: String,
 }
 
+/// A sibling workspace that conflicts with this one, plus the overlapping files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarWorkspaceConflict {
+    pub workspace: String,
+    pub files: Vec<String>,
+}
+
 /// One configured check command (key/label/command) a workspace can run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArchcarConfiguredCheck {
@@ -1061,6 +1076,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::ListWorkspaceTimeline { workspace } => {
             format!("list_workspace_timeline workspace={workspace}")
+        }
+        ArchcarRequest::ListWorkspaceConflicts { workspace } => {
+            format!("list_workspace_conflicts workspace={workspace}")
         }
         ArchcarRequest::GetRecentCommits { workspace, limit } => format!(
             "get_recent_commits workspace={workspace} limit={}",
@@ -1410,6 +1428,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceTimeline { workspace, events } => {
             format!("workspace_timeline workspace={workspace} count={}", events.len())
+        }
+        ArchcarResponse::WorkspaceConflicts { workspace, conflicts } => {
+            format!("workspace_conflicts workspace={workspace} count={}", conflicts.len())
         }
         ArchcarResponse::RecentCommits { workspace, log } => {
             format!("recent_commits workspace={workspace} bytes={}", log.len())
@@ -2214,6 +2235,34 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&resp),
             "workspace_timeline workspace=ws count=1"
+        );
+
+        let creq = ArchcarRequest::ListWorkspaceConflicts {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&creq).unwrap()).unwrap(),
+            creq
+        );
+        assert_eq!(
+            archcar_request_summary(&creq),
+            "list_workspace_conflicts workspace=ws"
+        );
+        let cresp = ArchcarResponse::WorkspaceConflicts {
+            workspace: "ws".to_owned(),
+            conflicts: vec![ArchcarWorkspaceConflict {
+                workspace: "sibling".to_owned(),
+                files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&cresp).unwrap())
+                .unwrap(),
+            cresp
+        );
+        assert_eq!(
+            archcar_response_summary(&cresp),
+            "workspace_conflicts workspace=ws count=1"
         );
     }
 

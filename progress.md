@@ -150,6 +150,10 @@ calling the existing `create_workspace` RPC — restoring the GTK branch/base
 creation flow. The base field autocompletes from the repo's local branches via a
 new `list_repository_branches` RPC (CLI `archcar branches`).
 
+Conflicts: `list_workspace_conflicts` RPC (CLI `archcar conflicts`) surfaces
+sibling workspaces whose changes overlap this one's files. Shown as a
+"Conflicting workspaces" section in the Checks tab.
+
 Timeline: `list_workspace_timeline` RPC (CLI `archcar timeline`) surfaces the
 workspace lifecycle events (creation, branch changes, session lifecycle,
 PR/check actions, commits, archive, …). Restored as a Timeline right-panel tab
