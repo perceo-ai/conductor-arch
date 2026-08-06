@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import { chatStore, threadsStore, nav, loadThread, interactionsStore, actions, prefsStore } from "@/store";
 import { MODELS, EFFORTS } from "@/lib/models";
 import { send } from "@/bridge/client";
@@ -592,13 +592,115 @@ function Composer(props: {
   );
 }
 
-// File view = the file's diff. There is no read-file RPC, so Edit/Preview modes
-// are not available; the diff is the useful, backend-backed view of a file.
+// File view — two modes backed by real RPCs:
+//   diff : the three-section unified diff (get_workspace_diff)
+//   edit : the file's UTF-8 text (read_workspace_file), editable + savable
+//          (write_workspace_file). Binary/oversize files surface the backend
+//          error instead of an editor.
+function FileEditor(props: { workspace: string; path: string }) {
+  const [loaded] = createResource(
+    () => [props.workspace, props.path] as const,
+    async ([ws, path]) => {
+      try {
+        const res = await send({ type: "read_workspace_file", workspace: ws, path });
+        if (res.type === "workspace_file_content") return { content: res.content, error: null };
+        if (res.type === "error") return { content: "", error: res.message };
+        return { content: "", error: "Unexpected response" };
+      } catch (err) {
+        return { content: "", error: (err as Error).message };
+      }
+    },
+  );
+  const [draft, setDraft] = createSignal<string | null>(null);
+  const [status, setStatus] = createSignal("");
+  // Reset the local draft whenever a fresh file load arrives.
+  createEffect(() => {
+    const l = loaded();
+    if (l && !l.error) setDraft(l.content);
+  });
+  const dirty = () => {
+    const l = loaded();
+    return l != null && draft() != null && draft() !== l.content;
+  };
+
+  async function save() {
+    const text = draft();
+    if (text == null) return;
+    setStatus("Saving…");
+    try {
+      const res = await send({
+        type: "write_workspace_file",
+        workspace: props.workspace,
+        path: props.path,
+        content: text,
+      });
+      setStatus(res.type === "workspace_file_written" ? "Saved" : "Save failed");
+    } catch (err) {
+      setStatus(`Save failed: ${(err as Error).message}`);
+    }
+  }
+
+  return (
+    <Show
+      when={!loaded()?.error}
+      fallback={<div class="empty-state">{loaded()?.error}</div>}
+    >
+      <div class="ws-file-editor">
+        <textarea
+          class="ws-file-editor-area"
+          spellcheck={false}
+          value={draft() ?? ""}
+          onInput={(e) => {
+            setDraft(e.currentTarget.value);
+            setStatus("");
+          }}
+          onKeyDown={(e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+              e.preventDefault();
+              void save();
+            }
+          }}
+        />
+        <div class="ws-file-editor-footer">
+          <span class="card-meta">{status() || (dirty() ? "Unsaved changes" : "")}</span>
+          <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
+            Save
+          </button>
+        </div>
+      </div>
+    </Show>
+  );
+}
+
 function FileView(props: { workspace: string; path: string }) {
+  const [mode, setMode] = createSignal<"diff" | "edit">("diff");
   return (
     <div class="ws-file-view">
-      <div class="ws-file-view-header">{props.path}</div>
-      <DiffView workspace={props.workspace} path={props.path} />
+      <div class="ws-file-view-header">
+        <span class="ws-file-view-path">{props.path}</span>
+        <div class="command-center-strip ws-file-view-modes">
+          <button
+            class="nav-button"
+            classList={{ "nav-button-active": mode() === "diff" }}
+            onClick={() => setMode("diff")}
+          >
+            Diff
+          </button>
+          <button
+            class="nav-button"
+            classList={{ "nav-button-active": mode() === "edit" }}
+            onClick={() => setMode("edit")}
+          >
+            Edit
+          </button>
+        </div>
+      </div>
+      <Show
+        when={mode() === "edit"}
+        fallback={<DiffView workspace={props.workspace} path={props.path} />}
+      >
+        <FileEditor workspace={props.workspace} path={props.path} />
+      </Show>
     </div>
   );
 }

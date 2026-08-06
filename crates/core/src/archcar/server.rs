@@ -713,6 +713,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ReadWorkspaceFile { workspace, path } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.read_file(&workspace, &path)) {
+                Ok(content) => ArchcarResponse::WorkspaceFileContent {
+                    workspace,
+                    path,
+                    content,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::WriteWorkspaceFile {
+            workspace,
+            path,
+            content,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.write_file(&workspace, &path, &content))
+            {
+                Ok(()) => ArchcarResponse::WorkspaceFileWritten { workspace, path },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|store| match scope {
@@ -1696,6 +1724,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
             | ArchcarRequest::ListWorkspaceFiles { .. }
+            | ArchcarRequest::ReadWorkspaceFile { .. }
             | ArchcarRequest::GetWorkspaceChanges { .. }
             | ArchcarRequest::GetWorkspaceDiff { .. }
             | ArchcarRequest::ListTodos { .. }

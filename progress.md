@@ -120,6 +120,12 @@ handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
   workspace actions dialog.
 - Provider default: `set_default_agent_provider`. UI: workspace actions dialog.
 
+Workspace file editing: `read_workspace_file`/`write_workspace_file` RPCs (core
+`WorkspaceStore::read_file`/`write_file`, path-traversal guarded, 2 MiB + binary
+limits) back a center-pane file editor. The desktop FileView now has Diff/Edit
+tabs; Edit loads real UTF-8 content into a textarea with Ctrl/Cmd+S save. CLI
+exposes `archcar read-file`/`write-file` for the same boundary.
+
 After a mutation acks, the renderer re-pulls the workspace/repository inventory
 (archcar has no inventory-changed event), mirroring the GTK sidebar's
 post-mutation refresh. Read surfaces (chat, changes, todos, checks, review,

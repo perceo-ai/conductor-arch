@@ -46,6 +46,8 @@ export type ArchcarRequest =
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
   | { type: "list_workspace_files"; workspace: string }
+  | { type: "read_workspace_file"; workspace: string; path: string }
+  | { type: "write_workspace_file"; workspace: string; path: string; content: string }
   | { type: "get_workspace_changes"; workspace: string; scope: WorkspaceChangeScope }
   | { type: "get_workspace_diff"; workspace: string; path?: string }
   | { type: "list_todos"; workspace: string }
@@ -304,6 +306,8 @@ export type ArchcarResponse =
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
   | { type: "workspace_files"; workspace: string; files: string[] }
+  | { type: "workspace_file_content"; workspace: string; path: string; content: string }
+  | { type: "workspace_file_written"; workspace: string; path: string }
   | {
       type: "workspace_changes";
       workspace: string;

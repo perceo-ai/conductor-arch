@@ -1566,17 +1566,60 @@ body.resizing-col {
 }
 .ws-file-view-header {
   flex: 0 0 auto;
-  padding: 8px 14px;
+  padding: 6px 10px 6px 14px;
   font-size: 12px;
   color: var(--lc-text-muted, #9a9a9a);
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ws-file-view-path {
+  flex: 1 1 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ws-file-view-modes {
+  flex: 0 0 auto;
+}
 .ws-file-view .ws-diff-view {
   flex: 1 1 auto;
   min-height: 0;
+}
+.ws-file-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ws-file-editor-area {
+  flex: 1 1 auto;
+  min-height: 0;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: 12px 14px;
+  background: var(--lc-surface, #161616);
+  color: var(--lc-text, #e6e6e6);
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+.ws-file-editor-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-file-editor-footer .card-meta {
+  margin-right: auto;
 }
 
 /* ---- Diff meta rows (headers) ---- */

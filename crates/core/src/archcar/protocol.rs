@@ -160,6 +160,15 @@ pub enum ArchcarRequest {
     ListWorkspaceFiles {
         workspace: String,
     },
+    ReadWorkspaceFile {
+        workspace: String,
+        path: String,
+    },
+    WriteWorkspaceFile {
+        workspace: String,
+        path: String,
+        content: String,
+    },
     GetWorkspaceChanges {
         workspace: String,
         scope: WorkspaceChangeScope,
@@ -451,6 +460,15 @@ pub enum ArchcarResponse {
     WorkspaceFiles {
         workspace: String,
         files: Vec<String>,
+    },
+    WorkspaceFileContent {
+        workspace: String,
+        path: String,
+        content: String,
+    },
+    WorkspaceFileWritten {
+        workspace: String,
+        path: String,
     },
     WorkspaceChanges {
         workspace: String,
@@ -835,6 +853,17 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListWorkspaceFiles { workspace } => {
             format!("list_workspace_files workspace={workspace}")
         }
+        ArchcarRequest::ReadWorkspaceFile { workspace, path } => {
+            format!("read_workspace_file workspace={workspace} path={path}")
+        }
+        ArchcarRequest::WriteWorkspaceFile {
+            workspace,
+            path,
+            content,
+        } => format!(
+            "write_workspace_file workspace={workspace} path={path} bytes={}",
+            content.len()
+        ),
         ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
             format!("get_workspace_changes workspace={workspace} scope={scope:?}")
         }
@@ -1113,6 +1142,17 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceFiles { workspace, files } => {
             format!("workspace_files workspace={workspace} count={}", files.len())
+        }
+        ArchcarResponse::WorkspaceFileContent {
+            workspace,
+            path,
+            content,
+        } => format!(
+            "workspace_file_content workspace={workspace} path={path} bytes={}",
+            content.len()
+        ),
+        ArchcarResponse::WorkspaceFileWritten { workspace, path } => {
+            format!("workspace_file_written workspace={workspace} path={path}")
         }
         ArchcarResponse::WorkspaceChanges { workspace, files, .. } => {
             format!("workspace_changes workspace={workspace} count={}", files.len())

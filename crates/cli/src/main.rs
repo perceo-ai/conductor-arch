@@ -254,6 +254,18 @@ enum ArchcarCommand {
     WorkspaceFiles {
         workspace: String,
     },
+    /// Read a UTF-8 text file from a workspace checkout.
+    ReadFile {
+        workspace: String,
+        path: String,
+    },
+    /// Overwrite a text file in a workspace checkout with stdin content.
+    WriteFile {
+        workspace: String,
+        path: String,
+        /// Inline content (if omitted, read from stdin).
+        content: Option<String>,
+    },
     /// List changed-file summaries for a workspace.
     WorkspaceChanges {
         workspace: String,
@@ -982,6 +994,30 @@ fn main() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListWorkspaceFiles { workspace })?,
                     );
+                }
+                ArchcarCommand::ReadFile { workspace, path } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ReadWorkspaceFile { workspace, path })?,
+                    );
+                }
+                ArchcarCommand::WriteFile {
+                    workspace,
+                    path,
+                    content,
+                } => {
+                    let content = match content {
+                        Some(c) => c,
+                        None => {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                            buf
+                        }
+                    };
+                    print_archcar_response(client.send(ArchcarRequest::WriteWorkspaceFile {
+                        workspace,
+                        path,
+                        content,
+                    })?);
                 }
                 ArchcarCommand::WorkspaceChanges { workspace, all } => {
                     let scope = if all {
@@ -1994,6 +2030,22 @@ fn print_archcar_response(response: ArchcarResponse) {
             for f in files {
                 println!("{f}");
             }
+        }
+        ArchcarResponse::WorkspaceFileContent {
+            workspace,
+            path,
+            content,
+        } => {
+            println!(
+                "workspace_file_content {} {} {}",
+                workspace,
+                path,
+                content.len()
+            );
+            print!("{content}");
+        }
+        ArchcarResponse::WorkspaceFileWritten { workspace, path } => {
+            println!("workspace_file_written {workspace} {path}");
         }
         ArchcarResponse::WorkspaceChanges {
             workspace, files, ..
