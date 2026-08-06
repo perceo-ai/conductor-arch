@@ -998,6 +998,17 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetPullRequestReadiness { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.pull_request_readiness_text(&workspace))
+            {
+                Ok(text) => ArchcarResponse::PullRequestReadiness { workspace, text },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetSpotlightStatus { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|s| s.spotlight_status(&workspace)) {
@@ -2187,6 +2198,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListWorkspaceConflicts { .. }
             | ArchcarRequest::ListLinkedDirectories { .. }
             | ArchcarRequest::GetSpotlightStatus { .. }
+            | ArchcarRequest::GetPullRequestReadiness { .. }
             | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetCommitDiff { .. }

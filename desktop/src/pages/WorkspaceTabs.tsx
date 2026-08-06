@@ -401,6 +401,20 @@ export function ChecksPanel(props: { workspace: string }) {
     }
   };
 
+  // GitHub PR readiness detail (gh pr view) — network/gh-auth gated, load on demand.
+  const [prReadiness, setPrReadiness] = createSignal<string | null>(null);
+  async function loadPrReadiness() {
+    setPrReadiness("Loading…");
+    try {
+      const res = await send({ type: "get_pull_request_readiness", workspace: props.workspace });
+      if (res.type === "pull_request_readiness") setPrReadiness(res.text || "No readiness detail.");
+      else if (res.type === "error") setPrReadiness(res.message);
+      else setPrReadiness("Unavailable.");
+    } catch (err) {
+      setPrReadiness((err as Error).message);
+    }
+  }
+
   const rows = (s: ArchcarChecksSummary): [string, string][] => [
     ["Changed files", String(s.changed_files)],
     ["Run", s.run_status ?? "—"],
@@ -473,7 +487,14 @@ export function ChecksPanel(props: { workspace: string }) {
         <button class="suggested-action" onClick={run("Merge PR", () => actions.mergePullRequest(props.workspace))}>
           Merge PR
         </button>
+        <button class="secondary-action" onClick={loadPrReadiness}>
+          PR readiness
+        </button>
       </div>
+      <Show when={prReadiness() != null}>
+        <div class="detail-label">GitHub PR readiness</div>
+        <pre class="ws-pr-readiness">{prReadiness()}</pre>
+      </Show>
       <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <Show when={(checks() ?? []).length > 0}>
         <div class="detail-label">Local checks</div>

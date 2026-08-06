@@ -191,6 +191,14 @@ shows a Spotlight status line with Start/Stop (requires `spotlight_testing` in
 settings). Restores the GTK Spotlight testing feature; conductor's "Spotlight
 testing" from the workflow doc.
 
+PR readiness detail: `get_pull_request_readiness` RPC (CLI `archcar
+pr-readiness <ws>`) surfaces core's `pull_request_readiness_text` (`gh pr view`
+— CI/status/deployment/review-thread signals conductor's Checks doc lists but
+the DB-only summary lacks). The Checks tab has a "PR readiness" button that
+loads the detail into a `<pre>` on demand. Network/gh-auth gated: boundary path
+(missing workspace) smoke-verified to return a clear error; the live gh path is
+auth-gated and not smoke-verified here.
+
 Runtime controls: `run_workspace_script`/`stop_workspace_script`/`get_run_log`
 RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:
 `archcar run-script`/`stop-script`/`run-log`). The Processes tab gained Run/Stop

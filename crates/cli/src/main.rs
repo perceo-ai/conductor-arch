@@ -318,6 +318,10 @@ enum ArchcarCommand {
         repository: String,
         issue: String,
     },
+    /// Print GitHub PR readiness detail (gh pr view) for a workspace.
+    PrReadiness {
+        workspace: String,
+    },
     /// Show spotlight-testing status for a workspace.
     SpotlightStatus {
         workspace: String,
@@ -1178,6 +1182,11 @@ fn main() -> Result<()> {
                             branch: None,
                         },
                     )?);
+                }
+                ArchcarCommand::PrReadiness { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetPullRequestReadiness { workspace })?,
+                    );
                 }
                 ArchcarCommand::SpotlightStatus { workspace } => {
                     print_archcar_response(
@@ -2401,6 +2410,10 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::WorkspaceCommitted { workspace, output } => {
             println!("workspace_committed {workspace}");
             print!("{output}");
+        }
+        ArchcarResponse::PullRequestReadiness { workspace, text } => {
+            println!("pull_request_readiness {workspace}");
+            print!("{text}");
         }
         ArchcarResponse::SpotlightStatus {
             workspace,

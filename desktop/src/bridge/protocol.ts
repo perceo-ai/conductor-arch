@@ -69,6 +69,7 @@ export type ArchcarRequest =
   | { type: "run_workspace_check"; workspace: string; key: string }
   | { type: "get_check_log"; workspace: string }
   | { type: "commit_workspace_changes"; workspace: string; message: string; stage_all?: boolean }
+  | { type: "get_pull_request_readiness"; workspace: string }
   | { type: "get_spotlight_status"; workspace: string }
   | { type: "start_spotlight"; workspace: string }
   | { type: "stop_spotlight"; workspace: string }
@@ -383,6 +384,7 @@ export type ArchcarResponse =
   | { type: "check_started"; workspace: string; key: string; pid: number; log_path: string }
   | { type: "check_log"; workspace: string; log: string }
   | { type: "workspace_committed"; workspace: string; output: string }
+  | { type: "pull_request_readiness"; workspace: string; text: string }
   | { type: "spotlight_status"; workspace: string; active: boolean; status?: string; started_at?: string }
   | { type: "workspace_script_prompt"; workspace: string; kind: string; prompt: string }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }

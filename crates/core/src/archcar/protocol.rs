@@ -251,6 +251,11 @@ pub enum ArchcarRequest {
     GetCheckLog {
         workspace: String,
     },
+    /// PR readiness detail from GitHub (`gh pr view`): CI/status checks, review
+    /// decision, deployments, review threads. Requires `gh` auth + an open PR.
+    GetPullRequestReadiness {
+        workspace: String,
+    },
     /// Spotlight testing: current status for a workspace (is its patch applied
     /// to the repo root for live testing).
     GetSpotlightStatus {
@@ -666,6 +671,10 @@ pub enum ArchcarResponse {
     WorkspaceCommitted {
         workspace: String,
         output: String,
+    },
+    PullRequestReadiness {
+        workspace: String,
+        text: String,
     },
     SpotlightStatus {
         workspace: String,
@@ -1157,6 +1166,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetCheckLog { workspace } => {
             format!("get_check_log workspace={workspace}")
         }
+        ArchcarRequest::GetPullRequestReadiness { workspace } => {
+            format!("get_pull_request_readiness workspace={workspace}")
+        }
         ArchcarRequest::GetSpotlightStatus { workspace } => {
             format!("get_spotlight_status workspace={workspace}")
         }
@@ -1524,6 +1536,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceCommitted { workspace, output } => {
             format!("workspace_committed workspace={workspace} bytes={}", output.len())
+        }
+        ArchcarResponse::PullRequestReadiness { workspace, text } => {
+            format!("pull_request_readiness workspace={workspace} bytes={}", text.len())
         }
         ArchcarResponse::SpotlightStatus { workspace, active, .. } => {
             format!("spotlight_status workspace={workspace} active={active}")
@@ -2509,6 +2524,34 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&resp),
             "spotlight_status workspace=ws active=true"
+        );
+    }
+
+    #[test]
+    fn pull_request_readiness_round_trips_and_summarizes() {
+        let req = ArchcarRequest::GetPullRequestReadiness {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "get_pull_request_readiness workspace=ws"
+        );
+        let resp = ArchcarResponse::PullRequestReadiness {
+            workspace: "ws".to_owned(),
+            text: "ready".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "pull_request_readiness workspace=ws bytes=5"
         );
     }
 
