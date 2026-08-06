@@ -1,0 +1,19 @@
+desktop/src/pages/Dashboard.tsx
+  s_6a5ec6ec557730::t_31d36287277563 76-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "504917ad5d186854023a13f2c314b8f4fe9de5af",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
