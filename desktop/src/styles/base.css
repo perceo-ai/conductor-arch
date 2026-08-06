@@ -224,13 +224,30 @@ body.resizing-col {
 .workspace-row-shell.selected {
   background: var(--lc-hover);
 }
+.workspace-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.workspace-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
 .workspace-row-shell .row-name {
   color: var(--lc-text-strong);
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .workspace-row-shell .row-meta {
   font-size: 12px;
   color: var(--lc-text-muted);
+  padding-left: 16px; /* align under the name, past the status dot */
 }
 
 /* --- project (repository) groups in the sidebar --- */

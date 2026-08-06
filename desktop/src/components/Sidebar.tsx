@@ -4,6 +4,7 @@ import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+import { workspaceStatusKind, STATUS_COLOR, STATUS_LABEL } from "@/lib/workspaceStatus";
 
 // Run a lifecycle action and surface any failure as a toast rather than
 // swallowing it — a silently-failing remove/delete is how a dead workspace ends
@@ -120,6 +121,7 @@ const SIDEBAR_MAX = 520;
 function WorkspaceRow(props: { name: string }) {
   const row = () => workspacesStore.row(props.name);
   const selected = () => nav.selectedWorkspace() === props.name;
+  const statusKind = () => workspaceStatusKind(row() ?? {});
   return (
     <button
       class="workspace-row-shell"
@@ -127,7 +129,14 @@ function WorkspaceRow(props: { name: string }) {
       onClick={() => nav.selectWorkspace(props.name)}
       onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
     >
-      <span class="row-name">{props.name}</span>
+      <span class="workspace-row-head">
+        <span
+          class="workspace-status-dot"
+          style={{ "background-color": STATUS_COLOR[statusKind()] }}
+          title={STATUS_LABEL[statusKind()]}
+        />
+        <span class="row-name">{props.name}</span>
+      </span>
       <span class="row-meta">
         <Show when={row()} fallback="…">
           {(r) => (
