@@ -8,7 +8,8 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore } from "@/store";
+import type { Accent } from "@/store/prefs";
 import type { WorkspaceTab } from "@/store/nav";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
@@ -129,6 +130,30 @@ export default function CommandPalette() {
         });
       }
     }
+    // Appearance + help — make the palette a real control surface.
+    list.push({
+      id: "appearance:theme",
+      label: `Switch to ${prefsStore.state.theme === "dark" ? "light" : "dark"} theme`,
+      hint: "Appearance",
+      group: "Appearance",
+      run: () => prefsStore.setTheme(prefsStore.state.theme === "dark" ? "light" : "dark"),
+    });
+    const ACCENTS: Accent[] = ["amber", "blue", "green", "rose"];
+    const nextAccent = ACCENTS[(ACCENTS.indexOf(prefsStore.state.accent) + 1) % ACCENTS.length];
+    list.push({
+      id: "appearance:accent",
+      label: `Cycle accent → ${nextAccent}`,
+      hint: "Appearance",
+      group: "Appearance",
+      run: () => prefsStore.setAccent(nextAccent),
+    });
+    list.push({
+      id: "help:shortcuts",
+      label: "Keyboard shortcuts",
+      hint: "Help",
+      group: "Help",
+      run: () => uiStore.setHelpOpen(true),
+    });
     // Actions.
     list.push({
       id: "action:add-project",

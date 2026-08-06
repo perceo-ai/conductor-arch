@@ -145,7 +145,9 @@ Command palette: Cmd/Ctrl+K global launcher (`desktop/src/components/
 CommandPalette.tsx`) restores the GTK command palette. Fuzzy-filters
 (`desktop/src/lib/fuzzy.ts`, unit-tested) across page navigation, workspace
 jumps, workspace-tab switches, and create/lifecycle actions (add project, new
-workspace, workspace actions). Keyboard-first: ↑/↓ move, Enter runs, Esc closes.
+workspace, workspace actions). Keyboard-first: ↑/↓ move, Enter runs, Esc closes. The palette also drives
+appearance (switch theme, cycle accent) and opens the keyboard-shortcuts help,
+making it a real control surface.
 
 After a mutation acks, the renderer re-pulls the workspace/repository inventory
 (archcar has no inventory-changed event), mirroring the GTK sidebar's

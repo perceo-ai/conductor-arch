@@ -9,13 +9,14 @@ import ContextMenu from "./components/ContextMenu";
 import CommandPalette from "./components/CommandPalette";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import { PageStack } from "./pages";
-import { startStore, setupStore, prefsStore, nav } from "./store";
+import { startStore, setupStore, prefsStore, nav, uiStore } from "./store";
 import { ACCENT_HEX } from "./store/prefs";
 import { resolveShortcut } from "./lib/shortcuts";
 
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
-  const [helpOpen, setHelpOpen] = createSignal(false);
+  const helpOpen = uiStore.helpOpen;
+  const setHelpOpen = uiStore.setHelpOpen;
 
   // Apply appearance prefs (theme/accent/density) to the document body — the
   // theme.css class hooks (lc-theme-*, lc-accent-*, lc-density-*) are already
