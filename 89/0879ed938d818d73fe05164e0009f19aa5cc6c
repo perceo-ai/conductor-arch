@@ -1,0 +1,48 @@
+crates/core/src/archcar/server.rs
+  s_6a5ec6ec557730::t_96ebe73e92640a 861-875
+  s_6a5ec6ec557730::t_613d81d6d02328 2055
+crates/core/src/archcar/protocol.rs
+  s_6a5ec6ec557730::t_349a71e0414a1f 1396-1398
+  s_6a5ec6ec557730::t_5784d3782fb742 212-216
+  s_6a5ec6ec557730::t_4bb2dc2e54d82e 588-592
+  s_6a5ec6ec557730::t_c172762ab3c549 2224-2251
+  s_6a5ec6ec557730::t_4be7703f624ec8 1051-1053
+desktop/src/pages/openFileBridge.ts
+  s_6a5ec6ec557730::t_4aa4b8abaaf66b 15-25
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_d556c1fa4ccac1 724-743
+progress.md
+  s_6a5ec6ec557730::t_e1dcdac671986d 143-145
+desktop/src/bridge/protocol.ts
+  s_6a5ec6ec557730::t_f9340ec85b6af0 61
+  s_6a5ec6ec557730::t_e0634f20e85e6a 346
+desktop/src/pages/ChatSurface.tsx
+  s_6a5ec6ec557730::t_1ef0af786be429 814-818
+  s_6a5ec6ec557730::t_6c4ee5e17eb077 753-788
+  s_6a5ec6ec557730::t_0584cc9d79e94d 956-962
+  s_6a5ec6ec557730::t_8b58f9df5f55a1 16
+crates/cli/src/main.rs
+  s_6a5ec6ec557730::t_5ff5c78affb026 2268-2275
+  s_6a5ec6ec557730::t_1969b4c3cab04e 279-283
+  s_6a5ec6ec557730::t_bdeafc741b3fbd 1097-1101
+desktop/src/pages/WorkspaceChanges.tsx
+  s_6a5ec6ec557730::t_ce10552b20a0b9 160-167,169-174
+  s_6a5ec6ec557730::t_7a9d6a9009487c 168
+  s_6a5ec6ec557730::t_b3f7edfc7c0f5a 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "890879ed938d818d73fe05164e0009f19aa5cc6c",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
