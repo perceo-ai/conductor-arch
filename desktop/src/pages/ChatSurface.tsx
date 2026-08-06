@@ -12,6 +12,7 @@ import type {
 import { titleCaseWorkspace } from "@/lib/text";
 import { isDisplayableTimelineItem } from "@/lib/timeline";
 import { DiffView } from "./WorkspaceChanges";
+import ChangesTab from "./WorkspaceChanges";
 import { registerOpenFile } from "./openFileBridge";
 import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
@@ -749,7 +750,7 @@ function FileView(props: { workspace: string; path: string }) {
   );
 }
 
-type CenterView = { kind: "chat" } | { kind: "file"; path: string };
+type CenterView = { kind: "chat" } | { kind: "file"; path: string } | { kind: "changes" };
 
 export default function ChatSurface(props: { workspace: string }) {
   // Only agent chats (codex/claude) belong in the tab strip. "shell" sessions
@@ -882,6 +883,14 @@ export default function ChatSurface(props: { workspace: string }) {
           <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
             +
           </button>
+          <button
+            class="ws-tab-shell ws-changes-tab-btn"
+            classList={{ "ws-tab-active": view().kind === "changes" }}
+            title="View all workspace changes"
+            onClick={() => setView({ kind: "changes" })}
+          >
+            <span class="ws-tab-label">Changes</span>
+          </button>
           <Show when={openFiles().length > 0}>
             <span class="ws-tab-sep-v" />
           </Show>
@@ -901,6 +910,9 @@ export default function ChatSurface(props: { workspace: string }) {
         </div>
       </div>
       <Switch fallback={<div class="empty-state">Starting chat…</div>}>
+        <Match when={view().kind === "changes"}>
+          <ChangesTab workspace={props.workspace} />
+        </Match>
         <Match when={view().kind === "file"}>
           <FileView workspace={props.workspace} path={(view() as { path: string }).path} />
         </Match>
