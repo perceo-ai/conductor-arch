@@ -847,6 +847,29 @@ pub fn default_repository_settings_toml() -> Result<String> {
     repository_settings_to_toml(&settings)
 }
 
+/// List the prompt-pack names available for a repository — the `.toml` file
+/// stems under `.archductor/prompt-packs/`, sorted, so a UI can show which packs
+/// exist. Returns an empty list when the directory is absent.
+pub fn list_prompt_pack_names(repo_path: &Path) -> Result<Vec<String>> {
+    let dir = repo_path.join(".archductor/prompt-packs");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 pub fn default_prompt_pack_toml() -> Result<String> {
     let raw = RawPromptPackFile {
         name: Some("default".to_owned()),

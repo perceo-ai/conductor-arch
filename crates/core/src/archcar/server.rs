@@ -1004,6 +1004,33 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListPromptPacks { repository } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let shared = AppPaths::from_env().shared_settings_path();
+            let result: anyhow::Result<(Vec<String>, Option<String>)> =
+                RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(&repository))
+                    .and_then(|r| {
+                        let packs = crate::settings::list_prompt_pack_names(&r.root_path)?;
+                        let active = crate::settings::load_effective_repository_settings(
+                            &r.root_path,
+                            &shared,
+                        )
+                        .ok()
+                        .and_then(|s| s.prompt_pack.active);
+                        Ok((packs, active))
+                    });
+            match result {
+                Ok((packs, active)) => ArchcarResponse::PromptPacks {
+                    repository,
+                    packs,
+                    active,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetSettingsSource { repository, layer } => {
             let db_path = state.lock().unwrap().db_path.clone();
             let read_layer_file = |path: std::path::PathBuf| -> std::io::Result<String> {
@@ -1917,6 +1944,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::ListPromptPacks { .. }
             | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }
     )

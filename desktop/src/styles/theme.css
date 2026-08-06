@@ -1397,6 +1397,30 @@ button.ui-button-destructive:hover {
     margin-top: 8px;
 }
 
+.settings-prompt-packs {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 0;
+}
+.settings-pack-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.settings-pack-chip {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid #333;
+    color: #b0b0b0;
+    background: #161616;
+}
+.settings-pack-chip-active {
+    border-color: var(--lc-accent, #c39b50);
+    color: var(--lc-accent, #c39b50);
+}
+
 .settings-appearance {
     display: flex;
     flex-wrap: wrap;

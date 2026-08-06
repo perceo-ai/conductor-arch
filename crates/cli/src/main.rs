@@ -346,6 +346,10 @@ enum ArchcarCommand {
         #[arg(long)]
         layer: Option<String>,
     },
+    /// List a repository's available prompt packs and the active one.
+    PromptPacks {
+        repository: String,
+    },
     /// Overwrite one settings layer's source TOML from stdin (or --content).
     SaveSettings {
         #[arg(long)]
@@ -1144,6 +1148,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::SettingsSource { repository, layer } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSettingsSource { repository, layer })?,
+                    );
+                }
+                ArchcarCommand::PromptPacks { repository } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListPromptPacks { repository })?,
                     );
                 }
                 ArchcarCommand::SaveSettings {
@@ -2213,6 +2222,20 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::PromptPacks {
+            repository,
+            packs,
+            active,
+        } => {
+            println!(
+                "prompt_packs {repository} {} active={}",
+                packs.len(),
+                active.as_deref().unwrap_or("<none>")
+            );
+            for p in packs {
+                println!("{p}");
+            }
         }
         ArchcarResponse::SettingsSource { scope, layer, toml } => {
             println!("settings_source {scope} {layer}");

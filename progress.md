@@ -140,6 +140,11 @@ RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:
 `archcar run-script`/`stop-script`/`run-log`). The Processes tab gained Run/Stop
 buttons and a latest-run-log view, restoring the GTK runtime controls.
 
+Prompt packs: `list_prompt_packs` RPC (CLI `archcar prompt-packs`) enumerates a
+repository's `.archductor/prompt-packs/*.toml` and reports the active one; the
+Settings page shows them as chips with the active pack marked. Switching is done
+by editing `[prompt_pack] active` in the settings source editor.
+
 Local check runner: `list_workspace_checks`/`run_workspace_check` RPCs surface
 the repository's configured `[scripts]` test/lint/typecheck/build commands and
 run one as a tracked Check process (CLI: `archcar check-list`/`run-check`). The

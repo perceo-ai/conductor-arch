@@ -235,6 +235,10 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    /// List the prompt-pack names available for a repository and which is active.
+    ListPromptPacks {
+        repository: String,
+    },
     /// Read the raw, editable source TOML for one settings layer (not the merged
     /// effective view). `repository` None = global app-shared; otherwise the
     /// repository's own committed (`repository`) or `local` override layer.
@@ -577,6 +581,12 @@ pub enum ArchcarResponse {
         scope: String,
         /// Effective settings serialized as pretty TOML.
         toml: String,
+    },
+    PromptPacks {
+        repository: String,
+        packs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active: Option<String>,
     },
     SettingsSource {
         /// "global" or the repository name.
@@ -996,6 +1006,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::ListPromptPacks { repository } => {
+            format!("list_prompt_packs repository={repository}")
+        }
         ArchcarRequest::GetSettingsSource { repository, layer } => format!(
             "get_settings_source repository={} layer={}",
             repository.as_deref().unwrap_or("<global>"),
@@ -1309,6 +1322,11 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::ChecksSummary { workspace, .. } => {
             format!("checks_summary workspace={workspace}")
         }
+        ArchcarResponse::PromptPacks { repository, packs, active } => format!(
+            "prompt_packs repository={repository} count={} active={}",
+            packs.len(),
+            active.as_deref().unwrap_or("<none>")
+        ),
         ArchcarResponse::SettingsSource { scope, layer, toml } => {
             format!("settings_source scope={scope} layer={layer} bytes={}", toml.len())
         }
@@ -2032,6 +2050,36 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn prompt_pack_list_round_trips_and_summarizes() {
+        let req = ArchcarRequest::ListPromptPacks {
+            repository: "repo".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "list_prompt_packs repository=repo"
+        );
+
+        let resp = ArchcarResponse::PromptPacks {
+            repository: "repo".to_owned(),
+            packs: vec!["default".to_owned(), "rust".to_owned()],
+            active: Some("rust".to_owned()),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "prompt_packs repository=repo count=2 active=rust"
+        );
     }
 
     #[test]

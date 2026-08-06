@@ -46,6 +46,20 @@ export function SettingsPage() {
     },
   );
 
+  // Available prompt packs for the selected repository (read-only discovery;
+  // switch by editing `[prompt_pack] active` in the source editor below).
+  const [promptPacks] = createResource(
+    () => repo(),
+    async (repository): Promise<{ packs: string[]; active?: string }> => {
+      try {
+        const res = await send({ type: "list_prompt_packs", repository });
+        return res.type === "prompt_packs" ? { packs: res.packs, active: res.active } : { packs: [] };
+      } catch {
+        return { packs: [] };
+      }
+    },
+  );
+
   const [draft, setDraft] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal("");
   // Reset the editor draft whenever a fresh source load arrives.
@@ -180,6 +194,29 @@ export function SettingsPage() {
             )}
           </For>
         </div>
+        <Show when={repo() !== undefined && (promptPacks()?.packs.length ?? 0) > 0}>
+          <div class="settings-prompt-packs">
+            <span class="settings-field-title">Prompt packs</span>
+            <div class="settings-pack-chips">
+              <For each={promptPacks()?.packs ?? []}>
+                {(pack) => (
+                  <span
+                    class="settings-pack-chip"
+                    classList={{ "settings-pack-chip-active": promptPacks()?.active === pack }}
+                    title={
+                      promptPacks()?.active === pack
+                        ? "Active pack"
+                        : "Switch by setting [prompt_pack] active in the source below"
+                    }
+                  >
+                    {pack}
+                    <Show when={promptPacks()?.active === pack}> ✓</Show>
+                  </span>
+                )}
+              </For>
+            </div>
+          </div>
+        </Show>
         <Show when={repo() !== undefined}>
           <div class="command-center-strip settings-layer-strip">
             <button
