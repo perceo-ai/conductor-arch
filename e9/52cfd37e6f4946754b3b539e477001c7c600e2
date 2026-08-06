@@ -1,0 +1,25 @@
+desktop/src/lib/indent.test.ts
+  s_6a5ec6ec557730::t_b0d69becf5310d 1-38
+desktop/src/lib/indent.ts
+  s_6a5ec6ec557730::t_353df6ade2ba73 1-59
+desktop/src/pages/ChatSurface.tsx
+  s_6a5ec6ec557730::t_4a3ff3234fb243 696-701
+  s_6a5ec6ec557730::t_849c221983361e 656-667
+  s_6a5ec6ec557730::t_a8154b7e59781a 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e952cfd37e6f4946754b3b539e477001c7c600e2",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
