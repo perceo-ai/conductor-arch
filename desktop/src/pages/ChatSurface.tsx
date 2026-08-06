@@ -16,6 +16,7 @@ import { registerOpenFile } from "./openFileBridge";
 import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
+import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
 
@@ -652,6 +653,18 @@ function FileEditor(props: { workspace: string; path: string }) {
   });
   let highlightRef: HTMLPreElement | undefined;
 
+  function indentSelection(el: HTMLTextAreaElement, dedent: boolean) {
+    const res = applyIndent(el.value, el.selectionStart, el.selectionEnd, dedent);
+    if (res.text === el.value) return;
+    setDraft(res.text);
+    // draft() now equals res.text, so the controlled value stays; restore the
+    // selection on the next microtask once the DOM has settled.
+    queueMicrotask(() => {
+      el.selectionStart = res.selStart;
+      el.selectionEnd = res.selEnd;
+    });
+  }
+
   return (
     <Show
       when={!loaded()?.error}
@@ -680,6 +693,12 @@ function FileEditor(props: { workspace: string; path: string }) {
               if ((e.ctrlKey || e.metaKey) && e.key === "s") {
                 e.preventDefault();
                 void save();
+                return;
+              }
+              if (e.key === "Tab") {
+                e.preventDefault();
+                indentSelection(e.currentTarget, e.shiftKey);
+                setStatus("");
               }
             }}
           />
