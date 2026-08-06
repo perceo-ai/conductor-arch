@@ -1825,6 +1825,50 @@ button.ui-button-destructive:hover {
 .lc-theme-light .nav-button-active {
     color: #111827;
 }
+.lc-theme-light .history-row .workspace-name,
+.lc-theme-light .project-workspace-row .workspace-name {
+    color: #111827;
+}
+.lc-theme-light .history-row:hover,
+.lc-theme-light .history-row.selected {
+    background-color: #eef2f7;
+    border-color: #d9e0e8;
+}
+
+/* Dialogs / modals in light. */
+.lc-theme-light .modal-body {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .dialog-title {
+    color: #111827;
+}
+.lc-theme-light .dialog-field > span,
+.lc-theme-light .dialog-field-head {
+    color: #334155;
+}
+.lc-theme-light .dialog-hint {
+    color: #667085;
+}
+.lc-theme-light button.ui-button,
+.lc-theme-light button.ui-button-sm {
+    background-color: #f1f5f9;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-tabs .ui-button-sm.active,
+.lc-theme-light button.ui-button-sm.active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .modal-body input,
+.lc-theme-light .dialog-field input,
+.lc-theme-light .dialog-field textarea {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
 
 .lc-theme-light .composer-bar input,
 .lc-theme-light input {
