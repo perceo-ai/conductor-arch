@@ -199,6 +199,18 @@ pub enum ArchcarRequest {
     GetWorkspaceProcesses {
         workspace: String,
     },
+    /// Start the workspace's configured run script as a tracked process.
+    RunWorkspaceScript {
+        workspace: String,
+    },
+    /// Stop the workspace's currently running run process.
+    StopWorkspaceScript {
+        workspace: String,
+    },
+    /// Read the latest run-script log for a workspace.
+    GetRunLog {
+        workspace: String,
+    },
     GetWorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -514,6 +526,19 @@ pub enum ArchcarResponse {
     WorkspaceProcesses {
         workspace: String,
         text: String,
+    },
+    RunScriptStarted {
+        workspace: String,
+        pid: u32,
+        log_path: String,
+    },
+    RunScriptStopped {
+        workspace: String,
+        pid: u32,
+    },
+    RunLog {
+        workspace: String,
+        log: String,
     },
     WorkspaceScriptPrompt {
         workspace: String,
@@ -917,6 +942,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetWorkspaceProcesses { workspace } => {
             format!("get_workspace_processes workspace={workspace}")
         }
+        ArchcarRequest::RunWorkspaceScript { workspace } => {
+            format!("run_workspace_script workspace={workspace}")
+        }
+        ArchcarRequest::StopWorkspaceScript { workspace } => {
+            format!("stop_workspace_script workspace={workspace}")
+        }
+        ArchcarRequest::GetRunLog { workspace } => {
+            format!("get_run_log workspace={workspace}")
+        }
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
         }
@@ -1217,6 +1251,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             format!("workspace_processes workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::RunScriptStarted { workspace, pid, log_path } => {
+            format!("run_script_started workspace={workspace} pid={pid} log={log_path}")
+        }
+        ArchcarResponse::RunScriptStopped { workspace, pid } => {
+            format!("run_script_stopped workspace={workspace} pid={pid}")
+        }
+        ArchcarResponse::RunLog { workspace, log } => {
+            format!("run_log workspace={workspace} bytes={}", log.len())
         }
         ArchcarResponse::WorkspaceScriptPrompt { workspace, kind, prompt } => {
             format!("workspace_script_prompt workspace={workspace} kind={kind} bytes={}", prompt.len())
@@ -1876,6 +1919,79 @@ mod tests {
                 request
             );
             assert_eq!(archcar_request_summary(&request), summary);
+        }
+    }
+
+    #[test]
+    fn run_script_requests_and_responses_round_trip_and_summarize() {
+        let requests: Vec<(ArchcarRequest, &str, &str)> = vec![
+            (
+                ArchcarRequest::RunWorkspaceScript {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"run_workspace_script\"",
+                "run_workspace_script workspace=ws",
+            ),
+            (
+                ArchcarRequest::StopWorkspaceScript {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"stop_workspace_script\"",
+                "stop_workspace_script workspace=ws",
+            ),
+            (
+                ArchcarRequest::GetRunLog {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"get_run_log\"",
+                "get_run_log workspace=ws",
+            ),
+        ];
+        for (request, type_tag, summary) in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+
+        let responses: Vec<(ArchcarResponse, &str, &str)> = vec![
+            (
+                ArchcarResponse::RunScriptStarted {
+                    workspace: "ws".to_owned(),
+                    pid: 4321,
+                    log_path: "/tmp/run.log".to_owned(),
+                },
+                "\"type\":\"run_script_started\"",
+                "run_script_started workspace=ws pid=4321 log=/tmp/run.log",
+            ),
+            (
+                ArchcarResponse::RunScriptStopped {
+                    workspace: "ws".to_owned(),
+                    pid: 4321,
+                },
+                "\"type\":\"run_script_stopped\"",
+                "run_script_stopped workspace=ws pid=4321",
+            ),
+            (
+                ArchcarResponse::RunLog {
+                    workspace: "ws".to_owned(),
+                    log: "hello".to_owned(),
+                },
+                "\"type\":\"run_log\"",
+                "run_log workspace=ws bytes=5",
+            ),
+        ];
+        for (response, type_tag, summary) in responses {
+            let json = serde_json::to_string(&response).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                response
+            );
+            assert_eq!(archcar_response_summary(&response), summary);
         }
     }
 

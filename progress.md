@@ -135,6 +135,11 @@ a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
 read-only Effective merge, with a Repository/Local layer toggle for repo scope.
 CLI: `archcar settings-source` / `archcar save-settings`.
 
+Runtime controls: `run_workspace_script`/`stop_workspace_script`/`get_run_log`
+RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:
+`archcar run-script`/`stop-script`/`run-log`). The Processes tab gained Run/Stop
+buttons and a latest-run-log view, restoring the GTK runtime controls.
+
 Status indicators: sidebar workspace rows show a colored status dot and
 dashboard cards a matching left accent stripe (green=running, blue=open PR,
 amber=uncommitted changes, grey=idle, dim=archived) from a pure, unit-tested

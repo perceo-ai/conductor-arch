@@ -836,6 +836,55 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::RunWorkspaceScript { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.run_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::RunScriptStarted {
+                    workspace,
+                    pid: process.pid,
+                    log_path: process.log_path.to_string_lossy().into_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StopWorkspaceScript { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.stop_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::RunScriptStopped {
+                    workspace,
+                    pid: process.pid,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetRunLog { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.read_latest_run_log(&workspace))
+            {
+                Ok(log) => ArchcarResponse::RunLog { workspace, log },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path) {
@@ -1823,6 +1872,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListTodos { .. }
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
+            | ArchcarRequest::GetRunLog { .. }
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }

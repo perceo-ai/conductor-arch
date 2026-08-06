@@ -168,7 +168,7 @@ export function CheckpointsPanel(props: { workspace: string }) {
 // ---- Processes (text blob) ------------------------------------------------
 
 export function ProcessesPanel(props: { workspace: string }) {
-  const [text] = createResource(
+  const [text, { refetch }] = createResource(
     () => props.workspace,
     async (ws): Promise<string> => {
       try {
@@ -179,11 +179,61 @@ export function ProcessesPanel(props: { workspace: string }) {
       }
     },
   );
+  const [log, { refetch: refetchLog }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_run_log", workspace: ws });
+        return res.type === "run_log" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+  const [feedback, setFeedback] = createSignal("");
+
+  async function runScript() {
+    setFeedback("Starting run…");
+    try {
+      const res = await send({ type: "run_workspace_script", workspace: props.workspace });
+      setFeedback(res.type === "run_script_started" ? `Run started (pid ${res.pid})` : "Run failed");
+      await Promise.all([refetch(), refetchLog()]);
+    } catch (err) {
+      setFeedback(`Run failed: ${(err as Error).message}`);
+    }
+  }
+  async function stopScript() {
+    setFeedback("Stopping run…");
+    try {
+      const res = await send({ type: "stop_workspace_script", workspace: props.workspace });
+      setFeedback(res.type === "run_script_stopped" ? `Run stopped (pid ${res.pid})` : "Stop failed");
+      await refetch();
+    } catch (err) {
+      setFeedback(`Stop failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
-    <div class="ws-diff-view">
+    <div class="ws-tab-panel command-panel">
+      <div class="section-title">Runtime</div>
+      <div class="action-row">
+        <button class="suggested-action" onClick={() => void runScript()}>
+          Run
+        </button>
+        <button class="ui-button-destructive" onClick={() => void stopScript()}>
+          Stop
+        </button>
+        <button class="secondary-action" onClick={() => void refetchLog()}>
+          Refresh log
+        </button>
+      </div>
+      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
+      <div class="detail-label">Processes</div>
       <Show when={!text.loading} fallback={<div class="empty-state">Loading…</div>}>
-        <pre class="ws-diff-text">{text()}</pre>
+        <pre class="ws-run-prompt">{text() || "No processes"}</pre>
       </Show>
+      <div class="detail-label">Latest run log</div>
+      <pre class="ws-run-prompt">{log.loading ? "Loading…" : log() || "No run log yet."}</pre>
     </div>
   );
 }

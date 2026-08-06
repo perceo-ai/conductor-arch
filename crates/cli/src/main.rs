@@ -254,6 +254,18 @@ enum ArchcarCommand {
     WorkspaceFiles {
         workspace: String,
     },
+    /// Start the workspace's configured run script.
+    RunScript {
+        workspace: String,
+    },
+    /// Stop the workspace's running run process.
+    StopScript {
+        workspace: String,
+    },
+    /// Print the latest run-script log for a workspace.
+    RunLog {
+        workspace: String,
+    },
     /// Read a UTF-8 text file from a workspace checkout.
     ReadFile {
         workspace: String,
@@ -1010,6 +1022,19 @@ fn main() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListWorkspaceFiles { workspace })?,
                     );
+                }
+                ArchcarCommand::RunScript { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::RunWorkspaceScript { workspace })?,
+                    );
+                }
+                ArchcarCommand::StopScript { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::StopWorkspaceScript { workspace })?,
+                    );
+                }
+                ArchcarCommand::RunLog { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetRunLog { workspace })?);
                 }
                 ArchcarCommand::ReadFile { workspace, path } => {
                     print_archcar_response(
@@ -2127,6 +2152,20 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             println!("workspace_processes {}", workspace);
             print!("{text}");
+        }
+        ArchcarResponse::RunScriptStarted {
+            workspace,
+            pid,
+            log_path,
+        } => {
+            println!("run_script_started {workspace} pid={pid} log={log_path}");
+        }
+        ArchcarResponse::RunScriptStopped { workspace, pid } => {
+            println!("run_script_stopped {workspace} pid={pid}");
+        }
+        ArchcarResponse::RunLog { workspace, log } => {
+            println!("run_log {workspace}");
+            print!("{log}");
         }
         ArchcarResponse::ReviewComments {
             workspace,
