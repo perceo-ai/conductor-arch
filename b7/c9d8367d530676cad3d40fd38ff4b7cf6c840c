@@ -1,0 +1,30 @@
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_f50bc42030a107 1688-1730
+desktop/src/components/ShortcutsHelp.tsx
+  s_6a5ec6ec557730::t_bd430089ec19da 1-32
+desktop/src/lib/shortcuts.ts
+  s_6a5ec6ec557730::t_4f1b2bf11b9e69 1-72
+desktop/src/App.tsx
+  s_6a5ec6ec557730::t_ad7c7c69e230fb 42-45,51-93
+  s_6a5ec6ec557730::t_6acfeebd8bfef6 46-50
+  s_6a5ec6ec557730::t_a0a5a6ddc0b4c3 116
+  s_6a5ec6ec557730::t_a33e5fce61bf16 1,10,12,14,18
+desktop/src/lib/shortcuts.test.ts
+  s_6a5ec6ec557730::t_aa2b796e2f0620 1-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "b7c9d8367d530676cad3d40fd38ff4b7cf6c840c",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
