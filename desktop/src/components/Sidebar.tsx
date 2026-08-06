@@ -244,6 +244,14 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         </button>
         <button
           class="sidebar-nav-button"
+          classList={{ active: nav.activePage() === "projects" }}
+          onClick={() => nav.goToPage("projects")}
+        >
+          <span class="sidebar-nav-icon">▢</span>
+          <span class="sidebar-nav-label">Projects</span>
+        </button>
+        <button
+          class="sidebar-nav-button"
           classList={{ active: nav.activePage() === "history" }}
           onClick={() => nav.goToPage("history")}
         >
@@ -270,6 +278,17 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         >
           <For each={repositoriesStore.state.order}>{(repo) => <ProjectGroup repo={repo} />}</For>
         </Show>
+      </div>
+
+      <div class="sidebar-footer">
+        <button
+          class="sidebar-nav-button"
+          classList={{ active: nav.activePage() === "settings" }}
+          onClick={() => nav.goToPage("settings")}
+        >
+          <span class="sidebar-nav-icon">⚙</span>
+          <span class="sidebar-nav-label">Settings</span>
+        </button>
       </div>
 
       <Show when={!props.collapsed}>

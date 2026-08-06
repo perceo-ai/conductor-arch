@@ -211,6 +211,11 @@ body.resizing-col {
   flex-direction: column;
   gap: 2px;
 }
+.sidebar-footer {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+}
 .workspace-row-shell {
   display: flex;
   flex-direction: column;
