@@ -1700,6 +1700,28 @@ button.ui-button-destructive:hover {
     border-color: #d9e0e8;
 }
 
+/* Dashboard board surfaces: without these the dark board/column backgrounds
+   remain, leaving dark blocks on the light page and dark-on-dark column titles. */
+.lc-theme-light .kanban-board {
+    background-color: #f8fafc;
+}
+.lc-theme-light .kanban-column,
+.lc-theme-light .dashboard .kanban-column {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .kanban-column-header {
+    border-color: #e2e8f0;
+}
+.lc-theme-light .kanban-column .workspace-card,
+.lc-theme-light .workspace-card-action .workspace-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dashboard-subtitle {
+    color: #667085;
+}
+
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
 .lc-theme-light .card-title,
@@ -1718,6 +1740,9 @@ button.ui-button-destructive:hover {
 .lc-theme-light .card-branch,
 .lc-theme-light .card-diff {
     color: #667085;
+}
+.lc-theme-light .card-activity {
+    color: #334155;
 }
 
 .lc-theme-light .composer-bar input,
