@@ -1,0 +1,25 @@
+desktop/src/components/Dialogs.tsx
+  s_6a5ec6ec557730::t_389937562218e7 321-329
+  s_6a5ec6ec557730::t_bd22a8fc88cfe2 399-405
+  s_6a5ec6ec557730::t_ed72f30224d49f 240,245-248
+  s_6a5ec6ec557730::t_f623253b1507f9 294
+  s_6a5ec6ec557730::t_4b2f96a2898419 274-280
+progress.md
+  s_6a5ec6ec557730::t_702cda83edd2e1 138-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "45aac9c0c8dfdca0194c9b7aa2e88cdc171f5c61",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
