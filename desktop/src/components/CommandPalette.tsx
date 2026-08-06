@@ -1,8 +1,19 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
 import type { WorkspaceTab } from "@/store/nav";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
+import { send } from "@/bridge/client";
+import { openFileInCenter } from "@/pages/openFileBridge";
 
 // Command palette — Cmd/Ctrl+K global launcher, ported from the GTK command
 // palette (crates/gtk-app command_palette). Fuzzy-filters a flat command list
@@ -60,6 +71,21 @@ export default function CommandPalette() {
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
+
+  // Fuzzy file open (conductor's Cmd+P): load the selected workspace's file
+  // list while the palette is open, and surface "Open <path>" commands once the
+  // user starts typing so they don't bury navigation on the empty palette.
+  const [files] = createResource(
+    () => (open() ? nav.selectedWorkspace() : null),
+    async (ws): Promise<string[]> => {
+      try {
+        const res = await send({ type: "list_workspace_files", workspace: ws });
+        return res.type === "workspace_files" ? res.files : [];
+      } catch {
+        return [];
+      }
+    },
+  );
 
   const commands = createMemo<Command[]>(() => {
     const list: Command[] = [];
@@ -130,6 +156,23 @@ export default function CommandPalette() {
         group: "Actions",
         run: () => dialogs.open({ kind: "workspace-actions", workspace: active }),
       });
+    }
+    // File open — only once the user is typing, capped so a huge repo cannot
+    // flood the list (fuzzy ranking still surfaces the best matches).
+    if (active && query().trim()) {
+      const ws = active;
+      for (const path of (files() ?? []).slice(0, 500)) {
+        list.push({
+          id: `file:${path}`,
+          label: path,
+          hint: "Open",
+          group: "File",
+          run: () => {
+            nav.selectWorkspace(ws);
+            queueMicrotask(() => openFileInCenter(ws, path));
+          },
+        });
+      }
     }
     return list;
   });
