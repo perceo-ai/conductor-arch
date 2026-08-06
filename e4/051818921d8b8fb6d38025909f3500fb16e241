@@ -1,0 +1,21 @@
+desktop/src/components/CommandPalette.tsx
+  s_6a5ec6ec557730::t_ca48ac3994cfcf 75-89
+  s_6a5ec6ec557730::t_4aaea2d67a6879 160-176
+  s_6a5ec6ec557730::t_3a835dd26208e5 1-10,15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e4051818921d8b8fb6d38025909f3500fb16e241",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
