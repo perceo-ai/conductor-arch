@@ -1792,6 +1792,40 @@ button.ui-button-destructive:hover {
     color: #334155;
 }
 
+/* Settings page + shared section labels + diff/source panes in light. */
+.lc-theme-light .section-title,
+.lc-theme-light .settings-field-title {
+    color: #111827;
+}
+.lc-theme-light .ws-diff-view {
+    background-color: #ffffff;
+}
+.lc-theme-light .settings-pane {
+    border-color: #d9e0e8;
+}
+.lc-theme-light .settings-pane-head {
+    background-color: #f8fafc;
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .settings-source-area {
+    background-color: #ffffff;
+    color: #1f2937;
+}
+.lc-theme-light .settings-pack-chip {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #334155;
+}
+.lc-theme-light .ws-tab-shell.ws-tab-active,
+.lc-theme-light .nav-button-active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .ws-tab-shell.ws-tab-active .ws-tab-label,
+.lc-theme-light .nav-button-active {
+    color: #111827;
+}
+
 .lc-theme-light .composer-bar input,
 .lc-theme-light input {
     background-color: #ffffff;
