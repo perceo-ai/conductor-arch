@@ -1917,7 +1917,8 @@ body.resizing-col {
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid var(--lc-border, #2a2a2a);
-  background: var(--lc-surface-2, #161616);
+  background: var(--lc-surface-raised, #161616);
+  color: var(--lc-text, #ddd);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
