@@ -10,7 +10,7 @@ import {
 } from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore } from "@/store";
 import type { Accent } from "@/store/prefs";
-import type { WorkspaceTab } from "@/store/nav";
+import type { RightPanelTab } from "@/store/nav";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { send } from "@/bridge/client";
@@ -29,15 +29,16 @@ interface Command {
   run: () => void;
 }
 
-const WORKSPACE_TABS: { tab: WorkspaceTab; label: string }[] = [
-  { tab: "chats", label: "Chats" },
+// Right-panel targets the palette can jump to (these actually drive the
+// CommandCenter right panel via nav.setRightPanelTab).
+const WORKSPACE_PANELS: { tab: RightPanelTab; label: string }[] = [
+  { tab: "browse", label: "Browse files" },
   { tab: "changes", label: "Changes" },
-  { tab: "review", label: "Review" },
   { tab: "checks", label: "Checks" },
+  { tab: "review", label: "Review" },
   { tab: "todos", label: "Todos" },
   { tab: "checkpoints", label: "Checkpoints" },
   { tab: "processes", label: "Processes" },
-  { tab: "terminal", label: "Terminal" },
 ];
 
 export default function CommandPalette() {
@@ -117,16 +118,27 @@ export default function CommandPalette() {
         run: () => nav.selectWorkspace(name),
       });
     }
-    // Workspace tabs (only meaningful with a selected workspace).
+    // Workspace views (only meaningful with a selected workspace). These focus
+    // the workspace and drive the CommandCenter right-panel tab.
     const active = nav.selectedWorkspace();
     if (active) {
-      for (const t of WORKSPACE_TABS) {
+      list.push({
+        id: "view:chats",
+        label: "Chats",
+        hint: titleCaseWorkspace(active),
+        group: "Workspace",
+        run: () => nav.selectWorkspace(active),
+      });
+      for (const t of WORKSPACE_PANELS) {
         list.push({
-          id: `tab:${t.tab}`,
-          label: `${t.label}`,
+          id: `panel:${t.tab}`,
+          label: t.label,
           hint: titleCaseWorkspace(active),
-          group: "Workspace Tab",
-          run: () => nav.selectWorkspaceTab(t.tab),
+          group: "Workspace",
+          run: () => {
+            nav.selectWorkspace(active);
+            nav.setRightPanelTab(t.tab);
+          },
         });
       }
     }
