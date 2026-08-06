@@ -27,6 +27,17 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Conductor Reference Cross-Check (2026-08-06)
+
+The Electron surface was cross-checked against Conductor's own reference docs
+(diff-viewer, checks, workflow, parallel-agents, settings). archductor matches
+the documented feature set; the concrete gaps found were closed: file-scoped
+review comments beside the diff (diff-viewer), a locally-computed merge-readiness
+"blockers" banner in Checks (checks), and the workflow keyboard shortcuts
+Cmd/Ctrl+Shift+N/D/P (workflow). Remaining Conductor-parity items require live
+GitHub `gh` / Linear auth to verify (PR checks/review/readiness detail, Linear
+workspace source) and are intentionally not built blind.
+
 ## Implemented Surfaces
 
 ### Core And CLI
