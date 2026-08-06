@@ -237,11 +237,15 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
   // (linux/distro codenames) in core; the Prompt flow lets the agent rename via
   // <archductor_metadata> on the first message, the Github flow uses the
   // {prefix}/gh-{issue|pr}-{n} branch scheme.
-  type Source = "prompt" | "github";
+  type Source = "prompt" | "branch" | "github";
   const [source, setSource] = createSignal<Source>("prompt");
   const [prompt, setPrompt] = createSignal("");
   const [selected, setSelected] = createSignal<GithubWorkItem | null>(null);
   const [filter, setFilter] = createSignal("");
+  // Branch/base source (restores the GTK "create from branch/base" flow).
+  const [wsName, setWsName] = createSignal("");
+  const [wsBranch, setWsBranch] = createSignal("");
+  const [wsBase, setWsBase] = createSignal("");
 
   const rootPath = () => repositoriesStore.row(props.repository)?.rootPath ?? "";
 
@@ -267,6 +271,13 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     if (source() === "prompt") {
       // Prompt is optional — empty just creates an empty workspace.
       await actions.createWorkspaceFromPromptMessage({ repository, prompt: prompt().trim() });
+    } else if (source() === "branch") {
+      await actions.createWorkspace({
+        repository,
+        name: wsName().trim(),
+        branch: wsBranch().trim(),
+        baseRef: wsBase().trim() || undefined,
+      });
     } else {
       const item = selected();
       if (!item) throw new Error("Select an issue or pull request");
@@ -280,6 +291,7 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
 
   const sources: { key: Source; label: string }[] = [
     { key: "prompt", label: "Prompt" },
+    { key: "branch", label: "Branch" },
     { key: "github", label: "Github" },
   ];
 
@@ -305,6 +317,15 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
               placeholder="Describe the task… (optional — sent as the first message)"
             /></label>
           <span class="dialog-hint">Optional. Workspace + branch are named automatically; a prompt is sent as the first message and the agent renames from its reply.</span>
+        </Match>
+        <Match when={source() === "branch"}>
+          <label class="dialog-field"><span>Workspace name</span>
+            <input value={wsName()} onInput={(e) => setWsName(e.currentTarget.value)} placeholder="e.g. auth-refactor" /></label>
+          <label class="dialog-field"><span>Branch name</span>
+            <input value={wsBranch()} onInput={(e) => setWsBranch(e.currentTarget.value)} placeholder="e.g. lc/auth-refactor" /></label>
+          <label class="dialog-field"><span>Base branch</span>
+            <input value={wsBase()} onInput={(e) => setWsBase(e.currentTarget.value)} placeholder="Optional — defaults to the repo default branch" /></label>
+          <span class="dialog-hint">Creates a workspace on a new branch off the base. Leave name/branch blank to auto-generate.</span>
         </Match>
         <Match when={source() === "github"}>
           <div class="dialog-field">
@@ -375,7 +396,13 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
       <div class="dialog-actions">
         <button class="ui-button" onClick={props.onDone}>Cancel</button>
         <button class="ui-button-primary" disabled={busy()} onClick={() => submit()}>
-          {busy() ? "Creating…" : source() === "prompt" ? "Start workspace" : "Create from selection"}
+          {busy()
+            ? "Creating…"
+            : source() === "prompt"
+              ? "Start workspace"
+              : source() === "branch"
+                ? "Create workspace"
+                : "Create from selection"}
         </button>
       </div>
     </div>
