@@ -1898,6 +1898,21 @@ body.resizing-col {
   color: var(--lc-text-muted, #b0b0b0);
 }
 
+.ws-readiness {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  border: 1px solid #2f6b46;
+  background: rgba(63, 178, 127, 0.12);
+  color: #7fdcae;
+}
+.ws-readiness-blocked {
+  border-color: #7a5b1f;
+  background: rgba(195, 155, 80, 0.12);
+  color: #e0b866;
+}
+
 .ws-file-comments {
   flex: 0 0 auto;
   border-top: 1px solid var(--lc-border, #2a2a2a);

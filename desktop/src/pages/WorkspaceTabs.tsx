@@ -381,9 +381,42 @@ export function ChecksPanel(props: { workspace: string }) {
     ["Conflicting workspaces", String(s.conflicting_workspaces)],
   ];
 
+  // Locally-computed merge-readiness blockers (conductor's "last review pass
+  // before merge"). Uses the DB-only summary — no network.
+  const blockers = (s: ArchcarChecksSummary): string[] => {
+    const out: string[] = [];
+    if (s.open_todos > 0) out.push(`${s.open_todos} open todo${s.open_todos === 1 ? "" : "s"}`);
+    if (s.open_review_comments > 0)
+      out.push(
+        `${s.open_review_comments} open review comment${s.open_review_comments === 1 ? "" : "s"}`,
+      );
+    if ((s.check_status ?? "").toLowerCase().includes("fail")) out.push("checks failing");
+    if (s.conflicting_workspaces > 0)
+      out.push(
+        `${s.conflicting_workspaces} conflicting workspace${s.conflicting_workspaces === 1 ? "" : "s"}`,
+      );
+    if ((s.branch_behind ?? 0) > 0) out.push(`${s.branch_behind} behind base`);
+    return out;
+  };
+
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Checks</div>
+      <Show when={summary()}>
+        {(s) => (
+          <div
+            class="ws-readiness"
+            classList={{ "ws-readiness-blocked": blockers(s()).length > 0 }}
+          >
+            <Show
+              when={blockers(s()).length === 0}
+              fallback={<span>Blockers before merge: {blockers(s()).join(", ")}</span>}
+            >
+              <span>Ready to merge ✓</span>
+            </Show>
+          </div>
+        )}
+      </Show>
       <div class="action-row">
         <button class="secondary-action" onClick={run("Push branch", () => actions.pushBranch(props.workspace))}>
           Push branch
