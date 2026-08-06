@@ -1,0 +1,26 @@
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_eff38d850797c2 917-929
+desktop/src/lib/diff.ts
+  s_6a5ec6ec557730::t_557458cb553f43 1-77
+desktop/src/components/Diff.tsx
+  s_6a5ec6ec557730::t_c33ab513be4335 2,5-6
+  s_6a5ec6ec557730::t_d08f4a5f10a9ad 4,9,25-26
+desktop/src/lib/diff.test.ts
+  s_6a5ec6ec557730::t_ca1246849dd3c7 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "3e70dbe26b43d107a4195a32e3f17e291b3167d9",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
