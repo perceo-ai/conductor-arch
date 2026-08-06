@@ -2,6 +2,7 @@ import { For, Show, createMemo, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
 import type { WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
+import { workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
 
 // Kanban dashboard — port of crates/gtk-app/src/dashboard.rs. Workspaces bucket
 // into Ready/Running/Review/Archived columns, filterable by project tab.
@@ -58,7 +59,10 @@ function DashboardCard(props: { row: WorkspaceRow }) {
       title={`Open workspace ${props.row.name}`}
       onClick={() => nav.selectWorkspace(props.row.name)}
     >
-      <div class="workspace-card shell-card">
+      <div
+        class="workspace-card shell-card"
+        style={{ "border-left-color": STATUS_COLOR[workspaceStatusKind(props.row)] }}
+      >
         <div class="dashboard-card-top">
           <span class="card-branch">{props.row.branch}</span>
           <span class={diffHot() ? "card-diff-hot" : "card-diff"}>

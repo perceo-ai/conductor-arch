@@ -389,6 +389,10 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* status-colored accent stripe (inline border-left-color from the status
+     kind); width/style here so the inline color always shows. */
+  border-left-width: 3px;
+  border-left-style: solid;
 }
 .dashboard-card-top,
 .dashboard-card-footer {
