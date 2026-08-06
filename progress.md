@@ -191,7 +191,13 @@ Appearance controls: the Settings page restores the GTK theme/accent/density
 runtime controls. `prefsStore` now persists `theme` (dark/light), `accent`
 (amber/blue/green/rose, also driving the global `--lc-accent` token), and
 `density` (compact/cozy/comfortable) to localStorage; an App effect toggles the
-existing `lc-theme-*`/`lc-accent-*`/`lc-density-*` class hooks on `<body>`.
+existing `lc-theme-*`/`lc-accent-*`/`lc-density-*` class hooks on `<body>`. The
+`lc-theme-light` CSS was originally partial (dashboard/cards only), leaving the
+command center, Settings panes, History rows, and dialogs dark/unreadable in
+light mode; it is now completed across all main surfaces, each verified by
+rendering the built renderer (stubbed archcar bridge, forced light prefs) in
+headless chromium — see the reusable full-app preview recipe in the session
+memory.
 
 Command palette: Cmd/Ctrl+K global launcher (`desktop/src/components/
 CommandPalette.tsx`) restores the GTK command palette. Fuzzy-filters
