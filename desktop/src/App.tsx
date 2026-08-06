@@ -14,7 +14,14 @@ import { ACCENT_HEX } from "./store/prefs";
 import { resolveShortcut } from "./lib/shortcuts";
 
 export default function App() {
-  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
+  const [sidebarCollapsed, setSidebarCollapsedRaw] = createSignal(prefsStore.state.sidebarCollapsed);
+  const setSidebarCollapsed = (next: boolean | ((c: boolean) => boolean)) => {
+    setSidebarCollapsedRaw((prev) => {
+      const value = typeof next === "function" ? next(prev) : next;
+      prefsStore.setSidebarCollapsed(value);
+      return value;
+    });
+  };
   const helpOpen = uiStore.helpOpen;
   const setHelpOpen = uiStore.setHelpOpen;
 

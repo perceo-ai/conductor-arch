@@ -46,6 +46,13 @@ describe("prefsStore", () => {
     expect(prefsStore.state.density).toBe("compact");
   });
 
+  it("tracks the sidebar-collapsed layout flag", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.sidebarCollapsed).toBe(false);
+    prefsStore.setSidebarCollapsed(true);
+    expect(prefsStore.state.sidebarCollapsed).toBe(true);
+  });
+
   it("exposes a hex for every accent", async () => {
     const { ACCENT_HEX } = await import("./prefs");
     expect(ACCENT_HEX.amber).toMatch(/^#[0-9a-f]{6}$/i);

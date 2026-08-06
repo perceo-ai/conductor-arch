@@ -29,6 +29,8 @@ export interface Prefs {
   theme: ThemeMode;
   accent: Accent;
   density: Density;
+  // Persisted layout state so the app restores where you left off.
+  sidebarCollapsed: boolean;
 }
 
 const DEFAULTS: Prefs = {
@@ -37,6 +39,7 @@ const DEFAULTS: Prefs = {
   theme: "dark",
   accent: "amber",
   density: "cozy",
+  sidebarCollapsed: false,
 };
 
 function load(): Prefs {
@@ -70,6 +73,7 @@ function persist() {
         theme: state.theme,
         accent: state.accent,
         density: state.density,
+        sidebarCollapsed: state.sidebarCollapsed,
       }),
     );
   } catch {
@@ -99,6 +103,11 @@ export const prefsStore = {
 
   setDensity(density: Density) {
     setState("density", density);
+    persist();
+  },
+
+  setSidebarCollapsed(collapsed: boolean) {
+    setState("sidebarCollapsed", collapsed);
     persist();
   },
 
