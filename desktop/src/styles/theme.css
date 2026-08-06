@@ -1745,6 +1745,53 @@ button.ui-button-destructive:hover {
     color: #334155;
 }
 
+/* Workspace command center — the main working surface. Without these it stays
+   fully dark in light mode (dark center/right-panel/composer on a light app). */
+.lc-theme-light .ws-center,
+.lc-theme-light .ws-tab-bar,
+.lc-theme-light .chat-surface {
+    background-color: #ffffff;
+    color: #1f2937;
+}
+.lc-theme-light .ws-topbar {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-topbar-repo,
+.lc-theme-light .ws-topbar-branch {
+    color: #1f2937;
+}
+.lc-theme-light .ws-right-panel {
+    background-color: #f8fafc;
+    border-left-color: #d9e0e8;
+}
+.lc-theme-light .ws-right-tabs {
+    background-color: #f8fafc;
+}
+.lc-theme-light .ws-run-section {
+    background-color: #f1f5f9;
+    border-top-color: #d9e0e8;
+}
+.lc-theme-light .ws-run-prompt {
+    background-color: #ffffff;
+    color: #334155;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-file-row,
+.lc-theme-light .ws-dir-row,
+.lc-theme-light .ws-file-name,
+.lc-theme-light .ws-folder-name {
+    color: #334155;
+}
+.lc-theme-light .empty-state,
+.lc-theme-light .ws-run-modal-title,
+.lc-theme-light .detail-label {
+    color: #667085;
+}
+.lc-theme-light .ws-diff-text {
+    color: #334155;
+}
+
 .lc-theme-light .composer-bar input,
 .lc-theme-light input {
     background-color: #ffffff;
