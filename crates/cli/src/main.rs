@@ -266,6 +266,12 @@ enum ArchcarCommand {
     RunLog {
         workspace: String,
     },
+    /// Print recent commits for a workspace.
+    Commits {
+        workspace: String,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// List a workspace's configured check commands.
     CheckList {
         workspace: String,
@@ -1068,6 +1074,11 @@ fn main() -> Result<()> {
                 }
                 ArchcarCommand::RunLog { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::GetRunLog { workspace })?);
+                }
+                ArchcarCommand::Commits { workspace, limit } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetRecentCommits { workspace, limit })?,
+                    );
                 }
                 ArchcarCommand::CheckList { workspace } => {
                     print_archcar_response(
@@ -2226,6 +2237,10 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             println!("workspace_processes {}", workspace);
             print!("{text}");
+        }
+        ArchcarResponse::RecentCommits { workspace, log } => {
+            println!("recent_commits {workspace}");
+            print!("{log}");
         }
         ArchcarResponse::RunScriptStarted {
             workspace,

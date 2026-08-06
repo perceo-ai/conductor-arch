@@ -199,6 +199,12 @@ pub enum ArchcarRequest {
     GetWorkspaceProcesses {
         workspace: String,
     },
+    /// Recent commit oneline log for a workspace's branch.
+    GetRecentCommits {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Start the workspace's configured run script as a tracked process.
     RunWorkspaceScript {
         workspace: String,
@@ -561,6 +567,10 @@ pub enum ArchcarResponse {
     WorkspaceProcesses {
         workspace: String,
         text: String,
+    },
+    RecentCommits {
+        workspace: String,
+        log: String,
     },
     RunScriptStarted {
         workspace: String,
@@ -1013,6 +1023,10 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetWorkspaceProcesses { workspace } => {
             format!("get_workspace_processes workspace={workspace}")
         }
+        ArchcarRequest::GetRecentCommits { workspace, limit } => format!(
+            "get_recent_commits workspace={workspace} limit={}",
+            limit.map(|n| n.to_string()).unwrap_or_else(|| "<default>".to_owned())
+        ),
         ArchcarRequest::RunWorkspaceScript { workspace } => {
             format!("run_workspace_script workspace={workspace}")
         }
@@ -1348,6 +1362,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             format!("workspace_processes workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::RecentCommits { workspace, log } => {
+            format!("recent_commits workspace={workspace} bytes={}", log.len())
         }
         ArchcarResponse::RunScriptStarted { workspace, pid, log_path } => {
             format!("run_script_started workspace={workspace} pid={pid} log={log_path}")
@@ -2110,6 +2127,44 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn recent_commits_round_trips_and_summarizes() {
+        let req = ArchcarRequest::GetRecentCommits {
+            workspace: "ws".to_owned(),
+            limit: Some(10),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "get_recent_commits workspace=ws limit=10"
+        );
+        let req_default = ArchcarRequest::GetRecentCommits {
+            workspace: "ws".to_owned(),
+            limit: None,
+        };
+        assert_eq!(
+            archcar_request_summary(&req_default),
+            "get_recent_commits workspace=ws limit=<default>"
+        );
+
+        let resp = ArchcarResponse::RecentCommits {
+            workspace: "ws".to_owned(),
+            log: "abc123 msg".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "recent_commits workspace=ws bytes=10"
+        );
     }
 
     #[test]

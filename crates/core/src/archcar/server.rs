@@ -836,6 +836,17 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetRecentCommits { workspace, limit } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let n = limit.unwrap_or(20).clamp(1, 200) as usize;
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.git_log_oneline(&workspace, n))
+            {
+                Ok(log) => ArchcarResponse::RecentCommits { workspace, log },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RunWorkspaceScript { workspace } => {
             let (db_path, logs_dir) = {
                 let s = state.lock().unwrap();
@@ -2013,6 +2024,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListTodos { .. }
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
+            | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetRunLog { .. }
             | ArchcarRequest::GetCheckLog { .. }
             | ArchcarRequest::ListWorkspaceChecks { .. }

@@ -50,6 +50,17 @@ export function ChangesRows(props: {
       }
     },
   );
+  const [commits, { refetch: refetchCommits }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_recent_commits", workspace: ws, limit: 15 });
+        return res.type === "recent_commits" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
   const [commitMsg, setCommitMsg] = createSignal("");
   const [commitFeedback, setCommitFeedback] = createSignal("");
   async function commit() {
@@ -69,7 +80,7 @@ export function ChangesRows(props: {
       if (res.type === "workspace_committed") {
         setCommitMsg("");
         setCommitFeedback("Committed.");
-        await refetch();
+        await Promise.all([refetch(), refetchCommits()]);
       } else if (res.type === "error") {
         setCommitFeedback(res.message);
       } else {
@@ -124,6 +135,15 @@ export function ChangesRows(props: {
           </button>
         </div>
         <Show when={commitFeedback()}><div class="card-meta">{commitFeedback()}</div></Show>
+      </Show>
+      <Show when={(commits() ?? "").trim()}>
+        <div class="ws-commits-section">
+          <div class="ws-commits-head">
+            <span class="section-title">Recent commits</span>
+            <button class="ui-button-icon" title="Refresh" onClick={() => void refetchCommits()}>⟳</button>
+          </div>
+          <pre class="ws-commits-log">{commits()}</pre>
+        </div>
       </Show>
     </div>
   );

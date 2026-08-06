@@ -700,6 +700,27 @@ body.resizing-col {
   flex: 1 1 auto;
   min-width: 0;
 }
+.ws-commits-section {
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+  padding: 8px 10px;
+}
+.ws-commits-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.ws-commits-log {
+  margin: 0;
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--lc-text-muted, #9a9a9a);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
 .ws-changes-title {
   flex: 1 1 auto;
   font-weight: 600;
