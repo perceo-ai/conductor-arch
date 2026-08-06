@@ -1823,6 +1823,17 @@ button.ui-button-destructive:hover {
     background-color: #ffffff;
     color: #1f2937;
 }
+/* Model/effort <select> pickers (Settings + chat composer): the closed control
+   keeps its dark #1e1e1e background in light theme. Override just the color so
+   the inline chevron background-image is preserved. */
+.lc-theme-light .chat-picker {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .chat-picker:hover {
+    border-color: #c4ccd6;
+}
 .lc-theme-light .settings-pack-chip {
     background-color: #ffffff;
     border-color: #d9e0e8;
