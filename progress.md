@@ -156,8 +156,11 @@ making it a real control surface.
 
 After a mutation acks, the renderer re-pulls the workspace/repository inventory
 (archcar has no inventory-changed event), mirroring the GTK sidebar's
-post-mutation refresh. Read surfaces (chat, changes, todos, checks, review,
-checkpoints, processes, terminal) were already wired.
+post-mutation refresh. Read surfaces are wired and now all reachable: chat +
+open files in the center; Browse, Changes, Checks, Review, Todos, Checkpoints,
+and Processes as right-panel tabs; terminals in the run dock. (The Checks/
+Review/Todos/Checkpoints/Processes panel components existed earlier but were
+unrendered until wired into the right-panel tab strip.)
 
 Not yet ported to Electron from the historical GTK surface: force-push (core
 `push_request` exposes no force flag), PR review-thread resolve/reopen, richer
