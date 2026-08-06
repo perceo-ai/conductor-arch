@@ -1,0 +1,50 @@
+desktop/src/components/CommandPalette.tsx
+  s_6a5ec6ec557730::t_c1895ef5058182 42
+desktop/src/store/nav.ts
+  s_6a5ec6ec557730::t_7ed1fbbaea6be9 17-18
+crates/core/src/archcar/protocol.rs
+  s_6a5ec6ec557730::t_e07fabd7c3bb47 202-205
+  s_6a5ec6ec557730::t_551400fdf6b575 2187-2209,2212-2219
+  s_6a5ec6ec557730::t_66a82f2c249a4c 1062-1064
+  s_6a5ec6ec557730::t_88c254666143b1 2210-2211
+  s_6a5ec6ec557730::t_3f95d6139c7829 584-587
+  s_6a5ec6ec557730::t_a645e59d0a73ee 1411-1413
+  s_6a5ec6ec557730::t_9130361c5c33cd 841-850
+  s_6a5ec6ec557730::t_4bc7e5c54c72db 2186
+crates/core/src/archcar/server.rs
+  s_6a5ec6ec557730::t_8581a632ee9a01 2075
+  s_6a5ec6ec557730::t_fdace8cb83e939 839-860
+progress.md
+  s_6a5ec6ec557730::t_fa96b375cfb27e 153-157
+desktop/src/bridge/protocol.ts
+  s_6a5ec6ec557730::t_aba1341c1b57c7 352
+  s_6a5ec6ec557730::t_1d00bea89dd912 242-248
+  s_6a5ec6ec557730::t_da414e6455e3a0 59
+desktop/src/pages/CommandCenter.tsx
+  s_6a5ec6ec557730::t_4414d402cab305 16
+  s_6a5ec6ec557730::t_77517938697026 37
+  s_6a5ec6ec557730::t_c2e79a45ddb0dd 127-129
+crates/cli/src/main.rs
+  s_6a5ec6ec557730::t_12b033b57f76bf 269-272
+  s_6a5ec6ec557730::t_67a7adb2cc4d91 1091-1095
+  s_6a5ec6ec557730::t_13b5767b5fad60 2269-2274
+desktop/src/pages/WorkspaceTabs.tsx
+  s_6a5ec6ec557730::t_5ff2bb3d722a5c 248-281
+  s_6a5ec6ec557730::t_d50e592dfea37b 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e25e4feeebf1febc5e341f38b5af32e0517b4dbf",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
