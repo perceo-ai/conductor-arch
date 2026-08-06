@@ -318,6 +318,22 @@ enum ArchcarCommand {
         #[arg(long)]
         repository: Option<String>,
     },
+    /// Read one settings layer's raw editable source TOML.
+    SettingsSource {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+    },
+    /// Overwrite one settings layer's source TOML from stdin (or --content).
+    SaveSettings {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long)]
+        content: Option<String>,
+    },
     /// Create a new chat thread in a workspace.
     CreateChat {
         workspace: String,
@@ -1080,6 +1096,30 @@ fn main() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSettings { repository })?,
                     );
+                }
+                ArchcarCommand::SettingsSource { repository, layer } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSettingsSource { repository, layer })?,
+                    );
+                }
+                ArchcarCommand::SaveSettings {
+                    repository,
+                    layer,
+                    content,
+                } => {
+                    let toml = match content {
+                        Some(c) => c,
+                        None => {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                            buf
+                        }
+                    };
+                    print_archcar_response(client.send(ArchcarRequest::SaveSettings {
+                        repository,
+                        layer,
+                        toml,
+                    })?);
                 }
                 ArchcarCommand::CreateChat {
                     workspace,
@@ -2101,6 +2141,13 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::SettingsSource { scope, layer, toml } => {
+            println!("settings_source {scope} {layer}");
+            print!("{toml}");
+        }
+        ArchcarResponse::SettingsSaved { scope, layer } => {
+            println!("settings_saved {scope} {layer}");
         }
         ArchcarResponse::SetupReadiness { report } => {
             println!(

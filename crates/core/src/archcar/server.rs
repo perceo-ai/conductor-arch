@@ -915,6 +915,99 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetSettingsSource { repository, layer } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let read_layer_file = |path: std::path::PathBuf| -> std::io::Result<String> {
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => Ok(s),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                    Err(err) => Err(err),
+                }
+            };
+            let result: anyhow::Result<(String, String)> = match &repository {
+                None => {
+                    let shared = AppPaths::from_env().shared_settings_path();
+                    read_layer_file(shared)
+                        .map(|toml| ("global".to_owned(), toml))
+                        .map_err(Into::into)
+                }
+                Some(repo) => RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(repo))
+                    .and_then(|r| {
+                        let layer = layer.as_deref().unwrap_or("repository");
+                        let file = match layer {
+                            "local" => r.root_path.join(".archductor/settings.local.toml"),
+                            _ => r.root_path.join(".archductor/settings.toml"),
+                        };
+                        let name = if layer == "local" {
+                            "local"
+                        } else {
+                            "repository"
+                        };
+                        read_layer_file(file)
+                            .map(|toml| (name.to_owned(), toml))
+                            .map_err(Into::into)
+                    }),
+            };
+            match result {
+                Ok((layer, toml)) => ArchcarResponse::SettingsSource {
+                    scope: repository.unwrap_or_else(|| "global".to_owned()),
+                    layer,
+                    toml,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveSettings {
+            repository,
+            layer,
+            toml,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<String> = match &repository {
+                None => {
+                    let shared = AppPaths::from_env().shared_settings_path();
+                    crate::settings::save_app_shared_settings_from_toml(&shared, &toml)
+                        .map(|()| "global".to_owned())
+                }
+                Some(repo) => {
+                    let layer_name = layer.as_deref().unwrap_or("repository");
+                    let settings_layer = if layer_name == "local" {
+                        crate::settings::SettingsLayer::LocalOverride
+                    } else {
+                        crate::settings::SettingsLayer::RepositoryShared
+                    };
+                    RepositoryStore::open(&db_path)
+                        .and_then(|s| s.get_by_name(repo))
+                        .and_then(|r| {
+                            crate::settings::save_repository_settings_from_toml(
+                                &r.root_path,
+                                settings_layer,
+                                &toml,
+                            )
+                        })
+                        .map(|()| {
+                            if layer_name == "local" {
+                                "local"
+                            } else {
+                                "repository"
+                            }
+                            .to_owned()
+                        })
+                }
+            };
+            match result {
+                Ok(layer) => ArchcarResponse::SettingsSaved {
+                    scope: repository.unwrap_or_else(|| "global".to_owned()),
+                    layer,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetSetupReadiness { recheck } => ArchcarResponse::SetupReadiness {
             report: crate::doctor::setup_report(recheck),
         },
@@ -1733,6 +1826,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }
     )
 }

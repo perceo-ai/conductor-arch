@@ -214,6 +214,24 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    /// Read the raw, editable source TOML for one settings layer (not the merged
+    /// effective view). `repository` None = global app-shared; otherwise the
+    /// repository's own committed (`repository`) or `local` override layer.
+    GetSettingsSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+        /// "repository" (default) or "local"; ignored for global scope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+    },
+    /// Overwrite one settings layer's source TOML. Validates before writing.
+    SaveSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        toml: String,
+    },
     /// Probe host setup readiness (GitHub CLI + agent providers). `recheck`
     /// refreshes the process environment before probing so a just-installed
     /// tool is picked up.
@@ -515,6 +533,18 @@ pub enum ArchcarResponse {
         scope: String,
         /// Effective settings serialized as pretty TOML.
         toml: String,
+    },
+    SettingsSource {
+        /// "global" or the repository name.
+        scope: String,
+        /// "global", "repository", or "local".
+        layer: String,
+        /// Raw editable source TOML for that one layer (empty if unset).
+        toml: String,
+    },
+    SettingsSaved {
+        scope: String,
+        layer: String,
     },
     SetupReadiness {
         report: SetupReport,
@@ -899,6 +929,21 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::GetSettingsSource { repository, layer } => format!(
+            "get_settings_source repository={} layer={}",
+            repository.as_deref().unwrap_or("<global>"),
+            layer.as_deref().unwrap_or("<default>")
+        ),
+        ArchcarRequest::SaveSettings {
+            repository,
+            layer,
+            toml,
+        } => format!(
+            "save_settings repository={} layer={} bytes={}",
+            repository.as_deref().unwrap_or("<global>"),
+            layer.as_deref().unwrap_or("<default>"),
+            toml.len()
+        ),
         ArchcarRequest::GetSetupReadiness { recheck } => {
             format!("get_setup_readiness recheck={recheck}")
         }
@@ -1181,6 +1226,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChecksSummary { workspace, .. } => {
             format!("checks_summary workspace={workspace}")
+        }
+        ArchcarResponse::SettingsSource { scope, layer, toml } => {
+            format!("settings_source scope={scope} layer={layer} bytes={}", toml.len())
+        }
+        ArchcarResponse::SettingsSaved { scope, layer } => {
+            format!("settings_saved scope={scope} layer={layer}")
         }
         ArchcarResponse::Settings { scope, toml } => {
             format!("settings scope={scope} bytes={}", toml.len())

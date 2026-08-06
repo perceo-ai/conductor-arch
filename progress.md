@@ -126,6 +126,13 @@ limits) back a center-pane file editor. The desktop FileView now has Diff/Edit
 tabs; Edit loads real UTF-8 content into a textarea with Ctrl/Cmd+S save. CLI
 exposes `archcar read-file`/`write-file` for the same boundary.
 
+Settings editing: `get_settings_source`/`save_settings` RPCs read and write one
+layer's raw TOML (global app-shared, repository-committed, or local override)
+through the validating `save_*_from_toml` path. The desktop Settings page is now
+a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
+read-only Effective merge, with a Repository/Local layer toggle for repo scope.
+CLI: `archcar settings-source` / `archcar save-settings`.
+
 After a mutation acks, the renderer re-pulls the workspace/repository inventory
 (archcar has no inventory-changed event), mirroring the GTK sidebar's
 post-mutation refresh. Read surfaces (chat, changes, todos, checks, review,
