@@ -73,7 +73,11 @@ function DashboardCard(props: { row: WorkspaceRow }) {
         <div class="card-meta">{meta()}</div>
         <div class="dashboard-card-footer">
           <span class="card-activity">{activity()}</span>
-          <span class="card-meta">{props.row.openTodos} todos</span>
+          <Show when={props.row.openTodos > 0}>
+            <span class="card-meta">
+              {props.row.openTodos} {props.row.openTodos === 1 ? "todo" : "todos"}
+            </span>
+          </Show>
         </div>
       </div>
     </button>
