@@ -123,8 +123,10 @@ handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
 Workspace file editing: `read_workspace_file`/`write_workspace_file` RPCs (core
 `WorkspaceStore::read_file`/`write_file`, path-traversal guarded, 2 MiB + binary
 limits) back a center-pane file editor. The desktop FileView now has Diff/Edit
-tabs; Edit loads real UTF-8 content into a textarea with Ctrl/Cmd+S save. CLI
-exposes `archcar read-file`/`write-file` for the same boundary.
+tabs; Edit loads real UTF-8 content into a syntax-highlighted editor (transparent
+textarea layered over a highlight.js `<pre>`, scroll-synced, language from file
+extension) with Ctrl/Cmd+S save. CLI exposes `archcar read-file`/`write-file`
+for the same boundary.
 
 Settings editing: `get_settings_source`/`save_settings` RPCs read and write one
 layer's raw TOML (global app-shared, repository-committed, or local override)

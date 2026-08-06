@@ -15,6 +15,7 @@ import { DiffView } from "./WorkspaceChanges";
 import { registerOpenFile } from "./openFileBridge";
 import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
+import { highlightCode, langFromPath } from "@/lib/highlight";
 import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
 
@@ -640,29 +641,53 @@ function FileEditor(props: { workspace: string; path: string }) {
     }
   }
 
+  // Syntax highlighting overlay: a transparent textarea sits over a highlighted
+  // <pre>. Both share identical font metrics + padding so the caret lines up;
+  // the textarea drives the scroll and mirrors it onto the highlight layer. A
+  // trailing newline keeps the last visual line height correct.
+  const lang = createMemo(() => langFromPath(props.path));
+  const highlighted = createMemo(() => {
+    const text = draft() ?? "";
+    return highlightCode(text.endsWith("\n") ? text : text + "\n", lang());
+  });
+  let highlightRef: HTMLPreElement | undefined;
+
   return (
     <Show
       when={!loaded()?.error}
       fallback={<div class="empty-state">{loaded()?.error}</div>}
     >
       <div class="ws-file-editor">
-        <textarea
-          class="ws-file-editor-area"
-          spellcheck={false}
-          value={draft() ?? ""}
-          onInput={(e) => {
-            setDraft(e.currentTarget.value);
-            setStatus("");
-          }}
-          onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-              e.preventDefault();
-              void save();
-            }
-          }}
-        />
+        <div class="ws-file-editor-scroll">
+          <pre class="ws-file-editor-highlight hljs" aria-hidden="true" ref={highlightRef}>
+            <code innerHTML={highlighted()} />
+          </pre>
+          <textarea
+            class="ws-file-editor-area"
+            spellcheck={false}
+            value={draft() ?? ""}
+            onInput={(e) => {
+              setDraft(e.currentTarget.value);
+              setStatus("");
+            }}
+            onScroll={(e) => {
+              if (highlightRef) {
+                highlightRef.scrollTop = e.currentTarget.scrollTop;
+                highlightRef.scrollLeft = e.currentTarget.scrollLeft;
+              }
+            }}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+                e.preventDefault();
+                void save();
+              }
+            }}
+          />
+        </div>
         <div class="ws-file-editor-footer">
-          <span class="card-meta">{status() || (dirty() ? "Unsaved changes" : "")}</span>
+          <span class="card-meta">
+            {status() || (dirty() ? "Unsaved changes" : lang() ?? "plain text")}
+          </span>
           <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
             Save
           </button>

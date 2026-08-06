@@ -1678,21 +1678,51 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
 }
-.ws-file-editor-area {
+/* Editor = a transparent textarea layered over a highlighted <pre>. Both share
+   these exact metrics so the caret and glyphs register 1:1. */
+.ws-file-editor-scroll {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  resize: none;
-  border: none;
-  outline: none;
-  padding: 12px 14px;
   background: var(--lc-surface, #161616);
-  color: var(--lc-text, #e6e6e6);
+  overflow: hidden;
+}
+.ws-file-editor-highlight,
+.ws-file-editor-area {
+  margin: 0;
+  border: 0;
+  padding: 12px 14px;
   font-family: var(--lc-mono, ui-monospace, monospace);
   font-size: 12.5px;
   line-height: 1.5;
   tab-size: 2;
   white-space: pre;
+  word-wrap: normal;
+}
+pre.ws-file-editor-highlight.hljs {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: transparent;
+  color: var(--lc-text, #e6e6e6);
+  pointer-events: none;
+}
+.ws-file-editor-highlight code {
+  font: inherit;
+  white-space: inherit;
+}
+.ws-file-editor-area {
+  position: absolute;
+  inset: 0;
+  resize: none;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--lc-text, #e6e6e6);
   overflow: auto;
+}
+.ws-file-editor-area::selection {
+  background: rgba(120, 140, 255, 0.32);
 }
 .ws-file-editor-footer {
   flex: 0 0 auto;
