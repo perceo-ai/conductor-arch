@@ -395,6 +395,14 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    CreateWorkspaceFromLinear {
+        repository: String,
+        issue_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
     ArchiveWorkspace {
         workspace: String,
         #[serde(default)]
@@ -1249,6 +1257,11 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             pr_number,
             ..
         } => format!("create_workspace_from_pull_request repository={repository} pr={pr_number}"),
+        ArchcarRequest::CreateWorkspaceFromLinear {
+            repository,
+            issue_id,
+            ..
+        } => format!("create_workspace_from_linear repository={repository} issue={issue_id}"),
         ArchcarRequest::ArchiveWorkspace {
             workspace,
             remove_worktree,
@@ -2064,6 +2077,16 @@ mod tests {
                 },
                 "\"type\":\"create_workspace_from_issue\"",
                 "create_workspace_from_issue repository=repo issue=42",
+            ),
+            (
+                ArchcarRequest::CreateWorkspaceFromLinear {
+                    repository: "repo".to_owned(),
+                    issue_id: "ENG-123".to_owned(),
+                    name: None,
+                    branch: None,
+                },
+                "\"type\":\"create_workspace_from_linear\"",
+                "create_workspace_from_linear repository=repo issue=ENG-123",
             ),
             (
                 ArchcarRequest::CreateWorkspaceFromPullRequest {

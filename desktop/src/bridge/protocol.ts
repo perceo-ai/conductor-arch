@@ -113,6 +113,13 @@ export type ArchcarRequest =
       name?: string;
       branch?: string;
     }
+  | {
+      type: "create_workspace_from_linear";
+      repository: string;
+      issue_id: string;
+      name?: string;
+      branch?: string;
+    }
   | { type: "archive_workspace"; workspace: string; remove_worktree?: boolean }
   | { type: "restore_workspace"; workspace: string }
   | { type: "rename_workspace"; workspace: string; new_name: string }

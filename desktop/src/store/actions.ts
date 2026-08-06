@@ -189,6 +189,25 @@ export const actions = {
     return this.afterCreate(res);
   },
 
+  async createWorkspaceFromLinear(input: {
+    repository: string;
+    issueId: string;
+    name?: string;
+    branch?: string;
+  }): Promise<string | undefined> {
+    logAction("create_workspace_from_linear", input);
+    const res = ensureOk(
+      await send({
+        type: "create_workspace_from_linear",
+        repository: input.repository,
+        issue_id: input.issueId,
+        name: input.name,
+        branch: input.branch,
+      }),
+    );
+    return this.afterCreate(res);
+  },
+
   // --- Workspace lifecycle --------------------------------------------------
   async archiveWorkspace(workspace: string, removeWorktree = false): Promise<void> {
     logAction("archive_workspace", { workspace, removeWorktree });

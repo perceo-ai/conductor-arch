@@ -1514,6 +1514,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 message: err.to_string(),
             },
         },
+        ArchcarRequest::CreateWorkspaceFromLinear {
+            repository,
+            issue_id,
+            name,
+            branch,
+        } => match open_lifecycle_workspace_store(state).and_then(|s| {
+            s.create_from_linear_issue(
+                &repository,
+                &issue_id,
+                name.as_deref(),
+                branch.as_deref(),
+                None,
+            )
+        }) {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
         ArchcarRequest::ArchiveWorkspace {
             workspace,
             remove_worktree,

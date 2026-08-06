@@ -238,8 +238,9 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
   // (linux/distro codenames) in core; the Prompt flow lets the agent rename via
   // <archductor_metadata> on the first message, the Github flow uses the
   // {prefix}/gh-{issue|pr}-{n} branch scheme.
-  type Source = "prompt" | "branch" | "github";
+  type Source = "prompt" | "branch" | "github" | "linear";
   const [source, setSource] = createSignal<Source>("prompt");
+  const [linearIssue, setLinearIssue] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selected, setSelected] = createSignal<GithubWorkItem | null>(null);
   const [filter, setFilter] = createSignal("");
@@ -291,6 +292,10 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
         branch: wsBranch().trim(),
         baseRef: wsBase().trim() || undefined,
       });
+    } else if (source() === "linear") {
+      const issue = linearIssue().trim();
+      if (!issue) throw new Error("Enter a Linear issue ID (e.g. ENG-123)");
+      await actions.createWorkspaceFromLinear({ repository, issueId: issue });
     } else {
       const item = selected();
       if (!item) throw new Error("Select an issue or pull request");
@@ -306,6 +311,7 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     { key: "prompt", label: "Prompt" },
     { key: "branch", label: "Branch" },
     { key: "github", label: "Github" },
+    { key: "linear", label: "Linear" },
   ];
 
   return (
@@ -348,6 +354,11 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
             </datalist>
           </label>
           <span class="dialog-hint">Creates a workspace on a new branch off the base. Leave name/branch blank to auto-generate.</span>
+        </Match>
+        <Match when={source() === "linear"}>
+          <label class="dialog-field"><span>Linear issue ID</span>
+            <input value={linearIssue()} onInput={(e) => setLinearIssue(e.currentTarget.value)} placeholder="e.g. ENG-123" /></label>
+          <span class="dialog-hint">Creates a workspace from a Linear issue. Requires LINEAR_API_KEY in the daemon's environment.</span>
         </Match>
         <Match when={source() === "github"}>
           <div class="dialog-field">
@@ -422,7 +433,7 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
             ? "Creating…"
             : source() === "prompt"
               ? "Start workspace"
-              : source() === "branch"
+              : source() === "branch" || source() === "linear"
                 ? "Create workspace"
                 : "Create from selection"}
         </button>

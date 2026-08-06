@@ -313,6 +313,11 @@ enum ArchcarCommand {
         #[arg(long)]
         stage_all: bool,
     },
+    /// Create a workspace from a Linear issue (needs LINEAR_API_KEY).
+    CreateFromLinear {
+        repository: String,
+        issue: String,
+    },
     /// Show spotlight-testing status for a workspace.
     SpotlightStatus {
         workspace: String,
@@ -1161,6 +1166,16 @@ fn main() -> Result<()> {
                             workspace,
                             message,
                             stage_all,
+                        },
+                    )?);
+                }
+                ArchcarCommand::CreateFromLinear { repository, issue } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::CreateWorkspaceFromLinear {
+                            repository,
+                            issue_id: issue,
+                            name: None,
+                            branch: None,
                         },
                     )?);
                 }

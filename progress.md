@@ -155,6 +155,14 @@ changed files; CLI `archcar commit-draft`), and a Recent-commits view
 center (`get_commit_diff` / git show, CLI `archcar commit-diff`) — a complete
 in-app git review/commit surface.
 
+Workspace creation from Linear: the create-workspace dialog gained a "Linear"
+source (issue-id input) backed by a `create_workspace_from_linear` RPC (core
+`create_from_linear_issue`, CLI `archcar create-from-linear`). The RPC→server→
+core wiring is verified via socket smoke (no key → clear "requires
+LINEAR_API_KEY" error); the live create needs `LINEAR_API_KEY` in the daemon
+env and is not smoke-verified here. The dialog now offers all GTK sources:
+Prompt, Branch, Github (issue/PR), and Linear.
+
 Workspace creation from branch/base: the create-workspace dialog gained a
 "Branch" source (name + branch + optional base) alongside Prompt and Github,
 calling the existing `create_workspace` RPC — restoring the GTK branch/base
