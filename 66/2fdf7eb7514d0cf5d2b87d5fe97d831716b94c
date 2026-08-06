@@ -1,0 +1,39 @@
+crates/cli/src/main.rs
+  s_6a5ec6ec557730::t_8d12ddc89bf626 2254-2257
+  s_6a5ec6ec557730::t_76c9085522b48f 275-278
+  s_6a5ec6ec557730::t_ebcd3f4e64473e 1087-1091
+crates/core/src/archcar/server.rs
+  s_6a5ec6ec557730::t_f75f7628f3ffc8 852-853
+  s_6a5ec6ec557730::t_71d709a0d867ce 2039
+  s_6a5ec6ec557730::t_b2a0857d695a7c 850-851,854-860
+desktop/src/bridge/protocol.ts
+  s_6a5ec6ec557730::t_80fe8ba72c753f 344
+  s_6a5ec6ec557730::t_f02b7bceaa5811 60
+crates/core/src/archcar/protocol.rs
+  s_6a5ec6ec557730::t_d3a403bf04098d 208-211
+  s_6a5ec6ec557730::t_c253e6711ac6b3 1038-1040
+  s_6a5ec6ec557730::t_6ab43fafe895e8 579-582
+  s_6a5ec6ec557730::t_ce1e2b7612e98a 2182-2207
+  s_6a5ec6ec557730::t_708c19dd5f05b5 1380-1382
+desktop/src/pages/WorkspaceChanges.tsx
+  s_6a5ec6ec557730::t_506ae583f2408a 144-146
+  s_6a5ec6ec557730::t_9f66a455814876 66-76
+progress.md
+  s_6a5ec6ec557730::t_d0b294f4ed11c2 140-143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "662fdf7eb7514d0cf5d2b87d5fe97d831716b94c",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
