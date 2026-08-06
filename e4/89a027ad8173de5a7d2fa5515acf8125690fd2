@@ -1,0 +1,25 @@
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_01190c591b5eef 1681-1684,1688-1694,1700-1701,1703-1721,1724-1726
+  s_6a5ec6ec557730::t_92a1b5b378026b 1702
+desktop/src/pages/ChatSurface.tsx
+  s_6a5ec6ec557730::t_1472a9aae0b42f 18
+  s_6a5ec6ec557730::t_8fb350f85815f0 644-654,661-686,688-690
+progress.md
+  s_6a5ec6ec557730::t_3b71262f2ec9f1 126-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e489a027ad8173de5a7d2fa5515acf8125690fd2",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
