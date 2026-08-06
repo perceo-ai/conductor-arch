@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import Sidebar from "./components/Sidebar";
 import WindowControls from "./components/WindowControls";
 import MetricsOverlay from "./components/MetricsOverlay";
@@ -7,12 +7,15 @@ import SetupModal from "./components/SetupModal";
 import Toasts from "./components/Toasts";
 import ContextMenu from "./components/ContextMenu";
 import CommandPalette from "./components/CommandPalette";
+import ShortcutsHelp from "./components/ShortcutsHelp";
 import { PageStack } from "./pages";
-import { startStore, setupStore, prefsStore } from "./store";
+import { startStore, setupStore, prefsStore, nav } from "./store";
 import { ACCENT_HEX } from "./store/prefs";
+import { resolveShortcut } from "./lib/shortcuts";
 
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
+  const [helpOpen, setHelpOpen] = createSignal(false);
 
   // Apply appearance prefs (theme/accent/density) to the document body — the
   // theme.css class hooks (lc-theme-*, lc-accent-*, lc-density-*) are already
@@ -34,6 +37,58 @@ export default function App() {
     // Connect the archcar event stream into the reactive store, then probe host
     // setup readiness. A blocking modal gates the app until setup is complete.
     void startStore().then(() => setupStore.check().catch(() => undefined));
+  });
+
+  // Global keyboard shortcuts (GTK parity). The command palette owns Cmd/Ctrl+K
+  // itself, so this handler skips "open-palette" to avoid double-toggling.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && helpOpen()) {
+        e.preventDefault();
+        setHelpOpen(false);
+        return;
+      }
+      const action = resolveShortcut(e);
+      if (!action || action === "open-palette") return;
+      const target = e.target as HTMLElement | null;
+      const editable =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      // Only the unmodified "?" help is suppressed while typing; modifier chords
+      // still fire so they work from anywhere.
+      if (action === "show-help" && editable) return;
+      e.preventDefault();
+      switch (action) {
+        case "toggle-sidebar":
+          setSidebarCollapsed((c) => !c);
+          break;
+        case "nav-back":
+          nav.back();
+          break;
+        case "nav-forward":
+          nav.forward();
+          break;
+        case "goto-dashboard":
+          nav.goToPage("dashboard");
+          break;
+        case "goto-projects":
+          nav.goToPage("projects");
+          break;
+        case "goto-history":
+          nav.goToPage("history");
+          break;
+        case "goto-settings":
+          nav.goToPage("settings");
+          break;
+        case "show-help":
+          setHelpOpen((o) => !o);
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
   return (
@@ -58,6 +113,7 @@ export default function App() {
       <Toasts />
       <ContextMenu />
       <CommandPalette />
+      <ShortcutsHelp open={helpOpen()} onClose={() => setHelpOpen(false)} />
       <MetricsOverlay />
     </>
   );
