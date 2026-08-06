@@ -1822,6 +1822,114 @@ mod tests {
     }
 
     #[test]
+    fn file_and_settings_requests_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarRequest, &str, &str)> = vec![
+            (
+                ArchcarRequest::ReadWorkspaceFile {
+                    workspace: "ws".to_owned(),
+                    path: "src/a.rs".to_owned(),
+                },
+                "\"type\":\"read_workspace_file\"",
+                "read_workspace_file workspace=ws path=src/a.rs",
+            ),
+            (
+                ArchcarRequest::WriteWorkspaceFile {
+                    workspace: "ws".to_owned(),
+                    path: "src/a.rs".to_owned(),
+                    content: "hello".to_owned(),
+                },
+                "\"type\":\"write_workspace_file\"",
+                "write_workspace_file workspace=ws path=src/a.rs bytes=5",
+            ),
+            (
+                ArchcarRequest::GetSettingsSource {
+                    repository: Some("repo".to_owned()),
+                    layer: Some("local".to_owned()),
+                },
+                "\"type\":\"get_settings_source\"",
+                "get_settings_source repository=repo layer=local",
+            ),
+            (
+                ArchcarRequest::GetSettingsSource {
+                    repository: None,
+                    layer: None,
+                },
+                "\"type\":\"get_settings_source\"",
+                "get_settings_source repository=<global> layer=<default>",
+            ),
+            (
+                ArchcarRequest::SaveSettings {
+                    repository: None,
+                    layer: None,
+                    toml: "x = 1".to_owned(),
+                },
+                "\"type\":\"save_settings\"",
+                "save_settings repository=<global> layer=<default> bytes=5",
+            ),
+        ];
+
+        for (request, type_tag, summary) in cases {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+    }
+
+    #[test]
+    fn file_and_settings_responses_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarResponse, &str, &str)> = vec![
+            (
+                ArchcarResponse::WorkspaceFileContent {
+                    workspace: "ws".to_owned(),
+                    path: "a.rs".to_owned(),
+                    content: "hello".to_owned(),
+                },
+                "\"type\":\"workspace_file_content\"",
+                "workspace_file_content workspace=ws path=a.rs bytes=5",
+            ),
+            (
+                ArchcarResponse::WorkspaceFileWritten {
+                    workspace: "ws".to_owned(),
+                    path: "a.rs".to_owned(),
+                },
+                "\"type\":\"workspace_file_written\"",
+                "workspace_file_written workspace=ws path=a.rs",
+            ),
+            (
+                ArchcarResponse::SettingsSource {
+                    scope: "global".to_owned(),
+                    layer: "global".to_owned(),
+                    toml: "x = 1".to_owned(),
+                },
+                "\"type\":\"settings_source\"",
+                "settings_source scope=global layer=global bytes=5",
+            ),
+            (
+                ArchcarResponse::SettingsSaved {
+                    scope: "repo".to_owned(),
+                    layer: "local".to_owned(),
+                },
+                "\"type\":\"settings_saved\"",
+                "settings_saved scope=repo layer=local",
+            ),
+        ];
+
+        for (response, type_tag, summary) in cases {
+            let json = serde_json::to_string(&response).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                response
+            );
+            assert_eq!(archcar_response_summary(&response), summary);
+        }
+    }
+
+    #[test]
     fn branch_pr_review_requests_round_trip_and_summarize() {
         let cases: Vec<(ArchcarRequest, &str, &str)> = vec![
             (
