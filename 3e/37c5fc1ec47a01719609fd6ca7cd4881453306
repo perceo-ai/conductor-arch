@@ -1,0 +1,44 @@
+crates/core/src/archcar/protocol.rs
+  s_6a5ec6ec557730::t_953d81e1cdf2a8 2056-2074,2077-2084
+  s_6a5ec6ec557730::t_a18c6ff2748dc3 1009-1011
+  s_6a5ec6ec557730::t_cea9526fac60b0 2075-2076
+  s_6a5ec6ec557730::t_71c2345dd85879 238-241
+  s_6a5ec6ec557730::t_82b02fd9ee34b5 585-590
+  s_6a5ec6ec557730::t_e189f5ce77955a 1325-1329
+  s_6a5ec6ec557730::t_aaeaaeb44e7130 2055
+crates/core/src/settings.rs
+  s_6a5ec6ec557730::t_6208129245c07e 850-872
+desktop/src/styles/theme.css
+  s_6a5ec6ec557730::t_cc4fa463326ba7 1400-1423
+desktop/src/bridge/protocol.ts
+  s_6a5ec6ec557730::t_a711f0a57add76 346
+  s_6a5ec6ec557730::t_a806a6f97afbfa 69
+crates/cli/src/main.rs
+  s_6a5ec6ec557730::t_6519e8c04306ab 349-352
+  s_6a5ec6ec557730::t_aaf86d1c555296 2226-2239
+  s_6a5ec6ec557730::t_8b6d37e20156a3 1153-1157
+desktop/src/pages/Settings.tsx
+  s_6a5ec6ec557730::t_406d36825d034e 49-62
+  s_6a5ec6ec557730::t_46c196c52e1d12 197-219
+progress.md
+  s_6a5ec6ec557730::t_15bb2f2f2542fb 143-147
+crates/core/src/archcar/server.rs
+  s_6a5ec6ec557730::t_8dedfc390be790 1007-1033
+  s_6a5ec6ec557730::t_add69ba48a4427 1947
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "3e37c5fc1ec47a01719609fd6ca7cd4881453306",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
