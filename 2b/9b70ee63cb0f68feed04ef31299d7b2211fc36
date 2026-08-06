@@ -1,0 +1,20 @@
+desktop/src/styles/theme.css
+  s_6a5ec6ec557730::t_eb55a015541c97 1850-1863,1878-1890
+  s_6a5ec6ec557730::t_9b2d57a6873ef5 1864-1877
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "2b9b70ee63cb0f68feed04ef31299d7b2211fc36",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
