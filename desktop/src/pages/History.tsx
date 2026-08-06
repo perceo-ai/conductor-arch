@@ -87,9 +87,12 @@ export function HistoryPage() {
                 </span>
                 <span class="card-meta">
                   <Show when={r.additions || r.deletions}>
-                    +{r.additions} −{r.deletions} ·{" "}
+                    +{r.additions} −{r.deletions}
+                    <Show when={r.openTodos > 0}> · </Show>
                   </Show>
-                  {r.openTodos} todos
+                  <Show when={r.openTodos > 0}>
+                    {r.openTodos} {r.openTodos === 1 ? "todo" : "todos"}
+                  </Show>
                 </span>
               </button>
             )}
