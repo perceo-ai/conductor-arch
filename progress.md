@@ -137,8 +137,10 @@ CLI: `archcar settings-source` / `archcar save-settings`.
 
 Commit from the app: `commit_workspace_changes` RPC (CLI `archcar commit
 <ws> <msg> --stage-all`) stages all (optional) and commits with a message. The
-Changes panel gained a commit box (message + "Stage all & commit") so you can
-commit working-tree changes without dropping to a terminal.
+Changes panel gained a commit box (message + "Stage all & commit") plus a
+"Suggest" button backed by `get_commit_message_draft` (heuristic message from
+changed files; CLI `archcar commit-draft`), and a Recent-commits view
+(`get_recent_commits`) — a complete in-app git review/commit surface.
 
 Workspace creation from branch/base: the create-workspace dialog gained a
 "Branch" source (name + branch + optional base) alongside Prompt and Github,

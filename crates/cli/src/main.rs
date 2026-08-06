@@ -272,6 +272,10 @@ enum ArchcarCommand {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Print a heuristic draft commit message for a workspace.
+    CommitDraft {
+        workspace: String,
+    },
     /// List a workspace's configured check commands.
     CheckList {
         workspace: String,
@@ -1078,6 +1082,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::Commits { workspace, limit } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetRecentCommits { workspace, limit })?,
+                    );
+                }
+                ArchcarCommand::CommitDraft { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetCommitMessageDraft { workspace })?,
                     );
                 }
                 ArchcarCommand::CheckList { workspace } => {
@@ -2241,6 +2250,10 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::RecentCommits { workspace, log } => {
             println!("recent_commits {workspace}");
             print!("{log}");
+        }
+        ArchcarResponse::CommitMessageDraft { workspace, message } => {
+            println!("commit_message_draft {workspace}");
+            print!("{message}");
         }
         ArchcarResponse::RunScriptStarted {
             workspace,

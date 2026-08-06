@@ -205,6 +205,10 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
     },
+    /// A heuristic draft commit message from the workspace's changed files.
+    GetCommitMessageDraft {
+        workspace: String,
+    },
     /// Start the workspace's configured run script as a tracked process.
     RunWorkspaceScript {
         workspace: String,
@@ -571,6 +575,10 @@ pub enum ArchcarResponse {
     RecentCommits {
         workspace: String,
         log: String,
+    },
+    CommitMessageDraft {
+        workspace: String,
+        message: String,
     },
     RunScriptStarted {
         workspace: String,
@@ -1027,6 +1035,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             "get_recent_commits workspace={workspace} limit={}",
             limit.map(|n| n.to_string()).unwrap_or_else(|| "<default>".to_owned())
         ),
+        ArchcarRequest::GetCommitMessageDraft { workspace } => {
+            format!("get_commit_message_draft workspace={workspace}")
+        }
         ArchcarRequest::RunWorkspaceScript { workspace } => {
             format!("run_workspace_script workspace={workspace}")
         }
@@ -1365,6 +1376,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::RecentCommits { workspace, log } => {
             format!("recent_commits workspace={workspace} bytes={}", log.len())
+        }
+        ArchcarResponse::CommitMessageDraft { workspace, message } => {
+            format!("commit_message_draft workspace={workspace} bytes={}", message.len())
         }
         ArchcarResponse::RunScriptStarted { workspace, pid, log_path } => {
             format!("run_script_started workspace={workspace} pid={pid} log={log_path}")
@@ -2164,6 +2178,32 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&resp),
             "recent_commits workspace=ws bytes=10"
+        );
+
+        let draft_req = ArchcarRequest::GetCommitMessageDraft {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&draft_req).unwrap())
+                .unwrap(),
+            draft_req
+        );
+        assert_eq!(
+            archcar_request_summary(&draft_req),
+            "get_commit_message_draft workspace=ws"
+        );
+        let draft_resp = ArchcarResponse::CommitMessageDraft {
+            workspace: "ws".to_owned(),
+            message: "update".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&draft_resp).unwrap())
+                .unwrap(),
+            draft_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&draft_resp),
+            "commit_message_draft workspace=ws bytes=6"
         );
     }
 

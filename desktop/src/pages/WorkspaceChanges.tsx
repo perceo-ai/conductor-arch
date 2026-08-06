@@ -63,6 +63,17 @@ export function ChangesRows(props: {
   );
   const [commitMsg, setCommitMsg] = createSignal("");
   const [commitFeedback, setCommitFeedback] = createSignal("");
+  async function suggestMessage() {
+    try {
+      const res = await send({ type: "get_commit_message_draft", workspace: props.workspace });
+      if (res.type === "commit_message_draft" && res.message.trim()) {
+        setCommitMsg(res.message.trim());
+        setCommitFeedback("");
+      }
+    } catch {
+      // non-fatal
+    }
+  }
   async function commit() {
     const message = commitMsg().trim();
     if (!message) {
@@ -130,6 +141,9 @@ export function ChangesRows(props: {
             onInput={(e) => setCommitMsg(e.currentTarget.value)}
             onKeyDown={(e) => e.key === "Enter" && void commit()}
           />
+          <button class="secondary-action" title="Draft a message from changed files" onClick={() => void suggestMessage()}>
+            Suggest
+          </button>
           <button class="suggested-action" onClick={() => void commit()}>
             Stage all &amp; commit
           </button>

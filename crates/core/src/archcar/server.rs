@@ -847,6 +847,17 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetCommitMessageDraft { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.commit_message_draft(&workspace))
+            {
+                Ok(message) => ArchcarResponse::CommitMessageDraft { workspace, message },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RunWorkspaceScript { workspace } => {
             let (db_path, logs_dir) = {
                 let s = state.lock().unwrap();
@@ -2025,6 +2036,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
             | ArchcarRequest::GetRecentCommits { .. }
+            | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetRunLog { .. }
             | ArchcarRequest::GetCheckLog { .. }
             | ArchcarRequest::ListWorkspaceChecks { .. }
