@@ -1,0 +1,25 @@
+desktop/src/store/prefs.test.ts
+  s_6a5ec6ec557730::t_4b8af6157233ed 49-55
+desktop/src/store/prefs.ts
+  s_6a5ec6ec557730::t_0c1478384f5ee6 32-33,42
+  s_6a5ec6ec557730::t_6ccc36ae061d07 109-113
+  s_6a5ec6ec557730::t_750b785f1d9374 76
+desktop/src/App.tsx
+  s_6a5ec6ec557730::t_79b89d1a32f7e2 17-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "431f2454efc9148445898373cb3b4cae24b295d0",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
