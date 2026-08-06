@@ -189,6 +189,19 @@ body.resizing-col {
 .sidebar-nav-button.active {
   background: var(--lc-hover);
   color: var(--lc-text-strong);
+  /* accent indicator so the accent control is actually visible */
+  box-shadow: inset 2px 0 0 var(--lc-accent, #c39b50);
+}
+.sidebar-nav-button.active .sidebar-nav-icon {
+  color: var(--lc-accent, #c39b50);
+}
+.workspace-row-shell.selected {
+  box-shadow: inset 2px 0 0 var(--lc-accent, #c39b50);
+}
+/* Active tab underline picks up the accent too. */
+.project-tabs .ws-tab-active,
+.ws-chat-tabs .ws-tab-active {
+  border-bottom: 2px solid var(--lc-accent, #c39b50);
 }
 .projects-header {
   display: flex;

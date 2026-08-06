@@ -1586,6 +1586,12 @@ button.ui-button-destructive:hover {
 .lc-density-compact .workspace-card {
     padding: 8px;
 }
+.lc-density-compact .workspace-row-shell {
+    padding: 4px 10px;
+}
+.lc-density-compact .sidebar-nav-button {
+    min-height: 26px;
+}
 
 .lc-density-compact .detail-body,
 .lc-density-compact .page-body,
@@ -1601,6 +1607,12 @@ button.ui-button-destructive:hover {
 .lc-density-comfortable .metric-card,
 .lc-density-comfortable .workspace-card {
     padding: 14px;
+}
+.lc-density-comfortable .workspace-row-shell {
+    padding: 12px 12px;
+}
+.lc-density-comfortable .sidebar-nav-button {
+    min-height: 40px;
 }
 
 .lc-density-comfortable .detail-body,
