@@ -1,0 +1,28 @@
+desktop/src/lib/workspaceStatus.test.ts
+  s_6a5ec6ec557730::t_92a12006f6a038 1-39
+desktop/src/styles/base.css
+  s_6a5ec6ec557730::t_7787122faa1cd4 250
+  s_6a5ec6ec557730::t_1411cfe5f80d10 227-239,243-245
+desktop/src/components/Sidebar.tsx
+  s_6a5ec6ec557730::t_bec57690a911bc 132-139
+  s_6a5ec6ec557730::t_90a4e307e08d94 7
+  s_6a5ec6ec557730::t_f62509861c1ae4 124
+desktop/src/lib/workspaceStatus.ts
+  s_6a5ec6ec557730::t_0467b3565e8fed 1-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "c78d7f2e1a05b8f6837cd86824610391af0c4711",
+  "prompts": {},
+  "sessions": {
+    "s_6a5ec6ec557730": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5549bfc6-928c-45f0-b032-e6c3915f6040",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
