@@ -2,6 +2,7 @@ import { For, Show, createMemo, createSignal } from "solid-js";
 import { nav, workspacesStore } from "@/store";
 import type { WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
+import { workspaceStatusKind, STATUS_COLOR, STATUS_LABEL } from "@/lib/workspaceStatus";
 
 // History page — port of history.rs workspace list. All workspaces sorted by
 // lifecycle state then recency, filterable All/Active/Archived. Reuses the
@@ -73,7 +74,14 @@ export function HistoryPage() {
           <For each={rows()}>
             {(r) => (
               <button class="history-row" onClick={() => nav.selectWorkspace(r.name)}>
-                <span class="workspace-name">{titleCaseWorkspace(r.name)}</span>
+                <span class="history-row-head">
+                  <span
+                    class="workspace-status-dot"
+                    style={{ "background-color": STATUS_COLOR[workspaceStatusKind(r)] }}
+                    title={STATUS_LABEL[workspaceStatusKind(r)]}
+                  />
+                  <span class="workspace-name">{titleCaseWorkspace(r.name)}</span>
+                </span>
                 <span class="workspace-meta">
                   {r.repository} · {r.branch} · {stateOf(r)}
                 </span>

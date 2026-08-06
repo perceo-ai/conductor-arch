@@ -801,6 +801,12 @@ body.resizing-col {
   background: rgba(255, 255, 255, 0.05);
   border-color: var(--lc-border, #2a2a2a);
 }
+.history-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .history-row .workspace-name {
   color: var(--lc-text, #e4e4e4);
   font-weight: 600;
