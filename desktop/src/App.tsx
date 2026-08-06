@@ -9,7 +9,17 @@ import ContextMenu from "./components/ContextMenu";
 import CommandPalette from "./components/CommandPalette";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import { PageStack } from "./pages";
-import { startStore, setupStore, prefsStore, nav, uiStore } from "./store";
+import {
+  startStore,
+  setupStore,
+  prefsStore,
+  nav,
+  uiStore,
+  dialogs,
+  actions,
+  workspacesStore,
+  repositoriesStore,
+} from "./store";
 import { ACCENT_HEX } from "./store/prefs";
 import { resolveShortcut } from "./lib/shortcuts";
 
@@ -93,6 +103,27 @@ export default function App() {
         case "show-help":
           setHelpOpen((o) => !o);
           break;
+        case "new-workspace": {
+          const active = nav.selectedWorkspace();
+          const repo =
+            (active && workspacesStore.row(active)?.repository) ||
+            repositoriesStore.state.order[0];
+          if (repo) dialogs.open({ kind: "create-workspace", repository: repo });
+          break;
+        }
+        case "show-changes": {
+          const active = nav.selectedWorkspace();
+          if (active) {
+            nav.selectWorkspace(active);
+            nav.setRightPanelTab("changes");
+          }
+          break;
+        }
+        case "create-pr": {
+          const active = nav.selectedWorkspace();
+          if (active) void actions.refreshPullRequest(active);
+          break;
+        }
       }
     };
     window.addEventListener("keydown", onKey);

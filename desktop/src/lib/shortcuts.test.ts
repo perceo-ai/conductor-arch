@@ -38,6 +38,14 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("z", true))).toBeNull();
   });
 
+  it("maps conductor mod+shift workflow chords (uppercase key)", () => {
+    expect(resolveShortcut(ev("N", true, true))).toBe("new-workspace");
+    expect(resolveShortcut(ev("D", true, true))).toBe("show-changes");
+    expect(resolveShortcut(ev("P", true, true))).toBe("create-pr");
+    // mod+shift with an unmapped letter is null (doesn't fall through to plain map)
+    expect(resolveShortcut(ev("B", true, true))).toBeNull();
+  });
+
   it("help table is non-empty and well-formed", () => {
     expect(SHORTCUT_HELP.length).toBeGreaterThan(0);
     expect(SHORTCUT_HELP.every((r) => r.keys && r.label)).toBe(true);

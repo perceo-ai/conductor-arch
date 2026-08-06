@@ -11,7 +11,10 @@ export type ShortcutAction =
   | "goto-projects"
   | "goto-history"
   | "goto-settings"
-  | "show-help";
+  | "show-help"
+  | "new-workspace"
+  | "show-changes"
+  | "create-pr";
 
 export interface KeyEventLike {
   key: string;
@@ -32,6 +35,19 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
   if (e.key === "?" ) return "show-help";
 
   if (!hasMod(e)) return null;
+  // Conductor workflow chords (mod+shift). Shift makes e.key uppercase.
+  if (e.shiftKey) {
+    switch (e.key.toLowerCase()) {
+      case "n":
+        return "new-workspace";
+      case "d":
+        return "show-changes";
+      case "p":
+        return "create-pr";
+      default:
+        return null;
+    }
+  }
   switch (e.key) {
     case "b":
     case "B":
@@ -62,6 +78,9 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
 // so the two never drift.
 export const SHORTCUT_HELP: { keys: string; label: string }[] = [
   { keys: "⌘/Ctrl K", label: "Command palette" },
+  { keys: "⌘/Ctrl ⇧ N", label: "New workspace" },
+  { keys: "⌘/Ctrl ⇧ D", label: "Show changes / diff" },
+  { keys: "⌘/Ctrl ⇧ P", label: "Create / refresh pull request" },
   { keys: "⌘/Ctrl B", label: "Toggle sidebar" },
   { keys: "⌘/Ctrl [", label: "Navigate back" },
   { keys: "⌘/Ctrl ]", label: "Navigate forward" },
