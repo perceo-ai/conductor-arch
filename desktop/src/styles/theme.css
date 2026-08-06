@@ -1397,6 +1397,31 @@ button.ui-button-destructive:hover {
     margin-top: 8px;
 }
 
+.settings-appearance {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    padding: 10px 0 12px;
+    border-bottom: 1px solid #2a2a2a;
+}
+.settings-appearance-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.settings-accent-swatch {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.settings-accent-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--swatch, #c39b50);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
 .settings-split {
     flex: 1 1 auto;
     min-height: 0;

@@ -135,6 +135,12 @@ a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
 read-only Effective merge, with a Repository/Local layer toggle for repo scope.
 CLI: `archcar settings-source` / `archcar save-settings`.
 
+Appearance controls: the Settings page restores the GTK theme/accent/density
+runtime controls. `prefsStore` now persists `theme` (dark/light), `accent`
+(amber/blue/green/rose, also driving the global `--lc-accent` token), and
+`density` (compact/cozy/comfortable) to localStorage; an App effect toggles the
+existing `lc-theme-*`/`lc-accent-*`/`lc-density-*` class hooks on `<body>`.
+
 Command palette: Cmd/Ctrl+K global launcher (`desktop/src/components/
 CommandPalette.tsx`) restores the GTK command palette. Fuzzy-filters
 (`desktop/src/lib/fuzzy.ts`, unit-tested) across page navigation, workspace

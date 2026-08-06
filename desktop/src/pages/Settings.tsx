@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createResource, createSignal } from "solid-js";
 import { repositoriesStore, prefsStore } from "@/store";
+import { ACCENT_HEX } from "@/store/prefs";
 import { send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
 
@@ -106,6 +107,58 @@ export function SettingsPage() {
               )}
             </For>
           </select>
+        </div>
+        <div class="settings-appearance">
+          <div class="settings-appearance-group">
+            <span class="settings-field-title">Theme</span>
+            <div class="command-center-strip">
+              <For each={["dark", "light"] as const}>
+                {(t) => (
+                  <button
+                    class="nav-button"
+                    classList={{ "nav-button-active": prefsStore.state.theme === t }}
+                    onClick={() => prefsStore.setTheme(t)}
+                  >
+                    {t === "dark" ? "Dark" : "Light"}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <div class="settings-appearance-group">
+            <span class="settings-field-title">Accent</span>
+            <div class="command-center-strip">
+              <For each={["amber", "blue", "green", "rose"] as const}>
+                {(a) => (
+                  <button
+                    class="nav-button settings-accent-swatch"
+                    classList={{ "nav-button-active": prefsStore.state.accent === a }}
+                    style={{ "--swatch": ACCENT_HEX[a] }}
+                    onClick={() => prefsStore.setAccent(a)}
+                  >
+                    <span class="settings-accent-dot" />
+                    {a[0].toUpperCase() + a.slice(1)}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <div class="settings-appearance-group">
+            <span class="settings-field-title">Density</span>
+            <div class="command-center-strip">
+              <For each={["compact", "cozy", "comfortable"] as const}>
+                {(d) => (
+                  <button
+                    class="nav-button"
+                    classList={{ "nav-button-active": prefsStore.state.density === d }}
+                    onClick={() => prefsStore.setDensity(d)}
+                  >
+                    {d[0].toUpperCase() + d.slice(1)}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
         </div>
         <div class="project-tabs">
           <button

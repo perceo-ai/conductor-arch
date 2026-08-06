@@ -28,4 +28,27 @@ describe("prefsStore", () => {
     // Different provider → fall back to that provider's first model.
     expect(prefsStore.seedModelFor("codex")).toBe("gpt-5-codex");
   });
+
+  it("defaults appearance to dark / amber / cozy", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.theme).toBe("dark");
+    expect(prefsStore.state.accent).toBe("amber");
+    expect(prefsStore.state.density).toBe("cozy");
+  });
+
+  it("updates appearance prefs through their setters", async () => {
+    const { prefsStore } = await import("./prefs");
+    prefsStore.setTheme("light");
+    prefsStore.setAccent("blue");
+    prefsStore.setDensity("compact");
+    expect(prefsStore.state.theme).toBe("light");
+    expect(prefsStore.state.accent).toBe("blue");
+    expect(prefsStore.state.density).toBe("compact");
+  });
+
+  it("exposes a hex for every accent", async () => {
+    const { ACCENT_HEX } = await import("./prefs");
+    expect(ACCENT_HEX.amber).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(Object.keys(ACCENT_HEX)).toEqual(["amber", "blue", "green", "rose"]);
+  });
 });
