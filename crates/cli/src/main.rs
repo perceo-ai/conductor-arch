@@ -350,6 +350,10 @@ enum ArchcarCommand {
         #[arg(long)]
         layer: Option<String>,
     },
+    /// List a repository's local branches.
+    Branches {
+        repository: String,
+    },
     /// List a repository's available prompt packs and the active one.
     PromptPacks {
         repository: String,
@@ -1160,6 +1164,11 @@ fn main() -> Result<()> {
                 ArchcarCommand::SettingsSource { repository, layer } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSettingsSource { repository, layer })?,
+                    );
+                }
+                ArchcarCommand::Branches { repository } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListRepositoryBranches { repository })?,
                     );
                 }
                 ArchcarCommand::PromptPacks { repository } => {
@@ -2243,6 +2252,15 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::RepositoryBranches {
+            repository,
+            branches,
+        } => {
+            println!("repository_branches {repository} {}", branches.len());
+            for b in branches {
+                println!("{b}");
+            }
         }
         ArchcarResponse::PromptPacks {
             repository,

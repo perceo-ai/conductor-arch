@@ -138,7 +138,8 @@ CLI: `archcar settings-source` / `archcar save-settings`.
 Workspace creation from branch/base: the create-workspace dialog gained a
 "Branch" source (name + branch + optional base) alongside Prompt and Github,
 calling the existing `create_workspace` RPC — restoring the GTK branch/base
-creation flow.
+creation flow. The base field autocompletes from the repo's local branches via a
+new `list_repository_branches` RPC (CLI `archcar branches`).
 
 Runtime controls: `run_workspace_script`/`stop_workspace_script`/`get_run_log`
 RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:

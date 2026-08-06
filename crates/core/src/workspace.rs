@@ -10180,6 +10180,26 @@ fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
     git_output_dynamic(cwd, &args)
 }
 
+/// List a repository's local branch names (short form), sorted by most recent
+/// commit first, so a UI can offer them as base-branch options.
+pub fn list_repository_branches(repo_path: &Path) -> Result<Vec<String>> {
+    let out = git_output(
+        repo_path,
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("git")
         .arg("-C")

@@ -4,6 +4,7 @@ import {
   selectFolder,
   listGithubRepos,
   listGithubWork,
+  send,
   type GithubRepo,
   type GithubWorkItem,
 } from "@/bridge/client";
@@ -246,6 +247,18 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
   const [wsName, setWsName] = createSignal("");
   const [wsBranch, setWsBranch] = createSignal("");
   const [wsBase, setWsBase] = createSignal("");
+  // Available base branches, loaded when the Branch tab is opened.
+  const [baseBranches] = createResource(
+    () => (source() === "branch" ? props.repository : undefined),
+    async (repository): Promise<string[]> => {
+      try {
+        const res = await send({ type: "list_repository_branches", repository });
+        return res.type === "repository_branches" ? res.branches : [];
+      } catch {
+        return [];
+      }
+    },
+  );
 
   const rootPath = () => repositoriesStore.row(props.repository)?.rootPath ?? "";
 
@@ -324,7 +337,16 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
           <label class="dialog-field"><span>Branch name</span>
             <input value={wsBranch()} onInput={(e) => setWsBranch(e.currentTarget.value)} placeholder="e.g. lc/auth-refactor" /></label>
           <label class="dialog-field"><span>Base branch</span>
-            <input value={wsBase()} onInput={(e) => setWsBase(e.currentTarget.value)} placeholder="Optional — defaults to the repo default branch" /></label>
+            <input
+              value={wsBase()}
+              onInput={(e) => setWsBase(e.currentTarget.value)}
+              list="create-ws-base-branches"
+              placeholder="Optional — defaults to the repo default branch"
+            />
+            <datalist id="create-ws-base-branches">
+              <For each={baseBranches() ?? []}>{(b) => <option value={b} />}</For>
+            </datalist>
+          </label>
           <span class="dialog-hint">Creates a workspace on a new branch off the base. Leave name/branch blank to auto-generate.</span>
         </Match>
         <Match when={source() === "github"}>

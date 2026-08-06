@@ -1018,6 +1018,21 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListRepositoryBranches { repository } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match RepositoryStore::open(&db_path)
+                .and_then(|s| s.get_by_name(&repository))
+                .and_then(|r| crate::workspace::list_repository_branches(&r.root_path))
+            {
+                Ok(branches) => ArchcarResponse::RepositoryBranches {
+                    repository,
+                    branches,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListPromptPacks { repository } => {
             let db_path = state.lock().unwrap().db_path.clone();
             let result: anyhow::Result<(Vec<String>, Option<String>)> =
@@ -1985,6 +2000,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::ListRepositoryBranches { .. }
             | ArchcarRequest::ListPromptPacks { .. }
             | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }

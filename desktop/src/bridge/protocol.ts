@@ -67,6 +67,7 @@ export type ArchcarRequest =
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
   | { type: "get_settings_source"; repository?: string; layer?: string }
+  | { type: "list_repository_branches"; repository: string }
   | { type: "list_prompt_packs"; repository: string }
   | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
@@ -346,6 +347,7 @@ export type ArchcarResponse =
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "repository_branches"; repository: string; branches: string[] }
   | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }
   | { type: "settings_source"; scope: string; layer: string; toml: string }
   | { type: "settings_saved"; scope: string; layer: string }

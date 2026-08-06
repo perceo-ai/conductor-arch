@@ -239,6 +239,10 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    /// List a repository's local branch names (base-branch options).
+    ListRepositoryBranches {
+        repository: String,
+    },
     /// List the prompt-pack names available for a repository and which is active.
     ListPromptPacks {
         repository: String,
@@ -595,6 +599,10 @@ pub enum ArchcarResponse {
         scope: String,
         /// Effective settings serialized as pretty TOML.
         toml: String,
+    },
+    RepositoryBranches {
+        repository: String,
+        branches: Vec<String>,
     },
     PromptPacks {
         repository: String,
@@ -1023,6 +1031,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::ListRepositoryBranches { repository } => {
+            format!("list_repository_branches repository={repository}")
+        }
         ArchcarRequest::ListPromptPacks { repository } => {
             format!("list_prompt_packs repository={repository}")
         }
@@ -1344,6 +1355,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChecksSummary { workspace, .. } => {
             format!("checks_summary workspace={workspace}")
+        }
+        ArchcarResponse::RepositoryBranches { repository, branches } => {
+            format!("repository_branches repository={repository} count={}", branches.len())
         }
         ArchcarResponse::PromptPacks { repository, packs, active } => format!(
             "prompt_packs repository={repository} count={} active={}",
@@ -2073,6 +2087,35 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn repository_branches_round_trips_and_summarizes() {
+        let req = ArchcarRequest::ListRepositoryBranches {
+            repository: "repo".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "list_repository_branches repository=repo"
+        );
+
+        let resp = ArchcarResponse::RepositoryBranches {
+            repository: "repo".to_owned(),
+            branches: vec!["main".to_owned(), "dev".to_owned()],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "repository_branches repository=repo count=2"
+        );
     }
 
     #[test]
