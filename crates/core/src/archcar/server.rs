@@ -885,6 +885,20 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetCheckLog { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.read_latest_check_log(&workspace))
+            {
+                Ok(log) => ArchcarResponse::CheckLog { workspace, log },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListWorkspaceChecks { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
@@ -1966,6 +1980,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
             | ArchcarRequest::GetRunLog { .. }
+            | ArchcarRequest::GetCheckLog { .. }
             | ArchcarRequest::ListWorkspaceChecks { .. }
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }

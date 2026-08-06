@@ -220,6 +220,10 @@ pub enum ArchcarRequest {
         workspace: String,
         key: String,
     },
+    /// Read the latest check-process log for a workspace.
+    GetCheckLog {
+        workspace: String,
+    },
     GetWorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -568,6 +572,10 @@ pub enum ArchcarResponse {
         key: String,
         pid: u32,
         log_path: String,
+    },
+    CheckLog {
+        workspace: String,
+        log: String,
     },
     WorkspaceScriptPrompt {
         workspace: String,
@@ -1000,6 +1008,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::RunWorkspaceCheck { workspace, key } => {
             format!("run_workspace_check workspace={workspace} key={key}")
         }
+        ArchcarRequest::GetCheckLog { workspace } => {
+            format!("get_check_log workspace={workspace}")
+        }
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
         }
@@ -1318,6 +1329,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::CheckStarted { workspace, key, pid, log_path } => {
             format!("check_started workspace={workspace} key={key} pid={pid} log={log_path}")
+        }
+        ArchcarResponse::CheckLog { workspace, log } => {
+            format!("check_log workspace={workspace} bytes={}", log.len())
         }
         ArchcarResponse::RunLog { workspace, log } => {
             format!("run_log workspace={workspace} bytes={}", log.len())
@@ -2166,6 +2180,33 @@ mod tests {
         assert_eq!(
             archcar_response_summary(&started),
             "check_started workspace=ws key=lint pid=9 log=/t/c.log"
+        );
+
+        let log_req = ArchcarRequest::GetCheckLog {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&log_req).unwrap())
+                .unwrap(),
+            log_req
+        );
+        assert_eq!(
+            archcar_request_summary(&log_req),
+            "get_check_log workspace=ws"
+        );
+
+        let log_resp = ArchcarResponse::CheckLog {
+            workspace: "ws".to_owned(),
+            log: "hello".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&log_resp).unwrap())
+                .unwrap(),
+            log_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&log_resp),
+            "check_log workspace=ws bytes=5"
         );
     }
 

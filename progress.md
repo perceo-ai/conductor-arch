@@ -149,8 +149,9 @@ non-active chip switches to it one-click.
 
 Local check runner: `list_workspace_checks`/`run_workspace_check` RPCs surface
 the repository's configured `[scripts]` test/lint/typecheck/build commands and
-run one as a tracked Check process (CLI: `archcar check-list`/`run-check`). The
-Checks tab lists each configured check with a Run button.
+run one as a tracked Check process, and read its latest output via
+`get_check_log` (CLI: `archcar check-list`/`run-check`/`check-log`). The Checks
+tab lists each configured check with a Run button and shows the latest check log.
 
 Status indicators: sidebar workspace rows show a colored status dot and
 dashboard cards a matching left accent stripe (green=running, blue=open PR,
@@ -264,9 +265,10 @@ Historical GTK surface (superseded, kept for reference):
   terminal emulator.
 - Project onboarding/settings need more polish and clearer managed/user setting
   separation.
-- Prompt pack switching/import/export, naming templates, hooks, local check
-  runner UI, and richer notifications are not fully surfaced in the GUI.
-  (Theme/accent/density controls are now surfaced on the Settings page.)
+- Prompt-pack import/export, naming templates, hooks, and richer notifications
+  are not fully surfaced in the GUI. (Now surfaced: theme/accent/density
+  controls, prompt-pack switching, the local check runner, and run/stop/log
+  runtime controls.)
 - `new_workspace`, `summarize_session`, `handoff`, `rename_branch`, and
   `refactor_style` prompts remain editable inherited defaults without dedicated
   surfaced actions.

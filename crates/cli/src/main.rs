@@ -275,6 +275,10 @@ enum ArchcarCommand {
         workspace: String,
         key: String,
     },
+    /// Print the latest check-process log for a workspace.
+    CheckLog {
+        workspace: String,
+    },
     /// Read a UTF-8 text file from a workspace checkout.
     ReadFile {
         workspace: String,
@@ -1063,6 +1067,9 @@ fn main() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::RunWorkspaceCheck { workspace, key })?,
                     );
+                }
+                ArchcarCommand::CheckLog { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetCheckLog { workspace })?);
                 }
                 ArchcarCommand::ReadFile { workspace, path } => {
                     print_archcar_response(
@@ -2218,6 +2225,10 @@ fn print_archcar_response(response: ArchcarResponse) {
             log_path,
         } => {
             println!("check_started {workspace} key={key} pid={pid} log={log_path}");
+        }
+        ArchcarResponse::CheckLog { workspace, log } => {
+            println!("check_log {workspace}");
+            print!("{log}");
         }
         ArchcarResponse::ReviewComments {
             workspace,

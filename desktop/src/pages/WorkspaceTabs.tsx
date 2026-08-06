@@ -269,6 +269,17 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
+  const [checkLog, { refetch: refetchCheckLog }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_check_log", workspace: ws });
+        return res.type === "check_log" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
   const [feedback, setFeedback] = createSignal("");
   async function runCheck(check: ArchcarConfiguredCheck) {
     setFeedback(`Running ${check.label}…`);
@@ -283,6 +294,8 @@ export function ChecksPanel(props: { workspace: string }) {
           ? `${check.label} started (pid ${res.pid})`
           : `${check.label} failed`,
       );
+      // Give the check a moment to produce output, then pull its log.
+      setTimeout(() => void refetchCheckLog(), 600);
     } catch (err) {
       setFeedback(`${check.label} failed: ${(err as Error).message}`);
     }
@@ -353,6 +366,15 @@ export function ChecksPanel(props: { workspace: string }) {
             </div>
           )}
         </For>
+        <div class="action-row">
+          <span class="detail-label" style={{ flex: "1 1 auto" }}>Latest check log</span>
+          <button class="secondary-action" onClick={() => void refetchCheckLog()}>
+            Refresh log
+          </button>
+        </div>
+        <pre class="ws-run-prompt">
+          {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
+        </pre>
       </Show>
       <Show
         when={summary()}
