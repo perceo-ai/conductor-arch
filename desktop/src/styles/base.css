@@ -1630,6 +1630,40 @@ body.resizing-col {
   flex: 1 1 auto;
   min-height: 0;
 }
+/* ---- Dashboard first-run onboarding ---- */
+.dashboard-onboarding {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+.onboarding-card {
+  max-width: 420px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px;
+  background: var(--lc-surface, #161616);
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 14px;
+}
+.onboarding-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--lc-text-strong, #ededed);
+}
+.onboarding-copy {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--lc-text-muted, #9a9a9a);
+}
+.onboarding-cta {
+  margin-top: 6px;
+}
+
 /* ---- Command palette (Cmd/Ctrl+K) ---- */
 .cmdk-overlay {
   position: fixed;

@@ -1,5 +1,5 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
-import { nav, workspacesStore, repositoriesStore } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
 import type { WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
 import { workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
@@ -145,13 +145,34 @@ export function DashboardPage() {
           </For>
         </div>
       </div>
-      <div class="kanban-board page-board">
-        <For each={COLUMNS}>
-          {(col) => (
-            <KanbanColumn title={col.title} empty={col.empty} cards={byBucket()[col.bucket]} />
-          )}
-        </For>
-      </div>
+      <Show
+        when={projectNames().length > 0}
+        fallback={
+          <div class="dashboard-onboarding">
+            <div class="onboarding-card">
+              <div class="onboarding-title">No projects yet</div>
+              <div class="onboarding-copy">
+                Add a local repository or clone one to create your first workspace and
+                start running agents.
+              </div>
+              <button
+                class="suggested-action onboarding-cta"
+                onClick={() => dialogs.open({ kind: "add-project" })}
+              >
+                Add your first project
+              </button>
+            </div>
+          </div>
+        }
+      >
+        <div class="kanban-board page-board">
+          <For each={COLUMNS}>
+            {(col) => (
+              <KanbanColumn title={col.title} empty={col.empty} cards={byBucket()[col.bucket]} />
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   );
 }
