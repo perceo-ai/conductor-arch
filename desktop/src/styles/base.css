@@ -484,6 +484,15 @@ body.resizing-col {
   padding: 8px 10px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
 }
+.ws-right-tabs {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
+}
+.ws-right-tabs .nav-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .ws-right-body {
   flex: 1 1 auto;
   overflow: auto;

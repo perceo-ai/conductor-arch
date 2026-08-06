@@ -17,7 +17,14 @@ export type WorkspaceTab =
   | "processes"
   | "terminal";
 
-export type RightPanelTab = "browse" | "changes";
+export type RightPanelTab =
+  | "browse"
+  | "changes"
+  | "checks"
+  | "review"
+  | "todos"
+  | "checkpoints"
+  | "processes";
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");

@@ -1,4 +1,4 @@
-import { Show, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
 import { openExternal } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
@@ -7,12 +7,33 @@ import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
 import WorkspacePrBar from "./WorkspacePrBar";
 import TerminalDock from "./TerminalDock";
+import {
+  ChecksPanel,
+  ReviewPanel,
+  TodosPanel,
+  CheckpointsPanel,
+  ProcessesPanel,
+} from "./WorkspaceTabs";
+import type { RightPanelTab } from "@/store/nav";
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 
 const RIGHT_MIN = 280;
 const RIGHT_MAX = 640;
+
+// Right-panel tabs. Browse/Changes lead (the common review flow); the rest
+// restore the GTK command-center panels (Checks/Review/Todos/Checkpoints/
+// Processes) that were defined but previously unreachable in the Electron UI.
+const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = [
+  { tab: "browse", label: "Browse" },
+  { tab: "changes", label: "Changes" },
+  { tab: "checks", label: "Checks" },
+  { tab: "review", label: "Review" },
+  { tab: "todos", label: "Todos" },
+  { tab: "checkpoints", label: "Checkpoints" },
+  { tab: "processes", label: "Processes" },
+];
 
 // Workspace command center — port of workspace_command_center.rs. Three regions:
 //   center  : draggable top bar (repo > branch) + chat/file surface + composer
@@ -59,34 +80,49 @@ function RightPanel(props: { workspace: string }) {
       <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
       <WorkspacePrBar workspace={props.workspace} />
       <div class="ws-right-mid">
-        <div class="command-center-strip">
-          <button
-            class="nav-button"
-            classList={{ "nav-button-active": nav.rightPanelTab() === "browse" }}
-            onClick={() => nav.setRightPanelTab("browse")}
-          >
-            Browse
-          </button>
-          <button
-            class="nav-button"
-            classList={{ "nav-button-active": nav.rightPanelTab() === "changes" }}
-            onClick={() => nav.setRightPanelTab("changes")}
-          >
-            Changes
-          </button>
+        <div class="command-center-strip ws-right-tabs">
+          <For each={RIGHT_TABS}>
+            {(t) => (
+              <button
+                class="nav-button"
+                classList={{ "nav-button-active": nav.rightPanelTab() === t.tab }}
+                onClick={() => nav.setRightPanelTab(t.tab)}
+              >
+                {t.label}
+              </button>
+            )}
+          </For>
         </div>
         <div class="ws-right-body">
-          <Show
-            when={nav.rightPanelTab() === "browse"}
-            fallback={
+          <Switch>
+            <Match when={nav.rightPanelTab() === "browse"}>
+              <WorkspaceFiles
+                workspace={props.workspace}
+                openFile={(p) => openFileInCenter(props.workspace, p)}
+              />
+            </Match>
+            <Match when={nav.rightPanelTab() === "changes"}>
               <ChangesRows
                 workspace={props.workspace}
                 openFile={(p) => openFileInCenter(props.workspace, p)}
               />
-            }
-          >
-            <WorkspaceFiles workspace={props.workspace} openFile={(p) => openFileInCenter(props.workspace, p)} />
-          </Show>
+            </Match>
+            <Match when={nav.rightPanelTab() === "checks"}>
+              <ChecksPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "review"}>
+              <ReviewPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "todos"}>
+              <TodosPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "checkpoints"}>
+              <CheckpointsPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "processes"}>
+              <ProcessesPanel workspace={props.workspace} />
+            </Match>
+          </Switch>
         </div>
       </div>
       <TerminalDock workspace={props.workspace} />
