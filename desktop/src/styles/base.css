@@ -1630,6 +1630,13 @@ body.resizing-col {
   flex: 1 1 auto;
   min-height: 0;
 }
+.projects-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 /* ---- Dashboard first-run onboarding ---- */
 .dashboard-onboarding {
   flex: 1 1 auto;

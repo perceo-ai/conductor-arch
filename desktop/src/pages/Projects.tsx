@@ -65,11 +65,39 @@ export function ProjectsPage() {
   return (
     <div class="page-shell">
       <div class="page-header dashboard-header">
-        <div class="dashboard-title">Projects</div>
-        <div class="dashboard-subtitle">Repositories and their workspaces.</div>
+        <div class="projects-header-row">
+          <div>
+            <div class="dashboard-title">Projects</div>
+            <div class="dashboard-subtitle">Repositories and their workspaces.</div>
+          </div>
+          <button
+            class="suggested-action"
+            onClick={() => dialogs.open({ kind: "add-project" })}
+          >
+            + Add project
+          </button>
+        </div>
       </div>
       <div class="page-body">
-        <Show when={repos().length > 0} fallback={<div class="empty-state">No repositories</div>}>
+        <Show
+          when={repos().length > 0}
+          fallback={
+            <div class="dashboard-onboarding">
+              <div class="onboarding-card">
+                <div class="onboarding-title">No projects yet</div>
+                <div class="onboarding-copy">
+                  Add a local repository or clone one to start creating workspaces.
+                </div>
+                <button
+                  class="suggested-action onboarding-cta"
+                  onClick={() => dialogs.open({ kind: "add-project" })}
+                >
+                  Add your first project
+                </button>
+              </div>
+            </div>
+          }
+        >
           <For each={repos()}>{(repo) => <ProjectGroup repo={repo} />}</For>
         </Show>
       </div>
