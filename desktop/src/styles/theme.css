@@ -1770,6 +1770,39 @@ button.ui-button-destructive:hover {
 .lc-theme-light .chat-timeline-scroll {
     background-color: #ffffff;
 }
+/* Diff viewer: dark #151515 container + dark GitHub-style row tints. Map to the
+   GitHub light diff palette so diffs are readable in light mode. */
+.lc-theme-light .diff-view {
+    background-color: #ffffff;
+    color: #1f2328;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .chat-inline-event-code-row-context {
+    background-color: #ffffff;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-code-row-added {
+    background-color: #e6ffec;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-code-row-removed {
+    background-color: #ffebe9;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-code-row-hunk {
+    background-color: #ddf4ff;
+    color: #0969da;
+}
+.lc-theme-light .chat-inline-event-code-row-meta {
+    background-color: #f6f8fa;
+    color: #57606a;
+}
+.lc-theme-light .diff-lineno {
+    color: #8c959f;
+}
+.lc-theme-light .diff-lineno-new {
+    border-right-color: #d9e0e8;
+}
 .lc-theme-light .ws-topbar {
     background-color: #ffffff;
     border-color: #d9e0e8;
