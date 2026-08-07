@@ -312,7 +312,7 @@ export function TimelinePanel(props: { workspace: string }) {
       >
         <For each={[...(events() ?? [])].reverse()}>
           {(e) => (
-            <div class="detail-row">
+            <div class="detail-row ws-timeline-row">
               <span class="detail-label">{e.created_at} · {e.kind}</span>
               <span class="detail-value">{e.summary}</span>
             </div>
