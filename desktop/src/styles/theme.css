@@ -1766,6 +1766,20 @@ button.ui-button-destructive:hover {
 .lc-theme-light .setup-status-detail {
     color: #57606a;
 }
+/* Command palette (Cmd+K/Cmd+P): dark --lc-surface-raised panel + light
+   --lc-text items, unreadable in light mode. Force the panel light. */
+.lc-theme-light .cmdk-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+.lc-theme-light .cmdk-input {
+    color: #1f2328;
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .cmdk-item {
+    color: #1f2328;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
