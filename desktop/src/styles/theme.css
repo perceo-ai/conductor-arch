@@ -1780,6 +1780,24 @@ button.ui-button-destructive:hover {
 .lc-theme-light .cmdk-item {
     color: #1f2328;
 }
+/* Keyboard-shortcuts help overlay ("?"): dark --lc-surface-raised panel + dark
+   kbd chips, all unreadable in light mode. */
+.lc-theme-light .shortcuts-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+.lc-theme-light .shortcuts-head {
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .shortcuts-keys {
+    color: #1f2328;
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .shortcuts-label {
+    color: #57606a;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
