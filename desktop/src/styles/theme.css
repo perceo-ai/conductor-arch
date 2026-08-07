@@ -1746,6 +1746,26 @@ button.ui-button-destructive:hover {
 .lc-theme-light .onboarding-copy {
     color: #667085;
 }
+/* Setup first-run modal status rows: dark tinted backgrounds + light
+   --lc-text-strong name, unreadable on the light modal. Light-tint them. */
+.lc-theme-light .setup-status-ready {
+    background-color: #e6ffec;
+    border-color: #aceebb;
+}
+.lc-theme-light .setup-status-missing-required {
+    background-color: #ffebe9;
+    border-color: #ffcecb;
+}
+.lc-theme-light .setup-status-missing {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .setup-status-name {
+    color: #111827;
+}
+.lc-theme-light .setup-status-detail {
+    color: #57606a;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
