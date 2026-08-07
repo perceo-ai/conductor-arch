@@ -1765,6 +1765,11 @@ button.ui-button-destructive:hover {
     background-color: #ffffff;
     color: #1f2937;
 }
+/* The transcript scroll paints its own dark #151515, overriding the light
+   chat-surface — the message area stayed a dark block in light mode. */
+.lc-theme-light .chat-timeline-scroll {
+    background-color: #ffffff;
+}
 .lc-theme-light .ws-topbar {
     background-color: #ffffff;
     border-color: #d9e0e8;
