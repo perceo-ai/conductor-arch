@@ -1733,6 +1733,19 @@ button.ui-button-destructive:hover {
 .lc-theme-light .dashboard-subtitle {
     color: #667085;
 }
+/* Onboarding card (fresh-install empty state — the first thing a new user sees)
+   used dark --lc-surface + light --lc-text-strong: a dark card with the title
+   invisible on a light page. */
+.lc-theme-light .onboarding-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .onboarding-title {
+    color: #111827;
+}
+.lc-theme-light .onboarding-copy {
+    color: #667085;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
