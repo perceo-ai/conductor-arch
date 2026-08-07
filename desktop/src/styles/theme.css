@@ -1798,6 +1798,64 @@ button.ui-button-destructive:hover {
 .lc-theme-light .shortcuts-label {
     color: #57606a;
 }
+/* Popovers / menus / toasts / add-project flow: all used dark surfaces with no
+   light override (scan of dark-bg classes lacking .lc-theme-light). */
+.lc-theme-light .context-menu,
+.lc-theme-light .chat-menu-popover,
+.lc-theme-light .project-create-menu {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+}
+.lc-theme-light .context-menu-item {
+    color: #1f2328;
+}
+.lc-theme-light .context-menu-item:hover {
+    background-color: #f1f5f9;
+}
+.lc-theme-light .context-menu-item-destructive {
+    color: #cf222e;
+}
+.lc-theme-light .context-menu-item-destructive:hover {
+    background-color: #ffebe9;
+}
+.lc-theme-light .toast,
+.lc-theme-light .toast-item {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .repo-picker {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .repo-search {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .repo-card:hover {
+    background-color: #f1f5f9;
+}
+.lc-theme-light .repo-card.selected {
+    background-color: #eef4ff;
+    border-color: #cdd9ec;
+}
+.lc-theme-light .project-template-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .project-template-card:hover {
+    background-color: #f1f5f9;
+    border-color: #cdd6e0;
+}
+.lc-theme-light .project-template-card-selected {
+    background-color: #eef4ff;
+    border-color: #9db4e0;
+}
+.lc-theme-light .project-template-title {
+    color: #111827;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
