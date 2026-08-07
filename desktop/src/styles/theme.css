@@ -1789,6 +1789,17 @@ button.ui-button-destructive:hover {
     background-color: #f1f5f9;
     border-top-color: #d9e0e8;
 }
+/* Setup/Run/terminal tab bar kept its dark #1a1a1a strip in the light panel. */
+.lc-theme-light .ws-run-tab-bar {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-run-tab-btn {
+    color: #475569;
+}
+.lc-theme-light .ws-run-tab-btn:hover {
+    background-color: #e2e8f0;
+}
 .lc-theme-light .ws-run-prompt {
     background-color: #ffffff;
     color: #334155;
