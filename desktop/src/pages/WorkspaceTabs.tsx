@@ -524,7 +524,7 @@ export function ChecksPanel(props: { workspace: string }) {
         <div class="detail-label">Conflicting workspaces</div>
         <For each={conflicts()}>
           {(c) => (
-            <div class="detail-row">
+            <div class="detail-row ws-timeline-row">
               <span class="detail-label">{c.workspace}</span>
               <span class="detail-value">{c.files.join(", ")}</span>
             </div>
