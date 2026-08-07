@@ -1811,6 +1811,74 @@ button.ui-button-destructive:hover {
 .lc-theme-light .ws-topbar-branch {
     color: #1f2937;
 }
+/* Code editor: dark --lc-surface container + light --lc-text base color meant
+   the editor was a dark block with invisible plain text in light mode. */
+.lc-theme-light .ws-file-editor-scroll {
+    background-color: #ffffff;
+}
+.lc-theme-light .ws-file-editor-highlight,
+.lc-theme-light .ws-file-editor-area {
+    caret-color: #1f2328;
+}
+.lc-theme-light pre.ws-file-editor-highlight.hljs {
+    color: #1f2328;
+}
+/* highlight.js ships github-DARK globally (bright tokens, unreadable on white).
+   Remap the tokens to the github-LIGHT palette under the light theme so the
+   editor, diff viewer, and markdown code blocks all read correctly. */
+.lc-theme-light .hljs {
+    color: #1f2328;
+}
+.lc-theme-light .hljs-doctag,
+.lc-theme-light .hljs-keyword,
+.lc-theme-light .hljs-meta .hljs-keyword,
+.lc-theme-light .hljs-template-tag,
+.lc-theme-light .hljs-template-variable,
+.lc-theme-light .hljs-type,
+.lc-theme-light .hljs-variable.language_ {
+    color: #cf222e;
+}
+.lc-theme-light .hljs-title,
+.lc-theme-light .hljs-title.class_,
+.lc-theme-light .hljs-title.class_.inherited__,
+.lc-theme-light .hljs-title.function_ {
+    color: #8250df;
+}
+.lc-theme-light .hljs-attr,
+.lc-theme-light .hljs-attribute,
+.lc-theme-light .hljs-literal,
+.lc-theme-light .hljs-meta,
+.lc-theme-light .hljs-number,
+.lc-theme-light .hljs-operator,
+.lc-theme-light .hljs-selector-attr,
+.lc-theme-light .hljs-selector-class,
+.lc-theme-light .hljs-selector-id,
+.lc-theme-light .hljs-variable {
+    color: #0550ae;
+}
+.lc-theme-light .hljs-string,
+.lc-theme-light .hljs-regexp {
+    color: #0a3069;
+}
+.lc-theme-light .hljs-built_in,
+.lc-theme-light .hljs-symbol {
+    color: #e36209;
+}
+.lc-theme-light .hljs-comment,
+.lc-theme-light .hljs-code,
+.lc-theme-light .hljs-formula {
+    color: #6e7781;
+}
+.lc-theme-light .hljs-name,
+.lc-theme-light .hljs-quote,
+.lc-theme-light .hljs-selector-tag,
+.lc-theme-light .hljs-selector-pseudo {
+    color: #116329;
+}
+.lc-theme-light .hljs-section {
+    color: #0550ae;
+    font-weight: bold;
+}
 .lc-theme-light .ws-right-panel {
     background-color: #f8fafc;
     border-left-color: #d9e0e8;
