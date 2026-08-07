@@ -1875,6 +1875,26 @@ button.ui-button-destructive:hover {
     background-color: #e2e8f0;
     color: #111827;
 }
+/* Chat tool-call cards (reasoning/command/edit events): body/chip/expander used
+   dark #18/#19/#17 surfaces, unreadable in light mode. (The ANSI terminal card
+   stays dark by convention.) */
+.lc-theme-light .chat-inline-event-body {
+    background-color: #f6f8fa;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-chip {
+    background-color: #eef1f5;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .chat-inline-event-chip-label {
+    color: #57606a;
+}
+.lc-theme-light .chat-inline-event-expander {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #57606a;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
