@@ -1856,6 +1856,25 @@ button.ui-button-destructive:hover {
 .lc-theme-light .project-template-title {
     color: #111827;
 }
+/* PR status bar (top-right of a workspace): the chip had a hard dark #232323
+   background and the title used light --lc-text, both wrong on the light bar. */
+.lc-theme-light .ws-pr-chip {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .ws-pr-chip-empty {
+    color: #57606a;
+}
+.lc-theme-light .ws-pr-status-title {
+    color: #57606a;
+}
+/* Active right-panel + run tab pills used dark #232323 in light mode. */
+.lc-theme-light .ws-right-tab-active,
+.lc-theme-light .ws-run-tab-active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
 
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
