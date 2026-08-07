@@ -826,6 +826,19 @@ body.resizing-col {
   color: var(--lc-text, #d4d4d4);
   overflow-wrap: anywhere;
 }
+/* Review comments aren't key/value pairs: a long body squeezed into the
+   remaining row width wraps one word per line in the narrow panel. Stack the
+   path label over a full-width body instead. */
+.ws-tab-panel .detail-row.ws-review-comment {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-tab-panel .ws-review-comment .detail-value {
+  white-space: normal;
+}
 .ws-text-input {
   flex: 1 1 auto;
   min-width: 0;

@@ -610,7 +610,7 @@ export function ReviewPanel(props: { workspace: string }) {
       >
         <For each={comments()}>
           {(c) => (
-            <div class="detail-row">
+            <div class="detail-row ws-review-comment">
               <span class="detail-label">
                 {c.file_path}
                 {c.line_number != null ? `:${c.line_number}` : ""} [{c.status}]
