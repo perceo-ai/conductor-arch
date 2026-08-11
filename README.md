@@ -25,7 +25,9 @@ Archductor is three cooperating pieces:
 - **`archcar` daemon** — the Rust sidecar that owns durable state (SQLite), managed agent sessions, chat input queues, and PTY-backed processes.
 - **`archductor` CLI** — the same backend exposed for automation, smoke tests, and fallback workflows.
 
-Linux is the primary validated target. Native Windows is a preview target.
+Linux is the primary manually validated release target. macOS and Windows are
+kept as compile/basic-smoke targets where tooling is available; native Windows
+is a preview target until its manual package checklist passes.
 
 ## Install
 

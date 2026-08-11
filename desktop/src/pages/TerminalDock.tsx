@@ -2,6 +2,8 @@ import { For, Match, Show, Switch, createResource, createSignal } from "solid-js
 import { send } from "@/bridge/client";
 import { terminalStore, nav, threadsStore, toastsStore } from "@/store";
 import TerminalPanel from "./TerminalPanel";
+import type { ArchcarRunScript } from "@/bridge/protocol";
+import { runScriptAvailabilityLabel, runScriptStatusText } from "@/lib/runScripts";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -16,6 +18,47 @@ type RunTab = "setup" | "run" | { term: string };
 
 function providerKind(provider: string): "codex" | "claude" | "shell" {
   return provider === "claude" || provider === "shell" ? provider : "codex";
+}
+
+function RunScriptsList(props: { workspace: string }) {
+  const [scripts] = createResource(
+    () => props.workspace,
+    async (workspace) => {
+      try {
+        const res = await send({ type: "get_workspace_run_scripts", workspace });
+        return res.type === "workspace_run_scripts" ? res.scripts : [];
+      } catch {
+        return [] as ArchcarRunScript[];
+      }
+    },
+  );
+
+  return (
+    <Show when={(scripts() ?? []).length > 0}>
+      <div class="ws-run-script-list" aria-label="Configured run scripts">
+        <For each={scripts() ?? []}>
+          {(script) => (
+            <div
+              class="ws-run-script-row"
+              classList={{ "ws-run-script-disabled": !script.runnable_here }}
+              title={runScriptStatusText(script)}
+            >
+              <div class="ws-run-script-main">
+                <span class="ws-run-script-id">{script.id}</span>
+                <Show when={script.default}>
+                  <span class="ws-run-script-badge">Default</span>
+                </Show>
+              </div>
+              <div class="ws-run-script-meta">
+                <span class="ws-run-script-env">{runScriptAvailabilityLabel(script)}</span>
+                <span class="ws-run-script-status">{runScriptStatusText(script)}</span>
+              </div>
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
 }
 
 // Setup/Run prompt tab: fetches the workspace's script-build prompt and queues it
@@ -35,6 +78,47 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
   const heading = () => (props.kind === "setup" ? "Setup Prompt" : "Run Prompt");
   const modalTitle = () => (props.kind === "setup" ? "Build Setup Script" : "Build Run Script");
   const buttonLabel = () => (props.kind === "setup" ? "Queue Bootstrap Draft" : "Queue Launch Draft");
+  const startLabel = () => (props.kind === "setup" ? "Run Setup" : "Run Default");
+  const [starting, setStarting] = createSignal(false);
+  const [stopping, setStopping] = createSignal(false);
+
+  async function startScript() {
+    if (starting()) return;
+    setStarting(true);
+    try {
+      const res = await send(
+        props.kind === "setup"
+          ? { type: "start_workspace_setup", workspace: props.workspace }
+          : { type: "start_workspace_run", workspace: props.workspace },
+      );
+      if (res.type === "workspace_process_started") {
+        toastsStore.push(`${startLabel()} started as pid ${res.process.pid}.`, "info");
+      } else if (res.type === "error") {
+        toastsStore.push(res.message, "error");
+      }
+    } catch (err) {
+      toastsStore.push(err instanceof Error ? err.message : "Unable to start script.", "error");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function stopRun() {
+    if (stopping()) return;
+    setStopping(true);
+    try {
+      const res = await send({ type: "stop_workspace_run", workspace: props.workspace });
+      if (res.type === "workspace_process_stopped") {
+        toastsStore.push(`Run stopped for pid ${res.process.pid}.`, "info");
+      } else if (res.type === "error") {
+        toastsStore.push(res.message, "error");
+      }
+    } catch (err) {
+      toastsStore.push(err instanceof Error ? err.message : "Unable to stop run.", "error");
+    } finally {
+      setStopping(false);
+    }
+  }
 
   function queueDraft() {
     const text = (prompt() ?? "").trim();
@@ -60,9 +144,20 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
   return (
     <div class="ws-run-panel">
       <div class="detail-label">{heading()}</div>
+      <Show when={props.kind === "run"}>
+        <RunScriptsList workspace={props.workspace} />
+      </Show>
       <pre class="ws-run-prompt">{prompt.loading ? "Loading…" : prompt()}</pre>
       <div class="ws-run-prompt-actions">
         <span class="ws-run-modal-title">{modalTitle()}</span>
+        <button class="ui-button-secondary" onClick={() => void startScript()} disabled={starting()}>
+          {starting() ? "Starting…" : startLabel()}
+        </button>
+        <Show when={props.kind === "run"}>
+          <button class="ui-button-secondary" onClick={() => void stopRun()} disabled={stopping()}>
+            {stopping() ? "Stopping…" : "Stop Run"}
+          </button>
+        </Show>
         <button class="suggested-action" onClick={queueDraft} disabled={!(prompt() ?? "").trim()}>
           {buttonLabel()}
         </button>

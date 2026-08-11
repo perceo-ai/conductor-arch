@@ -74,6 +74,11 @@ export type ArchcarRequest =
   | { type: "start_spotlight"; workspace: string }
   | { type: "stop_spotlight"; workspace: string }
   | { type: "get_workspace_script_prompt"; workspace: string; kind: "setup" | "run" }
+  | { type: "get_workspace_run_scripts"; workspace: string }
+  | { type: "start_workspace_setup"; workspace: string }
+  | { type: "start_workspace_run"; workspace: string }
+  | { type: "stop_workspace_run"; workspace: string }
+  | { type: "recover_workspace_lifecycle_jobs" }
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
@@ -120,6 +125,7 @@ export type ArchcarRequest =
       issue_id: string;
       name?: string;
       branch?: string;
+      base_ref?: string;
     }
   | { type: "archive_workspace"; workspace: string; remove_worktree?: boolean }
   | { type: "restore_workspace"; workspace: string }
@@ -337,6 +343,24 @@ export interface SetupReport {
   refresh_error?: string;
 }
 
+export interface ArchcarRunScript {
+  id: string;
+  command: string;
+  available_in: string[];
+  default: boolean;
+  icon?: string;
+  runnable_here: boolean;
+  unavailable_reason?: string;
+}
+
+export interface ArchcarProcessSummary {
+  id: number;
+  kind: string;
+  pid: number;
+  status: string;
+  log_path: string;
+}
+
 // --- Responses -------------------------------------------------------------
 export type ArchcarResponse =
   | { type: "ack" }
@@ -387,6 +411,10 @@ export type ArchcarResponse =
   | { type: "pull_request_readiness"; workspace: string; text: string }
   | { type: "spotlight_status"; workspace: string; active: boolean; status?: string; started_at?: string }
   | { type: "workspace_script_prompt"; workspace: string; kind: string; prompt: string }
+  | { type: "workspace_run_scripts"; workspace: string; scripts: ArchcarRunScript[] }
+  | { type: "workspace_process_started"; workspace: string; process: ArchcarProcessSummary }
+  | { type: "workspace_process_stopped"; workspace: string; process: ArchcarProcessSummary }
+  | { type: "workspace_lifecycle_recovery"; recovered: number; reconciled_processes: number }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }

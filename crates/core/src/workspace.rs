@@ -3078,6 +3078,42 @@ impl WorkspaceStore {
         Ok(reconciled)
     }
 
+    pub fn reconcile_script_processes(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes
+             WHERE kind IN (?1, ?2, ?3) AND status = 'running'
+             ORDER BY id",
+        )?;
+        let running = stmt
+            .query_map(
+                [
+                    ProcessKind::Setup.as_str(),
+                    ProcessKind::Run.as_str(),
+                    ProcessKind::Check.as_str(),
+                ],
+                row_to_process,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut reconciled = Vec::new();
+        for process in running {
+            if process_alive(process.pid) {
+                continue;
+            }
+            let now = timestamp();
+            self.conn.execute(
+                "UPDATE processes
+                 SET status = ?1, ended_at = ?2, exit_code = NULL
+                 WHERE id = ?3 AND status = 'running'",
+                params![ProcessStatus::Exited.as_str(), now, process.id],
+            )?;
+            reconciled.push(self.get_process(process.id)?);
+        }
+        Ok(reconciled)
+    }
+
     pub fn terminal_command(&self, name: &str, command: &str) -> Result<TerminalCommandResult> {
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
@@ -15443,6 +15479,73 @@ working_directory = "apps/web"
         assert!(reconciled[0].ended_at.is_some());
         assert_eq!(
             store.list_terminals("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
+    }
+
+    #[test]
+    fn script_process_reconciliation_marks_dead_setup_run_and_check_rows_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        for kind in [ProcessKind::Setup, ProcessKind::Run, ProcessKind::Check] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO processes (
+                        workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+                    ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, 'running', ?6, NULL, NULL, NULL, NULL)",
+                    params![
+                        workspace.id,
+                        kind.as_str(),
+                        "sleep 1",
+                        999_999_i64,
+                        temp.path().join(format!("{}.log", kind.as_str())).to_string_lossy(),
+                        timestamp(),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let reconciled = store.reconcile_script_processes().unwrap();
+
+        assert_eq!(reconciled.len(), 3);
+        assert!(reconciled.iter().all(|process| {
+            process.status == ProcessStatus::Exited
+                && process.exit_code.is_none()
+                && process.ended_at.is_some()
+        }));
+        assert_eq!(
+            store.list_setups("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
+        assert_eq!(
+            store.list_runs("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
+        assert_eq!(
+            store.list_checks("berlin").unwrap()[0].status,
             ProcessStatus::Exited
         );
     }

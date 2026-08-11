@@ -44,6 +44,26 @@ function spawnEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: shellPath() };
 }
 
+function normalizeVersion(value: string): number[] {
+  return value
+    .trim()
+    .replace(/^v/i, "")
+    .split(/[.-]/)
+    .slice(0, 3)
+    .map((part) => Number.parseInt(part, 10))
+    .map((part) => (Number.isFinite(part) ? part : 0));
+}
+
+function compareVersions(left: string, right: string): number {
+  const a = normalizeVersion(left);
+  const b = normalizeVersion(right);
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- Persistent desktop logfile (parity with gtk-app logger.rs) -----------
@@ -342,6 +362,37 @@ ipcMain.handle("shell:open-external", async (_evt, target: string) => {
     return { ok: false, error: "invalid target" };
   } catch (e) {
     return { ok: false, error: String(e) };
+  }
+});
+
+ipcMain.handle("app:check-for-updates", async () => {
+  const currentVersion = app.getVersion();
+  try {
+    const response = await fetch("https://api.github.com/repos/perceo-ai/conductor-arch/releases/latest", {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": `Archductor/${currentVersion}`,
+      },
+    });
+    if (!response.ok) {
+      return { ok: false, currentVersion, error: `GitHub returned ${response.status}` };
+    }
+    const release = (await response.json()) as {
+      tag_name?: string;
+      html_url?: string;
+    };
+    const latestVersion = release.tag_name?.trim();
+    if (!latestVersion) return { ok: false, currentVersion, error: "latest release has no tag" };
+    return {
+      ok: true,
+      currentVersion,
+      latestVersion,
+      updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
+      releaseUrl: release.html_url,
+    };
+  } catch (err) {
+    logLine("error", `update check failed: ${(err as Error).message}`);
+    return { ok: false, currentVersion, error: (err as Error).message };
   }
 });
 

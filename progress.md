@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-07-29.
+Current as of 2026-08-11.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -71,11 +71,12 @@ workspace source) and are intentionally not built blind.
   `.context/linked-directories`, and `ARCHDUCTOR_LINKED_*` environment.
 - PTY-backed shell/session primitives, transcript logs, provider events, and
   stale-process reconciliation.
-- Shell, Codex, and Claude CLI session commands. Cursor is available from GTK
-  launch paths where configured, not from the current CLI `session --kind`
-  enum.
-- Immediate Codex delivery from GTK Ctrl+Enter and CLI `session send`/`archcar
-  send --immediate`, using active-turn steer with transparent new-turn fallback.
+- Shell, Codex, and Claude CLI session commands. Cursor is available from
+  desktop launch paths where configured, not from the current CLI
+  `session --kind` enum.
+- Immediate Codex delivery from desktop Ctrl+Enter and CLI
+  `session send`/`archcar send --immediate`, using active-turn steer with
+  transparent new-turn fallback.
 - Archcar owns durable managed chat input queues in SQLite, exposes queue
   add/list/remove through the protocol and CLI, emits queue update events, and
   drains queued automatic input when the matching managed session becomes
@@ -97,8 +98,8 @@ workspace source) and are intentionally not built blind.
 - Cross-platform process/path/shell boundaries for Windows, including AppData
   storage, `cmd.exe` scripts, Windows Terminal launch, `taskkill` process-tree
   shutdown, and loopback archcar IPC.
-- CI compile gates for native Windows, glibc Linux, musl Linux, and GTK builds
-  on Debian, Fedora, Arch, openSUSE, and Alpine families.
+- CI compile gates cover native Windows, macOS where available, glibc Linux,
+  musl Linux, and representative distro families.
 
 ### Desktop App (Electron + Solid.js)
 
@@ -116,8 +117,8 @@ handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
 - Repository: `add_repository` (local path), `clone_repository` (git clone +
   add). UI: sidebar "+" → Add project dialog.
 - Workspace creation: `create_workspace` (branch/base), `_from_prompt`,
-  `_from_issue`, `_from_pull_request` (Linear source not yet wired). UI:
-  Projects "+ Workspace" dialog.
+  `_from_issue`, `_from_pull_request`, and `_from_linear`. UI: Projects
+  "+ Workspace" dialog.
 - Workspace lifecycle: `archive`/`restore`/`rename`/`duplicate`/`delete`
   (delete uses the lifecycle job; cleanup failures are logged, row still
   removed). UI: Projects row "⋯" → workspace actions dialog.
@@ -127,6 +128,18 @@ handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
 - Review: `add_review_comment`. UI: Review tab.
 - Checkpoint: `delete_checkpoint` (alongside existing create/restore). UI:
   Checkpoints tab.
+- Runtime scripts: `get_workspace_run_scripts`, `start_workspace_setup`,
+  `start_workspace_run`, and `stop_workspace_run`. UI: Run dock shows
+  configured run scripts with local/cloud/default status and starts Setup/Run or
+  stops Run through archcar.
+- Recovery: `recover_workspace_lifecycle_jobs` can be rerun from CLI and the
+  Electron Settings page; archcar still runs the same recovery automatically on
+  startup. Recovery also reconciles stale setup/run/check process rows whose
+  child process is no longer alive, so interrupted archcar monitors do not leave
+  those scripts stuck as running.
+- Updates: the Electron Settings page can check the latest GitHub release and
+  open the release page. Install/app replacement remains manual; there is no
+  signed auto-updater yet.
 - Linking: `link_workspace_directory`/`unlink_workspace_directory`. UI:
   workspace actions dialog.
 - Provider default: `set_default_agent_provider`. UI: workspace actions dialog.
@@ -252,9 +265,9 @@ unrendered until wired into the right-panel tab strip.)
 
 Now ported to Electron from the historical GTK surface: force-push (Checks
 panel), PR review-thread resolve/reopen (Review panel), editable settings source
-(Settings page), and a Cmd/Ctrl+K command palette. Still outstanding: full
-visual parity is an ongoing refinement, Linear workspace source is not wired,
-and prompt-pack switching / hooks / a local check-runner UI remain unbuilt.
+(Settings page), Linear workspace source creation, prompt-pack switching, and a
+Cmd/Ctrl+K command palette. Still outstanding: full visual parity is an ongoing
+refinement, and hooks / a local check-runner UI remain unbuilt.
 
 Historical GTK surface (superseded, kept for reference):
 
@@ -352,13 +365,17 @@ Historical GTK surface (superseded, kept for reference):
   requires `LINEAR_API_KEY`.
 - Native Windows is a preview target. The workspace compiles there and the
   release workflow assembles a portable ZIP, but real Windows install/launch,
-  GTK runtime, PTY, provider, upgrade, and checksum smoke remain required
+  Electron runtime, PTY, provider, upgrade, and checksum smoke remain required
   before calling the package release-ready.
-- Linux remains the manually validated primary product target. CI covers GNU
-  and musl plus representative distro families; individual package channels
-  still require install/launch/upgrade validation.
+- Linux remains the manually validated primary product target. macOS and
+  Windows should keep compile/basic smoke coverage green where tooling is
+  available. CI covers GNU and musl plus representative distro families;
+  individual package channels still require install/launch/upgrade validation.
 - Release packaging still needs full manual validation on target distros before
   public launch.
+- Update install is a manual release-download flow until package signing,
+  channel metadata, rollback/yank policy, and per-platform install/upgrade
+  validation are complete.
 
 ## Agent Context Policy
 
@@ -379,17 +396,66 @@ artifacts under `docs/superpowers` or `.superpowers`.
 ## Verification Standard
 
 Keep docs grounded in current evidence. When a feature exists only in core,
-CLI, or GTK, say which layer is implemented or verified.
+CLI, or Electron desktop, say which layer is implemented or verified. Historical
+GTK evidence is retained only as legacy context.
 
 Before calling behavior done, name:
 
 - written tests
 - CLI smoke
-- GTK smoke
+- Electron desktop smoke
 
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Conductor script baseline + Electron run dock/update/recovery on 2026-08-11:
+
+- Added Conductor-style `[scripts.run.<id>]` parsing with `command`,
+  `available_in`, `default`, and `icon`, while preserving legacy
+  `scripts.run = "..."`.
+- Structured run scripts select the default command for the existing run path;
+  `available_in` validates to `local` and/or `cloud`.
+- Added archcar `get_workspace_run_scripts`, `start_workspace_setup`,
+  `start_workspace_run`, and `stop_workspace_run` requests with compact process
+  summaries and CLI
+  response rendering.
+- Electron Run dock now shows configured run scripts with local/cloud/default
+  status and has buttons to start Setup, start the default Run script, or stop
+  Run through archcar.
+- Electron Settings now has a manual update check against GitHub releases and a
+  recovery check that reruns pending workspace lifecycle recovery through
+  archcar, including stale setup/run/check process reconciliation. The same
+  recovery request is exposed through the CLI archcar command surface.
+- Added startup recovery for stale setup/run/check process rows and written
+  coverage for dead script process reconciliation.
+- Added Electron/archcar Linear workspace creation so the New workspace dialog
+  can create from a Linear issue when `LINEAR_API_KEY` is available.
+- Passed `cargo test -p archductor-core structured_run_script -- --nocapture`.
+- Passed `cargo test -p archductor-core script_process_reconciliation --lib`.
+- Passed `cargo test -p archductor-core workspace_run_scripts -- --nocapture`.
+- Passed `cargo test -p archductor-core workspace_script_start -- --nocapture`.
+- Passed `cargo test -p archductor`.
+- Passed `cargo clippy -p archductor-core -p archductor -p archcar --all-targets -- -D warnings`.
+- Passed CLI smoke `cargo run -p archductor -- doctor`.
+- Passed desktop `pnpm typecheck`, `pnpm test` (24 tests), and `pnpm build`.
+
+Electron/manual checklist alignment on 2026-08-11:
+
+- Replaced active GTK verification language in agent instructions, MVP docs,
+  README platform notes, and manual checklist with Electron desktop validation.
+- Added a basic Conductor behavior baseline to the manual checklist covering
+  fetched base branches, isolated worktrees/branches, `.context`, per-workspace
+  ports, non-interactive scripts, `ARCHDUCTOR_*` environment, files-to-copy
+  precedence, and missing tool/auth states.
+- Added macOS compile smoke expectations and updated Windows preview smoke to
+  target the packaged Electron app instead of the retired GTK binary.
+- Passed `cargo test -p archductor-core worktreeinclude -- --nocapture`.
+- Passed `cargo test -p archductor-core create_workspace -- --nocapture`.
+- Passed `cargo test -p archductor-core run_workspace_executes_run_script_with_conductor_environment -- --nocapture`.
+- Passed `cargo test -p archductor-core explicit_remote_base_fetch_preserves_local_commits -- --nocapture`.
+- Passed CLI smoke `cargo run -p archductor -- doctor`.
+- Passed desktop `pnpm typecheck`, `pnpm test` (20 tests), and `pnpm build`.
 
 Electron archcar state-change parity + logging on 2026-07-29:
 
@@ -440,5 +506,5 @@ Not yet manually smoke-verified in this branch:
 - Live Claude first-send/follow-up through Archcar.
 - Two simultaneous Claude native thread IDs.
 - Live queue/immediate/interrupt/model/effort/permission-mode behavior.
-- Live permission/question/plan interaction cards in GTK.
+- Live permission/question/plan interaction cards in Electron desktop.
 - Archcar restart with a pending Claude interaction.

@@ -240,9 +240,9 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
   // {prefix}/gh-{issue|pr}-{n} branch scheme.
   type Source = "prompt" | "branch" | "github" | "linear";
   const [source, setSource] = createSignal<Source>("prompt");
-  const [linearIssue, setLinearIssue] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selected, setSelected] = createSignal<GithubWorkItem | null>(null);
+  const [linearIssue, setLinearIssue] = createSignal("");
   const [filter, setFilter] = createSignal("");
   // Branch/base source (restores the GTK "create from branch/base" flow).
   const [wsName, setWsName] = createSignal("");

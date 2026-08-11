@@ -58,6 +58,12 @@ const api = {
   openExternal: (target: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("shell:open-external", target),
 
+  /** Check the latest published GitHub release; install remains manual. */
+  checkForUpdates: (): Promise<
+    | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
+    | { ok: false; currentVersion: string; error: string }
+  > => ipcRenderer.invoke("app:check-for-updates"),
+
   window: {
     minimize: () => ipcRenderer.send("window:minimize"),
     toggleMaximize: () => ipcRenderer.send("window:toggle-maximize"),

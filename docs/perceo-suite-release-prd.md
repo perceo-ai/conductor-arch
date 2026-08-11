@@ -1,6 +1,6 @@
 # Archductor And Perceo Suite Release PRD
 
-Current summary as of 2026-07-24. `docs/release-readiness.md` is the release
+Current summary as of 2026-08-11. `docs/release-readiness.md` is the release
 runbook; this file keeps the product and launch intent short.
 
 ## Positioning
@@ -11,17 +11,18 @@ isolated Git worktree workspaces.
 Short pitch: run Codex and Claude Code in parallel workspaces, review diffs,
 create PRs, and archive finished work without juggling terminals.
 
-Claims must stay tied to verified behavior. Linux is the primary validated
-target. Windows ZIP remains preview-only until the real Windows checklist
-passes. GitHub flows use local `gh` auth. Linear flows require
-`LINEAR_API_KEY`.
+Claims must stay tied to verified behavior. Linux is the primary manually
+validated release target. macOS and Windows are compile/basic-smoke targets
+where tooling is available; Windows ZIP remains preview-only until the real
+Windows checklist passes. GitHub flows use local `gh` auth. Linear flows
+require `LINEAR_API_KEY`.
 
 ## Release Levels
 
 Internal dogfood:
 
 - local release-readiness script passes
-- GTK app launches locally
+- Electron desktop app launches locally
 - at least one real repository completes the happy path
 - blockers are recorded in `progress.md`
 
@@ -53,8 +54,8 @@ has install, launch, upgrade, checksum, and rollback/yank validation.
 ## Website Gate
 
 The Archductor product page on `perceo.ai` must show the real workflow, current
-GTK screenshots, install instructions for supported channels only, prerequisites,
-known limits from `progress.md`, release links, checksum/provenance verification,
-and a feedback path.
+Electron screenshots, install instructions for supported channels only,
+prerequisites, known limits from `progress.md`, release links,
+checksum/provenance verification, and a feedback path.
 
 Avoid broad AI productivity claims. Use founder-led, technical, concrete copy.
