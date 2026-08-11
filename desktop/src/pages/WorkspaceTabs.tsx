@@ -1,7 +1,15 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
 import { actions } from "@/store";
-import type { ArchcarChecksSummary, Checkpoint, ReviewComment, Todo } from "@/bridge/protocol";
+import type {
+  ArchcarChecksSummary,
+  ArchcarConfiguredCheck,
+  ArchcarTimelineEvent,
+  ArchcarWorkspaceConflict,
+  Checkpoint,
+  ReviewComment,
+  Todo,
+} from "@/bridge/protocol";
 
 // Read-only workspace command-center tabs — ports of workspace_todos_panel,
 // workspace_checkpoint_panel, workspace_processes_text, workspace_review_panel
@@ -168,7 +176,7 @@ export function CheckpointsPanel(props: { workspace: string }) {
 // ---- Processes (text blob) ------------------------------------------------
 
 export function ProcessesPanel(props: { workspace: string }) {
-  const [text] = createResource(
+  const [text, { refetch }] = createResource(
     () => props.workspace,
     async (ws): Promise<string> => {
       try {
@@ -179,10 +187,137 @@ export function ProcessesPanel(props: { workspace: string }) {
       }
     },
   );
+  const [log, { refetch: refetchLog }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_run_log", workspace: ws });
+        return res.type === "run_log" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+  const [spotlight, { refetch: refetchSpotlight }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<boolean> => {
+      try {
+        const res = await send({ type: "get_spotlight_status", workspace: ws });
+        return res.type === "spotlight_status" ? res.active : false;
+      } catch {
+        return false;
+      }
+    },
+  );
+  const [feedback, setFeedback] = createSignal("");
+
+  async function startSpotlight() {
+    setFeedback("Starting spotlight…");
+    try {
+      const res = await send({ type: "start_spotlight", workspace: props.workspace });
+      setFeedback(res.type === "spotlight_status" && res.active ? "Spotlight active" : "");
+      if (res.type === "error") setFeedback(res.message);
+      await refetchSpotlight();
+    } catch (err) {
+      setFeedback(`Spotlight failed: ${(err as Error).message}`);
+    }
+  }
+  async function stopSpotlight() {
+    try {
+      await send({ type: "stop_spotlight", workspace: props.workspace });
+      setFeedback("Spotlight stopped");
+      await refetchSpotlight();
+    } catch (err) {
+      setFeedback(`Stop spotlight failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function runScript() {
+    setFeedback("Starting run…");
+    try {
+      const res = await send({ type: "run_workspace_script", workspace: props.workspace });
+      setFeedback(res.type === "run_script_started" ? `Run started (pid ${res.pid})` : "Run failed");
+      await Promise.all([refetch(), refetchLog()]);
+    } catch (err) {
+      setFeedback(`Run failed: ${(err as Error).message}`);
+    }
+  }
+  async function stopScript() {
+    setFeedback("Stopping run…");
+    try {
+      const res = await send({ type: "stop_workspace_script", workspace: props.workspace });
+      setFeedback(res.type === "run_script_stopped" ? `Run stopped (pid ${res.pid})` : "Stop failed");
+      await refetch();
+    } catch (err) {
+      setFeedback(`Stop failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
-    <div class="ws-diff-view">
+    <div class="ws-tab-panel command-panel">
+      <div class="section-title">Runtime</div>
+      <div class="action-row">
+        <button class="suggested-action" onClick={() => void runScript()}>
+          Run
+        </button>
+        <button class="ui-button-destructive" onClick={() => void stopScript()}>
+          Stop
+        </button>
+        <button class="secondary-action" onClick={() => void refetchLog()}>
+          Refresh log
+        </button>
+      </div>
+      <div class="action-row">
+        <span class="detail-label" style={{ flex: "1 1 auto" }}>
+          Spotlight testing: {spotlight() ? "active" : "off"}
+        </span>
+        <Show
+          when={spotlight()}
+          fallback={<button class="secondary-action" onClick={() => void startSpotlight()}>Start spotlight</button>}
+        >
+          <button class="ui-button-destructive" onClick={() => void stopSpotlight()}>Stop spotlight</button>
+        </Show>
+      </div>
+      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
+      <div class="detail-label">Processes</div>
       <Show when={!text.loading} fallback={<div class="empty-state">Loading…</div>}>
-        <pre class="ws-diff-text">{text()}</pre>
+        <pre class="ws-run-prompt">{text() || "No processes"}</pre>
+      </Show>
+      <div class="detail-label">Latest run log</div>
+      <pre class="ws-run-prompt">{log.loading ? "Loading…" : log() || "No run log yet."}</pre>
+    </div>
+  );
+}
+
+// ---- Timeline (workspace lifecycle history) -------------------------------
+
+export function TimelinePanel(props: { workspace: string }) {
+  const [events] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarTimelineEvent[]> => {
+      try {
+        const res = await send({ type: "list_workspace_timeline", workspace: ws });
+        return res.type === "workspace_timeline" ? res.events : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  return (
+    <div class="ws-tab-panel command-panel">
+      <div class="section-title">Timeline</div>
+      <Show
+        when={(events() ?? []).length > 0}
+        fallback={<div class="empty-state">{events.loading ? "Loading…" : "No events yet"}</div>}
+      >
+        <For each={[...(events() ?? [])].reverse()}>
+          {(e) => (
+            <div class="detail-row ws-timeline-row">
+              <span class="detail-label">{e.created_at} · {e.kind}</span>
+              <span class="detail-value">{e.summary}</span>
+            </div>
+          )}
+        </For>
       </Show>
     </div>
   );
@@ -202,7 +337,59 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
+  const [checks] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarConfiguredCheck[]> => {
+      try {
+        const res = await send({ type: "list_workspace_checks", workspace: ws });
+        return res.type === "workspace_checks" ? res.checks : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const [checkLog, { refetch: refetchCheckLog }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_check_log", workspace: ws });
+        return res.type === "check_log" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
   const [feedback, setFeedback] = createSignal("");
+  async function runCheck(check: ArchcarConfiguredCheck) {
+    setFeedback(`Running ${check.label}…`);
+    try {
+      const res = await send({
+        type: "run_workspace_check",
+        workspace: props.workspace,
+        key: check.key,
+      });
+      setFeedback(
+        res.type === "check_started"
+          ? `${check.label} started (pid ${res.pid})`
+          : `${check.label} failed`,
+      );
+      // Give the check a moment to produce output, then pull its log.
+      setTimeout(() => void refetchCheckLog(), 600);
+    } catch (err) {
+      setFeedback(`${check.label} failed: ${(err as Error).message}`);
+    }
+  }
+  const [conflicts] = createResource(
+    () => props.workspace,
+    async (ws): Promise<ArchcarWorkspaceConflict[]> => {
+      try {
+        const res = await send({ type: "list_workspace_conflicts", workspace: ws });
+        return res.type === "workspace_conflicts" ? res.conflicts : [];
+      } catch {
+        return [];
+      }
+    },
+  );
   const run = (label: string, fn: () => Promise<void>) => async () => {
     setFeedback(`${label}…`);
     try {
@@ -213,6 +400,20 @@ export function ChecksPanel(props: { workspace: string }) {
       setFeedback(`${label} failed: ${(err as Error).message}`);
     }
   };
+
+  // GitHub PR readiness detail (gh pr view) — network/gh-auth gated, load on demand.
+  const [prReadiness, setPrReadiness] = createSignal<string | null>(null);
+  async function loadPrReadiness() {
+    setPrReadiness("Loading…");
+    try {
+      const res = await send({ type: "get_pull_request_readiness", workspace: props.workspace });
+      if (res.type === "pull_request_readiness") setPrReadiness(res.text || "No readiness detail.");
+      else if (res.type === "error") setPrReadiness(res.message);
+      else setPrReadiness("Unavailable.");
+    } catch (err) {
+      setPrReadiness((err as Error).message);
+    }
+  }
 
   const rows = (s: ArchcarChecksSummary): [string, string][] => [
     ["Changed files", String(s.changed_files)],
@@ -237,9 +438,42 @@ export function ChecksPanel(props: { workspace: string }) {
     ["Conflicting workspaces", String(s.conflicting_workspaces)],
   ];
 
+  // Locally-computed merge-readiness blockers (conductor's "last review pass
+  // before merge"). Uses the DB-only summary — no network.
+  const blockers = (s: ArchcarChecksSummary): string[] => {
+    const out: string[] = [];
+    if (s.open_todos > 0) out.push(`${s.open_todos} open todo${s.open_todos === 1 ? "" : "s"}`);
+    if (s.open_review_comments > 0)
+      out.push(
+        `${s.open_review_comments} open review comment${s.open_review_comments === 1 ? "" : "s"}`,
+      );
+    if ((s.check_status ?? "").toLowerCase().includes("fail")) out.push("checks failing");
+    if (s.conflicting_workspaces > 0)
+      out.push(
+        `${s.conflicting_workspaces} conflicting workspace${s.conflicting_workspaces === 1 ? "" : "s"}`,
+      );
+    if ((s.branch_behind ?? 0) > 0) out.push(`${s.branch_behind} behind base`);
+    return out;
+  };
+
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Checks</div>
+      <Show when={summary()}>
+        {(s) => (
+          <div
+            class="ws-readiness"
+            classList={{ "ws-readiness-blocked": blockers(s()).length > 0 }}
+          >
+            <Show
+              when={blockers(s()).length === 0}
+              fallback={<span>Blockers before merge: {blockers(s()).join(", ")}</span>}
+            >
+              <span>Ready to merge ✓</span>
+            </Show>
+          </div>
+        )}
+      </Show>
       <div class="action-row">
         <button class="secondary-action" onClick={run("Push branch", () => actions.pushBranch(props.workspace))}>
           Push branch
@@ -253,8 +487,50 @@ export function ChecksPanel(props: { workspace: string }) {
         <button class="suggested-action" onClick={run("Merge PR", () => actions.mergePullRequest(props.workspace))}>
           Merge PR
         </button>
+        <button class="secondary-action" onClick={loadPrReadiness}>
+          PR readiness
+        </button>
       </div>
+      <Show when={prReadiness() != null}>
+        <div class="detail-label">GitHub PR readiness</div>
+        <pre class="ws-pr-readiness">{prReadiness()}</pre>
+      </Show>
       <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
+      <Show when={(checks() ?? []).length > 0}>
+        <div class="detail-label">Local checks</div>
+        <For each={checks()}>
+          {(check) => (
+            <div class="action-row">
+              <span class="detail-value" style={{ flex: "1 1 auto" }} title={check.command}>
+                {check.label}
+              </span>
+              <button class="secondary-action" onClick={() => void runCheck(check)}>
+                Run
+              </button>
+            </div>
+          )}
+        </For>
+        <div class="action-row">
+          <span class="detail-label" style={{ flex: "1 1 auto" }}>Latest check log</span>
+          <button class="secondary-action" onClick={() => void refetchCheckLog()}>
+            Refresh log
+          </button>
+        </div>
+        <pre class="ws-run-prompt">
+          {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
+        </pre>
+      </Show>
+      <Show when={(conflicts() ?? []).length > 0}>
+        <div class="detail-label">Conflicting workspaces</div>
+        <For each={conflicts()}>
+          {(c) => (
+            <div class="detail-row ws-timeline-row">
+              <span class="detail-label">{c.workspace}</span>
+              <span class="detail-value">{c.files.join(", ")}</span>
+            </div>
+          )}
+        </For>
+      </Show>
       <Show
         when={summary()}
         fallback={<div class="empty-state">{summary.loading ? "Loading…" : "No summary"}</div>}
@@ -334,7 +610,7 @@ export function ReviewPanel(props: { workspace: string }) {
       >
         <For each={comments()}>
           {(c) => (
-            <div class="detail-row">
+            <div class="detail-row ws-review-comment">
               <span class="detail-label">
                 {c.file_path}
                 {c.line_number != null ? `:${c.line_number}` : ""} [{c.status}]

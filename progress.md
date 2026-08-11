@@ -27,6 +27,17 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Conductor Reference Cross-Check (2026-08-06)
+
+The Electron surface was cross-checked against Conductor's own reference docs
+(diff-viewer, checks, workflow, parallel-agents, settings). archductor matches
+the documented feature set; the concrete gaps found were closed: file-scoped
+review comments beside the diff (diff-viewer), a locally-computed merge-readiness
+"blockers" banner in Checks (checks), and the workflow keyboard shortcuts
+Cmd/Ctrl+Shift+N/D/P (workflow). Remaining Conductor-parity items require live
+GitHub `gh` / Linear auth to verify (PR checks/review/readiness detail, Linear
+workspace source) and are intentionally not built blind.
+
 ## Implemented Surfaces
 
 ### Core And CLI
@@ -120,14 +131,130 @@ handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
   workspace actions dialog.
 - Provider default: `set_default_agent_provider`. UI: workspace actions dialog.
 
+Workspace file editing: `read_workspace_file`/`write_workspace_file` RPCs (core
+`WorkspaceStore::read_file`/`write_file`, path-traversal guarded, 2 MiB + binary
+limits) back a center-pane file editor. The desktop FileView now has Diff/Edit
+tabs; Edit loads real UTF-8 content into a syntax-highlighted editor (transparent
+textarea layered over a highlight.js `<pre>`, scroll-synced, language from file
+extension) with Ctrl/Cmd+S save. CLI exposes `archcar read-file`/`write-file`
+for the same boundary.
+
+Settings editing: `get_settings_source`/`save_settings` RPCs read and write one
+layer's raw TOML (global app-shared, repository-committed, or local override)
+through the validating `save_*_from_toml` path. The desktop Settings page is now
+a split editor — an editable Source textarea (Ctrl/Cmd+S save) beside the
+read-only Effective merge, with a Repository/Local layer toggle for repo scope.
+CLI: `archcar settings-source` / `archcar save-settings`.
+
+Commit from the app: `commit_workspace_changes` RPC (CLI `archcar commit
+<ws> <msg> --stage-all`) stages all (optional) and commits with a message. The
+Changes panel gained a commit box (message + "Stage all & commit") plus a
+"Suggest" button backed by `get_commit_message_draft` (heuristic message from
+changed files; CLI `archcar commit-draft`), and a Recent-commits view
+(`get_recent_commits`) whose rows are clickable to open that commit's diff in the
+center (`get_commit_diff` / git show, CLI `archcar commit-diff`) — a complete
+in-app git review/commit surface.
+
+Workspace creation from Linear: the create-workspace dialog gained a "Linear"
+source (issue-id input) backed by a `create_workspace_from_linear` RPC (core
+`create_from_linear_issue`, CLI `archcar create-from-linear`). The RPC→server→
+core wiring is verified via socket smoke (no key → clear "requires
+LINEAR_API_KEY" error); the live create needs `LINEAR_API_KEY` in the daemon
+env and is not smoke-verified here. The dialog now offers all GTK sources:
+Prompt, Branch, Github (issue/PR), and Linear.
+
+Workspace creation from branch/base: the create-workspace dialog gained a
+"Branch" source (name + branch + optional base) alongside Prompt and Github,
+calling the existing `create_workspace` RPC — restoring the GTK branch/base
+creation flow. The base field autocompletes from the repo's local branches via a
+new `list_repository_branches` RPC (CLI `archcar branches`).
+
+Linked directories: `list_linked_directories` RPC (CLI `archcar linked-dirs`)
+lists the directories linked from other workspaces into this one; the
+workspace-actions dialog now shows the current links beneath its Link/Unlink
+controls (previously link/unlink existed but there was no way to see them).
+
+Conflicts: `list_workspace_conflicts` RPC (CLI `archcar conflicts`) surfaces
+sibling workspaces whose changes overlap this one's files. Shown as a
+"Conflicting workspaces" section in the Checks tab.
+
+Timeline: `list_workspace_timeline` RPC (CLI `archcar timeline`) surfaces the
+workspace lifecycle events (creation, branch changes, session lifecycle,
+PR/check actions, commits, archive, …). Restored as a Timeline right-panel tab
+(newest first), matching the GTK Timeline surface.
+
+Spotlight testing: `get_spotlight_status`/`start_spotlight`/`stop_spotlight`
+RPCs (CLI `archcar spotlight-status`/`spotlight-start`/`spotlight-stop`) expose
+core's spotlight slice — start applies the workspace's tracked patch to the
+repository root so the running app reflects it, stop reverts. The Processes tab
+shows a Spotlight status line with Start/Stop (requires `spotlight_testing` in
+settings). Restores the GTK Spotlight testing feature; conductor's "Spotlight
+testing" from the workflow doc.
+
+PR readiness detail: `get_pull_request_readiness` RPC (CLI `archcar
+pr-readiness <ws>`) surfaces core's `pull_request_readiness_text` (`gh pr view`
+— CI/status/deployment/review-thread signals conductor's Checks doc lists but
+the DB-only summary lacks). The Checks tab has a "PR readiness" button that
+loads the detail into a `<pre>` on demand. Network/gh-auth gated: boundary path
+(missing workspace) smoke-verified to return a clear error; the live gh path is
+auth-gated and not smoke-verified here.
+
+Runtime controls: `run_workspace_script`/`stop_workspace_script`/`get_run_log`
+RPCs expose the existing core run/stop/log-tail behavior over archcar (CLI:
+`archcar run-script`/`stop-script`/`run-log`). The Processes tab gained Run/Stop
+buttons and a latest-run-log view, restoring the GTK runtime controls.
+
+Prompt packs: `list_prompt_packs`/`set_active_prompt_pack` RPCs (CLI `archcar
+prompt-packs`/`set-prompt-pack`) enumerate a repository's
+`.archductor/prompt-packs/*.toml`, report the committed-layer active pack, and
+switch it by editing the `[prompt_pack]` table in the raw committed TOML
+(preserving other fields). The Settings page shows packs as chips; clicking a
+non-active chip switches to it one-click.
+
+Local check runner: `list_workspace_checks`/`run_workspace_check` RPCs surface
+the repository's configured `[scripts]` test/lint/typecheck/build commands and
+run one as a tracked Check process, and read its latest output via
+`get_check_log` (CLI: `archcar check-list`/`run-check`/`check-log`). The Checks
+tab lists each configured check with a Run button and shows the latest check log.
+
+Status indicators: sidebar workspace rows show a colored status dot and
+dashboard cards a matching left accent stripe (green=running, blue=open PR,
+amber=uncommitted changes, grey=idle, dim=archived) from a pure, unit-tested
+`desktop/src/lib/workspaceStatus.ts`.
+
+Appearance controls: the Settings page restores the GTK theme/accent/density
+runtime controls. `prefsStore` now persists `theme` (dark/light), `accent`
+(amber/blue/green/rose, also driving the global `--lc-accent` token), and
+`density` (compact/cozy/comfortable) to localStorage; an App effect toggles the
+existing `lc-theme-*`/`lc-accent-*`/`lc-density-*` class hooks on `<body>`. The
+`lc-theme-light` CSS was originally partial (dashboard/cards only), leaving the
+command center, Settings panes, History rows, and dialogs dark/unreadable in
+light mode; it is now completed across all main surfaces, each verified by
+rendering the built renderer (stubbed archcar bridge, forced light prefs) in
+headless chromium — see the reusable full-app preview recipe in the session
+memory.
+
+Command palette: Cmd/Ctrl+K global launcher (`desktop/src/components/
+CommandPalette.tsx`) restores the GTK command palette. Fuzzy-filters
+(`desktop/src/lib/fuzzy.ts`, unit-tested) across page navigation, workspace
+jumps, workspace-tab switches, and create/lifecycle actions (add project, new
+workspace, workspace actions). Keyboard-first: ↑/↓ move, Enter runs, Esc closes. The palette also drives
+appearance (switch theme, cycle accent) and opens the keyboard-shortcuts help,
+making it a real control surface.
+
 After a mutation acks, the renderer re-pulls the workspace/repository inventory
 (archcar has no inventory-changed event), mirroring the GTK sidebar's
-post-mutation refresh. Read surfaces (chat, changes, todos, checks, review,
-checkpoints, processes, terminal) were already wired.
+post-mutation refresh. Read surfaces are wired and now all reachable: chat +
+open files in the center; Browse, Changes, Checks, Review, Todos, Checkpoints,
+and Processes as right-panel tabs; terminals in the run dock. (The Checks/
+Review/Todos/Checkpoints/Processes panel components existed earlier but were
+unrendered until wired into the right-panel tab strip.)
 
-Not yet ported to Electron from the historical GTK surface: force-push (core
-`push_request` exposes no force flag), PR review-thread resolve/reopen, richer
-settings editors, command palette, and full visual parity.
+Now ported to Electron from the historical GTK surface: force-push (Checks
+panel), PR review-thread resolve/reopen (Review panel), editable settings source
+(Settings page), and a Cmd/Ctrl+K command palette. Still outstanding: full
+visual parity is an ongoing refinement, Linear workspace source is not wired,
+and prompt-pack switching / hooks / a local check-runner UI remain unbuilt.
 
 Historical GTK surface (superseded, kept for reference):
 
@@ -208,9 +335,10 @@ Historical GTK surface (superseded, kept for reference):
   terminal emulator.
 - Project onboarding/settings need more polish and clearer managed/user setting
   separation.
-- Prompt pack switching/import/export, naming templates, hooks, local check
-  runner UI, richer notifications, and deeper layout/theme controls are not
-  fully surfaced in the GUI.
+- Prompt-pack import/export, naming templates, hooks, and richer notifications
+  are not fully surfaced in the GUI. (Now surfaced: theme/accent/density
+  controls, prompt-pack switching, the local check runner, and run/stop/log
+  runtime controls.)
 - `new_workspace`, `summarize_session`, `handoff`, `rename_branch`, and
   `refactor_style` prompts remain editable inherited defaults without dedicated
   surfaced actions.

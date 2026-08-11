@@ -3,6 +3,7 @@ import { send } from "@/bridge/client";
 import type { DiffFileSummary, WorkspaceChangeScope } from "@/bridge/protocol";
 import Diff from "@/components/Diff";
 import { langFromPath } from "@/lib/highlight";
+import { openCommitInCenter } from "./openFileBridge";
 
 // Changes views — port of workspace_changes_panel + workspace_diff_sections.
 // The right panel shows the summary rows; the main Changes tab shows rows plus
@@ -39,7 +40,7 @@ export function ChangesRows(props: {
   openFile?: (path: string) => void;
 }) {
   const [scope, setScope] = createSignal<WorkspaceChangeScope>(props.defaultScope ?? "uncommitted");
-  const [changes] = createResource(
+  const [changes, { refetch }] = createResource(
     () => [props.workspace, scope()] as const,
     async ([ws, sc]) => {
       try {
@@ -50,6 +51,57 @@ export function ChangesRows(props: {
       }
     },
   );
+  const [commits, { refetch: refetchCommits }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_recent_commits", workspace: ws, limit: 15 });
+        return res.type === "recent_commits" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+  const [commitMsg, setCommitMsg] = createSignal("");
+  const [commitFeedback, setCommitFeedback] = createSignal("");
+  async function suggestMessage() {
+    try {
+      const res = await send({ type: "get_commit_message_draft", workspace: props.workspace });
+      if (res.type === "commit_message_draft" && res.message.trim()) {
+        setCommitMsg(res.message.trim());
+        setCommitFeedback("");
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+  async function commit() {
+    const message = commitMsg().trim();
+    if (!message) {
+      setCommitFeedback("Enter a commit message.");
+      return;
+    }
+    setCommitFeedback("Committing…");
+    try {
+      const res = await send({
+        type: "commit_workspace_changes",
+        workspace: props.workspace,
+        message,
+        stage_all: true,
+      });
+      if (res.type === "workspace_committed") {
+        setCommitMsg("");
+        setCommitFeedback("Committed.");
+        await Promise.all([refetch(), refetchCommits()]);
+      } else if (res.type === "error") {
+        setCommitFeedback(res.message);
+      } else {
+        setCommitFeedback("Commit failed.");
+      }
+    } catch (err) {
+      setCommitFeedback(`Commit failed: ${(err as Error).message}`);
+    }
+  }
   return (
     <div class="ws-file-summary-panel">
       <div class="ws-changes-header">
@@ -80,6 +132,47 @@ export function ChangesRows(props: {
             <ChangeRow file={file} showState={scope() === "uncommitted"} onOpen={props.openFile} />
           )}
         </For>
+      </Show>
+      <Show when={(changes() ?? []).length > 0}>
+        <div class="ws-commit-box">
+          <input
+            class="ws-text-input"
+            placeholder="Commit message…"
+            value={commitMsg()}
+            onInput={(e) => setCommitMsg(e.currentTarget.value)}
+            onKeyDown={(e) => e.key === "Enter" && void commit()}
+          />
+          <button class="secondary-action" title="Draft a message from changed files" onClick={() => void suggestMessage()}>
+            Suggest
+          </button>
+          <button class="suggested-action" onClick={() => void commit()}>
+            Stage all &amp; commit
+          </button>
+        </div>
+        <Show when={commitFeedback()}><div class="card-meta">{commitFeedback()}</div></Show>
+      </Show>
+      <Show when={(commits() ?? "").trim()}>
+        <div class="ws-commits-section">
+          <div class="ws-commits-head">
+            <span class="section-title">Recent commits</span>
+            <button class="ui-button-icon" title="Refresh" onClick={() => void refetchCommits()}>⟳</button>
+          </div>
+          <For each={(commits() ?? "").split("\n").filter((l) => l.trim())}>
+            {(line) => {
+              // First whitespace-delimited token is the short SHA.
+              const sha = line.trim().split(/\s+/)[0];
+              return (
+                <button
+                  class="ws-commit-row"
+                  title="View this commit's diff"
+                  onClick={() => sha && openCommitInCenter(props.workspace, sha)}
+                >
+                  {line}
+                </button>
+              );
+            }}
+          </For>
+        </div>
       </Show>
     </div>
   );

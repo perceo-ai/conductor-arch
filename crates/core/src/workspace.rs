@@ -2478,6 +2478,15 @@ impl WorkspaceStore {
         Ok(configured_check_commands_from_settings(&settings))
     }
 
+    /// List the repository's configured check commands (key/label/command) for
+    /// a workspace, so a UI can offer them as runnable local checks.
+    pub fn list_workspace_checks(&self, name: &str) -> Result<Vec<ConfiguredCheckCommand>> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        Ok(configured_check_commands_from_settings(&settings))
+    }
+
     pub fn run_workspace_check(&self, name: &str, key: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -3387,6 +3396,64 @@ impl WorkspaceStore {
                 }
             }
         }
+    }
+
+    /// Resolve a workspace-relative path to an absolute path inside the
+    /// checkout, rejecting anything that would escape the root (absolute
+    /// components, `..`, or symlinked parents that point outside).
+    fn resolve_in_workspace(root: &Path, relative: &str) -> Result<PathBuf> {
+        let rel = Path::new(relative);
+        if rel.is_absolute() {
+            return Err(anyhow!("path must be workspace-relative: {relative}"));
+        }
+        for component in rel.components() {
+            match component {
+                Component::Normal(_) => {}
+                _ => return Err(anyhow!("path escapes workspace: {relative}")),
+            }
+        }
+        let joined = root.join(rel);
+        // The parent directory must exist and canonicalize within the root so a
+        // symlinked directory cannot redirect writes outside the checkout.
+        let root_canon = root
+            .canonicalize()
+            .with_context(|| format!("canonicalize workspace root {}", root.display()))?;
+        if let Some(parent) = joined.parent() {
+            if let Ok(parent_canon) = parent.canonicalize() {
+                if !parent_canon.starts_with(&root_canon) {
+                    return Err(anyhow!("path escapes workspace: {relative}"));
+                }
+            }
+        }
+        Ok(joined)
+    }
+
+    /// Read a UTF-8 text file from the workspace checkout. Rejects paths that
+    /// escape the root, files larger than 2 MiB, and binary content.
+    pub fn read_file(&self, name: &str, relative: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let path = Self::resolve_in_workspace(&workspace.path, relative)?;
+        let metadata = fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(anyhow!("not a file: {relative}"));
+        }
+        const MAX_BYTES: u64 = 2 * 1024 * 1024;
+        if metadata.len() > MAX_BYTES {
+            return Err(anyhow!("file too large to edit ({} bytes)", metadata.len()));
+        }
+        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        if bytes.contains(&0) {
+            return Err(anyhow!("binary file cannot be edited: {relative}"));
+        }
+        String::from_utf8(bytes).map_err(|_| anyhow!("file is not valid UTF-8: {relative}"))
+    }
+
+    /// Overwrite a text file inside the workspace checkout with new content.
+    pub fn write_file(&self, name: &str, relative: &str, content: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let path = Self::resolve_in_workspace(&workspace.path, relative)?;
+        fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+        Ok(())
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {
@@ -10111,6 +10178,26 @@ fn git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
 
 fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
     git_output_dynamic(cwd, &args)
+}
+
+/// List a repository's local branch names (short form), sorted by most recent
+/// commit first, so a UI can offer them as base-branch options.
+pub fn list_repository_branches(repo_path: &Path) -> Result<Vec<String>> {
+    let out = git_output(
+        repo_path,
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
@@ -23763,6 +23850,24 @@ spotlight_testing = true
         assert_eq!(slugify("feat/cool-thing"), "feat-cool-thing");
         let long = "a".repeat(50);
         assert!(slugify(&long).len() <= 40);
+    }
+
+    #[test]
+    fn read_write_file_roundtrip_and_rejects_escape() {
+        let (_temp, store) = test_workspace_store();
+        // README.md is committed into the checkout by init_repo.
+        let original = store.read_file("berlin", "README.md").unwrap();
+        assert_eq!(original, "demo\n");
+
+        store
+            .write_file("berlin", "README.md", "changed\n")
+            .unwrap();
+        assert_eq!(store.read_file("berlin", "README.md").unwrap(), "changed\n");
+
+        // Path traversal and absolute paths are rejected before any IO.
+        assert!(store.read_file("berlin", "../demo/README.md").is_err());
+        assert!(store.write_file("berlin", "/etc/passwd", "x").is_err());
+        assert!(store.read_file("berlin", "../../escape.txt").is_err());
     }
 
     fn test_workspace_store() -> (tempfile::TempDir, WorkspaceStore) {

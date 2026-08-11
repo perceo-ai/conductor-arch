@@ -1393,6 +1393,122 @@ button.ui-button-destructive:hover {
     font-size: 12px;
 }
 
+.settings-layer-strip {
+    margin-top: 8px;
+}
+
+.settings-prompt-packs {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 0;
+}
+.settings-pack-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.settings-pack-chip {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid #333;
+    color: #b0b0b0;
+    background: #161616;
+    cursor: pointer;
+}
+.settings-pack-chip:hover:not(:disabled) {
+    border-color: #555;
+    color: #e6e6e6;
+}
+.settings-pack-chip:disabled {
+    cursor: default;
+}
+.settings-pack-chip-active {
+    border-color: var(--lc-accent, #c39b50);
+    color: var(--lc-accent, #c39b50);
+}
+
+.settings-appearance {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    padding: 10px 0 12px;
+    border-bottom: 1px solid #2a2a2a;
+}
+.settings-appearance-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.settings-accent-swatch {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.settings-accent-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--swatch, #c39b50);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.settings-split {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 12px 16px 16px;
+    overflow: hidden;
+}
+
+.settings-pane {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.settings-pane-head {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.settings-pane-head .card-meta {
+    margin-left: auto;
+}
+
+.settings-source-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: 12px;
+    background: #161616;
+    color: #e6e6e6;
+    font-family: var(--lc-mono, ui-monospace, monospace);
+    font-size: 12.5px;
+    line-height: 1.5;
+    tab-size: 2;
+    white-space: pre;
+    overflow: auto;
+}
+
+.settings-pane .ws-diff-view {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
 .settings-inherited-label {
     color: #aaaaaa;
     font-size: 11px;
@@ -1470,6 +1586,12 @@ button.ui-button-destructive:hover {
 .lc-density-compact .workspace-card {
     padding: 8px;
 }
+.lc-density-compact .workspace-row-shell {
+    padding: 4px 10px;
+}
+.lc-density-compact .sidebar-nav-button {
+    min-height: 26px;
+}
 
 .lc-density-compact .detail-body,
 .lc-density-compact .page-body,
@@ -1485,6 +1607,12 @@ button.ui-button-destructive:hover {
 .lc-density-comfortable .metric-card,
 .lc-density-comfortable .workspace-card {
     padding: 14px;
+}
+.lc-density-comfortable .workspace-row-shell {
+    padding: 12px 12px;
+}
+.lc-density-comfortable .sidebar-nav-button {
+    min-height: 40px;
 }
 
 .lc-density-comfortable .detail-body,
@@ -1584,6 +1712,190 @@ button.ui-button-destructive:hover {
     border-color: #d9e0e8;
 }
 
+/* Dashboard board surfaces: without these the dark board/column backgrounds
+   remain, leaving dark blocks on the light page and dark-on-dark column titles. */
+.lc-theme-light .kanban-board {
+    background-color: #f8fafc;
+}
+.lc-theme-light .kanban-column,
+.lc-theme-light .dashboard .kanban-column {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .kanban-column-header {
+    border-color: #e2e8f0;
+}
+.lc-theme-light .kanban-column .workspace-card,
+.lc-theme-light .workspace-card-action .workspace-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dashboard-subtitle {
+    color: #667085;
+}
+/* Onboarding card (fresh-install empty state — the first thing a new user sees)
+   used dark --lc-surface + light --lc-text-strong: a dark card with the title
+   invisible on a light page. */
+.lc-theme-light .onboarding-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .onboarding-title {
+    color: #111827;
+}
+.lc-theme-light .onboarding-copy {
+    color: #667085;
+}
+/* Setup first-run modal status rows: dark tinted backgrounds + light
+   --lc-text-strong name, unreadable on the light modal. Light-tint them. */
+.lc-theme-light .setup-status-ready {
+    background-color: #e6ffec;
+    border-color: #aceebb;
+}
+.lc-theme-light .setup-status-missing-required {
+    background-color: #ffebe9;
+    border-color: #ffcecb;
+}
+.lc-theme-light .setup-status-missing {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .setup-status-name {
+    color: #111827;
+}
+.lc-theme-light .setup-status-detail {
+    color: #57606a;
+}
+/* Command palette (Cmd+K/Cmd+P): dark --lc-surface-raised panel + light
+   --lc-text items, unreadable in light mode. Force the panel light. */
+.lc-theme-light .cmdk-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+.lc-theme-light .cmdk-input {
+    color: #1f2328;
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .cmdk-item {
+    color: #1f2328;
+}
+/* Keyboard-shortcuts help overlay ("?"): dark --lc-surface-raised panel + dark
+   kbd chips, all unreadable in light mode. */
+.lc-theme-light .shortcuts-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+.lc-theme-light .shortcuts-head {
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .shortcuts-keys {
+    color: #1f2328;
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .shortcuts-label {
+    color: #57606a;
+}
+/* Popovers / menus / toasts / add-project flow: all used dark surfaces with no
+   light override (scan of dark-bg classes lacking .lc-theme-light). */
+.lc-theme-light .context-menu,
+.lc-theme-light .chat-menu-popover,
+.lc-theme-light .project-create-menu {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+}
+.lc-theme-light .context-menu-item {
+    color: #1f2328;
+}
+.lc-theme-light .context-menu-item:hover {
+    background-color: #f1f5f9;
+}
+.lc-theme-light .context-menu-item-destructive {
+    color: #cf222e;
+}
+.lc-theme-light .context-menu-item-destructive:hover {
+    background-color: #ffebe9;
+}
+.lc-theme-light .toast,
+.lc-theme-light .toast-item {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .repo-picker {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .repo-search {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .repo-card:hover {
+    background-color: #f1f5f9;
+}
+.lc-theme-light .repo-card.selected {
+    background-color: #eef4ff;
+    border-color: #cdd9ec;
+}
+.lc-theme-light .project-template-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .project-template-card:hover {
+    background-color: #f1f5f9;
+    border-color: #cdd6e0;
+}
+.lc-theme-light .project-template-card-selected {
+    background-color: #eef4ff;
+    border-color: #9db4e0;
+}
+.lc-theme-light .project-template-title {
+    color: #111827;
+}
+/* PR status bar (top-right of a workspace): the chip had a hard dark #232323
+   background and the title used light --lc-text, both wrong on the light bar. */
+.lc-theme-light .ws-pr-chip {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .ws-pr-chip-empty {
+    color: #57606a;
+}
+.lc-theme-light .ws-pr-status-title {
+    color: #57606a;
+}
+/* Active right-panel + run tab pills used dark #232323 in light mode. */
+.lc-theme-light .ws-right-tab-active,
+.lc-theme-light .ws-run-tab-active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+/* Chat tool-call cards (reasoning/command/edit events): body/chip/expander used
+   dark #18/#19/#17 surfaces, unreadable in light mode. (The ANSI terminal card
+   stays dark by convention.) */
+.lc-theme-light .chat-inline-event-body {
+    background-color: #f6f8fa;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-chip {
+    background-color: #eef1f5;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .chat-inline-event-chip-label {
+    color: #57606a;
+}
+.lc-theme-light .chat-inline-event-expander {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #57606a;
+}
+
 .lc-theme-light .dashboard-title,
 .lc-theme-light .workspace-name,
 .lc-theme-light .card-title,
@@ -1602,6 +1914,303 @@ button.ui-button-destructive:hover {
 .lc-theme-light .card-branch,
 .lc-theme-light .card-diff {
     color: #667085;
+}
+.lc-theme-light .card-activity {
+    color: #334155;
+}
+
+/* Workspace command center — the main working surface. Without these it stays
+   fully dark in light mode (dark center/right-panel/composer on a light app). */
+.lc-theme-light .ws-center,
+.lc-theme-light .ws-tab-bar,
+.lc-theme-light .chat-surface {
+    background-color: #ffffff;
+    color: #1f2937;
+}
+/* The transcript scroll paints its own dark #151515, overriding the light
+   chat-surface — the message area stayed a dark block in light mode. */
+.lc-theme-light .chat-timeline-scroll {
+    background-color: #ffffff;
+}
+/* Diff viewer: dark #151515 container + dark GitHub-style row tints. Map to the
+   GitHub light diff palette so diffs are readable in light mode. */
+.lc-theme-light .diff-view {
+    background-color: #ffffff;
+    color: #1f2328;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .chat-inline-event-code-row-context {
+    background-color: #ffffff;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-code-row-added {
+    background-color: #e6ffec;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-code-row-removed {
+    background-color: #ffebe9;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-code-row-hunk {
+    background-color: #ddf4ff;
+    color: #0969da;
+}
+.lc-theme-light .chat-inline-event-code-row-meta {
+    background-color: #f6f8fa;
+    color: #57606a;
+}
+.lc-theme-light .diff-lineno {
+    color: #8c959f;
+}
+.lc-theme-light .diff-lineno-new {
+    border-right-color: #d9e0e8;
+}
+.lc-theme-light .ws-topbar {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-topbar-repo,
+.lc-theme-light .ws-topbar-branch {
+    color: #1f2937;
+}
+/* Code editor: dark --lc-surface container + light --lc-text base color meant
+   the editor was a dark block with invisible plain text in light mode. */
+.lc-theme-light .ws-file-editor-scroll {
+    background-color: #ffffff;
+}
+.lc-theme-light .ws-file-editor-highlight,
+.lc-theme-light .ws-file-editor-area {
+    caret-color: #1f2328;
+}
+.lc-theme-light pre.ws-file-editor-highlight.hljs {
+    color: #1f2328;
+}
+/* highlight.js ships github-DARK globally (bright tokens, unreadable on white).
+   Remap the tokens to the github-LIGHT palette under the light theme so the
+   editor, diff viewer, and markdown code blocks all read correctly. */
+.lc-theme-light .hljs {
+    color: #1f2328;
+}
+.lc-theme-light .hljs-doctag,
+.lc-theme-light .hljs-keyword,
+.lc-theme-light .hljs-meta .hljs-keyword,
+.lc-theme-light .hljs-template-tag,
+.lc-theme-light .hljs-template-variable,
+.lc-theme-light .hljs-type,
+.lc-theme-light .hljs-variable.language_ {
+    color: #cf222e;
+}
+.lc-theme-light .hljs-title,
+.lc-theme-light .hljs-title.class_,
+.lc-theme-light .hljs-title.class_.inherited__,
+.lc-theme-light .hljs-title.function_ {
+    color: #8250df;
+}
+.lc-theme-light .hljs-attr,
+.lc-theme-light .hljs-attribute,
+.lc-theme-light .hljs-literal,
+.lc-theme-light .hljs-meta,
+.lc-theme-light .hljs-number,
+.lc-theme-light .hljs-operator,
+.lc-theme-light .hljs-selector-attr,
+.lc-theme-light .hljs-selector-class,
+.lc-theme-light .hljs-selector-id,
+.lc-theme-light .hljs-variable {
+    color: #0550ae;
+}
+.lc-theme-light .hljs-string,
+.lc-theme-light .hljs-regexp {
+    color: #0a3069;
+}
+.lc-theme-light .hljs-built_in,
+.lc-theme-light .hljs-symbol {
+    color: #e36209;
+}
+.lc-theme-light .hljs-comment,
+.lc-theme-light .hljs-code,
+.lc-theme-light .hljs-formula {
+    color: #6e7781;
+}
+.lc-theme-light .hljs-name,
+.lc-theme-light .hljs-quote,
+.lc-theme-light .hljs-selector-tag,
+.lc-theme-light .hljs-selector-pseudo {
+    color: #116329;
+}
+.lc-theme-light .hljs-section {
+    color: #0550ae;
+    font-weight: bold;
+}
+.lc-theme-light .ws-right-panel {
+    background-color: #f8fafc;
+    border-left-color: #d9e0e8;
+}
+.lc-theme-light .ws-right-tabs {
+    background-color: #f8fafc;
+}
+.lc-theme-light .ws-run-section {
+    background-color: #f1f5f9;
+    border-top-color: #d9e0e8;
+}
+/* Setup/Run/terminal tab bar kept its dark #1a1a1a strip in the light panel. */
+.lc-theme-light .ws-run-tab-bar {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-run-tab-btn {
+    color: #475569;
+}
+.lc-theme-light .ws-run-tab-btn:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .ws-run-prompt {
+    background-color: #ffffff;
+    color: #334155;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-file-row,
+.lc-theme-light .ws-dir-row,
+.lc-theme-light .ws-file-name,
+.lc-theme-light .ws-folder-name {
+    color: #334155;
+}
+.lc-theme-light .empty-state,
+.lc-theme-light .ws-run-modal-title,
+.lc-theme-light .detail-label {
+    color: #667085;
+}
+.lc-theme-light .ws-diff-text {
+    color: #334155;
+}
+
+/* Settings page + shared section labels + diff/source panes in light. */
+.lc-theme-light .section-title,
+.lc-theme-light .settings-field-title {
+    color: #111827;
+}
+.lc-theme-light .ws-diff-view {
+    background-color: #ffffff;
+}
+.lc-theme-light .settings-pane {
+    border-color: #d9e0e8;
+}
+.lc-theme-light .settings-pane-head {
+    background-color: #f8fafc;
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .settings-source-area {
+    background-color: #ffffff;
+    color: #1f2937;
+}
+/* Model/effort <select> pickers (Settings + chat composer): the closed control
+   keeps its dark #1e1e1e background in light theme. Override just the color so
+   the inline chevron background-image is preserved. */
+.lc-theme-light .chat-picker {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .chat-picker:hover {
+    border-color: #c4ccd6;
+}
+.lc-theme-light .settings-pack-chip {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #334155;
+}
+.lc-theme-light .ws-tab-shell.ws-tab-active,
+.lc-theme-light .nav-button-active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .ws-tab-shell.ws-tab-active .ws-tab-label,
+.lc-theme-light .nav-button-active {
+    color: #111827;
+}
+.lc-theme-light .history-row .workspace-name,
+.lc-theme-light .project-workspace-row .workspace-name {
+    color: #111827;
+}
+.lc-theme-light .history-row:hover,
+.lc-theme-light .history-row.selected {
+    background-color: #eef2f7;
+    border-color: #d9e0e8;
+}
+
+/* Sidebar in light. Without these the sidebar keeps its dark surface-muted
+   background while the main content is light — a split-theme look. */
+.lc-theme-light .sidebar {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .sidebar-footer {
+    border-color: #d9e0e8;
+}
+.lc-theme-light .sidebar-nav-label,
+.lc-theme-light .projects-header,
+.lc-theme-light .project-name {
+    color: #1f2937;
+}
+/* Resting row surfaces: the unscoped rule paints project/workspace/history rows
+   with the dark --lc-surface-muted, leaving dark bands in the light sidebar. */
+.lc-theme-light .project-row,
+.lc-theme-light .workspace-row-shell,
+.lc-theme-light .sidebar .history-row {
+    background-color: transparent;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .project-avatar,
+.lc-theme-light .project-avatar-fallback {
+    background-color: #e2e8f0;
+    color: #334155;
+}
+.lc-theme-light .sidebar-nav-button:hover,
+.lc-theme-light .project-row:hover,
+.lc-theme-light .workspace-row-shell:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .sidebar-nav-button.active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .project-add {
+    color: #667085;
+}
+
+/* Dialogs / modals in light. */
+.lc-theme-light .modal-body {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .dialog-title {
+    color: #111827;
+}
+.lc-theme-light .dialog-field > span,
+.lc-theme-light .dialog-field-head {
+    color: #334155;
+}
+.lc-theme-light .dialog-hint {
+    color: #667085;
+}
+.lc-theme-light button.ui-button,
+.lc-theme-light button.ui-button-sm {
+    background-color: #f1f5f9;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-tabs .ui-button-sm.active,
+.lc-theme-light button.ui-button-sm.active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .modal-body input,
+.lc-theme-light .dialog-field input,
+.lc-theme-light .dialog-field textarea {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #d9e0e8;
 }
 
 .lc-theme-light .composer-bar input,

@@ -713,6 +713,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ReadWorkspaceFile { workspace, path } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.read_file(&workspace, &path)) {
+                Ok(content) => ArchcarResponse::WorkspaceFileContent {
+                    workspace,
+                    path,
+                    content,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::WriteWorkspaceFile {
+            workspace,
+            path,
+            content,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.write_file(&workspace, &path, &content))
+            {
+                Ok(()) => ArchcarResponse::WorkspaceFileWritten { workspace, path },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|store| match scope {
@@ -808,6 +836,290 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkspaceTimeline { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.workspace_timeline(&workspace, None))
+            {
+                Ok(events) => ArchcarResponse::WorkspaceTimeline {
+                    workspace,
+                    events: events
+                        .into_iter()
+                        .map(|e| crate::archcar::protocol::ArchcarTimelineEvent {
+                            id: e.id,
+                            kind: e.kind,
+                            summary: e.summary,
+                            created_at: e.created_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListWorkspaceConflicts { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.find_conflicting_workspaces(&workspace))
+            {
+                Ok(rows) => ArchcarResponse::WorkspaceConflicts {
+                    workspace,
+                    conflicts: rows
+                        .into_iter()
+                        .map(|(workspace, files)| {
+                            crate::archcar::protocol::ArchcarWorkspaceConflict { workspace, files }
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListLinkedDirectories { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.list_linked_directories(&workspace))
+            {
+                Ok(rows) => ArchcarResponse::LinkedDirectories {
+                    workspace,
+                    directories: rows
+                        .into_iter()
+                        .map(|d| crate::archcar::protocol::ArchcarLinkedDirectory {
+                            target_workspace: d.target_workspace_name,
+                            link_path: d.link_path.to_string_lossy().into_owned(),
+                            created_at: d.created_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetRecentCommits { workspace, limit } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let n = limit.unwrap_or(20).clamp(1, 200) as usize;
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.git_log_oneline(&workspace, n))
+            {
+                Ok(log) => ArchcarResponse::RecentCommits { workspace, log },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetCommitMessageDraft { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.commit_message_draft(&workspace))
+            {
+                Ok(message) => ArchcarResponse::CommitMessageDraft { workspace, message },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetCommitDiff { workspace, commit } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.git_show_commit(&workspace, &commit))
+            {
+                Ok(diff) => ArchcarResponse::CommitDiff {
+                    workspace,
+                    commit,
+                    diff,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RunWorkspaceScript { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.run_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::RunScriptStarted {
+                    workspace,
+                    pid: process.pid,
+                    log_path: process.log_path.to_string_lossy().into_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StopWorkspaceScript { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.stop_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::RunScriptStopped {
+                    workspace,
+                    pid: process.pid,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetRunLog { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.read_latest_run_log(&workspace))
+            {
+                Ok(log) => ArchcarResponse::RunLog { workspace, log },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetCheckLog { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.read_latest_check_log(&workspace))
+            {
+                Ok(log) => ArchcarResponse::CheckLog { workspace, log },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetPullRequestReadiness { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.pull_request_readiness_text(&workspace))
+            {
+                Ok(text) => ArchcarResponse::PullRequestReadiness { workspace, text },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetSpotlightStatus { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|s| s.spotlight_status(&workspace)) {
+                Ok(session) => ArchcarResponse::SpotlightStatus {
+                    workspace,
+                    active: session.is_some(),
+                    status: session.as_ref().map(|s| s.status.clone()),
+                    started_at: session.as_ref().map(|s| s.started_at.clone()),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StartSpotlight { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.spotlight_start(&workspace))
+            {
+                Ok(session) => ArchcarResponse::SpotlightStatus {
+                    workspace,
+                    active: true,
+                    status: Some(session.status),
+                    started_at: Some(session.started_at),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StopSpotlight { workspace } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.spotlight_stop(&workspace))
+            {
+                Ok(_) => ArchcarResponse::SpotlightStatus {
+                    workspace,
+                    active: false,
+                    status: None,
+                    started_at: None,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CommitWorkspaceChanges {
+            workspace,
+            message,
+            stage_all,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path).and_then(|s| {
+                if stage_all {
+                    s.stage_all_workspace_files(&workspace)?;
+                }
+                s.commit_workspace_changes(&workspace, &message)
+            });
+            match result {
+                Ok(output) => ArchcarResponse::WorkspaceCommitted { workspace, output },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListWorkspaceChecks { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.list_workspace_checks(&workspace))
+            {
+                Ok(checks) => ArchcarResponse::WorkspaceChecks {
+                    workspace,
+                    checks: checks
+                        .into_iter()
+                        .map(|c| crate::archcar::protocol::ArchcarConfiguredCheck {
+                            key: c.key,
+                            label: c.label,
+                            command: c.command,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RunWorkspaceCheck { workspace, key } => {
+            let (db_path, logs_dir) = {
+                let s = state.lock().unwrap();
+                (s.db_path.clone(), s.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+                .and_then(|s| s.run_workspace_check(&workspace, &key))
+            {
+                Ok(process) => ArchcarResponse::CheckStarted {
+                    workspace,
+                    key,
+                    pid: process.pid,
+                    log_path: process.log_path.to_string_lossy().into_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path) {
@@ -881,6 +1193,167 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 Ok(toml) => ArchcarResponse::Settings {
                     scope: repository.unwrap_or_else(|| "global".to_owned()),
                     toml,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListRepositoryBranches { repository } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match RepositoryStore::open(&db_path)
+                .and_then(|s| s.get_by_name(&repository))
+                .and_then(|r| crate::workspace::list_repository_branches(&r.root_path))
+            {
+                Ok(branches) => ArchcarResponse::RepositoryBranches {
+                    repository,
+                    branches,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListPromptPacks { repository } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<(Vec<String>, Option<String>)> =
+                RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(&repository))
+                    .and_then(|r| {
+                        let packs = crate::settings::list_prompt_pack_names(&r.root_path)?;
+                        let active = crate::settings::load_repository_settings_for_layer(
+                            &r.root_path,
+                            crate::settings::SettingsLayer::RepositoryShared,
+                        )
+                        .ok()
+                        .and_then(|s| s.prompt_pack.active);
+                        Ok((packs, active))
+                    });
+            match result {
+                Ok((packs, active)) => ArchcarResponse::PromptPacks {
+                    repository,
+                    packs,
+                    active,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SetActivePromptPack { repository, pack } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<(Vec<String>, Option<String>)> =
+                RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(&repository))
+                    .and_then(|r| {
+                        crate::settings::set_active_prompt_pack(&r.root_path, &pack)?;
+                        let packs = crate::settings::list_prompt_pack_names(&r.root_path)?;
+                        let active = crate::settings::load_repository_settings_for_layer(
+                            &r.root_path,
+                            crate::settings::SettingsLayer::RepositoryShared,
+                        )
+                        .ok()
+                        .and_then(|s| s.prompt_pack.active);
+                        Ok((packs, active))
+                    });
+            match result {
+                Ok((packs, active)) => ArchcarResponse::PromptPacks {
+                    repository,
+                    packs,
+                    active,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetSettingsSource { repository, layer } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let read_layer_file = |path: std::path::PathBuf| -> std::io::Result<String> {
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => Ok(s),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                    Err(err) => Err(err),
+                }
+            };
+            let result: anyhow::Result<(String, String)> = match &repository {
+                None => {
+                    let shared = AppPaths::from_env().shared_settings_path();
+                    read_layer_file(shared)
+                        .map(|toml| ("global".to_owned(), toml))
+                        .map_err(Into::into)
+                }
+                Some(repo) => RepositoryStore::open(&db_path)
+                    .and_then(|s| s.get_by_name(repo))
+                    .and_then(|r| {
+                        let layer = layer.as_deref().unwrap_or("repository");
+                        let file = match layer {
+                            "local" => r.root_path.join(".archductor/settings.local.toml"),
+                            _ => r.root_path.join(".archductor/settings.toml"),
+                        };
+                        let name = if layer == "local" {
+                            "local"
+                        } else {
+                            "repository"
+                        };
+                        read_layer_file(file)
+                            .map(|toml| (name.to_owned(), toml))
+                            .map_err(Into::into)
+                    }),
+            };
+            match result {
+                Ok((layer, toml)) => ArchcarResponse::SettingsSource {
+                    scope: repository.unwrap_or_else(|| "global".to_owned()),
+                    layer,
+                    toml,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveSettings {
+            repository,
+            layer,
+            toml,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<String> = match &repository {
+                None => {
+                    let shared = AppPaths::from_env().shared_settings_path();
+                    crate::settings::save_app_shared_settings_from_toml(&shared, &toml)
+                        .map(|()| "global".to_owned())
+                }
+                Some(repo) => {
+                    let layer_name = layer.as_deref().unwrap_or("repository");
+                    let settings_layer = if layer_name == "local" {
+                        crate::settings::SettingsLayer::LocalOverride
+                    } else {
+                        crate::settings::SettingsLayer::RepositoryShared
+                    };
+                    RepositoryStore::open(&db_path)
+                        .and_then(|s| s.get_by_name(repo))
+                        .and_then(|r| {
+                            crate::settings::save_repository_settings_from_toml(
+                                &r.root_path,
+                                settings_layer,
+                                &toml,
+                            )
+                        })
+                        .map(|()| {
+                            if layer_name == "local" {
+                                "local"
+                            } else {
+                                "repository"
+                            }
+                            .to_owned()
+                        })
+                }
+            };
+            match result {
+                Ok(layer) => ArchcarResponse::SettingsSaved {
+                    scope: repository.unwrap_or_else(|| "global".to_owned()),
+                    layer,
                 },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -1046,6 +1519,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             branch,
         } => match open_lifecycle_workspace_store(state).and_then(|s| {
             s.create_from_pull_request(&repository, pr_number, name.as_deref(), branch.as_deref())
+        }) {
+            Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::CreateWorkspaceFromLinear {
+            repository,
+            issue_id,
+            name,
+            branch,
+        } => match open_lifecycle_workspace_store(state).and_then(|s| {
+            s.create_from_linear_issue(
+                &repository,
+                &issue_id,
+                name.as_deref(),
+                branch.as_deref(),
+                None,
+            )
         }) {
             Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
             Err(err) => ArchcarResponse::Error {
@@ -1696,14 +2188,29 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
             | ArchcarRequest::ListWorkspaceFiles { .. }
+            | ArchcarRequest::ReadWorkspaceFile { .. }
             | ArchcarRequest::GetWorkspaceChanges { .. }
             | ArchcarRequest::GetWorkspaceDiff { .. }
             | ArchcarRequest::ListTodos { .. }
             | ArchcarRequest::ListCheckpoints { .. }
             | ArchcarRequest::GetWorkspaceProcesses { .. }
+            | ArchcarRequest::ListWorkspaceTimeline { .. }
+            | ArchcarRequest::ListWorkspaceConflicts { .. }
+            | ArchcarRequest::ListLinkedDirectories { .. }
+            | ArchcarRequest::GetSpotlightStatus { .. }
+            | ArchcarRequest::GetPullRequestReadiness { .. }
+            | ArchcarRequest::GetRecentCommits { .. }
+            | ArchcarRequest::GetCommitMessageDraft { .. }
+            | ArchcarRequest::GetCommitDiff { .. }
+            | ArchcarRequest::GetRunLog { .. }
+            | ArchcarRequest::GetCheckLog { .. }
+            | ArchcarRequest::ListWorkspaceChecks { .. }
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::ListRepositoryBranches { .. }
+            | ArchcarRequest::ListPromptPacks { .. }
+            | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }
     )
 }

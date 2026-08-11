@@ -160,6 +160,15 @@ pub enum ArchcarRequest {
     ListWorkspaceFiles {
         workspace: String,
     },
+    ReadWorkspaceFile {
+        workspace: String,
+        path: String,
+    },
+    WriteWorkspaceFile {
+        workspace: String,
+        path: String,
+        content: String,
+    },
     GetWorkspaceChanges {
         workspace: String,
         scope: WorkspaceChangeScope,
@@ -190,6 +199,85 @@ pub enum ArchcarRequest {
     GetWorkspaceProcesses {
         workspace: String,
     },
+    /// List a workspace's timeline events (lifecycle history).
+    ListWorkspaceTimeline {
+        workspace: String,
+    },
+    /// List sibling workspaces that conflict with this one (overlapping files).
+    ListWorkspaceConflicts {
+        workspace: String,
+    },
+    /// List directories linked from other workspaces into this one.
+    ListLinkedDirectories {
+        workspace: String,
+    },
+    /// Recent commit oneline log for a workspace's branch.
+    GetRecentCommits {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// A heuristic draft commit message from the workspace's changed files.
+    GetCommitMessageDraft {
+        workspace: String,
+    },
+    /// Show a single commit's stat + patch (git show) for a workspace.
+    GetCommitDiff {
+        workspace: String,
+        commit: String,
+    },
+    /// Start the workspace's configured run script as a tracked process.
+    RunWorkspaceScript {
+        workspace: String,
+    },
+    /// Stop the workspace's currently running run process.
+    StopWorkspaceScript {
+        workspace: String,
+    },
+    /// Read the latest run-script log for a workspace.
+    GetRunLog {
+        workspace: String,
+    },
+    /// List the repository's configured check commands for a workspace.
+    ListWorkspaceChecks {
+        workspace: String,
+    },
+    /// Run one configured check (by key) as a tracked process.
+    RunWorkspaceCheck {
+        workspace: String,
+        key: String,
+    },
+    /// Read the latest check-process log for a workspace.
+    GetCheckLog {
+        workspace: String,
+    },
+    /// PR readiness detail from GitHub (`gh pr view`): CI/status checks, review
+    /// decision, deployments, review threads. Requires `gh` auth + an open PR.
+    GetPullRequestReadiness {
+        workspace: String,
+    },
+    /// Spotlight testing: current status for a workspace (is its patch applied
+    /// to the repo root for live testing).
+    GetSpotlightStatus {
+        workspace: String,
+    },
+    /// Start spotlight testing — apply the workspace's tracked changes to the
+    /// repository root so the running app reflects them.
+    StartSpotlight {
+        workspace: String,
+    },
+    /// Stop spotlight testing — revert the repository root.
+    StopSpotlight {
+        workspace: String,
+    },
+    /// Commit the workspace's changes with a message; `stage_all` runs
+    /// `git add -A` first, otherwise only already-staged files are committed.
+    CommitWorkspaceChanges {
+        workspace: String,
+        message: String,
+        #[serde(default)]
+        stage_all: bool,
+    },
     GetWorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -204,6 +292,38 @@ pub enum ArchcarRequest {
         /// Repository name for repo-scoped settings; None = global app settings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
+    },
+    /// List a repository's local branch names (base-branch options).
+    ListRepositoryBranches {
+        repository: String,
+    },
+    /// List the prompt-pack names available for a repository and which is active.
+    ListPromptPacks {
+        repository: String,
+    },
+    /// Set the active prompt pack for a repository (writes committed settings);
+    /// responds with the refreshed PromptPacks list.
+    SetActivePromptPack {
+        repository: String,
+        pack: String,
+    },
+    /// Read the raw, editable source TOML for one settings layer (not the merged
+    /// effective view). `repository` None = global app-shared; otherwise the
+    /// repository's own committed (`repository`) or `local` override layer.
+    GetSettingsSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+        /// "repository" (default) or "local"; ignored for global scope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+    },
+    /// Overwrite one settings layer's source TOML. Validates before writing.
+    SaveSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        toml: String,
     },
     /// Probe host setup readiness (GitHub CLI + agent providers). `recheck`
     /// refreshes the process environment before probing so a just-installed
@@ -275,6 +395,14 @@ pub enum ArchcarRequest {
     CreateWorkspaceFromPullRequest {
         repository: String,
         pr_number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    CreateWorkspaceFromLinear {
+        repository: String,
+        issue_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +580,15 @@ pub enum ArchcarResponse {
         workspace: String,
         files: Vec<String>,
     },
+    WorkspaceFileContent {
+        workspace: String,
+        path: String,
+        content: String,
+    },
+    WorkspaceFileWritten {
+        workspace: String,
+        path: String,
+    },
     WorkspaceChanges {
         workspace: String,
         scope: WorkspaceChangeScope,
@@ -479,6 +616,74 @@ pub enum ArchcarResponse {
         workspace: String,
         text: String,
     },
+    WorkspaceTimeline {
+        workspace: String,
+        events: Vec<ArchcarTimelineEvent>,
+    },
+    WorkspaceConflicts {
+        workspace: String,
+        conflicts: Vec<ArchcarWorkspaceConflict>,
+    },
+    LinkedDirectories {
+        workspace: String,
+        directories: Vec<ArchcarLinkedDirectory>,
+    },
+    RecentCommits {
+        workspace: String,
+        log: String,
+    },
+    CommitMessageDraft {
+        workspace: String,
+        message: String,
+    },
+    CommitDiff {
+        workspace: String,
+        commit: String,
+        diff: String,
+    },
+    RunScriptStarted {
+        workspace: String,
+        pid: u32,
+        log_path: String,
+    },
+    RunScriptStopped {
+        workspace: String,
+        pid: u32,
+    },
+    RunLog {
+        workspace: String,
+        log: String,
+    },
+    WorkspaceChecks {
+        workspace: String,
+        checks: Vec<ArchcarConfiguredCheck>,
+    },
+    CheckStarted {
+        workspace: String,
+        key: String,
+        pid: u32,
+        log_path: String,
+    },
+    CheckLog {
+        workspace: String,
+        log: String,
+    },
+    WorkspaceCommitted {
+        workspace: String,
+        output: String,
+    },
+    PullRequestReadiness {
+        workspace: String,
+        text: String,
+    },
+    SpotlightStatus {
+        workspace: String,
+        active: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
+    },
     WorkspaceScriptPrompt {
         workspace: String,
         kind: String,
@@ -497,6 +702,28 @@ pub enum ArchcarResponse {
         scope: String,
         /// Effective settings serialized as pretty TOML.
         toml: String,
+    },
+    RepositoryBranches {
+        repository: String,
+        branches: Vec<String>,
+    },
+    PromptPacks {
+        repository: String,
+        packs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active: Option<String>,
+    },
+    SettingsSource {
+        /// "global" or the repository name.
+        scope: String,
+        /// "global", "repository", or "local".
+        layer: String,
+        /// Raw editable source TOML for that one layer (empty if unset).
+        toml: String,
+    },
+    SettingsSaved {
+        scope: String,
+        layer: String,
     },
     SetupReadiness {
         report: SetupReport,
@@ -664,6 +891,39 @@ pub struct ArchcarProjectionItem {
     pub body: String,
     pub status: String,
     pub stream_state: String,
+}
+
+/// One workspace timeline event (creation, branch change, session lifecycle,
+/// PR/check action, commit, archive, …) for the Timeline surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarTimelineEvent {
+    pub id: i64,
+    pub kind: String,
+    pub summary: String,
+    pub created_at: String,
+}
+
+/// A directory linked from another workspace into this one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarLinkedDirectory {
+    pub target_workspace: String,
+    pub link_path: String,
+    pub created_at: String,
+}
+
+/// A sibling workspace that conflicts with this one, plus the overlapping files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarWorkspaceConflict {
+    pub workspace: String,
+    pub files: Vec<String>,
+}
+
+/// One configured check command (key/label/command) a workspace can run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarConfiguredCheck {
+    pub key: String,
+    pub label: String,
+    pub command: String,
 }
 
 /// Flat DB-only checks summary (compact projection of ChecksSummary; the
@@ -835,6 +1095,17 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListWorkspaceFiles { workspace } => {
             format!("list_workspace_files workspace={workspace}")
         }
+        ArchcarRequest::ReadWorkspaceFile { workspace, path } => {
+            format!("read_workspace_file workspace={workspace} path={path}")
+        }
+        ArchcarRequest::WriteWorkspaceFile {
+            workspace,
+            path,
+            content,
+        } => format!(
+            "write_workspace_file workspace={workspace} path={path} bytes={}",
+            content.len()
+        ),
         ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
             format!("get_workspace_changes workspace={workspace} scope={scope:?}")
         }
@@ -858,6 +1129,63 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetWorkspaceProcesses { workspace } => {
             format!("get_workspace_processes workspace={workspace}")
         }
+        ArchcarRequest::ListWorkspaceTimeline { workspace } => {
+            format!("list_workspace_timeline workspace={workspace}")
+        }
+        ArchcarRequest::ListWorkspaceConflicts { workspace } => {
+            format!("list_workspace_conflicts workspace={workspace}")
+        }
+        ArchcarRequest::ListLinkedDirectories { workspace } => {
+            format!("list_linked_directories workspace={workspace}")
+        }
+        ArchcarRequest::GetRecentCommits { workspace, limit } => format!(
+            "get_recent_commits workspace={workspace} limit={}",
+            limit.map(|n| n.to_string()).unwrap_or_else(|| "<default>".to_owned())
+        ),
+        ArchcarRequest::GetCommitMessageDraft { workspace } => {
+            format!("get_commit_message_draft workspace={workspace}")
+        }
+        ArchcarRequest::GetCommitDiff { workspace, commit } => {
+            format!("get_commit_diff workspace={workspace} commit={commit}")
+        }
+        ArchcarRequest::RunWorkspaceScript { workspace } => {
+            format!("run_workspace_script workspace={workspace}")
+        }
+        ArchcarRequest::StopWorkspaceScript { workspace } => {
+            format!("stop_workspace_script workspace={workspace}")
+        }
+        ArchcarRequest::GetRunLog { workspace } => {
+            format!("get_run_log workspace={workspace}")
+        }
+        ArchcarRequest::ListWorkspaceChecks { workspace } => {
+            format!("list_workspace_checks workspace={workspace}")
+        }
+        ArchcarRequest::RunWorkspaceCheck { workspace, key } => {
+            format!("run_workspace_check workspace={workspace} key={key}")
+        }
+        ArchcarRequest::GetCheckLog { workspace } => {
+            format!("get_check_log workspace={workspace}")
+        }
+        ArchcarRequest::GetPullRequestReadiness { workspace } => {
+            format!("get_pull_request_readiness workspace={workspace}")
+        }
+        ArchcarRequest::GetSpotlightStatus { workspace } => {
+            format!("get_spotlight_status workspace={workspace}")
+        }
+        ArchcarRequest::StartSpotlight { workspace } => {
+            format!("start_spotlight workspace={workspace}")
+        }
+        ArchcarRequest::StopSpotlight { workspace } => {
+            format!("stop_spotlight workspace={workspace}")
+        }
+        ArchcarRequest::CommitWorkspaceChanges {
+            workspace,
+            message,
+            stage_all,
+        } => format!(
+            "commit_workspace_changes workspace={workspace} stage_all={stage_all} bytes={}",
+            message.len()
+        ),
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
         }
@@ -870,6 +1198,30 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::ListRepositoryBranches { repository } => {
+            format!("list_repository_branches repository={repository}")
+        }
+        ArchcarRequest::ListPromptPacks { repository } => {
+            format!("list_prompt_packs repository={repository}")
+        }
+        ArchcarRequest::SetActivePromptPack { repository, pack } => {
+            format!("set_active_prompt_pack repository={repository} pack={pack}")
+        }
+        ArchcarRequest::GetSettingsSource { repository, layer } => format!(
+            "get_settings_source repository={} layer={}",
+            repository.as_deref().unwrap_or("<global>"),
+            layer.as_deref().unwrap_or("<default>")
+        ),
+        ArchcarRequest::SaveSettings {
+            repository,
+            layer,
+            toml,
+        } => format!(
+            "save_settings repository={} layer={} bytes={}",
+            repository.as_deref().unwrap_or("<global>"),
+            layer.as_deref().unwrap_or("<default>"),
+            toml.len()
+        ),
         ArchcarRequest::GetSetupReadiness { recheck } => {
             format!("get_setup_readiness recheck={recheck}")
         }
@@ -917,6 +1269,11 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             pr_number,
             ..
         } => format!("create_workspace_from_pull_request repository={repository} pr={pr_number}"),
+        ArchcarRequest::CreateWorkspaceFromLinear {
+            repository,
+            issue_id,
+            ..
+        } => format!("create_workspace_from_linear repository={repository} issue={issue_id}"),
         ArchcarRequest::ArchiveWorkspace {
             workspace,
             remove_worktree,
@@ -1114,6 +1471,17 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::WorkspaceFiles { workspace, files } => {
             format!("workspace_files workspace={workspace} count={}", files.len())
         }
+        ArchcarResponse::WorkspaceFileContent {
+            workspace,
+            path,
+            content,
+        } => format!(
+            "workspace_file_content workspace={workspace} path={path} bytes={}",
+            content.len()
+        ),
+        ArchcarResponse::WorkspaceFileWritten { workspace, path } => {
+            format!("workspace_file_written workspace={workspace} path={path}")
+        }
         ArchcarResponse::WorkspaceChanges { workspace, files, .. } => {
             format!("workspace_changes workspace={workspace} count={}", files.len())
         }
@@ -1133,6 +1501,51 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             format!("workspace_processes workspace={workspace} bytes={}", text.len())
         }
+        ArchcarResponse::WorkspaceTimeline { workspace, events } => {
+            format!("workspace_timeline workspace={workspace} count={}", events.len())
+        }
+        ArchcarResponse::WorkspaceConflicts { workspace, conflicts } => {
+            format!("workspace_conflicts workspace={workspace} count={}", conflicts.len())
+        }
+        ArchcarResponse::LinkedDirectories { workspace, directories } => {
+            format!("linked_directories workspace={workspace} count={}", directories.len())
+        }
+        ArchcarResponse::RecentCommits { workspace, log } => {
+            format!("recent_commits workspace={workspace} bytes={}", log.len())
+        }
+        ArchcarResponse::CommitMessageDraft { workspace, message } => {
+            format!("commit_message_draft workspace={workspace} bytes={}", message.len())
+        }
+        ArchcarResponse::CommitDiff { workspace, commit, diff } => {
+            format!("commit_diff workspace={workspace} commit={commit} bytes={}", diff.len())
+        }
+        ArchcarResponse::RunScriptStarted { workspace, pid, log_path } => {
+            format!("run_script_started workspace={workspace} pid={pid} log={log_path}")
+        }
+        ArchcarResponse::RunScriptStopped { workspace, pid } => {
+            format!("run_script_stopped workspace={workspace} pid={pid}")
+        }
+        ArchcarResponse::WorkspaceChecks { workspace, checks } => {
+            format!("workspace_checks workspace={workspace} count={}", checks.len())
+        }
+        ArchcarResponse::CheckStarted { workspace, key, pid, log_path } => {
+            format!("check_started workspace={workspace} key={key} pid={pid} log={log_path}")
+        }
+        ArchcarResponse::CheckLog { workspace, log } => {
+            format!("check_log workspace={workspace} bytes={}", log.len())
+        }
+        ArchcarResponse::WorkspaceCommitted { workspace, output } => {
+            format!("workspace_committed workspace={workspace} bytes={}", output.len())
+        }
+        ArchcarResponse::PullRequestReadiness { workspace, text } => {
+            format!("pull_request_readiness workspace={workspace} bytes={}", text.len())
+        }
+        ArchcarResponse::SpotlightStatus { workspace, active, .. } => {
+            format!("spotlight_status workspace={workspace} active={active}")
+        }
+        ArchcarResponse::RunLog { workspace, log } => {
+            format!("run_log workspace={workspace} bytes={}", log.len())
+        }
         ArchcarResponse::WorkspaceScriptPrompt { workspace, kind, prompt } => {
             format!("workspace_script_prompt workspace={workspace} kind={kind} bytes={}", prompt.len())
         }
@@ -1141,6 +1554,20 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChecksSummary { workspace, .. } => {
             format!("checks_summary workspace={workspace}")
+        }
+        ArchcarResponse::RepositoryBranches { repository, branches } => {
+            format!("repository_branches repository={repository} count={}", branches.len())
+        }
+        ArchcarResponse::PromptPacks { repository, packs, active } => format!(
+            "prompt_packs repository={repository} count={} active={}",
+            packs.len(),
+            active.as_deref().unwrap_or("<none>")
+        ),
+        ArchcarResponse::SettingsSource { scope, layer, toml } => {
+            format!("settings_source scope={scope} layer={layer} bytes={}", toml.len())
+        }
+        ArchcarResponse::SettingsSaved { scope, layer } => {
+            format!("settings_saved scope={scope} layer={layer}")
         }
         ArchcarResponse::Settings { scope, toml } => {
             format!("settings scope={scope} bytes={}", toml.len())
@@ -1667,6 +2094,16 @@ mod tests {
                 "create_workspace_from_issue repository=repo issue=42",
             ),
             (
+                ArchcarRequest::CreateWorkspaceFromLinear {
+                    repository: "repo".to_owned(),
+                    issue_id: "ENG-123".to_owned(),
+                    name: None,
+                    branch: None,
+                },
+                "\"type\":\"create_workspace_from_linear\"",
+                "create_workspace_from_linear repository=repo issue=ENG-123",
+            ),
+            (
                 ArchcarRequest::CreateWorkspaceFromPullRequest {
                     repository: "repo".to_owned(),
                     pr_number: 7,
@@ -1727,6 +2164,639 @@ mod tests {
                 request
             );
             assert_eq!(archcar_request_summary(&request), summary);
+        }
+    }
+
+    #[test]
+    fn file_and_settings_requests_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarRequest, &str, &str)> = vec![
+            (
+                ArchcarRequest::ReadWorkspaceFile {
+                    workspace: "ws".to_owned(),
+                    path: "src/a.rs".to_owned(),
+                },
+                "\"type\":\"read_workspace_file\"",
+                "read_workspace_file workspace=ws path=src/a.rs",
+            ),
+            (
+                ArchcarRequest::WriteWorkspaceFile {
+                    workspace: "ws".to_owned(),
+                    path: "src/a.rs".to_owned(),
+                    content: "hello".to_owned(),
+                },
+                "\"type\":\"write_workspace_file\"",
+                "write_workspace_file workspace=ws path=src/a.rs bytes=5",
+            ),
+            (
+                ArchcarRequest::GetSettingsSource {
+                    repository: Some("repo".to_owned()),
+                    layer: Some("local".to_owned()),
+                },
+                "\"type\":\"get_settings_source\"",
+                "get_settings_source repository=repo layer=local",
+            ),
+            (
+                ArchcarRequest::GetSettingsSource {
+                    repository: None,
+                    layer: None,
+                },
+                "\"type\":\"get_settings_source\"",
+                "get_settings_source repository=<global> layer=<default>",
+            ),
+            (
+                ArchcarRequest::SaveSettings {
+                    repository: None,
+                    layer: None,
+                    toml: "x = 1".to_owned(),
+                },
+                "\"type\":\"save_settings\"",
+                "save_settings repository=<global> layer=<default> bytes=5",
+            ),
+        ];
+
+        for (request, type_tag, summary) in cases {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+    }
+
+    #[test]
+    fn run_script_requests_and_responses_round_trip_and_summarize() {
+        let requests: Vec<(ArchcarRequest, &str, &str)> = vec![
+            (
+                ArchcarRequest::RunWorkspaceScript {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"run_workspace_script\"",
+                "run_workspace_script workspace=ws",
+            ),
+            (
+                ArchcarRequest::StopWorkspaceScript {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"stop_workspace_script\"",
+                "stop_workspace_script workspace=ws",
+            ),
+            (
+                ArchcarRequest::GetRunLog {
+                    workspace: "ws".to_owned(),
+                },
+                "\"type\":\"get_run_log\"",
+                "get_run_log workspace=ws",
+            ),
+        ];
+        for (request, type_tag, summary) in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+
+        let responses: Vec<(ArchcarResponse, &str, &str)> = vec![
+            (
+                ArchcarResponse::RunScriptStarted {
+                    workspace: "ws".to_owned(),
+                    pid: 4321,
+                    log_path: "/tmp/run.log".to_owned(),
+                },
+                "\"type\":\"run_script_started\"",
+                "run_script_started workspace=ws pid=4321 log=/tmp/run.log",
+            ),
+            (
+                ArchcarResponse::RunScriptStopped {
+                    workspace: "ws".to_owned(),
+                    pid: 4321,
+                },
+                "\"type\":\"run_script_stopped\"",
+                "run_script_stopped workspace=ws pid=4321",
+            ),
+            (
+                ArchcarResponse::RunLog {
+                    workspace: "ws".to_owned(),
+                    log: "hello".to_owned(),
+                },
+                "\"type\":\"run_log\"",
+                "run_log workspace=ws bytes=5",
+            ),
+        ];
+        for (response, type_tag, summary) in responses {
+            let json = serde_json::to_string(&response).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                response
+            );
+            assert_eq!(archcar_response_summary(&response), summary);
+        }
+    }
+
+    #[test]
+    fn workspace_timeline_round_trips_and_summarizes() {
+        let req = ArchcarRequest::ListWorkspaceTimeline {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "list_workspace_timeline workspace=ws"
+        );
+
+        let resp = ArchcarResponse::WorkspaceTimeline {
+            workspace: "ws".to_owned(),
+            events: vec![ArchcarTimelineEvent {
+                id: 3,
+                kind: "commit.created".to_owned(),
+                summary: "Committed staged changes".to_owned(),
+                created_at: "2026-08-06T00:00:00Z".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "workspace_timeline workspace=ws count=1"
+        );
+
+        let creq = ArchcarRequest::ListWorkspaceConflicts {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&creq).unwrap()).unwrap(),
+            creq
+        );
+        assert_eq!(
+            archcar_request_summary(&creq),
+            "list_workspace_conflicts workspace=ws"
+        );
+        let cresp = ArchcarResponse::WorkspaceConflicts {
+            workspace: "ws".to_owned(),
+            conflicts: vec![ArchcarWorkspaceConflict {
+                workspace: "sibling".to_owned(),
+                files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&cresp).unwrap())
+                .unwrap(),
+            cresp
+        );
+        assert_eq!(
+            archcar_response_summary(&cresp),
+            "workspace_conflicts workspace=ws count=1"
+        );
+
+        let lreq = ArchcarRequest::ListLinkedDirectories {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&lreq).unwrap()).unwrap(),
+            lreq
+        );
+        assert_eq!(
+            archcar_request_summary(&lreq),
+            "list_linked_directories workspace=ws"
+        );
+        let lresp = ArchcarResponse::LinkedDirectories {
+            workspace: "ws".to_owned(),
+            directories: vec![ArchcarLinkedDirectory {
+                target_workspace: "sib".to_owned(),
+                link_path: ".context/linked-directories/sib".to_owned(),
+                created_at: "2026-08-06T00:00:00Z".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&lresp).unwrap())
+                .unwrap(),
+            lresp
+        );
+        assert_eq!(
+            archcar_response_summary(&lresp),
+            "linked_directories workspace=ws count=1"
+        );
+    }
+
+    #[test]
+    fn recent_commits_round_trips_and_summarizes() {
+        let req = ArchcarRequest::GetRecentCommits {
+            workspace: "ws".to_owned(),
+            limit: Some(10),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "get_recent_commits workspace=ws limit=10"
+        );
+        let req_default = ArchcarRequest::GetRecentCommits {
+            workspace: "ws".to_owned(),
+            limit: None,
+        };
+        assert_eq!(
+            archcar_request_summary(&req_default),
+            "get_recent_commits workspace=ws limit=<default>"
+        );
+
+        let resp = ArchcarResponse::RecentCommits {
+            workspace: "ws".to_owned(),
+            log: "abc123 msg".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "recent_commits workspace=ws bytes=10"
+        );
+
+        let draft_req = ArchcarRequest::GetCommitMessageDraft {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&draft_req).unwrap())
+                .unwrap(),
+            draft_req
+        );
+        assert_eq!(
+            archcar_request_summary(&draft_req),
+            "get_commit_message_draft workspace=ws"
+        );
+        let draft_resp = ArchcarResponse::CommitMessageDraft {
+            workspace: "ws".to_owned(),
+            message: "update".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&draft_resp).unwrap())
+                .unwrap(),
+            draft_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&draft_resp),
+            "commit_message_draft workspace=ws bytes=6"
+        );
+
+        let show_req = ArchcarRequest::GetCommitDiff {
+            workspace: "ws".to_owned(),
+            commit: "abc123".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&show_req).unwrap())
+                .unwrap(),
+            show_req
+        );
+        assert_eq!(
+            archcar_request_summary(&show_req),
+            "get_commit_diff workspace=ws commit=abc123"
+        );
+        let show_resp = ArchcarResponse::CommitDiff {
+            workspace: "ws".to_owned(),
+            commit: "abc123".to_owned(),
+            diff: "patch".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&show_resp).unwrap())
+                .unwrap(),
+            show_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&show_resp),
+            "commit_diff workspace=ws commit=abc123 bytes=5"
+        );
+    }
+
+    #[test]
+    fn spotlight_round_trips_and_summarizes() {
+        for (req, summary) in [
+            (
+                ArchcarRequest::GetSpotlightStatus {
+                    workspace: "ws".to_owned(),
+                },
+                "get_spotlight_status workspace=ws",
+            ),
+            (
+                ArchcarRequest::StartSpotlight {
+                    workspace: "ws".to_owned(),
+                },
+                "start_spotlight workspace=ws",
+            ),
+            (
+                ArchcarRequest::StopSpotlight {
+                    workspace: "ws".to_owned(),
+                },
+                "stop_spotlight workspace=ws",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap())
+                    .unwrap(),
+                req
+            );
+            assert_eq!(archcar_request_summary(&req), summary);
+        }
+        let resp = ArchcarResponse::SpotlightStatus {
+            workspace: "ws".to_owned(),
+            active: true,
+            status: Some("active".to_owned()),
+            started_at: Some("123".to_owned()),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "spotlight_status workspace=ws active=true"
+        );
+    }
+
+    #[test]
+    fn pull_request_readiness_round_trips_and_summarizes() {
+        let req = ArchcarRequest::GetPullRequestReadiness {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "get_pull_request_readiness workspace=ws"
+        );
+        let resp = ArchcarResponse::PullRequestReadiness {
+            workspace: "ws".to_owned(),
+            text: "ready".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "pull_request_readiness workspace=ws bytes=5"
+        );
+    }
+
+    #[test]
+    fn commit_workspace_changes_round_trips_and_summarizes() {
+        let req = ArchcarRequest::CommitWorkspaceChanges {
+            workspace: "ws".to_owned(),
+            message: "hello".to_owned(),
+            stage_all: true,
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "commit_workspace_changes workspace=ws stage_all=true bytes=5"
+        );
+
+        let resp = ArchcarResponse::WorkspaceCommitted {
+            workspace: "ws".to_owned(),
+            output: "1 file changed".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "workspace_committed workspace=ws bytes=14"
+        );
+    }
+
+    #[test]
+    fn repository_branches_round_trips_and_summarizes() {
+        let req = ArchcarRequest::ListRepositoryBranches {
+            repository: "repo".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "list_repository_branches repository=repo"
+        );
+
+        let resp = ArchcarResponse::RepositoryBranches {
+            repository: "repo".to_owned(),
+            branches: vec!["main".to_owned(), "dev".to_owned()],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "repository_branches repository=repo count=2"
+        );
+    }
+
+    #[test]
+    fn prompt_pack_list_round_trips_and_summarizes() {
+        let req = ArchcarRequest::ListPromptPacks {
+            repository: "repo".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&req).unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            archcar_request_summary(&req),
+            "list_prompt_packs repository=repo"
+        );
+
+        let set_req = ArchcarRequest::SetActivePromptPack {
+            repository: "repo".to_owned(),
+            pack: "rust".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&set_req).unwrap())
+                .unwrap(),
+            set_req
+        );
+        assert_eq!(
+            archcar_request_summary(&set_req),
+            "set_active_prompt_pack repository=repo pack=rust"
+        );
+
+        let resp = ArchcarResponse::PromptPacks {
+            repository: "repo".to_owned(),
+            packs: vec!["default".to_owned(), "rust".to_owned()],
+            active: Some("rust".to_owned()),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&resp).unwrap())
+                .unwrap(),
+            resp
+        );
+        assert_eq!(
+            archcar_response_summary(&resp),
+            "prompt_packs repository=repo count=2 active=rust"
+        );
+    }
+
+    #[test]
+    fn check_requests_and_responses_round_trip_and_summarize() {
+        let list_req = ArchcarRequest::ListWorkspaceChecks {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&list_req).unwrap())
+                .unwrap(),
+            list_req
+        );
+        assert_eq!(
+            archcar_request_summary(&list_req),
+            "list_workspace_checks workspace=ws"
+        );
+
+        let run_req = ArchcarRequest::RunWorkspaceCheck {
+            workspace: "ws".to_owned(),
+            key: "lint".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&run_req).unwrap())
+                .unwrap(),
+            run_req
+        );
+        assert_eq!(
+            archcar_request_summary(&run_req),
+            "run_workspace_check workspace=ws key=lint"
+        );
+
+        let checks_resp = ArchcarResponse::WorkspaceChecks {
+            workspace: "ws".to_owned(),
+            checks: vec![ArchcarConfiguredCheck {
+                key: "lint".to_owned(),
+                label: "Lint".to_owned(),
+                command: "npm run lint".to_owned(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&checks_resp).unwrap())
+                .unwrap(),
+            checks_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&checks_resp),
+            "workspace_checks workspace=ws count=1"
+        );
+
+        let started = ArchcarResponse::CheckStarted {
+            workspace: "ws".to_owned(),
+            key: "lint".to_owned(),
+            pid: 9,
+            log_path: "/t/c.log".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&started).unwrap())
+                .unwrap(),
+            started
+        );
+        assert_eq!(
+            archcar_response_summary(&started),
+            "check_started workspace=ws key=lint pid=9 log=/t/c.log"
+        );
+
+        let log_req = ArchcarRequest::GetCheckLog {
+            workspace: "ws".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&serde_json::to_string(&log_req).unwrap())
+                .unwrap(),
+            log_req
+        );
+        assert_eq!(
+            archcar_request_summary(&log_req),
+            "get_check_log workspace=ws"
+        );
+
+        let log_resp = ArchcarResponse::CheckLog {
+            workspace: "ws".to_owned(),
+            log: "hello".to_owned(),
+        };
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&serde_json::to_string(&log_resp).unwrap())
+                .unwrap(),
+            log_resp
+        );
+        assert_eq!(
+            archcar_response_summary(&log_resp),
+            "check_log workspace=ws bytes=5"
+        );
+    }
+
+    #[test]
+    fn file_and_settings_responses_round_trip_and_summarize() {
+        let cases: Vec<(ArchcarResponse, &str, &str)> = vec![
+            (
+                ArchcarResponse::WorkspaceFileContent {
+                    workspace: "ws".to_owned(),
+                    path: "a.rs".to_owned(),
+                    content: "hello".to_owned(),
+                },
+                "\"type\":\"workspace_file_content\"",
+                "workspace_file_content workspace=ws path=a.rs bytes=5",
+            ),
+            (
+                ArchcarResponse::WorkspaceFileWritten {
+                    workspace: "ws".to_owned(),
+                    path: "a.rs".to_owned(),
+                },
+                "\"type\":\"workspace_file_written\"",
+                "workspace_file_written workspace=ws path=a.rs",
+            ),
+            (
+                ArchcarResponse::SettingsSource {
+                    scope: "global".to_owned(),
+                    layer: "global".to_owned(),
+                    toml: "x = 1".to_owned(),
+                },
+                "\"type\":\"settings_source\"",
+                "settings_source scope=global layer=global bytes=5",
+            ),
+            (
+                ArchcarResponse::SettingsSaved {
+                    scope: "repo".to_owned(),
+                    layer: "local".to_owned(),
+                },
+                "\"type\":\"settings_saved\"",
+                "settings_saved scope=repo layer=local",
+            ),
+        ];
+
+        for (response, type_tag, summary) in cases {
+            let json = serde_json::to_string(&response).unwrap();
+            assert!(json.contains(type_tag), "missing {type_tag} in {json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                response
+            );
+            assert_eq!(archcar_response_summary(&response), summary);
         }
     }
 

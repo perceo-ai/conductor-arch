@@ -8,13 +8,39 @@ import { CHAT_PROVIDERS, MODELS, firstModel, providerForModel } from "@/lib/mode
 
 const KEY = "archductor.prefs.v1";
 
+export type ThemeMode = "dark" | "light";
+export type Accent = "amber" | "blue" | "green" | "rose";
+export type Density = "cozy" | "compact" | "comfortable";
+
+// Real hex for each accent so we can drive the global --lc-accent token, not
+// just the scoped .lc-accent-* class rules already in theme.css.
+export const ACCENT_HEX: Record<Accent, string> = {
+  amber: "#c39b50",
+  blue: "#5b8def",
+  green: "#3fb27f",
+  rose: "#e0567b",
+};
+
 export interface Prefs {
   // Provider + model a newly created chat is seeded with.
   defaultProvider: string;
   defaultModel: string;
+  // Appearance (restored from the GTK theme/accent/density controls).
+  theme: ThemeMode;
+  accent: Accent;
+  density: Density;
+  // Persisted layout state so the app restores where you left off.
+  sidebarCollapsed: boolean;
 }
 
-const DEFAULTS: Prefs = { defaultProvider: "codex", defaultModel: firstModel("codex") };
+const DEFAULTS: Prefs = {
+  defaultProvider: "codex",
+  defaultModel: firstModel("codex"),
+  theme: "dark",
+  accent: "amber",
+  density: "cozy",
+  sidebarCollapsed: false,
+};
 
 function load(): Prefs {
   try {
@@ -22,9 +48,11 @@ function load(): Prefs {
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw) as Partial<Prefs>;
     const merged = { ...DEFAULTS, ...parsed };
-    // Drop stale values if the model list changed between versions.
+    // Drop only the stale model/provider if the model list changed between
+    // versions; keep appearance prefs intact.
     if (!MODELS[merged.defaultProvider]?.includes(merged.defaultModel)) {
-      return { ...DEFAULTS };
+      merged.defaultProvider = DEFAULTS.defaultProvider;
+      merged.defaultModel = DEFAULTS.defaultModel;
     }
     return merged;
   } catch {
@@ -39,7 +67,14 @@ function persist() {
     if (typeof localStorage === "undefined") return;
     localStorage.setItem(
       KEY,
-      JSON.stringify({ defaultProvider: state.defaultProvider, defaultModel: state.defaultModel }),
+      JSON.stringify({
+        defaultProvider: state.defaultProvider,
+        defaultModel: state.defaultModel,
+        theme: state.theme,
+        accent: state.accent,
+        density: state.density,
+        sidebarCollapsed: state.sidebarCollapsed,
+      }),
     );
   } catch {
     // best-effort; a private-mode / quota failure just means it won't persist
@@ -53,6 +88,26 @@ export const prefsStore = {
   setDefaultModel(model: string) {
     const provider = providerForModel(model) ?? state.defaultProvider;
     setState({ defaultProvider: provider, defaultModel: model });
+    persist();
+  },
+
+  setTheme(theme: ThemeMode) {
+    setState("theme", theme);
+    persist();
+  },
+
+  setAccent(accent: Accent) {
+    setState("accent", accent);
+    persist();
+  },
+
+  setDensity(density: Density) {
+    setState("density", density);
+    persist();
+  },
+
+  setSidebarCollapsed(collapsed: boolean) {
+    setState("sidebarCollapsed", collapsed);
     persist();
   },
 

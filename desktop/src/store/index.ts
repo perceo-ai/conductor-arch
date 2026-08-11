@@ -24,6 +24,7 @@ export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
 export type { Prefs } from "./prefs";
 export { updateMetrics, metricsEnabled } from "./metrics";
+export { uiStore } from "./ui";
 
 let focusWired = false;
 let startPromise: Promise<void> | null = null;

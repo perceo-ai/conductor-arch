@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import { chatStore, threadsStore, nav, loadThread, interactionsStore, actions, prefsStore } from "@/store";
 import { MODELS, EFFORTS } from "@/lib/models";
 import { send } from "@/bridge/client";
@@ -12,9 +12,12 @@ import type {
 import { titleCaseWorkspace } from "@/lib/text";
 import { isDisplayableTimelineItem } from "@/lib/timeline";
 import { DiffView } from "./WorkspaceChanges";
-import { registerOpenFile } from "./openFileBridge";
+import ChangesTab from "./WorkspaceChanges";
+import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
 import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
+import { highlightCode, langFromPath } from "@/lib/highlight";
+import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
 
@@ -592,18 +595,271 @@ function Composer(props: {
   );
 }
 
-// File view = the file's diff. There is no read-file RPC, so Edit/Preview modes
-// are not available; the diff is the useful, backend-backed view of a file.
-function FileView(props: { workspace: string; path: string }) {
+// File view — two modes backed by real RPCs:
+//   diff : the three-section unified diff (get_workspace_diff)
+//   edit : the file's UTF-8 text (read_workspace_file), editable + savable
+//          (write_workspace_file). Binary/oversize files surface the backend
+//          error instead of an editor.
+function FileEditor(props: { workspace: string; path: string }) {
+  const [loaded] = createResource(
+    () => [props.workspace, props.path] as const,
+    async ([ws, path]) => {
+      try {
+        const res = await send({ type: "read_workspace_file", workspace: ws, path });
+        if (res.type === "workspace_file_content") return { content: res.content, error: null };
+        if (res.type === "error") return { content: "", error: res.message };
+        return { content: "", error: "Unexpected response" };
+      } catch (err) {
+        return { content: "", error: (err as Error).message };
+      }
+    },
+  );
+  const [draft, setDraft] = createSignal<string | null>(null);
+  const [status, setStatus] = createSignal("");
+  // Reset the local draft whenever a fresh file load arrives.
+  createEffect(() => {
+    const l = loaded();
+    if (l && !l.error) setDraft(l.content);
+  });
+  const dirty = () => {
+    const l = loaded();
+    return l != null && draft() != null && draft() !== l.content;
+  };
+
+  async function save() {
+    const text = draft();
+    if (text == null) return;
+    setStatus("Saving…");
+    try {
+      const res = await send({
+        type: "write_workspace_file",
+        workspace: props.workspace,
+        path: props.path,
+        content: text,
+      });
+      setStatus(res.type === "workspace_file_written" ? "Saved" : "Save failed");
+    } catch (err) {
+      setStatus(`Save failed: ${(err as Error).message}`);
+    }
+  }
+
+  // Syntax highlighting overlay: a transparent textarea sits over a highlighted
+  // <pre>. Both share identical font metrics + padding so the caret lines up;
+  // the textarea drives the scroll and mirrors it onto the highlight layer. A
+  // trailing newline keeps the last visual line height correct.
+  const lang = createMemo(() => langFromPath(props.path));
+  const highlighted = createMemo(() => {
+    const text = draft() ?? "";
+    return highlightCode(text.endsWith("\n") ? text : text + "\n", lang());
+  });
+  let highlightRef: HTMLPreElement | undefined;
+
+  function indentSelection(el: HTMLTextAreaElement, dedent: boolean) {
+    const res = applyIndent(el.value, el.selectionStart, el.selectionEnd, dedent);
+    if (res.text === el.value) return;
+    setDraft(res.text);
+    // draft() now equals res.text, so the controlled value stays; restore the
+    // selection on the next microtask once the DOM has settled.
+    queueMicrotask(() => {
+      el.selectionStart = res.selStart;
+      el.selectionEnd = res.selEnd;
+    });
+  }
+
   return (
-    <div class="ws-file-view">
-      <div class="ws-file-view-header">{props.path}</div>
-      <DiffView workspace={props.workspace} path={props.path} />
+    <Show
+      when={!loaded()?.error}
+      fallback={<div class="empty-state">{loaded()?.error}</div>}
+    >
+      <div class="ws-file-editor">
+        <div class="ws-file-editor-scroll">
+          <pre class="ws-file-editor-highlight hljs" aria-hidden="true" ref={highlightRef}>
+            <code innerHTML={highlighted()} />
+          </pre>
+          <textarea
+            class="ws-file-editor-area"
+            spellcheck={false}
+            value={draft() ?? ""}
+            onInput={(e) => {
+              setDraft(e.currentTarget.value);
+              setStatus("");
+            }}
+            onScroll={(e) => {
+              if (highlightRef) {
+                highlightRef.scrollTop = e.currentTarget.scrollTop;
+                highlightRef.scrollLeft = e.currentTarget.scrollLeft;
+              }
+            }}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+                e.preventDefault();
+                void save();
+                return;
+              }
+              if (e.key === "Tab") {
+                e.preventDefault();
+                indentSelection(e.currentTarget, e.shiftKey);
+                setStatus("");
+              }
+            }}
+          />
+        </div>
+        <div class="ws-file-editor-footer">
+          <span class="card-meta">
+            {status() || (dirty() ? "Unsaved changes" : lang() ?? "plain text")}
+          </span>
+          <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
+            Save
+          </button>
+        </div>
+      </div>
+    </Show>
+  );
+}
+
+// File-scoped review comments shown beneath the diff — conductor's "comments
+// point at changed lines" model. Lists this file's local review comments (by
+// line) and lets you add one (line optional) via add_review_comment.
+function FileComments(props: { workspace: string; path: string }) {
+  const [comments, { refetch }] = createResource(
+    () => [props.workspace, props.path] as const,
+    async ([ws, path]) => {
+      try {
+        const res = await send({ type: "list_review_comments", workspace: ws });
+        return res.type === "review_comments"
+          ? res.comments.filter((c) => c.file_path === path)
+          : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const [line, setLine] = createSignal("");
+  const [body, setBody] = createSignal("");
+  async function add() {
+    if (!body().trim()) return;
+    const lineNum = line().trim() ? Number(line().trim()) : undefined;
+    try {
+      await actions.addReviewComment({
+        workspace: props.workspace,
+        filePath: props.path,
+        lineNumber: Number.isInteger(lineNum) ? lineNum : undefined,
+        body: body().trim(),
+      });
+      setLine("");
+      setBody("");
+      await refetch();
+    } catch {
+      // non-fatal
+    }
+  }
+  return (
+    <div class="ws-file-comments">
+      <div class="detail-label">Review comments</div>
+      <For each={comments() ?? []}>
+        {(c) => (
+          <div class="ws-file-comment-row">
+            <span class="ws-file-comment-loc">{c.line_number != null ? `L${c.line_number}` : "file"}</span>
+            <span class="ws-file-comment-body">{c.body}</span>
+            <span class="ws-file-comment-status">[{c.status}]</span>
+          </div>
+        )}
+      </For>
+      <div class="action-row">
+        <input
+          class="ws-text-input"
+          style={{ "max-width": "70px" }}
+          placeholder="line"
+          value={line()}
+          onInput={(e) => setLine(e.currentTarget.value)}
+        />
+        <input
+          class="ws-text-input"
+          placeholder="Add a comment on this file…"
+          value={body()}
+          onInput={(e) => setBody(e.currentTarget.value)}
+          onKeyDown={(e) => e.key === "Enter" && void add()}
+        />
+        <button class="secondary-action" onClick={() => void add()}>Add</button>
+      </div>
     </div>
   );
 }
 
-type CenterView = { kind: "chat" } | { kind: "file"; path: string };
+function FileView(props: { workspace: string; path: string }) {
+  const [mode, setMode] = createSignal<"diff" | "edit">("diff");
+  return (
+    <div class="ws-file-view">
+      <div class="ws-file-view-header">
+        <span class="ws-file-view-path">{props.path}</span>
+        <div class="command-center-strip ws-file-view-modes">
+          <button
+            class="nav-button"
+            classList={{ "nav-button-active": mode() === "diff" }}
+            onClick={() => setMode("diff")}
+          >
+            Diff
+          </button>
+          <button
+            class="nav-button"
+            classList={{ "nav-button-active": mode() === "edit" }}
+            onClick={() => setMode("edit")}
+          >
+            Edit
+          </button>
+        </div>
+      </div>
+      <Show
+        when={mode() === "edit"}
+        fallback={
+          <>
+            <DiffView workspace={props.workspace} path={props.path} />
+            <FileComments workspace={props.workspace} path={props.path} />
+          </>
+        }
+      >
+        <FileEditor workspace={props.workspace} path={props.path} />
+      </Show>
+    </div>
+  );
+}
+
+// Commit view — a single commit's stat+patch (git show), rendered with the same
+// Diff component as file diffs.
+function CommitView(props: { workspace: string; commit: string; onClose: () => void }) {
+  const [diff] = createResource(
+    () => [props.workspace, props.commit] as const,
+    async ([ws, commit]) => {
+      try {
+        const res = await send({ type: "get_commit_diff", workspace: ws, commit });
+        return res.type === "commit_diff" ? res.diff : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+  return (
+    <div class="ws-file-view">
+      <div class="ws-file-view-header">
+        <span class="ws-file-view-path">Commit {props.commit}</span>
+        <button class="ui-button-icon" title="Close" onClick={props.onClose}>×</button>
+      </div>
+      <div class="ws-diff-view">
+        <Show when={!diff.loading} fallback={<div class="empty-state">Loading…</div>}>
+          <Show when={(diff() ?? "").trim()} fallback={<div class="empty-state">No diff</div>}>
+            <Diff text={diff()!} />
+          </Show>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+type CenterView =
+  | { kind: "chat" }
+  | { kind: "file"; path: string }
+  | { kind: "changes" }
+  | { kind: "commit"; commit: string };
 
 export default function ChatSurface(props: { workspace: string }) {
   // Only agent chats (codex/claude) belong in the tab strip. "shell" sessions
@@ -628,6 +884,11 @@ export default function ChatSurface(props: { workspace: string }) {
   onMount(() => registerOpenFile((ws, path) => {
     if (ws !== props.workspace) return;
     openFile(path);
+  }));
+  // Let the recent-commits list open a commit's diff into the center.
+  onMount(() => registerOpenCommit((ws, commit) => {
+    if (ws !== props.workspace) return;
+    setView({ kind: "commit", commit });
   }));
 
   function openFile(path: string) {
@@ -736,6 +997,14 @@ export default function ChatSurface(props: { workspace: string }) {
           <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
             +
           </button>
+          <button
+            class="ws-tab-shell ws-changes-tab-btn"
+            classList={{ "ws-tab-active": view().kind === "changes" }}
+            title="View all workspace changes"
+            onClick={() => setView({ kind: "changes" })}
+          >
+            <span class="ws-tab-label">Changes</span>
+          </button>
           <Show when={openFiles().length > 0}>
             <span class="ws-tab-sep-v" />
           </Show>
@@ -755,6 +1024,16 @@ export default function ChatSurface(props: { workspace: string }) {
         </div>
       </div>
       <Switch fallback={<div class="empty-state">Starting chat…</div>}>
+        <Match when={view().kind === "changes"}>
+          <ChangesTab workspace={props.workspace} />
+        </Match>
+        <Match when={view().kind === "commit"}>
+          <CommitView
+            workspace={props.workspace}
+            commit={(view() as { commit: string }).commit}
+            onClose={() => setView({ kind: "chat" })}
+          />
+        </Match>
         <Match when={view().kind === "file"}>
           <FileView workspace={props.workspace} path={(view() as { path: string }).path} />
         </Match>

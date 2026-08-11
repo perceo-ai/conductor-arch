@@ -7,21 +7,18 @@ import { createSignal } from "solid-js";
 
 export type AppPage = "dashboard" | "projects" | "workspace" | "history" | "settings" | "review";
 
-export type WorkspaceTab =
-  | "chats"
+export type RightPanelTab =
+  | "browse"
   | "changes"
-  | "review"
-  | "checkpoints"
   | "checks"
+  | "review"
   | "todos"
+  | "checkpoints"
   | "processes"
-  | "terminal";
-
-export type RightPanelTab = "browse" | "changes";
+  | "timeline";
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");
-const [activeWorkspaceTab, setActiveWorkspaceTab] = createSignal<WorkspaceTab>("chats");
 const [rightPanelTab, setRightPanelTab] = createSignal<RightPanelTab>("browse");
 const [selectedChatThread, setSelectedChatThread] = createSignal<number | null>(null);
 const [windowFocused, setWindowFocused] = createSignal(true);
@@ -29,7 +26,6 @@ const [windowFocused, setWindowFocused] = createSignal(true);
 interface NavEntry {
   selectedWorkspace: string | null;
   activePage: AppPage;
-  activeWorkspaceTab: WorkspaceTab;
   rightPanelTab: RightPanelTab;
 }
 
@@ -42,7 +38,6 @@ function snapshot(): NavEntry {
   return {
     selectedWorkspace: selectedWorkspace(),
     activePage: activePage(),
-    activeWorkspaceTab: activeWorkspaceTab(),
     rightPanelTab: rightPanelTab(),
   };
 }
@@ -58,14 +53,12 @@ function apply(entry: NavEntry) {
   if (entry.selectedWorkspace !== selectedWorkspace()) setSelectedChatThread(null);
   setSelectedWorkspaceRaw(entry.selectedWorkspace);
   setActivePage(entry.activePage);
-  setActiveWorkspaceTab(entry.activeWorkspaceTab);
   setRightPanelTab(entry.rightPanelTab);
 }
 
 export const nav = {
   selectedWorkspace,
   activePage,
-  activeWorkspaceTab,
   rightPanelTab,
   selectedChatThread,
   windowFocused,
@@ -76,12 +69,11 @@ export const nav = {
   setRightPanelTab,
 
   /** Select a workspace and switch to its page (clears per-workspace selections). */
-  selectWorkspace(name: string | null, defaultTab?: WorkspaceTab) {
+  selectWorkspace(name: string | null) {
     if (selectedWorkspace() === name && activePage() === "workspace") return;
     pushHistory();
     if (selectedWorkspace() !== name) {
       setSelectedChatThread(null);
-      if (defaultTab) setActiveWorkspaceTab(defaultTab);
     }
     setSelectedWorkspaceRaw(name);
     setActivePage("workspace");
@@ -91,13 +83,6 @@ export const nav = {
     if (activePage() === page) return;
     pushHistory();
     setActivePage(page);
-  },
-
-  selectWorkspaceTab(tab: WorkspaceTab) {
-    if (activePage() === "workspace" && activeWorkspaceTab() === tab) return;
-    pushHistory();
-    setActivePage("workspace");
-    setActiveWorkspaceTab(tab);
   },
 
   selectChatThread(threadId: number | null) {

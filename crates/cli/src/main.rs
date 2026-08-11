@@ -254,6 +254,98 @@ enum ArchcarCommand {
     WorkspaceFiles {
         workspace: String,
     },
+    /// Start the workspace's configured run script.
+    RunScript {
+        workspace: String,
+    },
+    /// Stop the workspace's running run process.
+    StopScript {
+        workspace: String,
+    },
+    /// Print the latest run-script log for a workspace.
+    RunLog {
+        workspace: String,
+    },
+    /// Print a workspace's timeline events.
+    Timeline {
+        workspace: String,
+    },
+    /// Print sibling workspaces that conflict with this one.
+    Conflicts {
+        workspace: String,
+    },
+    /// Print directories linked into a workspace.
+    LinkedDirs {
+        workspace: String,
+    },
+    /// Print recent commits for a workspace.
+    Commits {
+        workspace: String,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Print a heuristic draft commit message for a workspace.
+    CommitDraft {
+        workspace: String,
+    },
+    /// Show a single commit's stat + patch for a workspace.
+    CommitDiff {
+        workspace: String,
+        commit: String,
+    },
+    /// List a workspace's configured check commands.
+    CheckList {
+        workspace: String,
+    },
+    /// Run one configured check (by key) for a workspace.
+    RunCheck {
+        workspace: String,
+        key: String,
+    },
+    /// Print the latest check-process log for a workspace.
+    CheckLog {
+        workspace: String,
+    },
+    /// Commit a workspace's changes (optionally staging all first).
+    Commit {
+        workspace: String,
+        message: String,
+        #[arg(long)]
+        stage_all: bool,
+    },
+    /// Create a workspace from a Linear issue (needs LINEAR_API_KEY).
+    CreateFromLinear {
+        repository: String,
+        issue: String,
+    },
+    /// Print GitHub PR readiness detail (gh pr view) for a workspace.
+    PrReadiness {
+        workspace: String,
+    },
+    /// Show spotlight-testing status for a workspace.
+    SpotlightStatus {
+        workspace: String,
+    },
+    /// Start spotlight testing for a workspace.
+    SpotlightStart {
+        workspace: String,
+    },
+    /// Stop spotlight testing for a workspace.
+    SpotlightStop {
+        workspace: String,
+    },
+    /// Read a UTF-8 text file from a workspace checkout.
+    ReadFile {
+        workspace: String,
+        path: String,
+    },
+    /// Overwrite a text file in a workspace checkout with stdin content.
+    WriteFile {
+        workspace: String,
+        path: String,
+        /// Inline content (if omitted, read from stdin).
+        content: Option<String>,
+    },
     /// List changed-file summaries for a workspace.
     WorkspaceChanges {
         workspace: String,
@@ -305,6 +397,35 @@ enum ArchcarCommand {
     Settings {
         #[arg(long)]
         repository: Option<String>,
+    },
+    /// Read one settings layer's raw editable source TOML.
+    SettingsSource {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+    },
+    /// List a repository's local branches.
+    Branches {
+        repository: String,
+    },
+    /// List a repository's available prompt packs and the active one.
+    PromptPacks {
+        repository: String,
+    },
+    /// Set a repository's active prompt pack.
+    SetPromptPack {
+        repository: String,
+        pack: String,
+    },
+    /// Overwrite one settings layer's source TOML from stdin (or --content).
+    SaveSettings {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long)]
+        content: Option<String>,
     },
     /// Create a new chat thread in a workspace.
     CreateChat {
@@ -983,6 +1104,129 @@ fn main() -> Result<()> {
                         client.send(ArchcarRequest::ListWorkspaceFiles { workspace })?,
                     );
                 }
+                ArchcarCommand::RunScript { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::RunWorkspaceScript { workspace })?,
+                    );
+                }
+                ArchcarCommand::StopScript { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::StopWorkspaceScript { workspace })?,
+                    );
+                }
+                ArchcarCommand::RunLog { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetRunLog { workspace })?);
+                }
+                ArchcarCommand::Timeline { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceTimeline { workspace })?,
+                    );
+                }
+                ArchcarCommand::Conflicts { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceConflicts { workspace })?,
+                    );
+                }
+                ArchcarCommand::LinkedDirs { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListLinkedDirectories { workspace })?,
+                    );
+                }
+                ArchcarCommand::Commits { workspace, limit } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetRecentCommits { workspace, limit })?,
+                    );
+                }
+                ArchcarCommand::CommitDraft { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetCommitMessageDraft { workspace })?,
+                    );
+                }
+                ArchcarCommand::CommitDiff { workspace, commit } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetCommitDiff { workspace, commit })?,
+                    );
+                }
+                ArchcarCommand::CheckList { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkspaceChecks { workspace })?,
+                    );
+                }
+                ArchcarCommand::RunCheck { workspace, key } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::RunWorkspaceCheck { workspace, key })?,
+                    );
+                }
+                ArchcarCommand::CheckLog { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetCheckLog { workspace })?);
+                }
+                ArchcarCommand::Commit {
+                    workspace,
+                    message,
+                    stage_all,
+                } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::CommitWorkspaceChanges {
+                            workspace,
+                            message,
+                            stage_all,
+                        },
+                    )?);
+                }
+                ArchcarCommand::CreateFromLinear { repository, issue } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::CreateWorkspaceFromLinear {
+                            repository,
+                            issue_id: issue,
+                            name: None,
+                            branch: None,
+                        },
+                    )?);
+                }
+                ArchcarCommand::PrReadiness { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetPullRequestReadiness { workspace })?,
+                    );
+                }
+                ArchcarCommand::SpotlightStatus { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSpotlightStatus { workspace })?,
+                    );
+                }
+                ArchcarCommand::SpotlightStart { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::StartSpotlight { workspace })?,
+                    );
+                }
+                ArchcarCommand::SpotlightStop { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::StopSpotlight { workspace })?,
+                    );
+                }
+                ArchcarCommand::ReadFile { workspace, path } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ReadWorkspaceFile { workspace, path })?,
+                    );
+                }
+                ArchcarCommand::WriteFile {
+                    workspace,
+                    path,
+                    content,
+                } => {
+                    let content = match content {
+                        Some(c) => c,
+                        None => {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                            buf
+                        }
+                    };
+                    print_archcar_response(client.send(ArchcarRequest::WriteWorkspaceFile {
+                        workspace,
+                        path,
+                        content,
+                    })?);
+                }
                 ArchcarCommand::WorkspaceChanges { workspace, all } => {
                     let scope = if all {
                         WorkspaceChangeScope::All
@@ -1044,6 +1288,45 @@ fn main() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSettings { repository })?,
                     );
+                }
+                ArchcarCommand::SettingsSource { repository, layer } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetSettingsSource { repository, layer })?,
+                    );
+                }
+                ArchcarCommand::Branches { repository } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListRepositoryBranches { repository })?,
+                    );
+                }
+                ArchcarCommand::PromptPacks { repository } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListPromptPacks { repository })?,
+                    );
+                }
+                ArchcarCommand::SetPromptPack { repository, pack } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::SetActivePromptPack { repository, pack })?,
+                    );
+                }
+                ArchcarCommand::SaveSettings {
+                    repository,
+                    layer,
+                    content,
+                } => {
+                    let toml = match content {
+                        Some(c) => c,
+                        None => {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                            buf
+                        }
+                    };
+                    print_archcar_response(client.send(ArchcarRequest::SaveSettings {
+                        repository,
+                        layer,
+                        toml,
+                    })?);
                 }
                 ArchcarCommand::CreateChat {
                     workspace,
@@ -1995,6 +2278,22 @@ fn print_archcar_response(response: ArchcarResponse) {
                 println!("{f}");
             }
         }
+        ArchcarResponse::WorkspaceFileContent {
+            workspace,
+            path,
+            content,
+        } => {
+            println!(
+                "workspace_file_content {} {} {}",
+                workspace,
+                path,
+                content.len()
+            );
+            print!("{content}");
+        }
+        ArchcarResponse::WorkspaceFileWritten { workspace, path } => {
+            println!("workspace_file_written {workspace} {path}");
+        }
         ArchcarResponse::WorkspaceChanges {
             workspace, files, ..
         } => {
@@ -2036,6 +2335,98 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspace_processes {}", workspace);
             print!("{text}");
         }
+        ArchcarResponse::WorkspaceTimeline { workspace, events } => {
+            println!("workspace_timeline {workspace} {}", events.len());
+            for e in events {
+                println!("#{}\t{}\t{}\t{}", e.id, e.created_at, e.kind, e.summary);
+            }
+        }
+        ArchcarResponse::WorkspaceConflicts {
+            workspace,
+            conflicts,
+        } => {
+            println!("workspace_conflicts {workspace} {}", conflicts.len());
+            for c in conflicts {
+                println!("{}\t{}", c.workspace, c.files.join(","));
+            }
+        }
+        ArchcarResponse::LinkedDirectories {
+            workspace,
+            directories,
+        } => {
+            println!("linked_directories {workspace} {}", directories.len());
+            for d in directories {
+                println!("{}\t{}\t{}", d.target_workspace, d.link_path, d.created_at);
+            }
+        }
+        ArchcarResponse::RecentCommits { workspace, log } => {
+            println!("recent_commits {workspace}");
+            print!("{log}");
+        }
+        ArchcarResponse::CommitMessageDraft { workspace, message } => {
+            println!("commit_message_draft {workspace}");
+            print!("{message}");
+        }
+        ArchcarResponse::CommitDiff {
+            workspace,
+            commit,
+            diff,
+        } => {
+            println!("commit_diff {workspace} {commit}");
+            print!("{diff}");
+        }
+        ArchcarResponse::RunScriptStarted {
+            workspace,
+            pid,
+            log_path,
+        } => {
+            println!("run_script_started {workspace} pid={pid} log={log_path}");
+        }
+        ArchcarResponse::RunScriptStopped { workspace, pid } => {
+            println!("run_script_stopped {workspace} pid={pid}");
+        }
+        ArchcarResponse::RunLog { workspace, log } => {
+            println!("run_log {workspace}");
+            print!("{log}");
+        }
+        ArchcarResponse::WorkspaceChecks { workspace, checks } => {
+            println!("workspace_checks {workspace} {}", checks.len());
+            for c in checks {
+                println!("{}\t{}\t{}", c.key, c.label, c.command);
+            }
+        }
+        ArchcarResponse::CheckStarted {
+            workspace,
+            key,
+            pid,
+            log_path,
+        } => {
+            println!("check_started {workspace} key={key} pid={pid} log={log_path}");
+        }
+        ArchcarResponse::CheckLog { workspace, log } => {
+            println!("check_log {workspace}");
+            print!("{log}");
+        }
+        ArchcarResponse::WorkspaceCommitted { workspace, output } => {
+            println!("workspace_committed {workspace}");
+            print!("{output}");
+        }
+        ArchcarResponse::PullRequestReadiness { workspace, text } => {
+            println!("pull_request_readiness {workspace}");
+            print!("{text}");
+        }
+        ArchcarResponse::SpotlightStatus {
+            workspace,
+            active,
+            status,
+            started_at,
+        } => {
+            println!(
+                "spotlight_status {workspace} active={active} status={} started_at={}",
+                status.as_deref().unwrap_or("-"),
+                started_at.as_deref().unwrap_or("-")
+            );
+        }
         ArchcarResponse::ReviewComments {
             workspace,
             comments,
@@ -2049,6 +2440,36 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::RepositoryBranches {
+            repository,
+            branches,
+        } => {
+            println!("repository_branches {repository} {}", branches.len());
+            for b in branches {
+                println!("{b}");
+            }
+        }
+        ArchcarResponse::PromptPacks {
+            repository,
+            packs,
+            active,
+        } => {
+            println!(
+                "prompt_packs {repository} {} active={}",
+                packs.len(),
+                active.as_deref().unwrap_or("<none>")
+            );
+            for p in packs {
+                println!("{p}");
+            }
+        }
+        ArchcarResponse::SettingsSource { scope, layer, toml } => {
+            println!("settings_source {scope} {layer}");
+            print!("{toml}");
+        }
+        ArchcarResponse::SettingsSaved { scope, layer } => {
+            println!("settings_saved {scope} {layer}");
         }
         ArchcarResponse::SetupReadiness { report } => {
             println!(

@@ -4,6 +4,7 @@ import {
   selectFolder,
   listGithubRepos,
   listGithubWork,
+  send,
   type GithubRepo,
   type GithubWorkItem,
 } from "@/bridge/client";
@@ -237,11 +238,28 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
   // (linux/distro codenames) in core; the Prompt flow lets the agent rename via
   // <archductor_metadata> on the first message, the Github flow uses the
   // {prefix}/gh-{issue|pr}-{n} branch scheme.
-  type Source = "prompt" | "github";
+  type Source = "prompt" | "branch" | "github" | "linear";
   const [source, setSource] = createSignal<Source>("prompt");
+  const [linearIssue, setLinearIssue] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selected, setSelected] = createSignal<GithubWorkItem | null>(null);
   const [filter, setFilter] = createSignal("");
+  // Branch/base source (restores the GTK "create from branch/base" flow).
+  const [wsName, setWsName] = createSignal("");
+  const [wsBranch, setWsBranch] = createSignal("");
+  const [wsBase, setWsBase] = createSignal("");
+  // Available base branches, loaded when the Branch tab is opened.
+  const [baseBranches] = createResource(
+    () => (source() === "branch" ? props.repository : undefined),
+    async (repository): Promise<string[]> => {
+      try {
+        const res = await send({ type: "list_repository_branches", repository });
+        return res.type === "repository_branches" ? res.branches : [];
+      } catch {
+        return [];
+      }
+    },
+  );
 
   const rootPath = () => repositoriesStore.row(props.repository)?.rootPath ?? "";
 
@@ -267,6 +285,17 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     if (source() === "prompt") {
       // Prompt is optional — empty just creates an empty workspace.
       await actions.createWorkspaceFromPromptMessage({ repository, prompt: prompt().trim() });
+    } else if (source() === "branch") {
+      await actions.createWorkspace({
+        repository,
+        name: wsName().trim(),
+        branch: wsBranch().trim(),
+        baseRef: wsBase().trim() || undefined,
+      });
+    } else if (source() === "linear") {
+      const issue = linearIssue().trim();
+      if (!issue) throw new Error("Enter a Linear issue ID (e.g. ENG-123)");
+      await actions.createWorkspaceFromLinear({ repository, issueId: issue });
     } else {
       const item = selected();
       if (!item) throw new Error("Select an issue or pull request");
@@ -280,7 +309,9 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
 
   const sources: { key: Source; label: string }[] = [
     { key: "prompt", label: "Prompt" },
+    { key: "branch", label: "Branch" },
     { key: "github", label: "Github" },
+    { key: "linear", label: "Linear" },
   ];
 
   return (
@@ -305,6 +336,29 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
               placeholder="Describe the task… (optional — sent as the first message)"
             /></label>
           <span class="dialog-hint">Optional. Workspace + branch are named automatically; a prompt is sent as the first message and the agent renames from its reply.</span>
+        </Match>
+        <Match when={source() === "branch"}>
+          <label class="dialog-field"><span>Workspace name</span>
+            <input value={wsName()} onInput={(e) => setWsName(e.currentTarget.value)} placeholder="e.g. auth-refactor" /></label>
+          <label class="dialog-field"><span>Branch name</span>
+            <input value={wsBranch()} onInput={(e) => setWsBranch(e.currentTarget.value)} placeholder="e.g. lc/auth-refactor" /></label>
+          <label class="dialog-field"><span>Base branch</span>
+            <input
+              value={wsBase()}
+              onInput={(e) => setWsBase(e.currentTarget.value)}
+              list="create-ws-base-branches"
+              placeholder="Optional — defaults to the repo default branch"
+            />
+            <datalist id="create-ws-base-branches">
+              <For each={baseBranches() ?? []}>{(b) => <option value={b} />}</For>
+            </datalist>
+          </label>
+          <span class="dialog-hint">Creates a workspace on a new branch off the base. Leave name/branch blank to auto-generate.</span>
+        </Match>
+        <Match when={source() === "linear"}>
+          <label class="dialog-field"><span>Linear issue ID</span>
+            <input value={linearIssue()} onInput={(e) => setLinearIssue(e.currentTarget.value)} placeholder="e.g. ENG-123" /></label>
+          <span class="dialog-hint">Creates a workspace from a Linear issue. Requires LINEAR_API_KEY in the daemon's environment.</span>
         </Match>
         <Match when={source() === "github"}>
           <div class="dialog-field">
@@ -375,7 +429,13 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
       <div class="dialog-actions">
         <button class="ui-button" onClick={props.onDone}>Cancel</button>
         <button class="ui-button-primary" disabled={busy()} onClick={() => submit()}>
-          {busy() ? "Creating…" : source() === "prompt" ? "Start workspace" : "Create from selection"}
+          {busy()
+            ? "Creating…"
+            : source() === "prompt"
+              ? "Start workspace"
+              : source() === "branch" || source() === "linear"
+                ? "Create workspace"
+                : "Create from selection"}
         </button>
       </div>
     </div>
@@ -389,6 +449,17 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
   const [branch, setBranch] = createSignal("");
   const [target, setTarget] = createSignal("");
   const [provider, setProvider] = createSignal("");
+  const [links, { refetch: refetchLinks }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<{ target_workspace: string; link_path: string }[]> => {
+      try {
+        const res = await send({ type: "list_linked_directories", workspace: ws });
+        return res.type === "linked_directories" ? res.directories : [];
+      } catch {
+        return [];
+      }
+    },
+  );
   // The lifecycle actions here don't close the dialog on their own; the caller
   // stays open so several tweaks can be chained. Rename/delete change selection.
   const { busy, error, submit } = useSubmit<() => Promise<unknown>>((run) => run(), () => {});
@@ -423,9 +494,21 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
       <label class="dialog-field"><span>Link directory from workspace</span>
         <input value={target()} onInput={(e) => setTarget(e.currentTarget.value)} placeholder="target workspace name" /></label>
       <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()))}>Link</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()))}>Unlink</button>
+        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Link</button>
+        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Unlink</button>
       </div>
+      <Show when={(links() ?? []).length > 0}>
+        <div class="dialog-linked-list">
+          <For each={links()}>
+            {(d) => (
+              <div class="dialog-linked-row">
+                <span class="dialog-linked-target">{d.target_workspace}</span>
+                <span class="dialog-linked-path">{d.link_path}</span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <label class="dialog-field"><span>Default agent provider</span>
         <input value={provider()} onInput={(e) => setProvider(e.currentTarget.value)} placeholder="codex | claude | cursor" /></label>

@@ -1,18 +1,24 @@
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, createEffect, createResource, createSignal } from "solid-js";
 import { repositoriesStore, prefsStore } from "@/store";
+import { ACCENT_HEX } from "@/store/prefs";
 import { send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
 
-// Settings page — read-only view of the effective settings (global app layer or
-// a repository's merged layers), rendered as TOML. A structured editor
-// (save_settings + per-field controls) is future work; this de-placeholders the
-// page with the real, authoritative config.
+// Settings page — two panes per scope:
+//   Effective : the merged, read-only config (get_settings) for reference.
+//   Source    : the raw editable TOML for one layer (get_settings_source),
+//               saved back through save_settings (validated server-side).
+// Global scope edits the app-shared layer; a repository scope edits either its
+// committed ("repository") or "local" override layer.
+
+type Layer = "repository" | "local";
 
 export function SettingsPage() {
   // undefined scope = global; otherwise a repository name.
   const [repo, setRepo] = createSignal<string | undefined>(undefined);
+  const [layer, setLayer] = createSignal<Layer>("repository");
 
-  const [settings] = createResource(
+  const [effective, { refetch: refetchEffective }] = createResource(
     () => repo() ?? "\0global",
     async (): Promise<string> => {
       try {
@@ -24,12 +30,93 @@ export function SettingsPage() {
     },
   );
 
+  const [source, { refetch: refetchSource }] = createResource(
+    () => [repo() ?? "\0global", repo() ? layer() : "global"] as const,
+    async (): Promise<string> => {
+      try {
+        const res = await send({
+          type: "get_settings_source",
+          repository: repo(),
+          layer: repo() ? layer() : undefined,
+        });
+        return res.type === "settings_source" ? res.toml : "";
+      } catch (err) {
+        return `# failed to load source: ${(err as Error).message}`;
+      }
+    },
+  );
+
+  // Available prompt packs for the selected repository (read-only discovery;
+  // switch by editing `[prompt_pack] active` in the source editor below).
+  const [promptPacks, { refetch: refetchPacks, mutate: mutatePacks }] = createResource(
+    () => repo(),
+    async (repository): Promise<{ packs: string[]; active?: string }> => {
+      try {
+        const res = await send({ type: "list_prompt_packs", repository });
+        return res.type === "prompt_packs" ? { packs: res.packs, active: res.active } : { packs: [] };
+      } catch {
+        return { packs: [] };
+      }
+    },
+  );
+  async function switchPack(pack: string) {
+    const repository = repo();
+    if (!repository) return;
+    try {
+      const res = await send({ type: "set_active_prompt_pack", repository, pack });
+      if (res.type === "prompt_packs") {
+        mutatePacks({ packs: res.packs, active: res.active });
+        await refetchEffective();
+      } else {
+        await refetchPacks();
+      }
+    } catch {
+      await refetchPacks();
+    }
+  }
+
+  const [draft, setDraft] = createSignal<string | null>(null);
+  const [status, setStatus] = createSignal("");
+  // Reset the editor draft whenever a fresh source load arrives.
+  createEffect(() => {
+    const s = source();
+    if (s != null) {
+      setDraft(s);
+      setStatus("");
+    }
+  });
+  const dirty = () => draft() != null && draft() !== source();
+
+  async function save() {
+    const toml = draft();
+    if (toml == null) return;
+    setStatus("Saving…");
+    try {
+      const res = await send({
+        type: "save_settings",
+        repository: repo(),
+        layer: repo() ? layer() : undefined,
+        toml,
+      });
+      if (res.type === "settings_saved") {
+        setStatus("Saved");
+        await Promise.all([refetchSource(), refetchEffective()]);
+      } else if (res.type === "error") {
+        setStatus(`Save failed: ${res.message}`);
+      } else {
+        setStatus("Save failed");
+      }
+    } catch (err) {
+      setStatus(`Save failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
     <div class="page-shell">
       <div class="page-header dashboard-header">
         <div class="dashboard-title">Settings</div>
         <div class="dashboard-subtitle">
-          Effective configuration (read-only). Editing is coming soon.
+          Edit a layer's source below; the effective column shows the merged result.
         </div>
         <div class="settings-field">
           <div class="settings-field-title">Default model for new chats</div>
@@ -49,6 +136,58 @@ export function SettingsPage() {
               )}
             </For>
           </select>
+        </div>
+        <div class="settings-appearance">
+          <div class="settings-appearance-group">
+            <span class="settings-field-title">Theme</span>
+            <div class="command-center-strip">
+              <For each={["dark", "light"] as const}>
+                {(t) => (
+                  <button
+                    class="nav-button"
+                    classList={{ "nav-button-active": prefsStore.state.theme === t }}
+                    onClick={() => prefsStore.setTheme(t)}
+                  >
+                    {t === "dark" ? "Dark" : "Light"}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <div class="settings-appearance-group">
+            <span class="settings-field-title">Accent</span>
+            <div class="command-center-strip">
+              <For each={["amber", "blue", "green", "rose"] as const}>
+                {(a) => (
+                  <button
+                    class="nav-button settings-accent-swatch"
+                    classList={{ "nav-button-active": prefsStore.state.accent === a }}
+                    style={{ "--swatch": ACCENT_HEX[a] }}
+                    onClick={() => prefsStore.setAccent(a)}
+                  >
+                    <span class="settings-accent-dot" />
+                    {a[0].toUpperCase() + a.slice(1)}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <div class="settings-appearance-group">
+            <span class="settings-field-title">Density</span>
+            <div class="command-center-strip">
+              <For each={["compact", "cozy", "comfortable"] as const}>
+                {(d) => (
+                  <button
+                    class="nav-button"
+                    classList={{ "nav-button-active": prefsStore.state.density === d }}
+                    onClick={() => prefsStore.setDensity(d)}
+                  >
+                    {d[0].toUpperCase() + d.slice(1)}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
         </div>
         <div class="project-tabs">
           <button
@@ -70,11 +209,86 @@ export function SettingsPage() {
             )}
           </For>
         </div>
-      </div>
-      <div class="ws-diff-view">
-        <Show when={!settings.loading} fallback={<div class="empty-state">Loading…</div>}>
-          <pre class="ws-diff-text">{settings()}</pre>
+        <Show when={repo() !== undefined && (promptPacks()?.packs.length ?? 0) > 0}>
+          <div class="settings-prompt-packs">
+            <span class="settings-field-title">Prompt packs</span>
+            <div class="settings-pack-chips">
+              <For each={promptPacks()?.packs ?? []}>
+                {(pack) => (
+                  <button
+                    class="settings-pack-chip"
+                    classList={{ "settings-pack-chip-active": promptPacks()?.active === pack }}
+                    disabled={promptPacks()?.active === pack}
+                    title={
+                      promptPacks()?.active === pack ? "Active pack" : `Switch to ${pack}`
+                    }
+                    onClick={() => void switchPack(pack)}
+                  >
+                    {pack}
+                    <Show when={promptPacks()?.active === pack}> ✓</Show>
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
         </Show>
+        <Show when={repo() !== undefined}>
+          <div class="command-center-strip settings-layer-strip">
+            <button
+              class="nav-button"
+              classList={{ "nav-button-active": layer() === "repository" }}
+              onClick={() => setLayer("repository")}
+            >
+              Repository
+            </button>
+            <button
+              class="nav-button"
+              classList={{ "nav-button-active": layer() === "local" }}
+              onClick={() => setLayer("local")}
+            >
+              Local
+            </button>
+          </div>
+        </Show>
+      </div>
+
+      <div class="settings-split">
+        <div class="settings-pane">
+          <div class="settings-pane-head">
+            <span class="section-title">
+              Source — {repo() === undefined ? "app shared" : layer()}
+            </span>
+            <span class="card-meta">{status() || (dirty() ? "Unsaved changes" : "")}</span>
+            <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
+              Save
+            </button>
+          </div>
+          <textarea
+            class="settings-source-area"
+            spellcheck={false}
+            value={draft() ?? ""}
+            onInput={(e) => {
+              setDraft(e.currentTarget.value);
+              setStatus("");
+            }}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+                e.preventDefault();
+                void save();
+              }
+            }}
+          />
+        </div>
+        <div class="settings-pane">
+          <div class="settings-pane-head">
+            <span class="section-title">Effective (read-only)</span>
+          </div>
+          <div class="ws-diff-view">
+            <Show when={!effective.loading} fallback={<div class="empty-state">Loading…</div>}>
+              <pre class="ws-diff-text">{effective()}</pre>
+            </Show>
+          </div>
+        </div>
       </div>
     </div>
   );

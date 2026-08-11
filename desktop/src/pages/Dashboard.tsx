@@ -1,7 +1,8 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
-import { nav, workspacesStore, repositoriesStore } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
 import type { WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
+import { workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
 
 // Kanban dashboard — port of crates/gtk-app/src/dashboard.rs. Workspaces bucket
 // into Ready/Running/Review/Archived columns, filterable by project tab.
@@ -58,7 +59,10 @@ function DashboardCard(props: { row: WorkspaceRow }) {
       title={`Open workspace ${props.row.name}`}
       onClick={() => nav.selectWorkspace(props.row.name)}
     >
-      <div class="workspace-card shell-card">
+      <div
+        class="workspace-card shell-card"
+        style={{ "border-left-color": STATUS_COLOR[workspaceStatusKind(props.row)] }}
+      >
         <div class="dashboard-card-top">
           <span class="card-branch">{props.row.branch}</span>
           <span class={diffHot() ? "card-diff-hot" : "card-diff"}>
@@ -69,7 +73,11 @@ function DashboardCard(props: { row: WorkspaceRow }) {
         <div class="card-meta">{meta()}</div>
         <div class="dashboard-card-footer">
           <span class="card-activity">{activity()}</span>
-          <span class="card-meta">{props.row.openTodos} todos</span>
+          <Show when={props.row.openTodos > 0}>
+            <span class="card-meta">
+              {props.row.openTodos} {props.row.openTodos === 1 ? "todo" : "todos"}
+            </span>
+          </Show>
         </div>
       </div>
     </button>
@@ -141,13 +149,34 @@ export function DashboardPage() {
           </For>
         </div>
       </div>
-      <div class="kanban-board page-board">
-        <For each={COLUMNS}>
-          {(col) => (
-            <KanbanColumn title={col.title} empty={col.empty} cards={byBucket()[col.bucket]} />
-          )}
-        </For>
-      </div>
+      <Show
+        when={projectNames().length > 0}
+        fallback={
+          <div class="dashboard-onboarding">
+            <div class="onboarding-card">
+              <div class="onboarding-title">No projects yet</div>
+              <div class="onboarding-copy">
+                Add a local repository or clone one to create your first workspace and
+                start running agents.
+              </div>
+              <button
+                class="suggested-action onboarding-cta"
+                onClick={() => dialogs.open({ kind: "add-project" })}
+              >
+                Add your first project
+              </button>
+            </div>
+          </div>
+        }
+      >
+        <div class="kanban-board page-board">
+          <For each={COLUMNS}>
+            {(col) => (
+              <KanbanColumn title={col.title} empty={col.empty} cards={byBucket()[col.bucket]} />
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   );
 }

@@ -741,6 +741,43 @@ pub fn save_local_default_agent_provider(repo_path: &Path, provider: &str) -> Re
     atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
+/// Set the active prompt pack in the repository-committed settings, editing the
+/// `[prompt_pack]` table in the raw TOML directly so other fields are preserved
+/// (no full RepositorySettings round-trip). The pack file is expected under
+/// `.archductor/prompt-packs/<pack>.toml`.
+pub fn set_active_prompt_pack(repo_path: &Path, pack: &str) -> Result<()> {
+    anyhow::ensure!(
+        !pack.trim().is_empty() && !pack.contains('\0'),
+        "prompt pack name must not be empty or contain NUL bytes"
+    );
+    let (conductor_dir, _) = ensure_settings_dir(repo_path)?;
+    let path = conductor_dir.join("settings.toml");
+    reject_symlink_file(&path)?;
+    let mut value = match fs::read_to_string(&path) {
+        Ok(contents) if contents.trim().is_empty() => toml::Value::Table(toml::map::Map::new()),
+        Ok(contents) => toml::from_str::<toml::Value>(&contents)
+            .with_context(|| format!("parse {}", path.display()))?,
+        Err(err) if err.kind() == ErrorKind::NotFound => toml::Value::Table(toml::map::Map::new()),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let table = value
+        .as_table_mut()
+        .context("repository settings root is not a TOML table")?;
+    let pp = table
+        .entry("prompt_pack".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let pp_table = pp
+        .as_table_mut()
+        .context("prompt_pack is not a TOML table")?;
+    pp_table.insert("active".to_owned(), toml::Value::String(pack.to_owned()));
+    pp_table.insert(
+        "path".to_owned(),
+        toml::Value::String(format!(".archductor/prompt-packs/{pack}.toml")),
+    );
+    let contents = toml::to_string_pretty(&value).context("serialize repository settings")?;
+    atomic_write_no_symlink(&path, contents.as_bytes())
+}
+
 pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Result<String> {
     let raw = RawRepositorySettings {
         customization: Some(RawCustomizationSettings::from_settings(settings)),
@@ -845,6 +882,29 @@ pub fn default_repository_settings_toml() -> Result<String> {
         ..RepositorySettings::default()
     };
     repository_settings_to_toml(&settings)
+}
+
+/// List the prompt-pack names available for a repository — the `.toml` file
+/// stems under `.archductor/prompt-packs/`, sorted, so a UI can show which packs
+/// exist. Returns an empty list when the directory is absent.
+pub fn list_prompt_pack_names(repo_path: &Path) -> Result<Vec<String>> {
+    let dir = repo_path.join(".archductor/prompt-packs");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 pub fn default_prompt_pack_toml() -> Result<String> {

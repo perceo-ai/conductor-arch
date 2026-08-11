@@ -46,6 +46,8 @@ export type ArchcarRequest =
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
   | { type: "list_workspace_files"; workspace: string }
+  | { type: "read_workspace_file"; workspace: string; path: string }
+  | { type: "write_workspace_file"; workspace: string; path: string; content: string }
   | { type: "get_workspace_changes"; workspace: string; scope: WorkspaceChangeScope }
   | { type: "get_workspace_diff"; workspace: string; path?: string }
   | { type: "list_todos"; workspace: string }
@@ -54,10 +56,32 @@ export type ArchcarRequest =
   | { type: "create_checkpoint"; workspace: string; message: string }
   | { type: "restore_checkpoint"; workspace: string; checkpoint_id: number }
   | { type: "get_workspace_processes"; workspace: string }
+  | { type: "list_workspace_timeline"; workspace: string }
+  | { type: "list_workspace_conflicts"; workspace: string }
+  | { type: "list_linked_directories"; workspace: string }
+  | { type: "get_recent_commits"; workspace: string; limit?: number }
+  | { type: "get_commit_message_draft"; workspace: string }
+  | { type: "get_commit_diff"; workspace: string; commit: string }
+  | { type: "run_workspace_script"; workspace: string }
+  | { type: "stop_workspace_script"; workspace: string }
+  | { type: "get_run_log"; workspace: string }
+  | { type: "list_workspace_checks"; workspace: string }
+  | { type: "run_workspace_check"; workspace: string; key: string }
+  | { type: "get_check_log"; workspace: string }
+  | { type: "commit_workspace_changes"; workspace: string; message: string; stage_all?: boolean }
+  | { type: "get_pull_request_readiness"; workspace: string }
+  | { type: "get_spotlight_status"; workspace: string }
+  | { type: "start_spotlight"; workspace: string }
+  | { type: "stop_spotlight"; workspace: string }
   | { type: "get_workspace_script_prompt"; workspace: string; kind: "setup" | "run" }
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
+  | { type: "get_settings_source"; repository?: string; layer?: string }
+  | { type: "list_repository_branches"; repository: string }
+  | { type: "list_prompt_packs"; repository: string }
+  | { type: "set_active_prompt_pack"; repository: string; pack: string }
+  | { type: "save_settings"; repository?: string; layer?: string; toml: string }
   | { type: "get_setup_readiness"; recheck?: boolean }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
   | { type: "close_chat_thread"; thread_id: number }
@@ -87,6 +111,13 @@ export type ArchcarRequest =
       type: "create_workspace_from_pull_request";
       repository: string;
       pr_number: number;
+      name?: string;
+      branch?: string;
+    }
+  | {
+      type: "create_workspace_from_linear";
+      repository: string;
+      issue_id: string;
       name?: string;
       branch?: string;
     }
@@ -215,6 +246,24 @@ export interface ReviewComment {
   updated_at: string;
 }
 
+export interface ArchcarConfiguredCheck {
+  key: string;
+  label: string;
+  command: string;
+}
+
+export interface ArchcarTimelineEvent {
+  id: number;
+  kind: string;
+  summary: string;
+  created_at: string;
+}
+
+export interface ArchcarWorkspaceConflict {
+  workspace: string;
+  files: string[];
+}
+
 export interface ArchcarChecksSummary {
   workspace: string;
   changed_files: number;
@@ -304,6 +353,8 @@ export type ArchcarResponse =
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
   | { type: "workspace_files"; workspace: string; files: string[] }
+  | { type: "workspace_file_content"; workspace: string; path: string; content: string }
+  | { type: "workspace_file_written"; workspace: string; path: string }
   | {
       type: "workspace_changes";
       workspace: string;
@@ -316,10 +367,33 @@ export type ArchcarResponse =
   | { type: "checkpoints"; workspace: string; checkpoints: Checkpoint[] }
   | { type: "checkpoint_saved"; checkpoint: Checkpoint }
   | { type: "workspace_processes"; workspace: string; text: string }
+  | { type: "workspace_timeline"; workspace: string; events: ArchcarTimelineEvent[] }
+  | { type: "workspace_conflicts"; workspace: string; conflicts: ArchcarWorkspaceConflict[] }
+  | {
+      type: "linked_directories";
+      workspace: string;
+      directories: { target_workspace: string; link_path: string; created_at: string }[];
+    }
+  | { type: "recent_commits"; workspace: string; log: string }
+  | { type: "commit_message_draft"; workspace: string; message: string }
+  | { type: "commit_diff"; workspace: string; commit: string; diff: string }
+  | { type: "run_script_started"; workspace: string; pid: number; log_path: string }
+  | { type: "run_script_stopped"; workspace: string; pid: number }
+  | { type: "run_log"; workspace: string; log: string }
+  | { type: "workspace_checks"; workspace: string; checks: ArchcarConfiguredCheck[] }
+  | { type: "check_started"; workspace: string; key: string; pid: number; log_path: string }
+  | { type: "check_log"; workspace: string; log: string }
+  | { type: "workspace_committed"; workspace: string; output: string }
+  | { type: "pull_request_readiness"; workspace: string; text: string }
+  | { type: "spotlight_status"; workspace: string; active: boolean; status?: string; started_at?: string }
   | { type: "workspace_script_prompt"; workspace: string; kind: string; prompt: string }
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "repository_branches"; repository: string; branches: string[] }
+  | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }
+  | { type: "settings_source"; scope: string; layer: string; toml: string }
+  | { type: "settings_saved"; scope: string; layer: string }
   | { type: "setup_readiness"; report: SetupReport }
   | { type: "chat_thread_created"; thread: ArchcarChatThread }
   | { type: "repository_added"; name: string }
