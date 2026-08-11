@@ -110,6 +110,110 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
   ];
 }
 
+// Run a lifecycle action and surface any failure as a toast rather than
+// swallowing it — a silently-failing remove/delete is how a dead workspace ends
+// up un-removable.
+function runAction(label: string, p: Promise<unknown>): void {
+  void p.catch((err) => toastsStore.error(`${label} failed: ${(err as Error).message}`));
+}
+
+// Right-click actions for a workspace row — GTK parity (Rename / Duplicate /
+// Archive|Restore / Delete) plus Open and a "More…" escape hatch to the full
+// actions dialog (branch ops, link dir, default provider). Uses in-app dialogs
+// rather than window.prompt/confirm, which are unreliable in the Electron
+// renderer (that's why "Remove" appeared to do nothing).
+function workspaceMenuItems(name: string): ContextMenuItem[] {
+  const archived = () => workspacesStore.row(name)?.status === "archived";
+  return [
+    { label: "Open", run: () => nav.selectWorkspace(name) },
+    {
+      label: "Rename…",
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Rename ${name}`,
+          message: "Give the workspace a new name.",
+          confirmLabel: "Rename",
+          input: { label: "New name", initialValue: name },
+          onConfirm: (v) => {
+            if (v && v !== name) runAction("Rename", actions.renameWorkspace(name, v));
+          },
+        }),
+    },
+    {
+      label: "Duplicate…",
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Duplicate ${name}`,
+          message: "Create a copy of this workspace under a new name.",
+          confirmLabel: "Duplicate",
+          input: { label: "New name", initialValue: `${name}-copy` },
+          onConfirm: (v) => {
+            if (v) runAction("Duplicate", actions.duplicateWorkspace(name, v));
+          },
+        }),
+    },
+    archived()
+      ? { label: "Restore", run: () => runAction("Restore", actions.restoreWorkspace(name)) }
+      : {
+          label: "Archive",
+          run: () =>
+            dialogs.open({
+              kind: "confirm",
+              title: `Archive ${name}`,
+              message: `Archive "${name}"? It moves out of the active board but keeps its worktree.`,
+              confirmLabel: "Archive",
+              onConfirm: () => runAction("Archive", actions.archiveWorkspace(name)),
+            }),
+        },
+    {
+      label: "Delete",
+      destructive: true,
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Delete ${name}`,
+          message: `Delete "${name}"? Removes the worktree and deletes the local branch (can discard unmerged commits).`,
+          confirmLabel: "Delete",
+          destructive: true,
+          onConfirm: () => runAction("Delete", actions.deleteWorkspace(name, true, true)),
+        }),
+    },
+    { label: "More actions…", run: () => dialogs.open({ kind: "workspace-actions", workspace: name }) },
+  ];
+}
+
+// Right-click actions for a project (repository) row.
+function repoMenuItems(repo: string): ContextMenuItem[] {
+  return [
+    {
+      label: "New workspace",
+      run: () => dialogs.open({ kind: "create-workspace", repository: repo }),
+    },
+    {
+      label: "Open in editor",
+      run: () => {
+        const root = repositoriesStore.row(repo)?.rootPath;
+        if (root) runAction("Open", openExternal(root));
+      },
+    },
+    {
+      label: "Remove project",
+      destructive: true,
+      run: () =>
+        dialogs.open({
+          kind: "confirm",
+          title: `Remove ${repo}`,
+          message: `Remove project "${repo}"? Drops it (and its workspace records) from Archductor. Local files are left alone.`,
+          confirmLabel: "Remove project",
+          destructive: true,
+          onConfirm: () => runAction("Remove project", actions.removeRepository(repo)),
+        }),
+    },
+  ];
+}
+
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 520;
 
