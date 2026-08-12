@@ -253,6 +253,26 @@ export function ProcessesPanel(props: { workspace: string }) {
     }
   }
 
+  async function recoverProcesses() {
+    setFeedback("Recovering stale process state...");
+    try {
+      const res = await send({ type: "recover_workspace_lifecycle_jobs" });
+      if (res.type === "workspace_lifecycle_recovery") {
+        const total = res.recovered + res.reconciled_processes;
+        setFeedback(
+          total === 0
+            ? "No stale processes found."
+            : `Recovered ${res.recovered} lifecycle job${res.recovered === 1 ? "" : "s"} and reconciled ${res.reconciled_processes} stale process record${res.reconciled_processes === 1 ? "" : "s"}.`,
+        );
+        await Promise.all([refetch(), refetchLog()]);
+      } else if (res.type === "error") {
+        setFeedback(res.message);
+      }
+    } catch (err) {
+      setFeedback(`Recovery failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Runtime</div>
@@ -265,6 +285,9 @@ export function ProcessesPanel(props: { workspace: string }) {
         </button>
         <button class="secondary-action" onClick={() => void refetchLog()}>
           Refresh log
+        </button>
+        <button class="secondary-action" onClick={() => void recoverProcesses()}>
+          Recover stale processes
         </button>
       </div>
       <div class="action-row">
