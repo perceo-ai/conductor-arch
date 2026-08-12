@@ -191,6 +191,12 @@ pub struct RunScriptDefinition {
     pub icon: Option<String>,
 }
 
+impl RunScriptDefinition {
+    pub fn runnable_locally(&self) -> bool {
+        self.available_in.is_empty() || self.available_in.iter().any(|value| value == "local")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CustomizationSettings {
     pub naming: NamingSettings,
@@ -2018,20 +2024,18 @@ impl RawScriptSettings {
             Some(RawRunScripts::Structured(entries)) => {
                 let scripts = entries
                     .iter()
-                    .filter_map(|(id, entry)| {
-                        entry.command.as_ref().map(|command| RunScriptDefinition {
-                            id: id.clone(),
-                            command: command.clone(),
-                            available_in: entry.available_in.clone().unwrap_or_default(),
-                            default: entry.default,
-                            icon: entry.icon.clone(),
-                        })
+                    .map(|(id, entry)| RunScriptDefinition {
+                        id: id.clone(),
+                        command: entry.command.clone().unwrap_or_default(),
+                        available_in: entry.available_in.clone().unwrap_or_default(),
+                        default: entry.default,
+                        icon: entry.icon.clone(),
                     })
                     .collect::<Vec<_>>();
                 let selected = scripts
                     .iter()
-                    .find(|script| script.default)
-                    .or_else(|| scripts.first())
+                    .find(|script| script.default && script.runnable_locally())
+                    .or_else(|| scripts.iter().find(|script| script.runnable_locally()))
                     .map(|script| script.command.clone());
                 (selected, scripts)
             }
@@ -4300,6 +4304,82 @@ icon = "test-tube"
                     icon: Some("test-tube".to_owned()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn structured_run_scripts_select_local_default_for_legacy_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.deploy]
+command = "pnpm deploy"
+available_in = ["cloud"]
+default = true
+
+[scripts.run.dev]
+command = "pnpm dev"
+available_in = ["local"]
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert_eq!(settings.scripts.run.as_deref(), Some("pnpm dev"));
+        assert_eq!(settings.scripts.run_scripts.len(), 2);
+        assert!(settings.scripts.run_scripts[0].default);
+        assert!(!settings.scripts.run_scripts[0].runnable_locally());
+        assert!(settings.scripts.run_scripts[1].runnable_locally());
+    }
+
+    #[test]
+    fn structured_run_scripts_skip_cloud_only_run_for_local_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.deploy]
+command = "pnpm deploy"
+available_in = ["cloud"]
+default = true
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert_eq!(settings.scripts.run, None);
+        assert_eq!(settings.scripts.run_scripts.len(), 1);
+        assert!(!settings.scripts.run_scripts[0].runnable_locally());
+    }
+
+    #[test]
+    fn rejects_structured_run_script_missing_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.dev]
+available_in = ["local"]
+default = true
+"#,
+        )
+        .unwrap();
+
+        let err = load_repository_settings_strict(temp.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("scripts.run.dev.command must not be empty"),
+            "{err:?}"
         );
     }
 

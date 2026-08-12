@@ -2418,8 +2418,20 @@ impl WorkspaceStore {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
         let Some(run) = &settings.scripts.run else {
+            if !settings.scripts.run_scripts.is_empty() {
+                anyhow::bail!("workspace {name} has no local scripts.run configured");
+            }
             anyhow::bail!("workspace {name} has no scripts.run configured");
         };
+        if !settings.scripts.run_scripts.is_empty()
+            && !settings
+                .scripts
+                .run_scripts
+                .iter()
+                .any(|script| script.command == *run && script.runnable_locally())
+        {
+            anyhow::bail!("workspace {name} scripts.run is not available locally");
+        }
 
         let run_mode = settings.scripts.run_mode.as_deref().unwrap_or("concurrent");
         if run_mode == "nonconcurrent" {
@@ -14855,6 +14867,76 @@ CUSTOM_VALUE = "from-settings"
                 "from-settings",
             ]
         );
+    }
+
+    #[test]
+    fn run_workspace_rejects_cloud_only_structured_run_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts.run.deploy]
+command = "printf 'should-not-run' > .context/run-env"
+available_in = ["cloud"]
+default = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add cloud run script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let err = store.run_workspace("berlin").unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("workspace berlin has no local scripts.run configured"),
+            "{err:?}"
+        );
+        assert!(!workspace.path.join(".context/run-env").exists());
     }
 
     #[test]

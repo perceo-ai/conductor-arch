@@ -2427,8 +2427,7 @@ fn workspace_run_scripts(store: &WorkspaceStore, name: &str) -> Vec<ArchcarRunSc
     scripts
         .into_iter()
         .map(|script| {
-            let runnable_here = script.available_in.is_empty()
-                || script.available_in.iter().any(|value| value == "local");
+            let runnable_here = script.runnable_locally();
             ArchcarRunScript {
                 id: script.id,
                 command: script.command,
