@@ -365,6 +365,16 @@ body.resizing-col {
   flex-direction: column;
   gap: 10px;
 }
+.dashboard-heading-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.dashboard-new-workspace {
+  flex: 0 0 auto;
+}
 .project-tabs {
   display: flex;
   flex-direction: row;
@@ -422,13 +432,34 @@ body.resizing-col {
   align-items: center;
   gap: 8px;
 }
+.dashboard-card-badges {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.triage-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  max-width: 100%;
+  padding: 1px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .card-branch,
-.card-activity {
+.card-activity,
+.card-state {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.card-state {
+  flex: 0 0 auto;
 }
 .card-title {
   overflow-wrap: anywhere;
@@ -444,6 +475,17 @@ body.resizing-col {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+@media (max-width: 760px) {
+  .dashboard-heading-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dashboard-new-workspace {
+    width: 100%;
+  }
 }
 
 /* ---- Workspace command center layout ---- */
@@ -543,6 +585,8 @@ body.resizing-col {
   gap: 6px;
   cursor: pointer;
   white-space: nowrap;
+  min-width: 154px;
+  max-width: 230px;
 }
 .ws-chat-tab-dot {
   width: 8px;
@@ -553,6 +597,22 @@ body.resizing-col {
 }
 .ws-chat-tab-spinner {
   background: #6f8fbd;
+}
+.ws-chat-tab-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ws-chat-tab-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.15;
 }
 .chat-timeline-scroll {
   flex: 1 1 auto;
@@ -640,6 +700,13 @@ body.resizing-col {
   flex-direction: column;
   gap: 4px;
   padding: 6px 16px 0 16px;
+}
+.chat-queue-heading {
+  padding: 2px 4px;
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 /* ---- File browser + changes/diff ---- */

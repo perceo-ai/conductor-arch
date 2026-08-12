@@ -2,7 +2,7 @@ import { For, Show, createMemo, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
 import type { WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
-import { workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
+import { dashboardTriageBadges, workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
 
 // Kanban dashboard — port of crates/gtk-app/src/dashboard.rs. Workspaces bucket
 // into Ready/Running/Review/Archived columns, filterable by project tab.
@@ -41,14 +41,6 @@ function ProjectTab(props: { label: string; active: boolean; onClick: () => void
 }
 
 function DashboardCard(props: { row: WorkspaceRow }) {
-  const diffHot = () => props.row.changedFiles > 0;
-  const activity = () => {
-    const r = props.row;
-    if (r.runRunning) return "Running";
-    if (r.activeSessions > 0) return "Agent active";
-    if (r.status === "archived") return "Archived";
-    return "Ready";
-  };
   const meta = () =>
     props.row.prNumber != null
       ? `${props.row.repository} · PR #${props.row.prNumber}`
@@ -65,19 +57,18 @@ function DashboardCard(props: { row: WorkspaceRow }) {
       >
         <div class="dashboard-card-top">
           <span class="card-branch">{props.row.branch}</span>
-          <span class={diffHot() ? "card-diff-hot" : "card-diff"}>
-            {diffHot() ? `+${props.row.changedFiles}` : "clean"}
-          </span>
+          <span class="card-state">{props.row.status}</span>
         </div>
         <div class="card-title">{titleCaseWorkspace(props.row.name)}</div>
         <div class="card-meta">{meta()}</div>
-        <div class="dashboard-card-footer">
-          <span class="card-activity">{activity()}</span>
-          <Show when={props.row.openTodos > 0}>
-            <span class="card-meta">
-              {props.row.openTodos} {props.row.openTodos === 1 ? "todo" : "todos"}
-            </span>
-          </Show>
+        <div class="dashboard-card-badges" aria-label="Workspace triage summary">
+          <For each={dashboardTriageBadges(props.row)}>
+            {(badge) => (
+              <span class={`triage-badge triage-badge-${badge.tone}`} title={badge.title}>
+                {badge.label}
+              </span>
+            )}
+          </For>
         </div>
       </div>
     </button>
@@ -105,6 +96,7 @@ export function DashboardPage() {
   const [project, setProject] = createSignal<string | null>(null);
 
   const projectNames = createMemo(() => repositoriesStore.state.order);
+  const selectedProject = createMemo(() => project());
 
   const visibleRows = createMemo(() => {
     const sel = project();
@@ -128,9 +120,24 @@ export function DashboardPage() {
   return (
     <div class="dashboard page-shell">
       <div class="dashboard-header page-header">
-        <div class="dashboard-title">Dashboard</div>
-        <div class="dashboard-subtitle">
-          See what is ready, running, under review, or archived across your projects.
+        <div class="dashboard-heading-row">
+          <div>
+            <div class="dashboard-title">Dashboard</div>
+            <div class="dashboard-subtitle">
+              See what is ready, running, under review, or archived across your projects.
+            </div>
+          </div>
+          <Show when={selectedProject()}>
+            {(repository) => (
+              <button
+                class="suggested-action dashboard-new-workspace"
+                title={`New workspace in ${repository()}`}
+                onClick={() => dialogs.open({ kind: "create-workspace", repository: repository() })}
+              >
+                New workspace
+              </button>
+            )}
+          </Show>
         </div>
         <div class="project-tabs">
           <ProjectTab

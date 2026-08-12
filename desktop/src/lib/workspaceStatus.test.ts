@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { workspaceStatusKind, STATUS_COLOR, STATUS_LABEL } from "./workspaceStatus";
+import {
+  dashboardTriageBadges,
+  workspaceStatusKind,
+  STATUS_COLOR,
+  STATUS_LABEL,
+} from "./workspaceStatus";
 
 describe("workspaceStatusKind", () => {
   it("archived wins over everything", () => {
@@ -35,5 +40,42 @@ describe("workspaceStatusKind", () => {
       expect(STATUS_COLOR[k]).toMatch(/^#[0-9a-f]{6}$/i);
       expect(STATUS_LABEL[k]).toBeTruthy();
     }
+  });
+});
+
+describe("dashboardTriageBadges", () => {
+  it("summarizes active agents, run status, PR state, changed files, and todos", () => {
+    expect(
+      dashboardTriageBadges({
+        activeSessions: 2,
+        runRunning: true,
+        prNumber: 93,
+        prState: "open",
+        changedFiles: 4,
+        openTodos: 1,
+      }),
+    ).toEqual([
+      { tone: "agent", label: "2 agents", title: "2 active agent sessions" },
+      { tone: "run", label: "Run live", title: "Run script is running" },
+      { tone: "pr", label: "PR #93 open", title: "Pull request #93 is open" },
+      { tone: "changes", label: "4 files", title: "4 changed files" },
+      { tone: "todo", label: "1 todo", title: "1 open todo" },
+    ]);
+  });
+
+  it("keeps clean and idle workspace badges compact", () => {
+    expect(
+      dashboardTriageBadges({
+        activeSessions: 0,
+        runRunning: false,
+        changedFiles: 0,
+        openTodos: 0,
+      }),
+    ).toEqual([
+      { tone: "agent", label: "No agents", title: "No active agent sessions" },
+      { tone: "run", label: "Run idle", title: "No run script is running" },
+      { tone: "changes", label: "Clean", title: "No changed files" },
+      { tone: "todo", label: "No todos", title: "No open todos" },
+    ]);
   });
 });

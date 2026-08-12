@@ -774,12 +774,52 @@ button.ui-button-destructive:hover {
 }
 
 .card-branch,
+.card-state,
 .card-diff,
 .column-empty,
 .empty-label,
 .status-detail,
 .info-text {
     color: #8a8a8a;
+}
+.card-state,
+.triage-badge {
+    border-radius: 6px;
+    border: 1px solid #343434;
+    background-color: #202020;
+    color: #b8b8b8;
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 16px;
+}
+.card-state {
+    padding: 1px 6px;
+    text-transform: capitalize;
+}
+.triage-badge-agent {
+    border-color: #36513f;
+    background-color: #17251d;
+    color: #8fd2a6;
+}
+.triage-badge-run {
+    border-color: #345445;
+    background-color: #14271f;
+    color: #9adfbd;
+}
+.triage-badge-pr {
+    border-color: #334768;
+    background-color: #151f33;
+    color: #9bbcf4;
+}
+.triage-badge-changes {
+    border-color: #5a4a2e;
+    background-color: #2a2214;
+    color: #e2c071;
+}
+.triage-badge-todo {
+    border-color: #57445f;
+    background-color: #241a2a;
+    color: #d7a6ea;
 }
 
 .metric-value {
@@ -1775,6 +1815,37 @@ button.ui-button-destructive:hover {
     background-color: #ffffff;
     border-color: #d9e0e8;
 }
+.lc-theme-light .card-state,
+.lc-theme-light .triage-badge {
+    background-color: #f8fafc;
+    border-color: #d9e0e8;
+    color: #475467;
+}
+.lc-theme-light .triage-badge-agent {
+    background-color: #ecfdf3;
+    border-color: #b7e4c7;
+    color: #087443;
+}
+.lc-theme-light .triage-badge-run {
+    background-color: #eefbf4;
+    border-color: #b7e4c7;
+    color: #067647;
+}
+.lc-theme-light .triage-badge-pr {
+    background-color: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1d4ed8;
+}
+.lc-theme-light .triage-badge-changes {
+    background-color: #fffbeb;
+    border-color: #fde68a;
+    color: #92400e;
+}
+.lc-theme-light .triage-badge-todo {
+    background-color: #faf5ff;
+    border-color: #e9d5ff;
+    color: #7e22ce;
+}
 .lc-theme-light .dashboard-subtitle {
     color: #667085;
 }
@@ -2134,6 +2205,18 @@ button.ui-button-destructive:hover {
 }
 .lc-theme-light .ws-run-tab-btn:hover {
     background-color: #e2e8f0;
+}
+.lc-theme-light .ws-chat-tab-meta {
+    color: #64748b;
+}
+.lc-theme-light .ws-chat-tab-meta-active {
+    color: #2563eb;
+}
+.lc-theme-light .ws-chat-tab-meta-needs-input {
+    color: #b45309;
+}
+.lc-theme-light .chat-queue-heading {
+    color: #64748b;
 }
 .lc-theme-light .ws-run-prompt {
     background-color: #ffffff;
@@ -2575,6 +2658,15 @@ button.ws-tab-shell {
     color: #f0c36a;
     font-size: 18px;
     font-weight: 700;
+}
+.ws-chat-tab-meta {
+    color: #777777;
+}
+.ws-chat-tab-meta-active {
+    color: #b6c7e8;
+}
+.ws-chat-tab-meta-needs-input {
+    color: #f2bf7e;
 }
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
@@ -3594,6 +3686,9 @@ button.chat-inline-event-expander label {
     border-radius: 8px;
     background-color: rgba(18, 18, 18, 0.96);
 }
+.chat-queue-heading {
+    color: #858585;
+}
 .chat-queued-composer-row {
     padding: 5px 6px;
     border-radius: 6px;
@@ -4306,9 +4401,16 @@ textarea:focus {
 .lc-custom-colors .column-count,
 .lc-custom-colors .empty-label,
 .lc-custom-colors .card-branch,
+.lc-custom-colors .card-state,
 .lc-custom-colors .card-diff,
+.lc-custom-colors .triage-badge,
 .lc-custom-colors .workspace-row-branch-icon {
     color: var(--lc-text-muted);
+}
+.lc-custom-colors .card-state,
+.lc-custom-colors .triage-badge {
+    background-color: var(--lc-surface);
+    border-color: var(--lc-border);
 }
 
 .lc-custom-colors .dashboard-title,
