@@ -1190,6 +1190,53 @@ body.resizing-col {
 .dialog-tabs .ui-button-sm.active {
   background: var(--lc-surface-selected, #2a2a2a);
 }
+.dialog-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.dialog-source-card {
+  min-width: 0;
+  min-height: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.dialog-source-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dialog-source-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 750;
+}
+.dialog-source-state {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.dialog-source-detail {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 11px;
+  line-height: 1.35;
+}
 .dialog-field {
   display: flex;
   flex-direction: column;
@@ -1251,6 +1298,38 @@ body.resizing-col {
 .dialog-hint {
   font-size: 11px;
   color: #7a7a7a;
+}
+.dialog-preview {
+  display: grid;
+  gap: 5px;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.dialog-preview-title {
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.dialog-preview-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+.dialog-preview-label,
+.dialog-preview-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  .dialog-source-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* GitHub repo picker: bounded scroll of flush cards. */

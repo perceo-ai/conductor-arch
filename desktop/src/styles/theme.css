@@ -2379,6 +2379,49 @@ button.ui-button-destructive:hover {
     background-color: #e2e8f0;
     color: #111827;
 }
+.lc-theme-light .dialog-source-card {
+    background: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .dialog-source-card:hover {
+    background: #f8fafc;
+    border-color: #b9c6d8;
+}
+.lc-theme-light .dialog-source-active {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+.lc-theme-light .dialog-source-warning {
+    border-color: #fed7aa;
+}
+.lc-theme-light .dialog-source-detail,
+.lc-theme-light .dialog-preview-label {
+    color: #64748b;
+}
+.lc-theme-light .dialog-source-state {
+    background: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #475569;
+}
+.lc-theme-light .dialog-source-state-ready {
+    background: #ecfdf5;
+    border-color: #bbf7d0;
+    color: #047857;
+}
+.lc-theme-light .dialog-source-state-action {
+    background: #fff7ed;
+    border-color: #fed7aa;
+    color: #c2410c;
+}
+.lc-theme-light .dialog-preview {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-preview-title,
+.lc-theme-light .dialog-preview-value {
+    color: #1f2937;
+}
 .lc-theme-light .modal-body input,
 .lc-theme-light .dialog-field input,
 .lc-theme-light .dialog-field textarea {
@@ -3842,6 +3885,50 @@ button.chat-inline-event-expander label {
 .settings-page .settings-editor-shell:focus-within {
     border-color: #8a8a8a;
     box-shadow: none;
+}
+
+.dialog-source-card {
+    background: #1c1c1c;
+    border: 1px solid #2c2c2c;
+    color: #d8d8d8;
+}
+.dialog-source-card:hover {
+    background: #222222;
+    border-color: #3a3a3a;
+}
+.dialog-source-active {
+    background: #232323;
+    border-color: #5b5b5b;
+}
+.dialog-source-warning {
+    border-color: rgba(242, 191, 126, 0.34);
+}
+.dialog-source-detail,
+.dialog-preview-label {
+    color: #858585;
+}
+.dialog-source-state {
+    border: 1px solid #343434;
+    background: #202020;
+    color: #a8a8a8;
+}
+.dialog-source-state-ready {
+    border-color: #2f6b4d;
+    background: #193225;
+    color: #9be7bb;
+}
+.dialog-source-state-action {
+    border-color: #5f4526;
+    background: #2c2114;
+    color: #f2bf7e;
+}
+.dialog-preview {
+    background: #181818;
+    border: 1px solid #2a2a2a;
+}
+.dialog-preview-title,
+.dialog-preview-value {
+    color: #d8d8d8;
 }
 
 .chat-context-usage-danger {

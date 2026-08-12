@@ -307,20 +307,116 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     }
   }, props.onDone);
 
-  const sources: { key: Source; label: string }[] = [
-    { key: "prompt", label: "Prompt" },
-    { key: "branch", label: "Branch" },
-    { key: "github", label: "Github" },
-    { key: "linear", label: "Linear" },
+  const sourceMeta: Record<Source, { label: string; detail: string }> = {
+    prompt: {
+      label: "Prompt",
+      detail: "Start from a task brief and let the agent shape the workspace.",
+    },
+    branch: {
+      label: "Branch",
+      detail: "Create a named workspace from a base branch.",
+    },
+    github: {
+      label: "GitHub",
+      detail: "Start from an open issue or pull request using local gh auth.",
+    },
+    linear: {
+      label: "Linear",
+      detail: "Start from a Linear issue when LINEAR_API_KEY is available.",
+    },
+  };
+
+  const sourceState = (key: Source) => {
+    if (key === "github") {
+      if (!rootPath()) return "No project path";
+      if (work.loading) return "Loading";
+      if (work()?.ok === false) return "Needs gh";
+      return "Ready";
+    }
+    if (key === "linear") return "Needs key";
+    return "Ready";
+  };
+
+  const missingRequirement = () => {
+    if (source() === "github" && !selected()) return "Select a GitHub issue or pull request.";
+    if (source() === "linear" && !linearIssue().trim()) return "Enter a Linear issue ID.";
+    return "";
+  };
+  const canSubmit = () => !busy() && !missingRequirement();
+  const previewRows = (): [string, string][] => {
+    if (source() === "prompt") {
+      return [
+        ["Source", "Prompt"],
+        ["Workspace", "Generated automatically"],
+        ["First message", prompt().trim() ? "Prompt will be sent to the agent" : "No first message"],
+      ];
+    }
+    if (source() === "branch") {
+      return [
+        ["Source", "Branch"],
+        ["Workspace", wsName().trim() || "Generated automatically"],
+        ["Branch", wsBranch().trim() || "Generated automatically"],
+        ["Base", wsBase().trim() || "Repository default branch"],
+      ];
+    }
+    if (source() === "linear") {
+      return [
+        ["Source", "Linear"],
+        ["Issue", linearIssue().trim() || "Required"],
+        ["Auth", "Requires LINEAR_API_KEY in archcar environment"],
+      ];
+    }
+    const item = selected();
+    return [
+      ["Source", "GitHub"],
+      ["Selection", item ? `${item.kind === "pr" ? "PR" : "Issue"} #${item.number}` : "Required"],
+      ["Auth", "Uses local gh authentication"],
+    ];
+  };
+
+  const submitLabel = () =>
+    busy()
+      ? "Creating..."
+      : source() === "prompt"
+        ? "Start workspace"
+        : source() === "github"
+          ? "Create from selection"
+          : "Create workspace";
+
+  const submitTitle = () => missingRequirement() || submitLabel();
+
+  const sourceClass = (key: Source) => ({
+    "dialog-source-active": source() === key,
+    "dialog-source-warning": sourceState(key).startsWith("Needs"),
+  });
+
+  const sourceTone = (key: Source) =>
+    sourceState(key) === "Ready" ? "dialog-source-state-ready" : "dialog-source-state-action";
+
+  const sourceItems: { key: Source; label: string; detail: string }[] = [
+    { key: "prompt", ...sourceMeta.prompt },
+    { key: "branch", ...sourceMeta.branch },
+    { key: "github", ...sourceMeta.github },
+    { key: "linear", ...sourceMeta.linear },
   ];
 
   return (
     <div class="dialog-form">
-      <div class="dialog-tabs">
-        <For each={sources}>
+      <div class="dialog-source-grid">
+        <For each={sourceItems}>
           {(s) => (
-            <button class="ui-button-sm" classList={{ active: source() === s.key }} onClick={() => setSource(s.key)}>
-              {s.label}
+            <button
+              class="dialog-source-card"
+              classList={sourceClass(s.key)}
+              onClick={() => setSource(s.key)}
+            >
+              <span class="dialog-source-card-head">
+                <span class="dialog-source-label">{s.label}</span>
+                <span class={`dialog-source-state ${sourceTone(s.key)}`}>
+                  {sourceState(s.key)}
+                </span>
+              </span>
+              <span class="dialog-source-detail">{s.detail}</span>
             </button>
           )}
         </For>
@@ -425,17 +521,29 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
         </Match>
       </Switch>
 
+      <div class="dialog-preview">
+        <div class="dialog-preview-title">Workspace preview</div>
+        <For each={previewRows()}>
+          {([label, value]) => (
+            <div class="dialog-preview-row">
+              <span class="dialog-preview-label">{label}</span>
+              <span class="dialog-preview-value">{value}</span>
+            </div>
+          )}
+        </For>
+      </div>
+
       <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
+      <Show when={missingRequirement()}>{(msg) => <div class="dialog-hint">{msg()}</div>}</Show>
       <div class="dialog-actions">
         <button class="ui-button" onClick={props.onDone}>Cancel</button>
-        <button class="ui-button-primary" disabled={busy()} onClick={() => submit()}>
-          {busy()
-            ? "Creating…"
-            : source() === "prompt"
-              ? "Start workspace"
-              : source() === "branch" || source() === "linear"
-                ? "Create workspace"
-                : "Create from selection"}
+        <button
+          class="ui-button-primary"
+          disabled={!canSubmit()}
+          title={submitTitle()}
+          onClick={() => submit()}
+        >
+          {submitLabel()}
         </button>
       </div>
     </div>
