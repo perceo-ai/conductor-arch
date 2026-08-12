@@ -1,6 +1,6 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
-import { actions } from "@/store";
+import { actions, nav } from "@/store";
 import type {
   ArchcarChecksSummary,
   ArchcarConfiguredCheck,
@@ -461,39 +461,39 @@ export function ChecksPanel(props: { workspace: string }) {
       <div class="section-title">Checks</div>
       <Show when={summary()}>
         {(s) => (
-          <div
-            class="ws-readiness"
-            classList={{ "ws-readiness-blocked": blockers(s()).length > 0 }}
-          >
-            <Show
-              when={blockers(s()).length === 0}
-              fallback={<span>Blockers before merge: {blockers(s()).join(", ")}</span>}
+          <div class="ws-checks-readiness">
+            <div
+              class="ws-readiness"
+              classList={{ "ws-readiness-blocked": blockers(s()).length > 0 }}
             >
-              <span>Ready to merge ✓</span>
+              <Show
+                when={blockers(s()).length === 0}
+                fallback={<span>Blocked by: {blockers(s()).join(", ")}</span>}
+              >
+                <span>No merge blockers found</span>
+              </Show>
+            </div>
+            <Show when={blockers(s()).length > 0}>
+              <div class="ws-blocker-list">
+                <For each={blockers(s())}>
+                  {(blocker) => (
+                    <button
+                      class="ws-blocker-chip"
+                      onClick={() => {
+                        if (blocker.includes("todo")) nav.setRightPanelTab("todos");
+                        else if (blocker.includes("review")) nav.setRightPanelTab("review");
+                        else if (blocker.includes("check")) nav.setRightPanelTab("checks");
+                        else nav.setRightPanelTab("changes");
+                      }}
+                    >
+                      {blocker}
+                    </button>
+                  )}
+                </For>
+              </div>
             </Show>
           </div>
         )}
-      </Show>
-      <div class="action-row">
-        <button class="secondary-action" onClick={run("Push branch", () => actions.pushBranch(props.workspace))}>
-          Push branch
-        </button>
-        <button class="secondary-action" onClick={run("Force push", () => actions.pushBranch(props.workspace, true))}>
-          Force push
-        </button>
-        <button class="secondary-action" onClick={run("Refresh PR", () => actions.refreshPullRequest(props.workspace))}>
-          Refresh PR
-        </button>
-        <button class="suggested-action" onClick={run("Merge PR", () => actions.mergePullRequest(props.workspace))}>
-          Merge PR
-        </button>
-        <button class="secondary-action" onClick={loadPrReadiness}>
-          PR readiness
-        </button>
-      </div>
-      <Show when={prReadiness() != null}>
-        <div class="detail-label">GitHub PR readiness</div>
-        <pre class="ws-pr-readiness">{prReadiness()}</pre>
       </Show>
       <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <Show when={(checks() ?? []).length > 0}>
@@ -519,6 +519,28 @@ export function ChecksPanel(props: { workspace: string }) {
         <pre class="ws-run-prompt">
           {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
         </pre>
+      </Show>
+      <div class="detail-label">PR and branch actions</div>
+      <div class="action-row ws-pr-actions-row">
+        <button class="secondary-action" onClick={run("Refresh PR", () => actions.refreshPullRequest(props.workspace))}>
+          Refresh readiness
+        </button>
+        <button class="secondary-action" onClick={run("Push branch", () => actions.pushBranch(props.workspace))}>
+          Push branch
+        </button>
+        <button class="secondary-action" onClick={loadPrReadiness}>
+          PR readiness detail
+        </button>
+        <button class="suggested-action" onClick={run("Merge PR", () => actions.mergePullRequest(props.workspace))}>
+          Merge PR
+        </button>
+        <button class="secondary-action ws-force-push-action" onClick={run("Force push", () => actions.pushBranch(props.workspace, true))}>
+          Force push
+        </button>
+      </div>
+      <Show when={prReadiness() != null}>
+        <div class="detail-label">GitHub PR readiness</div>
+        <pre class="ws-pr-readiness">{prReadiness()}</pre>
       </Show>
       <Show when={(conflicts() ?? []).length > 0}>
         <div class="detail-label">Conflicting workspaces</div>

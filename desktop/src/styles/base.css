@@ -1525,6 +1525,30 @@ body.resizing-col {
   }
 }
 
+.ws-checks-readiness {
+  display: grid;
+  gap: 8px;
+}
+
+.ws-blocker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ws-blocker-chip {
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ws-pr-actions-row {
+  align-items: center;
+}
+
 /* ---- Right panel regions ---- */
 .ws-right-mid {
   flex: 1 1 auto;

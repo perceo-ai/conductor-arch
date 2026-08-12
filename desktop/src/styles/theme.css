@@ -2209,6 +2209,15 @@ button.ui-button-destructive:hover {
     border-color: #bbf7d0;
     color: #047857;
 }
+.lc-theme-light .ws-blocker-chip {
+    background: #fff1f2;
+    border-color: #fecdd3;
+    color: #be123c;
+}
+.lc-theme-light .ws-blocker-chip:hover {
+    background: #ffe4e6;
+    border-color: #fda4af;
+}
 .lc-theme-light .history-row .workspace-name,
 .lc-theme-light .project-workspace-row .workspace-name {
     color: #111827;
@@ -2474,6 +2483,21 @@ button.ui-button-destructive:hover {
 .nav-button-count {
     background: #343434;
     color: #d8d8d8;
+}
+.ws-blocker-chip {
+    background: rgba(255, 138, 138, 0.09);
+    border: 1px solid rgba(255, 138, 138, 0.34);
+    color: #ffb4b4;
+}
+.ws-blocker-chip:hover {
+    background: rgba(255, 138, 138, 0.15);
+    border-color: rgba(255, 138, 138, 0.52);
+}
+.ws-force-push-action {
+    opacity: 0.72;
+}
+.ws-force-push-action:hover {
+    opacity: 1;
 }
 .ws-tab-bar {
     min-height: 46px;
