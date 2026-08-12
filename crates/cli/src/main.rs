@@ -820,7 +820,30 @@ enum CliArchcarInputKind {
     RawTerminal,
 }
 
+#[cfg(windows)]
 fn main() -> Result<()> {
+    thread::Builder::new()
+        .name("archductor-cli".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_cli)?
+        .join()
+        .map_err(|panic| {
+            if let Some(message) = panic.downcast_ref::<&str>() {
+                anyhow::anyhow!("archductor CLI panicked: {message}")
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                anyhow::anyhow!("archductor CLI panicked: {message}")
+            } else {
+                anyhow::anyhow!("archductor CLI panicked")
+            }
+        })?
+}
+
+#[cfg(not(windows))]
+fn main() -> Result<()> {
+    run_cli()
+}
+
+fn run_cli() -> Result<()> {
     if handle_archcar_claude_hook()? {
         return Ok(());
     }
