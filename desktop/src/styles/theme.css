@@ -1295,6 +1295,34 @@ button.ui-button-destructive:hover {
     align-items: stretch;
 }
 
+.settings-readiness-card {
+    grid-column: 1 / -1;
+}
+
+.settings-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.settings-readiness-pill {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    border: 1px solid #5a2a2a;
+    background: #321b1b;
+    color: #ffaaaa;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 750;
+}
+
+.settings-readiness-pill-ready {
+    border-color: #2f6b4d;
+    background: #193225;
+    color: #9be7bb;
+}
+
 .settings-action-row {
     display: flex;
     align-items: center;
@@ -1990,6 +2018,33 @@ button.ui-button-destructive:hover {
 .lc-theme-light .ws-topbar-branch {
     color: #1f2937;
 }
+.lc-theme-light .ws-topbar-summary {
+    color: #64748b;
+}
+.lc-theme-light .ws-briefing {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-briefing-kicker,
+.lc-theme-light .ws-briefing-label {
+    color: #64748b;
+}
+.lc-theme-light .ws-briefing-action,
+.lc-theme-light .ws-briefing-value {
+    color: #172033;
+}
+.lc-theme-light .ws-briefing-tile {
+    background: #ffffff;
+    border: 1px solid #dbe3ef;
+}
+.lc-theme-light .ws-briefing-tile:hover {
+    border-color: #b9c6d8;
+    background: #f4f7fb;
+}
+.lc-theme-light .nav-button-count {
+    background: #e2e8f0;
+    color: #334155;
+}
 /* Code editor: dark --lc-surface container + light --lc-text base color meant
    the editor was a dark block with invisible plain text in light mode. */
 .lc-theme-light .ws-file-editor-scroll {
@@ -2143,6 +2198,16 @@ button.ui-button-destructive:hover {
 .lc-theme-light .ws-tab-shell.ws-tab-active .ws-tab-label,
 .lc-theme-light .nav-button-active {
     color: #111827;
+}
+.lc-theme-light .settings-readiness-pill {
+    background: #fff1f2;
+    border-color: #fecdd3;
+    color: #be123c;
+}
+.lc-theme-light .settings-readiness-pill-ready {
+    background: #ecfdf5;
+    border-color: #bbf7d0;
+    color: #047857;
 }
 .lc-theme-light .history-row .workspace-name,
 .lc-theme-light .project-workspace-row .workspace-name {
@@ -2362,6 +2427,53 @@ button.ui-button-destructive:hover {
 /* ── Center panel / tab bar ── */
 .ws-center {
     background-color: #191919;
+}
+.ws-topbar-summary {
+    color: #8e8e8e;
+}
+.ws-briefing {
+    background: #171717;
+    border-color: #252525;
+}
+.ws-briefing-kicker,
+.ws-briefing-label {
+    color: #7f8792;
+}
+.ws-briefing-action,
+.ws-briefing-value {
+    color: #e2e8f0;
+}
+.ws-briefing-tile {
+    background: #1d1d1d;
+    border: 1px solid #2c2c2c;
+    box-shadow: none;
+}
+.ws-briefing-tile:hover {
+    background: #232323;
+    border-color: #3a3a3a;
+}
+.ws-briefing-running {
+    border-color: rgba(63, 178, 127, 0.42);
+    background: rgba(63, 178, 127, 0.08);
+}
+.ws-briefing-review {
+    border-color: rgba(91, 141, 239, 0.42);
+    background: rgba(91, 141, 239, 0.08);
+}
+.ws-briefing-changes {
+    border-color: rgba(195, 155, 80, 0.45);
+    background: rgba(195, 155, 80, 0.09);
+}
+.ws-briefing-danger {
+    border-color: rgba(255, 138, 138, 0.48);
+    background: rgba(255, 138, 138, 0.09);
+}
+.ws-briefing-archived {
+    opacity: 0.72;
+}
+.nav-button-count {
+    background: #343434;
+    color: #d8d8d8;
 }
 .ws-tab-bar {
     min-height: 46px;

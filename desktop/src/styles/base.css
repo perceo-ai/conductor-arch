@@ -1401,6 +1401,12 @@ body.resizing-col {
   gap: 8px;
   overflow: hidden;
 }
+.ws-topbar-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
 .ws-topbar-repo {
   font-size: 14px;
   font-weight: 600;
@@ -1420,6 +1426,14 @@ body.resizing-col {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ws-topbar-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ws-topbar-actions {
   display: flex;
   gap: 4px;
@@ -1427,6 +1441,88 @@ body.resizing-col {
 }
 .ws-topbar-btn {
   -webkit-app-region: no-drag;
+}
+
+.ws-briefing {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(320px, 1.35fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-briefing-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+.ws-briefing-kicker,
+.ws-briefing-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.ws-briefing-action {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-briefing-tiles {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.ws-briefing-tile {
+  min-width: 0;
+  min-height: 48px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-briefing-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.nav-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-button-count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+@media (max-width: 1180px) {
+  .ws-briefing {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* ---- Right panel regions ---- */

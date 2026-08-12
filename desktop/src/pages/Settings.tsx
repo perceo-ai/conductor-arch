@@ -4,6 +4,7 @@ import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, openExternal, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
+import { SetupReadinessCard } from "@/components/SetupReadiness";
 
 // Settings page — two panes per scope:
 //   Effective : the merged, read-only config (get_settings) for reference.
@@ -234,6 +235,7 @@ export function SettingsPage() {
           </div>
         </div>
         <div class="settings-health-grid">
+          <SetupReadinessCard />
           <div class="settings-field settings-health-card">
             <div class="settings-field-title">Updates</div>
             <div class="settings-status">
