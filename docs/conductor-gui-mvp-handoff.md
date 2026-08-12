@@ -5,8 +5,11 @@ notes that imply a backend-first or CLI-first product are stale.
 
 ## Product Target
 
-Archductor is a Linux and Windows desktop control plane for parallel coding agents. V1 must
-make the normal loop usable from GTK:
+Archductor is a cross-platform desktop control plane for parallel coding
+agents. Linux is the primary manually validated package target; macOS and
+Windows must keep compiling and basic runtime smokes green where the platform
+tooling is available. V1 must make the normal loop usable from the Electron
+desktop app:
 
 1. Add or clone a project repository.
 2. Configure project settings that affect workspaces and agents.
@@ -17,8 +20,8 @@ make the normal loop usable from GTK:
 6. Send review/check/comment context back to an agent.
 7. Create, refresh, merge, archive, restore, and review history.
 
-The CLI is fallback and automation surface. A CLI path without a GTK path does
-not complete the MVP.
+The CLI is fallback and automation surface. A CLI path without an Electron
+desktop path does not complete the MVP.
 
 ## Required Concepts
 
@@ -65,12 +68,15 @@ Relationships:
 ## Known Large Risks
 
 - `crates/core/src/workspace.rs` still holds too many service responsibilities.
-- GTK view files are too large and mix rendering, state, and runtime actions.
+- Electron view/store files can still mix rendering, state, and runtime actions;
+  split them only when doing so directly reduces active task complexity.
 - Runtime ownership must keep converging on archcar/local daemon APIs.
 - Codex unsafe approval/sandbox bypass needs explicit policy before broad
   public launch.
-- Manual Linux and Windows GUI validation remains required before announcing
-  the corresponding public package.
+- Manual Linux GUI validation remains required before announcing a public Linux
+  package. Windows remains preview-only until native install, launch, runtime,
+  upgrade, and checksum validation passes. macOS builds are useful regression
+  coverage but are not an announced package channel until product scope says so.
 
 ## Non-Goals For V1
 
@@ -87,6 +93,9 @@ Do not call a feature done unless current evidence proves the right layer:
 
 - Core support proves only core behavior.
 - CLI support proves fallback/automation behavior.
-- GTK support proves product behavior only when connected to real core behavior.
-- Live provider behavior requires authenticated `gh` or `LINEAR_API_KEY`.
-- Packaging support requires Linux artifact validation, not only Rust tests.
+- Electron desktop support proves product behavior only when connected to real
+  core behavior through archcar.
+- Live provider behavior requires authenticated `gh`, local agent CLI auth, or
+  `LINEAR_API_KEY` as applicable.
+- Packaging support requires artifact validation on each announced platform, not
+  only Rust tests.

@@ -194,8 +194,9 @@ export const actions = {
     issueId: string;
     name?: string;
     branch?: string;
+    baseRef?: string;
   }): Promise<string | undefined> {
-    logAction("create_workspace_from_linear", input);
+    logAction("create_workspace_from_linear", { repository: input.repository, issueId: input.issueId });
     const res = ensureOk(
       await send({
         type: "create_workspace_from_linear",
@@ -203,6 +204,7 @@ export const actions = {
         issue_id: input.issueId,
         name: input.name,
         branch: input.branch,
+        base_ref: input.baseRef,
       }),
     );
     return this.afterCreate(res);

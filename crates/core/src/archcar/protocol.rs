@@ -282,6 +282,19 @@ pub enum ArchcarRequest {
         workspace: String,
         kind: String,
     },
+    GetWorkspaceRunScripts {
+        workspace: String,
+    },
+    StartWorkspaceSetup {
+        workspace: String,
+    },
+    StartWorkspaceRun {
+        workspace: String,
+    },
+    StopWorkspaceRun {
+        workspace: String,
+    },
+    RecoverWorkspaceLifecycleJobs,
     ListReviewComments {
         workspace: String,
     },
@@ -407,6 +420,8 @@ pub enum ArchcarRequest {
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
     },
     ArchiveWorkspace {
         workspace: String,
@@ -689,6 +704,22 @@ pub enum ArchcarResponse {
         kind: String,
         prompt: String,
     },
+    WorkspaceRunScripts {
+        workspace: String,
+        scripts: Vec<ArchcarRunScript>,
+    },
+    WorkspaceProcessStarted {
+        workspace: String,
+        process: ArchcarProcessSummary,
+    },
+    WorkspaceProcessStopped {
+        workspace: String,
+        process: ArchcarProcessSummary,
+    },
+    WorkspaceLifecycleRecovery {
+        recovered: usize,
+        reconciled_processes: usize,
+    },
     ReviewComments {
         workspace: String,
         comments: Vec<ReviewComment>,
@@ -924,6 +955,28 @@ pub struct ArchcarConfiguredCheck {
     pub key: String,
     pub label: String,
     pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarRunScript {
+    pub id: String,
+    pub command: String,
+    pub available_in: Vec<String>,
+    pub default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub runnable_here: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarProcessSummary {
+    pub id: i64,
+    pub kind: String,
+    pub pid: u32,
+    pub status: String,
+    pub log_path: String,
 }
 
 /// Flat DB-only checks summary (compact projection of ChecksSummary; the
@@ -1189,6 +1242,21 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetWorkspaceScriptPrompt { workspace, kind } => {
             format!("get_workspace_script_prompt workspace={workspace} kind={kind}")
         }
+        ArchcarRequest::GetWorkspaceRunScripts { workspace } => {
+            format!("get_workspace_run_scripts workspace={workspace}")
+        }
+        ArchcarRequest::StartWorkspaceSetup { workspace } => {
+            format!("start_workspace_setup workspace={workspace}")
+        }
+        ArchcarRequest::StartWorkspaceRun { workspace } => {
+            format!("start_workspace_run workspace={workspace}")
+        }
+        ArchcarRequest::StopWorkspaceRun { workspace } => {
+            format!("stop_workspace_run workspace={workspace}")
+        }
+        ArchcarRequest::RecoverWorkspaceLifecycleJobs => {
+            "recover_workspace_lifecycle_jobs".to_owned()
+        }
         ArchcarRequest::ListReviewComments { workspace } => {
             format!("list_review_comments workspace={workspace}")
         }
@@ -1272,8 +1340,12 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::CreateWorkspaceFromLinear {
             repository,
             issue_id,
+            name,
             ..
-        } => format!("create_workspace_from_linear repository={repository} issue={issue_id}"),
+        } => format!(
+            "create_workspace_from_linear repository={repository} issue_id={issue_id} name={}",
+            name.as_deref().unwrap_or("<derived>")
+        ),
         ArchcarRequest::ArchiveWorkspace {
             workspace,
             remove_worktree,
@@ -1548,6 +1620,21 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::WorkspaceScriptPrompt { workspace, kind, prompt } => {
             format!("workspace_script_prompt workspace={workspace} kind={kind} bytes={}", prompt.len())
+        }
+        ArchcarResponse::WorkspaceRunScripts { workspace, scripts } => {
+            format!("workspace_run_scripts workspace={workspace} count={}", scripts.len())
+        }
+        ArchcarResponse::WorkspaceProcessStarted { workspace, process } => {
+            format!("workspace_process_started workspace={workspace} kind={} pid={}", process.kind, process.pid)
+        }
+        ArchcarResponse::WorkspaceProcessStopped { workspace, process } => {
+            format!("workspace_process_stopped workspace={workspace} kind={} pid={}", process.kind, process.pid)
+        }
+        ArchcarResponse::WorkspaceLifecycleRecovery {
+            recovered,
+            reconciled_processes,
+        } => {
+            format!("workspace_lifecycle_recovery recovered={recovered} reconciled_processes={reconciled_processes}")
         }
         ArchcarResponse::ReviewComments { workspace, comments } => {
             format!("review_comments workspace={workspace} count={}", comments.len())
@@ -2099,9 +2186,10 @@ mod tests {
                     issue_id: "ENG-123".to_owned(),
                     name: None,
                     branch: None,
+                    base_ref: None,
                 },
                 "\"type\":\"create_workspace_from_linear\"",
-                "create_workspace_from_linear repository=repo issue=ENG-123",
+                "create_workspace_from_linear repository=repo issue_id=ENG-123 name=<derived>",
             ),
             (
                 ArchcarRequest::CreateWorkspaceFromPullRequest {
@@ -2112,6 +2200,17 @@ mod tests {
                 },
                 "\"type\":\"create_workspace_from_pull_request\"",
                 "create_workspace_from_pull_request repository=repo pr=7",
+            ),
+            (
+                ArchcarRequest::CreateWorkspaceFromLinear {
+                    repository: "repo".to_owned(),
+                    issue_id: "ARC-123".to_owned(),
+                    name: None,
+                    branch: None,
+                    base_ref: None,
+                },
+                "\"type\":\"create_workspace_from_linear\"",
+                "create_workspace_from_linear repository=repo issue_id=ARC-123 name=<derived>",
             ),
             (
                 ArchcarRequest::ArchiveWorkspace {
@@ -2965,6 +3064,152 @@ mod tests {
             );
             assert_eq!(archcar_response_summary(&response), summary);
         }
+    }
+
+    #[test]
+    fn workspace_run_scripts_protocol_round_trips_without_logging_commands() {
+        let request = ArchcarRequest::GetWorkspaceRunScripts {
+            workspace: "berlin".to_owned(),
+        };
+        let response = ArchcarResponse::WorkspaceRunScripts {
+            workspace: "berlin".to_owned(),
+            scripts: vec![ArchcarRunScript {
+                id: "dev".to_owned(),
+                command: "pnpm dev --token secret".to_owned(),
+                available_in: vec!["local".to_owned()],
+                default: true,
+                icon: Some("play".to_owned()),
+                runnable_here: true,
+                unavailable_reason: None,
+            }],
+        };
+
+        let request_json = serde_json::to_string(&request).unwrap();
+        let response_json = serde_json::to_string(&response).unwrap();
+
+        assert!(request_json.contains("\"type\":\"get_workspace_run_scripts\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&request_json).unwrap(),
+            request
+        );
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&response_json).unwrap(),
+            response
+        );
+        assert_eq!(
+            archcar_request_summary(&request),
+            "get_workspace_run_scripts workspace=berlin"
+        );
+        assert_eq!(
+            archcar_response_summary(&response),
+            "workspace_run_scripts workspace=berlin count=1"
+        );
+        assert!(!archcar_response_summary(&response).contains("secret"));
+    }
+
+    #[test]
+    fn workspace_script_start_protocol_round_trips_process_summary() {
+        let requests = [
+            (
+                ArchcarRequest::StartWorkspaceSetup {
+                    workspace: "berlin".to_owned(),
+                },
+                "\"type\":\"start_workspace_setup\"",
+                "start_workspace_setup workspace=berlin",
+            ),
+            (
+                ArchcarRequest::StartWorkspaceRun {
+                    workspace: "berlin".to_owned(),
+                },
+                "\"type\":\"start_workspace_run\"",
+                "start_workspace_run workspace=berlin",
+            ),
+            (
+                ArchcarRequest::StopWorkspaceRun {
+                    workspace: "berlin".to_owned(),
+                },
+                "\"type\":\"stop_workspace_run\"",
+                "stop_workspace_run workspace=berlin",
+            ),
+        ];
+        for (request, tag, summary) in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(tag), "{json}");
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+        }
+
+        let response = ArchcarResponse::WorkspaceProcessStarted {
+            workspace: "berlin".to_owned(),
+            process: ArchcarProcessSummary {
+                id: 7,
+                kind: "run".to_owned(),
+                pid: 123,
+                status: "running".to_owned(),
+                log_path: "/tmp/run.log".to_owned(),
+            },
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"workspace_process_started\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+            response
+        );
+        assert_eq!(
+            archcar_response_summary(&response),
+            "workspace_process_started workspace=berlin kind=run pid=123"
+        );
+
+        let stopped = ArchcarResponse::WorkspaceProcessStopped {
+            workspace: "berlin".to_owned(),
+            process: ArchcarProcessSummary {
+                id: 7,
+                kind: "run".to_owned(),
+                pid: 123,
+                status: "stopped".to_owned(),
+                log_path: "/tmp/run.log".to_owned(),
+            },
+        };
+        let stopped_json = serde_json::to_string(&stopped).unwrap();
+        assert!(stopped_json.contains("\"type\":\"workspace_process_stopped\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&stopped_json).unwrap(),
+            stopped
+        );
+        assert_eq!(
+            archcar_response_summary(&stopped),
+            "workspace_process_stopped workspace=berlin kind=run pid=123"
+        );
+
+        let recovery = ArchcarRequest::RecoverWorkspaceLifecycleJobs;
+        let recovery_json = serde_json::to_string(&recovery).unwrap();
+        assert!(recovery_json.contains("\"type\":\"recover_workspace_lifecycle_jobs\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&recovery_json).unwrap(),
+            recovery
+        );
+        assert_eq!(
+            archcar_request_summary(&recovery),
+            "recover_workspace_lifecycle_jobs"
+        );
+
+        let recovery_response = ArchcarResponse::WorkspaceLifecycleRecovery {
+            recovered: 2,
+            reconciled_processes: 3,
+        };
+        let recovery_response_json = serde_json::to_string(&recovery_response).unwrap();
+        assert!(recovery_response_json.contains("\"type\":\"workspace_lifecycle_recovery\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarResponse>(&recovery_response_json).unwrap(),
+            recovery_response
+        );
+        assert_eq!(
+            archcar_response_summary(&recovery_response),
+            "workspace_lifecycle_recovery recovered=2 reconciled_processes=3"
+        );
     }
 
     #[test]

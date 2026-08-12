@@ -1,7 +1,10 @@
-import { For, Match, Show, Switch, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
-import { openExternal } from "@/bridge/client";
+import { openExternal, send } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
+import { STATUS_COLOR } from "@/lib/workspaceStatus";
+import { deriveWorkspaceBriefing, workspaceBriefingStatusLabel } from "@/lib/workspaceBriefing";
+import type { ArchcarChecksSummary } from "@/bridge/protocol";
 import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
@@ -48,16 +51,24 @@ function TopBar(props: {
   onOpenEditor: () => void;
   rightCollapsed: boolean;
   onToggleRight: () => void;
+  checks?: ArchcarChecksSummary;
 }) {
   const row = () => workspacesStore.row(props.workspace);
+  const briefing = () => deriveWorkspaceBriefing(row(), props.checks);
   return (
     <div class="ws-topbar">
       <div class="ws-topbar-breadcrumb">
+        <span
+          class="ws-topbar-status-dot"
+          style={{ "background-color": STATUS_COLOR[briefing().status] }}
+          aria-label={workspaceBriefingStatusLabel(briefing())}
+        />
         <span class="ws-topbar-repo">{titleCaseWorkspace(props.workspace)}</span>
         <Show when={row()?.branch}>
           <span class="ws-topbar-sep">›</span>
           <span class="ws-topbar-branch">{row()!.branch}</span>
         </Show>
+        <span class="ws-topbar-summary">{briefing().topbarSummary}</span>
       </div>
       <div class="ws-topbar-actions">
         <button class="ui-button-icon ws-topbar-btn" title="Open in editor" onClick={props.onOpenEditor}>
@@ -75,8 +86,54 @@ function TopBar(props: {
   );
 }
 
+function WorkspaceBriefing(props: { workspace: string; checks?: ArchcarChecksSummary }) {
+  const row = () => workspacesStore.row(props.workspace);
+  const briefing = () => deriveWorkspaceBriefing(row(), props.checks);
+
+  return (
+    <div class="ws-briefing" aria-label="Workspace briefing">
+      <div class="ws-briefing-main">
+        <span class="ws-briefing-kicker">Next</span>
+        <span class="ws-briefing-action">{briefing().nextAction}</span>
+      </div>
+      <div class="ws-briefing-tiles">
+        <For each={briefing().tiles}>
+          {(tile) => (
+            <button
+              class="ws-briefing-tile"
+              classList={{ [`ws-briefing-${tile.tone}`]: true }}
+              onClick={() => {
+                if (tile.label === "Review") nav.setRightPanelTab("checks");
+                if (tile.label === "Changes") nav.setRightPanelTab("changes");
+                if (tile.label === "Agents" || tile.label === "Scripts")
+                  nav.setRightPanelTab("processes");
+                if (tile.label === "Checks") nav.setRightPanelTab("checks");
+              }}
+            >
+              <span class="ws-briefing-label">{tile.label}</span>
+              <span class="ws-briefing-value">{tile.value}</span>
+            </button>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+}
+
 function RightPanel(props: { workspace: string }) {
   const [width, setWidth] = createPersistedWidth("rightPanel.width", 340, RIGHT_MIN, RIGHT_MAX);
+  const row = () => workspacesStore.row(props.workspace);
+  const tabCount = (tab: RightPanelTab) => {
+    const r = row();
+    if (!r) return "";
+    if (tab === "changes" && r.changedFiles > 0) return String(r.changedFiles);
+    if (tab === "todos" && r.openTodos > 0) return String(r.openTodos);
+    if (tab === "processes" && (r.activeSessions > 0 || r.runRunning)) {
+      return r.runRunning ? "run" : String(r.activeSessions);
+    }
+    if (tab === "checks" && r.prNumber != null) return "PR";
+    return "";
+  };
   return (
     <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
       <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
@@ -90,7 +147,10 @@ function RightPanel(props: { workspace: string }) {
                 classList={{ "nav-button-active": nav.rightPanelTab() === t.tab }}
                 onClick={() => nav.setRightPanelTab(t.tab)}
               >
-                {t.label}
+                <span>{t.label}</span>
+                <Show when={tabCount(t.tab)}>
+                  {(count) => <span class="nav-button-count">{count()}</span>}
+                </Show>
               </button>
             )}
           </For>
@@ -138,6 +198,19 @@ function RightPanel(props: { workspace: string }) {
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
   const [rightCollapsed, setRightCollapsed] = createSignal(false);
+  const [checks] = createResource(
+    workspace,
+    async (ws): Promise<ArchcarChecksSummary | undefined> => {
+      if (!ws) return undefined;
+      try {
+        const res = await send({ type: "get_checks_summary", workspace: ws });
+        return res.type === "checks_summary" ? res.summary : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+  );
+  const currentChecks = createMemo(() => checks());
 
   function openEditor(ws: string) {
     const repo = workspacesStore.row(ws)?.repository;
@@ -155,10 +228,12 @@ export default function CommandCenter() {
           <div class="ws-center">
             <TopBar
               workspace={ws()}
+              checks={currentChecks()}
               onOpenEditor={() => openEditor(ws())}
               rightCollapsed={rightCollapsed()}
               onToggleRight={() => setRightCollapsed((c) => !c)}
             />
+            <WorkspaceBriefing workspace={ws()} checks={currentChecks()} />
             <div class="ws-center-content">
               <ChatSurface workspace={ws()} />
             </div>

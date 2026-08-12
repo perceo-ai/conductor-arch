@@ -2418,8 +2418,20 @@ impl WorkspaceStore {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
         let Some(run) = &settings.scripts.run else {
+            if !settings.scripts.run_scripts.is_empty() {
+                anyhow::bail!("workspace {name} has no local scripts.run configured");
+            }
             anyhow::bail!("workspace {name} has no scripts.run configured");
         };
+        if !settings.scripts.run_scripts.is_empty()
+            && !settings
+                .scripts
+                .run_scripts
+                .iter()
+                .any(|script| script.command == *run && script.runnable_locally())
+        {
+            anyhow::bail!("workspace {name} scripts.run is not available locally");
+        }
 
         let run_mode = settings.scripts.run_mode.as_deref().unwrap_or("concurrent");
         if run_mode == "nonconcurrent" {
@@ -3058,6 +3070,42 @@ impl WorkspaceStore {
         )?;
         let running = stmt
             .query_map([ProcessKind::Terminal.as_str()], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut reconciled = Vec::new();
+        for process in running {
+            if process_alive(process.pid) {
+                continue;
+            }
+            let now = timestamp();
+            self.conn.execute(
+                "UPDATE processes
+                 SET status = ?1, ended_at = ?2, exit_code = NULL
+                 WHERE id = ?3 AND status = 'running'",
+                params![ProcessStatus::Exited.as_str(), now, process.id],
+            )?;
+            reconciled.push(self.get_process(process.id)?);
+        }
+        Ok(reconciled)
+    }
+
+    pub fn reconcile_script_processes(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes
+             WHERE kind IN (?1, ?2, ?3) AND status = 'running'
+             ORDER BY id",
+        )?;
+        let running = stmt
+            .query_map(
+                [
+                    ProcessKind::Setup.as_str(),
+                    ProcessKind::Run.as_str(),
+                    ProcessKind::Check.as_str(),
+                ],
+                row_to_process,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
 
@@ -14822,6 +14870,76 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn run_workspace_rejects_cloud_only_structured_run_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts.run.deploy]
+command = "printf 'should-not-run' > .context/run-env"
+available_in = ["cloud"]
+default = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add cloud run script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let err = store.run_workspace("berlin").unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("workspace berlin has no local scripts.run configured"),
+            "{err:?}"
+        );
+        assert!(!workspace.path.join(".context/run-env").exists());
+    }
+
+    #[test]
     fn run_workspace_loads_env_file_refs_without_logging_secret_values() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -15443,6 +15561,73 @@ working_directory = "apps/web"
         assert!(reconciled[0].ended_at.is_some());
         assert_eq!(
             store.list_terminals("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
+    }
+
+    #[test]
+    fn script_process_reconciliation_marks_dead_setup_run_and_check_rows_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        for kind in [ProcessKind::Setup, ProcessKind::Run, ProcessKind::Check] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO processes (
+                        workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+                    ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, 'running', ?6, NULL, NULL, NULL, NULL)",
+                    params![
+                        workspace.id,
+                        kind.as_str(),
+                        "sleep 1",
+                        999_999_i64,
+                        temp.path().join(format!("{}.log", kind.as_str())).to_string_lossy(),
+                        timestamp(),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let reconciled = store.reconcile_script_processes().unwrap();
+
+        assert_eq!(reconciled.len(), 3);
+        assert!(reconciled.iter().all(|process| {
+            process.status == ProcessStatus::Exited
+                && process.exit_code.is_none()
+                && process.ended_at.is_some()
+        }));
+        assert_eq!(
+            store.list_setups("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
+        assert_eq!(
+            store.list_runs("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
+        assert_eq!(
+            store.list_checks("berlin").unwrap()[0].status,
             ProcessStatus::Exited
         );
     }

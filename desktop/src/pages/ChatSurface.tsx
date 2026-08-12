@@ -35,10 +35,18 @@ function providerToKind(provider: string): SessionKind {
 function ThreadTab(props: {
   thread: ArchcarChatThread;
   active: boolean;
+  queued: number;
+  pendingInteraction: boolean;
   onClick: () => void;
   onClose: () => void;
 }) {
   const generating = () => props.thread.status === "running" || props.thread.status === "generating";
+  const statusText = () => {
+    if (props.pendingInteraction) return "needs input";
+    if (props.queued > 0) return `${props.queued} queued`;
+    if (generating()) return "running";
+    return props.thread.status || "ready";
+  };
   return (
     <div
       class="ws-chat-tab-shell ws-tab-shell"
@@ -47,7 +55,18 @@ function ThreadTab(props: {
       role="button"
     >
       <span class="ws-chat-tab-dot" classList={{ "ws-chat-tab-spinner": generating() }} />
-      <span class="ws-tab-label">{props.thread.title || `Chat ${props.thread.id}`}</span>
+      <span class="ws-chat-tab-text">
+        <span class="ws-tab-label">{props.thread.title || `Chat ${props.thread.id}`}</span>
+        <span
+          class="ws-chat-tab-meta"
+          classList={{
+            "ws-chat-tab-meta-active": generating(),
+            "ws-chat-tab-meta-needs-input": props.pendingInteraction,
+          }}
+        >
+          {props.thread.provider} · {statusText()}
+        </span>
+      </span>
       <button
         class="ws-tab-close-button"
         title="Close chat"
@@ -451,6 +470,7 @@ function Composer(props: {
     <div class="chat-composer">
       <Show when={slice().queue.length > 0}>
         <div class="chat-queue-overlay">
+          <div class="chat-queue-heading">Queued for next idle turn</div>
           <For each={slice().queue}>
             {(q) => (
               <div class="chat-queued-composer-row">
@@ -556,37 +576,37 @@ function Composer(props: {
             </Show>
             <span class="chat-status-hint">
               {running()
-                ? "running…"
+                ? "Agent running · Enter queues next turn · Cmd/Ctrl+Enter steers now"
                 : busy()
                   ? slowStart()
                     ? "still starting — messages you send will be queued"
                     : "starting…"
-                  : "Enter to queue · ⌘/Ctrl+Enter to steer"}
+                  : "Enter queues next turn · Cmd/Ctrl+Enter steers now"}
             </span>
             <Show when={running()}>
               <button
                 class="chat-send-btn chat-stop-btn"
                 onClick={() => void interrupt()}
-                title="Stop (interrupt turn)"
+                title="Stop current turn"
               >
-                ⏹
+                Stop
               </button>
             </Show>
             <button
               class="chat-send-btn chat-steer-btn"
               classList={{ "chat-send-btn-active": text().trim().length > 0 }}
               onClick={() => void steerSend()}
-              title="Steer now — skip queue (⌘/Ctrl+Enter)"
+              title="Steer current turn — skip queue (Cmd/Ctrl+Enter)"
             >
-              ⚡
+              Steer
             </button>
             <button
               class="chat-send-btn"
               classList={{ "chat-send-btn-active": text().trim().length > 0 }}
               onClick={() => void queueSend()}
-              title="Queue message (Enter)"
+              title="Queue next turn (Enter)"
             >
-              ⏎
+              Queue
             </button>
           </div>
         </div>
@@ -988,6 +1008,8 @@ export default function ChatSurface(props: { workspace: string }) {
             {(thread) => (
               <ThreadTab
                 thread={thread}
+                queued={chatStore.slice(thread.id).queue.length}
+                pendingInteraction={interactionsStore.pending(thread.id) != null}
                 active={view().kind === "chat" && nav.selectedChatThread() === thread.id}
                 onClick={() => selectThread(thread)}
                 onClose={() => void closeThread(thread)}

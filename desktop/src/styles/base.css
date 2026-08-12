@@ -365,6 +365,16 @@ body.resizing-col {
   flex-direction: column;
   gap: 10px;
 }
+.dashboard-heading-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.dashboard-new-workspace {
+  flex: 0 0 auto;
+}
 .project-tabs {
   display: flex;
   flex-direction: row;
@@ -422,13 +432,34 @@ body.resizing-col {
   align-items: center;
   gap: 8px;
 }
+.dashboard-card-badges {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.triage-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  max-width: 100%;
+  padding: 1px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .card-branch,
-.card-activity {
+.card-activity,
+.card-state {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.card-state {
+  flex: 0 0 auto;
 }
 .card-title {
   overflow-wrap: anywhere;
@@ -444,6 +475,17 @@ body.resizing-col {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+@media (max-width: 760px) {
+  .dashboard-heading-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dashboard-new-workspace {
+    width: 100%;
+  }
 }
 
 /* ---- Workspace command center layout ---- */
@@ -543,6 +585,8 @@ body.resizing-col {
   gap: 6px;
   cursor: pointer;
   white-space: nowrap;
+  min-width: 154px;
+  max-width: 230px;
 }
 .ws-chat-tab-dot {
   width: 8px;
@@ -553,6 +597,22 @@ body.resizing-col {
 }
 .ws-chat-tab-spinner {
   background: #6f8fbd;
+}
+.ws-chat-tab-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ws-chat-tab-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.15;
 }
 .chat-timeline-scroll {
   flex: 1 1 auto;
@@ -640,6 +700,13 @@ body.resizing-col {
   flex-direction: column;
   gap: 4px;
   padding: 6px 16px 0 16px;
+}
+.chat-queue-heading {
+  padding: 2px 4px;
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 /* ---- File browser + changes/diff ---- */
@@ -1123,6 +1190,53 @@ body.resizing-col {
 .dialog-tabs .ui-button-sm.active {
   background: var(--lc-surface-selected, #2a2a2a);
 }
+.dialog-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.dialog-source-card {
+  min-width: 0;
+  min-height: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.dialog-source-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dialog-source-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 750;
+}
+.dialog-source-state {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.dialog-source-detail {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 11px;
+  line-height: 1.35;
+}
 .dialog-field {
   display: flex;
   flex-direction: column;
@@ -1184,6 +1298,76 @@ body.resizing-col {
 .dialog-hint {
   font-size: 11px;
   color: #7a7a7a;
+}
+.dialog-preview {
+  display: grid;
+  gap: 5px;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.dialog-preview-title {
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.dialog-preview-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+.dialog-preview-label,
+.dialog-preview-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.dialog-action-section {
+  display: grid;
+  gap: 9px;
+  border-radius: 8px;
+  padding: 10px;
+}
+.dialog-section-head {
+  display: grid;
+  gap: 3px;
+}
+.dialog-section-title {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.dialog-section-copy {
+  font-size: 11px;
+  line-height: 1.35;
+}
+.dialog-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.dialog-provider-chip {
+  min-width: 0;
+  min-height: 32px;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+@media (max-width: 560px) {
+  .dialog-source-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dialog-provider-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* GitHub repo picker: bounded scroll of flush cards. */
@@ -1401,6 +1585,12 @@ body.resizing-col {
   gap: 8px;
   overflow: hidden;
 }
+.ws-topbar-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
 .ws-topbar-repo {
   font-size: 14px;
   font-weight: 600;
@@ -1420,6 +1610,14 @@ body.resizing-col {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ws-topbar-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ws-topbar-actions {
   display: flex;
   gap: 4px;
@@ -1427,6 +1625,112 @@ body.resizing-col {
 }
 .ws-topbar-btn {
   -webkit-app-region: no-drag;
+}
+
+.ws-briefing {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(320px, 1.35fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-briefing-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+.ws-briefing-kicker,
+.ws-briefing-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.ws-briefing-action {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-briefing-tiles {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.ws-briefing-tile {
+  min-width: 0;
+  min-height: 48px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-briefing-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.nav-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-button-count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+@media (max-width: 1180px) {
+  .ws-briefing {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ws-checks-readiness {
+  display: grid;
+  gap: 8px;
+}
+
+.ws-blocker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ws-blocker-chip {
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ws-pr-actions-row {
+  align-items: center;
 }
 
 /* ---- Right panel regions ---- */

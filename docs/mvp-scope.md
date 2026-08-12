@@ -1,9 +1,11 @@
 # Archductor MVP Scope
 
-Archductor V1 is desktop-first and GUI-first, with Linux as the primary target
-and native Windows as a preview target. The MVP is the smallest product that
-lets one developer coordinate parallel local coding-agent work without juggling
-many terminals.
+Archductor V1 is desktop-first and GUI-first. Linux is the primary manually
+validated package target, macOS and Windows must keep compiling and passing
+basic smokes where available, and native Windows remains a preview target until
+its manual checklist passes. The MVP is the smallest product that lets one
+developer coordinate parallel local coding-agent work without juggling many
+terminals.
 
 ## In Scope
 
@@ -55,11 +57,11 @@ many terminals.
 
 - Pass `cargo fmt`, clippy, workspace tests, release-readiness script tests, and
   Linux build/package gates that match the announced channel.
-- Complete the manual GTK checklist on a real Linux desktop before public
-  release.
-- Keep native Windows, glibc Linux, musl Linux, and representative distro GTK
-  compile gates green. Complete the Windows manual/package checklist before
-  promoting the Windows ZIP beyond preview.
+- Complete the manual Electron desktop checklist on a real Linux desktop before
+  public Linux release.
+- Keep macOS, native Windows, glibc Linux, musl Linux, and representative distro
+  compile gates green where CI/tooling supports them. Complete the Windows
+  manual/package checklist before promoting the Windows ZIP beyond preview.
 
 ## Out Of Scope For V1
 

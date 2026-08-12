@@ -427,6 +427,8 @@ enum ArchcarCommand {
         #[arg(long)]
         content: Option<String>,
     },
+    /// Re-run pending workspace lifecycle recovery jobs.
+    RecoverWorkspaceLifecycleJobs,
     /// Create a new chat thread in a workspace.
     CreateChat {
         workspace: String,
@@ -818,7 +820,30 @@ enum CliArchcarInputKind {
     RawTerminal,
 }
 
+#[cfg(windows)]
 fn main() -> Result<()> {
+    thread::Builder::new()
+        .name("archductor-cli".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_cli)?
+        .join()
+        .map_err(|panic| {
+            if let Some(message) = panic.downcast_ref::<&str>() {
+                anyhow::anyhow!("archductor CLI panicked: {message}")
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                anyhow::anyhow!("archductor CLI panicked: {message}")
+            } else {
+                anyhow::anyhow!("archductor CLI panicked")
+            }
+        })?
+}
+
+#[cfg(not(windows))]
+fn main() -> Result<()> {
+    run_cli()
+}
+
+fn run_cli() -> Result<()> {
     if handle_archcar_claude_hook()? {
         return Ok(());
     }
@@ -1180,6 +1205,7 @@ fn main() -> Result<()> {
                             issue_id: issue,
                             name: None,
                             branch: None,
+                            base_ref: None,
                         },
                     )?);
                 }
@@ -1327,6 +1353,11 @@ fn main() -> Result<()> {
                         layer,
                         toml,
                     })?);
+                }
+                ArchcarCommand::RecoverWorkspaceLifecycleJobs => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::RecoverWorkspaceLifecycleJobs)?,
+                    );
                 }
                 ArchcarCommand::CreateChat {
                     workspace,
@@ -2425,6 +2456,49 @@ fn print_archcar_response(response: ArchcarResponse) {
                 "spotlight_status {workspace} active={active} status={} started_at={}",
                 status.as_deref().unwrap_or("-"),
                 started_at.as_deref().unwrap_or("-")
+            );
+        }
+        ArchcarResponse::WorkspaceRunScripts { workspace, scripts } => {
+            println!("workspace_run_scripts {} {}", workspace, scripts.len());
+            for script in scripts {
+                let availability = if script.available_in.is_empty() {
+                    "local".to_owned()
+                } else {
+                    script.available_in.join(",")
+                };
+                let marker = if script.default { " default" } else { "" };
+                let status = if script.runnable_here {
+                    "runnable"
+                } else {
+                    "disabled"
+                };
+                println!(
+                    "[{status}] {} available_in={availability}{marker}",
+                    script.id
+                );
+                if let Some(reason) = script.unavailable_reason {
+                    println!("  {reason}");
+                }
+            }
+        }
+        ArchcarResponse::WorkspaceProcessStarted { workspace, process } => {
+            println!(
+                "workspace_process_started {} kind={} pid={} status={} log={}",
+                workspace, process.kind, process.pid, process.status, process.log_path
+            );
+        }
+        ArchcarResponse::WorkspaceProcessStopped { workspace, process } => {
+            println!(
+                "workspace_process_stopped {} kind={} pid={} status={} log={}",
+                workspace, process.kind, process.pid, process.status, process.log_path
+            );
+        }
+        ArchcarResponse::WorkspaceLifecycleRecovery {
+            recovered,
+            reconciled_processes,
+        } => {
+            println!(
+                "workspace_lifecycle_recovery recovered={recovered} reconciled_processes={reconciled_processes}"
             );
         }
         ArchcarResponse::ReviewComments {

@@ -173,12 +173,28 @@ pub struct GitSettings {
 pub struct ScriptSettings {
     pub setup: Option<String>,
     pub run: Option<String>,
+    pub run_scripts: Vec<RunScriptDefinition>,
     pub archive: Option<String>,
     pub test: Option<String>,
     pub lint: Option<String>,
     pub typecheck: Option<String>,
     pub build: Option<String>,
     pub run_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunScriptDefinition {
+    pub id: String,
+    pub command: String,
+    pub available_in: Vec<String>,
+    pub default: bool,
+    pub icon: Option<String>,
+}
+
+impl RunScriptDefinition {
+    pub fn runnable_locally(&self) -> bool {
+        self.available_in.is_empty() || self.available_in.iter().any(|value| value == "local")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1017,6 +1033,25 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
             "scripts.run_mode must be concurrent or nonconcurrent"
         );
     }
+    for script in &settings.scripts.run_scripts {
+        anyhow::ensure!(
+            is_valid_run_script_id(&script.id),
+            "scripts.run.{} must use a lowercase-kebab id",
+            script.id
+        );
+        anyhow::ensure!(
+            !script.command.trim().is_empty(),
+            "scripts.run.{}.command must not be empty",
+            script.id
+        );
+        for availability in &script.available_in {
+            anyhow::ensure!(
+                matches!(availability.as_str(), "local" | "cloud"),
+                "scripts.run.{}.available_in must contain only local or cloud",
+                script.id
+            );
+        }
+    }
     for (label, command) in [
         ("scripts.setup", settings.scripts.setup.as_deref()),
         ("scripts.run", settings.scripts.run.as_deref()),
@@ -1212,7 +1247,7 @@ struct RawScriptSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     setup: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    run: Option<String>,
+    run: Option<RawRunScripts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     archive: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1225,6 +1260,24 @@ struct RawScriptSettings {
     build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum RawRunScripts {
+    Legacy(String),
+    Structured(BTreeMap<String, RawRunScriptDefinition>),
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RawRunScriptDefinition {
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    available_in: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1458,6 +1511,7 @@ impl RawRepositorySettings {
 
     fn into_settings(self) -> RepositorySettings {
         let scripts = self.scripts.unwrap_or_default();
+        let (run, run_scripts) = scripts.run_into_settings();
         RepositorySettings {
             file_include_globs: split_patterns(self.file_include_globs),
             env_file_refs: split_patterns(self.env_file_refs),
@@ -1465,7 +1519,8 @@ impl RawRepositorySettings {
             enterprise_data_privacy: self.enterprise_data_privacy,
             scripts: ScriptSettings {
                 setup: scripts.setup,
-                run: scripts.run,
+                run,
+                run_scripts,
                 archive: scripts.archive,
                 test: scripts.test,
                 lint: scripts.lint,
@@ -1497,7 +1552,7 @@ impl RawRepositorySettings {
             enterprise_data_privacy: settings.enterprise_data_privacy,
             scripts: Some(RawScriptSettings {
                 setup: settings.scripts.setup.clone(),
-                run: settings.scripts.run.clone(),
+                run: RawRunScripts::from_settings(&settings.scripts),
                 archive: settings.scripts.archive.clone(),
                 test: settings.scripts.test.clone(),
                 lint: settings.scripts.lint.clone(),
@@ -1962,6 +2017,72 @@ impl RawScriptSettings {
             run_mode: local.run_mode.or(self.run_mode),
         }
     }
+
+    fn run_into_settings(&self) -> (Option<String>, Vec<RunScriptDefinition>) {
+        match &self.run {
+            Some(RawRunScripts::Legacy(command)) => (Some(command.clone()), Vec::new()),
+            Some(RawRunScripts::Structured(entries)) => {
+                let scripts = entries
+                    .iter()
+                    .map(|(id, entry)| RunScriptDefinition {
+                        id: id.clone(),
+                        command: entry.command.clone().unwrap_or_default(),
+                        available_in: entry.available_in.clone().unwrap_or_default(),
+                        default: entry.default,
+                        icon: entry.icon.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let selected = scripts
+                    .iter()
+                    .find(|script| script.default && script.runnable_locally())
+                    .or_else(|| scripts.iter().find(|script| script.runnable_locally()))
+                    .map(|script| script.command.clone());
+                (selected, scripts)
+            }
+            None => (None, Vec::new()),
+        }
+    }
+}
+
+impl RawRunScripts {
+    fn from_settings(settings: &ScriptSettings) -> Option<Self> {
+        if !settings.run_scripts.is_empty() {
+            let scripts = settings
+                .run_scripts
+                .iter()
+                .map(|script| {
+                    (
+                        script.id.clone(),
+                        RawRunScriptDefinition {
+                            command: Some(script.command.clone()),
+                            available_in: (!script.available_in.is_empty())
+                                .then(|| script.available_in.clone()),
+                            default: script.default,
+                            icon: script.icon.clone(),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            Some(Self::Structured(scripts))
+        } else {
+            settings.scripts_run_legacy()
+        }
+    }
+}
+
+impl ScriptSettings {
+    fn scripts_run_legacy(&self) -> Option<RawRunScripts> {
+        self.run.clone().map(RawRunScripts::Legacy)
+    }
+}
+
+fn is_valid_run_script_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
 }
 
 impl RawPromptSettings {
@@ -4135,6 +4256,158 @@ API_BASE_URL = "http://localhost:3000"
     }
 
     #[test]
+    fn parses_conductor_style_structured_run_scripts() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts]
+run_mode = "concurrent"
+
+[scripts.run.dev]
+command = "pnpm dev --port $ARCHDUCTOR_PORT"
+available_in = ["local"]
+default = true
+icon = "play"
+
+[scripts.run.test]
+command = "pnpm test:watch"
+available_in = ["local", "cloud"]
+icon = "test-tube"
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert_eq!(
+            settings.scripts.run.as_deref(),
+            Some("pnpm dev --port $ARCHDUCTOR_PORT")
+        );
+        assert_eq!(
+            settings.scripts.run_scripts,
+            vec![
+                RunScriptDefinition {
+                    id: "dev".to_owned(),
+                    command: "pnpm dev --port $ARCHDUCTOR_PORT".to_owned(),
+                    available_in: vec!["local".to_owned()],
+                    default: true,
+                    icon: Some("play".to_owned()),
+                },
+                RunScriptDefinition {
+                    id: "test".to_owned(),
+                    command: "pnpm test:watch".to_owned(),
+                    available_in: vec!["local".to_owned(), "cloud".to_owned()],
+                    default: false,
+                    icon: Some("test-tube".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn structured_run_scripts_select_local_default_for_legacy_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.deploy]
+command = "pnpm deploy"
+available_in = ["cloud"]
+default = true
+
+[scripts.run.dev]
+command = "pnpm dev"
+available_in = ["local"]
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert_eq!(settings.scripts.run.as_deref(), Some("pnpm dev"));
+        assert_eq!(settings.scripts.run_scripts.len(), 2);
+        assert!(settings.scripts.run_scripts[0].default);
+        assert!(!settings.scripts.run_scripts[0].runnable_locally());
+        assert!(settings.scripts.run_scripts[1].runnable_locally());
+    }
+
+    #[test]
+    fn structured_run_scripts_skip_cloud_only_run_for_local_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.deploy]
+command = "pnpm deploy"
+available_in = ["cloud"]
+default = true
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert_eq!(settings.scripts.run, None);
+        assert_eq!(settings.scripts.run_scripts.len(), 1);
+        assert!(!settings.scripts.run_scripts[0].runnable_locally());
+    }
+
+    #[test]
+    fn rejects_structured_run_script_missing_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.dev]
+available_in = ["local"]
+default = true
+"#,
+        )
+        .unwrap();
+
+        let err = load_repository_settings_strict(temp.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("scripts.run.dev.command must not be empty"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_structured_run_script_with_invalid_availability() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts.run.dev]
+command = "pnpm dev"
+available_in = ["desktop"]
+"#,
+        )
+        .unwrap();
+
+        let err = load_repository_settings_strict(temp.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("scripts.run.dev.available_in must contain only local or cloud"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn local_settings_override_shared_settings() {
         let temp = tempfile::tempdir().unwrap();
         let conductor_dir = temp.path().join(".archductor");
@@ -4208,6 +4481,7 @@ LOCAL_ONLY = "1"
                 typecheck: Some("pnpm typecheck".to_owned()),
                 build: Some("pnpm build".to_owned()),
                 run_mode: Some("nonconcurrent".to_owned()),
+                run_scripts: Vec::new(),
             },
             environment_variables: vec![(
                 "API_BASE_URL".to_owned(),

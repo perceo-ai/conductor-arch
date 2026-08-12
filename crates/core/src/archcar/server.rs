@@ -17,9 +17,9 @@ use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
     ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChecksSummary,
-    ArchcarEvent, ArchcarMessage, ArchcarProjectionItem, ArchcarRepositorySummary, ArchcarRequest,
-    ArchcarResponse, ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope,
-    WorkspaceChangeScope,
+    ArchcarEvent, ArchcarMessage, ArchcarProcessSummary, ArchcarProjectionItem,
+    ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse, ArchcarRunScript,
+    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
 };
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
@@ -114,9 +114,13 @@ impl ArchcarServer {
     pub fn bind(paths: AppPaths) -> Result<Self> {
         fs::create_dir_all(&paths.state_dir)?;
         if let Err(err) = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)
-            .and_then(|store| store.recover_workspace_lifecycle_jobs())
+            .and_then(|store| {
+                store.recover_workspace_lifecycle_jobs()?;
+                store.reconcile_script_processes()?;
+                Ok(())
+            })
         {
-            warn!(error = %err, "archcar workspace lifecycle job recovery failed");
+            warn!(error = %err, "archcar workspace recovery failed");
         }
         let endpoint_path = paths.archcar_endpoint_path();
         if let Some(parent) = endpoint_path.parent() {
@@ -1133,6 +1137,87 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetWorkspaceRunScripts { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path) {
+                Ok(store) => ArchcarResponse::WorkspaceRunScripts {
+                    scripts: workspace_run_scripts(&store, &workspace),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StartWorkspaceSetup { workspace } => {
+            let (db_path, logs_dir) = {
+                let state = state.lock().unwrap();
+                (state.db_path.clone(), state.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, logs_dir)
+                .and_then(|store| store.setup_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::WorkspaceProcessStarted {
+                    process: archcar_process_summary(&process),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StartWorkspaceRun { workspace } => {
+            let (db_path, logs_dir) = {
+                let state = state.lock().unwrap();
+                (state.db_path.clone(), state.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, logs_dir)
+                .and_then(|store| store.run_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::WorkspaceProcessStarted {
+                    process: archcar_process_summary(&process),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::StopWorkspaceRun { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.stop_workspace(&workspace))
+            {
+                Ok(process) => ArchcarResponse::WorkspaceProcessStopped {
+                    process: archcar_process_summary(&process),
+                    workspace,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::RecoverWorkspaceLifecycleJobs => {
+            let (db_path, logs_dir) = {
+                let state = state.lock().unwrap();
+                (state.db_path.clone(), state.logs_dir.clone())
+            };
+            match WorkspaceStore::open_app_with_logs(&db_path, logs_dir).and_then(|store| {
+                let recovered = store.recover_workspace_lifecycle_jobs()?;
+                let reconciled_processes = store.reconcile_script_processes()?.len();
+                Ok((recovered, reconciled_processes))
+            }) {
+                Ok((recovered, reconciled_processes)) => {
+                    ArchcarResponse::WorkspaceLifecycleRecovery {
+                        recovered,
+                        reconciled_processes,
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListReviewComments { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
@@ -1530,13 +1615,14 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             issue_id,
             name,
             branch,
+            base_ref,
         } => match open_lifecycle_workspace_store(state).and_then(|s| {
             s.create_from_linear_issue(
                 &repository,
                 &issue_id,
                 name.as_deref(),
                 branch.as_deref(),
-                None,
+                base_ref.as_deref(),
             )
         }) {
             Ok(w) => ArchcarResponse::WorkspaceCreated { name: w.name },
@@ -2273,8 +2359,6 @@ fn exit_code_label(exit_code: Option<i32>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-/// Compose the Processes tab text (Setups / Runs / Checks / Sessions). Ported
-/// from workspace_command_center::workspace_processes_text.
 // Build the Setup/Run tab prompt — port of the GTK run console's
 // workspace_script_prompt. Instructs the agent to (re)write scripts.setup/run in
 // .archductor/settings.toml, seeding it with any script already configured, then
@@ -2317,6 +2401,66 @@ fn workspace_script_prompt(store: &WorkspaceStore, name: &str, kind: &str) -> St
     prompt
 }
 
+fn workspace_run_scripts(store: &WorkspaceStore, name: &str) -> Vec<ArchcarRunScript> {
+    let Ok(settings) = store.workspace_repo_settings(name) else {
+        return Vec::new();
+    };
+    let scripts = if settings.scripts.run_scripts.is_empty() {
+        settings
+            .scripts
+            .run
+            .filter(|command| !command.trim().is_empty())
+            .map(|command| {
+                vec![crate::settings::RunScriptDefinition {
+                    id: "run".to_owned(),
+                    command,
+                    available_in: Vec::new(),
+                    default: true,
+                    icon: Some("play".to_owned()),
+                }]
+            })
+            .unwrap_or_default()
+    } else {
+        settings.scripts.run_scripts
+    };
+
+    scripts
+        .into_iter()
+        .map(|script| {
+            let runnable_here = script.runnable_locally();
+            ArchcarRunScript {
+                id: script.id,
+                command: script.command,
+                available_in: script.available_in,
+                default: script.default,
+                icon: script.icon,
+                runnable_here,
+                unavailable_reason: (!runnable_here)
+                    .then(|| "Available only in cloud workspaces.".to_owned()),
+            }
+        })
+        .collect()
+}
+
+fn archcar_process_summary(process: &crate::workspace::ProcessRecord) -> ArchcarProcessSummary {
+    let kind = match process.kind {
+        crate::workspace::ProcessKind::Setup => "setup",
+        crate::workspace::ProcessKind::Run => "run",
+        crate::workspace::ProcessKind::Check => "check",
+        crate::workspace::ProcessKind::Session => "session",
+        crate::workspace::ProcessKind::Terminal => "terminal",
+    };
+    ArchcarProcessSummary {
+        id: process.id,
+        kind: kind.to_owned(),
+        pid: process.pid,
+        status: process.status.as_str().to_owned(),
+        log_path: process.log_path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Compose the Processes tab text (Setups / Runs / Checks / Sessions). Ported
+/// from workspace_command_center::workspace_processes_text.
 fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     let mut out = String::new();
     let section = |out: &mut String,
@@ -5018,6 +5162,211 @@ mod tests {
             .status()
             .unwrap();
         path
+    }
+
+    fn wait_for_test_path(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    #[test]
+    fn workspace_run_scripts_dispatch_projects_local_availability() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts.run.dev]
+command = "pnpm dev --port $ARCHDUCTOR_PORT"
+available_in = ["local"]
+default = true
+icon = "play"
+
+[scripts.run.cloud-preview]
+command = "pnpm preview"
+available_in = ["cloud"]
+icon = "cloud"
+"#,
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let added = dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        assert!(
+            matches!(added, ArchcarResponse::RepositoryAdded { ref name } if name == "demo"),
+            "add_repository got {added:?}"
+        );
+        let created = dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+        assert!(
+            matches!(created, ArchcarResponse::WorkspaceCreated { ref name } if name == "berlin"),
+            "create_workspace got {created:?}"
+        );
+
+        let response = dispatch_request(
+            ArchcarRequest::GetWorkspaceRunScripts {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+
+        let ArchcarResponse::WorkspaceRunScripts { scripts, .. } = response else {
+            panic!("get_workspace_run_scripts got {response:?}");
+        };
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0].id, "cloud-preview");
+        assert!(!scripts[0].runnable_here);
+        assert_eq!(
+            scripts[0].unavailable_reason.as_deref(),
+            Some("Available only in cloud workspaces.")
+        );
+        assert_eq!(scripts[1].id, "dev");
+        assert!(scripts[1].runnable_here);
+        assert!(scripts[1].default);
+    }
+
+    #[test]
+    fn workspace_script_start_dispatch_runs_setup_and_default_run_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts]
+setup = "printf setup > .context/setup-started"
+
+[scripts.run.dev]
+command = "printf run > .context/run-started; sleep 5"
+available_in = ["local"]
+default = true
+"#,
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let added = dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        assert!(
+            matches!(added, ArchcarResponse::RepositoryAdded { ref name } if name == "demo"),
+            "add_repository got {added:?}"
+        );
+        let created = dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+        assert!(
+            matches!(created, ArchcarResponse::WorkspaceCreated { ref name } if name == "berlin"),
+            "create_workspace got {created:?}"
+        );
+        let workspace = WorkspaceStore::open_app(&db_path)
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|workspace| workspace.name == "berlin")
+            .unwrap();
+
+        let setup = dispatch_request(
+            ArchcarRequest::StartWorkspaceSetup {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(setup, ArchcarResponse::WorkspaceProcessStarted { ref process, .. } if process.kind == "setup"),
+            "start_workspace_setup got {setup:?}"
+        );
+        wait_for_test_path(&workspace.path.join(".context/setup-started"));
+
+        let run = dispatch_request(
+            ArchcarRequest::StartWorkspaceRun {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(run, ArchcarResponse::WorkspaceProcessStarted { ref process, .. } if process.kind == "run"),
+            "start_workspace_run got {run:?}"
+        );
+        wait_for_test_path(&workspace.path.join(".context/run-started"));
+
+        let stopped = dispatch_request(
+            ArchcarRequest::StopWorkspaceRun {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(stopped, ArchcarResponse::WorkspaceProcessStopped { ref process, .. } if process.kind == "run" && process.status == "stopped"),
+            "stop_workspace_run got {stopped:?}"
+        );
     }
 
     #[test]

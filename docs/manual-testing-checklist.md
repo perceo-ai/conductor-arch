@@ -4,9 +4,9 @@ Use this checklist before calling the app flow healthy or cutting a public
 artifact. It focuses on the real Archductor loop: one repository, many
 workspaces, multiple agent sessions, review, GitHub PR, merge, archive, repeat.
 
-Run on a machine with `git`, `gh`, Rust, GTK4, libadwaita, and any agent CLIs
-you want to test. Run `gh auth login` before GitHub checks. Set
-`LINEAR_API_KEY` before Linear checks.
+Run on a machine with `git`, `gh`, Rust, Node/pnpm, and any agent CLIs you want
+to test. Run `gh auth login` before GitHub checks. Set `LINEAR_API_KEY` before
+Linear checks.
 
 ## Build And Launch
 
@@ -14,10 +14,16 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] `cargo test -p archductor-core -p archductor`
 - [ ] `cargo build --workspace --release --locked`
 - [ ] `cd desktop && pnpm install && pnpm typecheck && pnpm test && pnpm build`
-- [ ] `./target/release/archductor doctor` prints distro guidance.
-- [ ] The Archductor desktop app (Electron, `desktop/`) opens
-      (`cd desktop && pnpm dev`, or an installed build). NOTE: the deeper
-      GTK-specific manual steps below still need an Electron rewrite.
+- [ ] `./target/release/archductor doctor` prints platform guidance.
+- [ ] The Archductor desktop app (Electron, `desktop/`) opens with
+  `cd desktop && pnpm dev`, or from an installed/package build.
+- [ ] On macOS and Windows-capable CI or local machines, run the relevant
+  compile smoke and record whether any platform-specific dependency is missing.
+- [ ] In Settings, run Check for updates; confirm a network failure or latest
+  release response is visible, and Open release launches the release page when a
+  release URL is available.
+- [ ] Confirm update installation is documented and treated as manual unless the
+  package channel under test has signed/validated automatic update support.
 
 ## Repository Setup
 
@@ -103,6 +109,35 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   command palette presets, and settings import/export, or mark missing areas as
   known gaps.
 
+## Conductor Behavior Baseline
+
+- [ ] Create a workspace after advancing `origin/<base>` and confirm Archductor
+  fetches before worktree creation so the workspace starts from the latest
+  remote base, without moving the branch checked out in the repository root.
+- [ ] Confirm every workspace is an isolated Git worktree with its own branch,
+  `.context` directory, running process records, and per-workspace port block.
+- [ ] Create two workspaces and confirm scripts/agents receive distinct
+  `ARCHDUCTOR_PORT` values and ten-port ranges.
+- [ ] Confirm setup/run/archive scripts run from the workspace working directory
+  in a non-interactive shell and receive `ARCHDUCTOR_WORKSPACE_NAME`,
+  `ARCHDUCTOR_WORKSPACE_ID`, `ARCHDUCTOR_WORKSPACE_PATH`,
+  `ARCHDUCTOR_ROOT_PATH`, `ARCHDUCTOR_DEFAULT_BRANCH`, `ARCHDUCTOR_PORT`, and
+  `ARCHDUCTOR_IS_LOCAL=1`.
+- [ ] Confirm `scripts.run_mode = "concurrent"` permits two workspace run
+  scripts for the same project, and `scripts.run_mode = "nonconcurrent"` blocks
+  the second run with visible UI and CLI feedback.
+- [ ] Put `.env.local` in both `file_include_globs` and `.worktreeinclude`;
+  confirm `.worktreeinclude` wins when present, then remove it and confirm
+  `file_include_globs` applies.
+- [ ] Confirm default file copy behavior includes `.env*` when neither
+  `.worktreeinclude` nor explicit file-copy settings are present.
+- [ ] Configure a run script that depends on local ports and confirm the desktop
+  UI clearly marks or hides it when the current environment cannot supply the
+  required local behavior.
+- [ ] Confirm missing `gh`, unauthenticated `gh`, missing Codex/Claude/Cursor
+  CLIs, and missing `LINEAR_API_KEY` show explicit source/tool/auth feedback
+  instead of silent empty states.
+
 ## Workspace Creation
 
 - [ ] Create a branch/base workspace from the GUI.
@@ -119,8 +154,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Click Check Sources on the Projects page and confirm GitHub reports ready
   only when `gh` is installed and authenticated.
 - [ ] With authenticated `gh`, click through GitHub issue and GitHub PR
-  workspace creation in GTK and confirm the created workspaces include source
-  context in `.context/brief.md`.
+  workspace creation in the desktop UI and confirm the created workspaces
+  include source context in `.context/brief.md`.
 - [ ] Create a Linear issue workspace with `LINEAR_API_KEY`.
 - [ ] Confirm Linear source creation fails clearly without `LINEAR_API_KEY`.
 - [ ] Click Check Sources on the Projects page and confirm Linear reports ready
@@ -136,7 +171,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Repeat the same branch flow through
   `archductor workspace branch <workspace> create|checkout|rename|delete`.
 - [ ] Confirm dirty working trees and branch collisions show actionable branch
-  errors in the GTK Branch tab and CLI.
+  errors in the desktop Branch surface and CLI.
 
 ## Agent Sessions And Terminal
 
@@ -166,12 +201,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   marked running/unread in the chat tab bar while thread 2's timeline and queue
   remain stable.
 - [ ] While a managed Codex session is running, stop and restart the archcar
-  daemon; confirm the GTK session surface reconnects or shows a single
+  daemon; confirm the desktop session surface reconnects or shows a single
   deduped bridge error, persisted transcript state reloads, and stale managed
   rows reconcile to exited without affecting unmanaged processes.
-- [ ] Quit and relaunch GTK while a managed Codex session record exists; confirm
-  service/bridge readiness is rebuilt from sidecar/store state and no session
-  state is available only from the previous GTK process memory.
+- [ ] Quit and relaunch the desktop app while a managed Codex session record
+  exists; confirm service/bridge readiness is rebuilt from sidecar/store state
+  and no session state is available only from the previous renderer process
+  memory.
 - [ ] Send input while Codex is still starting; confirm the composer defers the
   queued input and flushes it only after the selected session reports ready.
 - [ ] During active Codex generation, press Enter and confirm the message
@@ -182,9 +218,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm contract version 1 capability snapshots list the full required
   baseline for both Codex and Claude Code through
   `archductor archcar status <session-id>`.
-- [ ] Confirm Codex exposes native goal support and the GTK goal action, while
-  Claude Code reports a structured unsupported-goals reason and does not show
-  the goal action.
+- [ ] Confirm Codex exposes native goal support and the desktop goal action,
+  while Claude Code reports a structured unsupported-goals reason and does not
+  show the goal action.
 - [ ] Run `claude auth status` with the user's local Claude Code login and
   confirm Archductor does not require an API key.
 - [ ] Send a first Claude Code message through Archcar and confirm stream-json
@@ -193,17 +229,22 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   session ID.
 - [ ] Start two Claude Code threads and confirm their native session IDs,
   transcripts, readiness, queued input, and provider events remain separate.
-- [ ] Exercise Claude queueing and immediate delivery from CLI/GTK and confirm
-  messages are not duplicated.
+- [ ] Exercise Claude queueing and immediate delivery from CLI/desktop and
+  confirm messages are not duplicated.
 - [ ] Interrupt a harmless long Claude turn and confirm either clean survival or
   restart-and-resume, with exactly one interrupted completion boundary.
 - [ ] Change Claude model, effort, and permission mode; confirm conversation
   context survives the restart/resume path.
-- [ ] Resolve Claude permission flows through CLI and GTK: allow, deny, always
-  allow, `AskUserQuestion`, and plan approval.
+- [ ] Resolve Claude permission flows through CLI and desktop: allow, deny,
+  always allow, `AskUserQuestion`, and plan approval.
 - [ ] Restart Archcar with an acknowledged Claude input and a pending provider
   interaction; confirm acknowledged input is not resent and the pending
   interaction survives.
+- [ ] In Settings, run Recovery check after startup and confirm it reports
+  either no pending jobs/processes or the number of recovered lifecycle jobs and
+  reconciled stale setup/run/check processes.
+- [ ] Run `archductor archcar recover-workspace-lifecycle-jobs` against a live
+  archcar and confirm it prints recovered job and reconciled process counts.
 - [ ] Confirm native Claude raw JSON and canonical provider events remain
   queryable and that transcript content is not duplicated.
 - [ ] Hover queued-message actions while provider output streams and confirm
@@ -236,21 +277,20 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   do not leave duplicate or misplaced text.
 - [ ] Confirm stopped/exited terminal process rows reconcile after restart.
 - [ ] Confirm terminal transcripts are persisted, searchable, and reloadable.
-- [ ] Launch `./target/release/archductor-gtk` without
-  `ARCHDUCTOR_DEBUG`; confirm there is no PTY Inspector sidebar item or debug
-  fields in normal workspace/session UI.
-- [ ] Launch `./target/release/archductor-gtk --page pty-inspector`; confirm it
-  falls back to the normal default page.
+- [ ] Launch the desktop app without `ARCHDUCTOR_DEBUG`; confirm there is no PTY
+  Inspector sidebar item or debug fields in normal workspace/session UI.
+- [ ] Launch the desktop app with a direct PTY Inspector route while
+  `ARCHDUCTOR_DEBUG` is unset; confirm it falls back to the normal default page.
 
 ## Runtime
 
-- [ ] Start a Codex/agent session from GTK and confirm normal session start,
-  status, readiness, transcript rendering, and stop behavior.
+- [ ] Start a Codex/agent session from the desktop UI and confirm normal session
+  start, status, readiness, transcript rendering, and stop behavior.
 - [ ] Stop or block the archcar sidecar socket and confirm the session UI shows
   a visible bridge error without repeating a toast/status update every second.
-- [ ] Temporarily point GTK at a missing, locked, or corrupt workspace database
-  and confirm session refresh renders an explicit store/list error instead of
-  an empty state.
+- [ ] Temporarily point the desktop app at a missing, locked, or corrupt
+  workspace database and confirm session refresh renders an explicit store/list
+  error instead of an empty state.
 - [ ] Force a terminal/runtime reconcile or command-send failure and confirm the
   relevant terminal or run-console transcript displays the error with context.
 - [ ] Force Spotlight autosync/watch setup to fail and confirm the runtime
@@ -354,9 +394,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   start/stop, PR creation, archive/restore/delete, push, and check refresh
   events in timestamp order.
 - [ ] Run `archductor workspace timeline <workspace>` and confirm it
-  matches the GTK Timeline tab; repeat with `--kind branch.renamed`.
+  matches the desktop Timeline tab; repeat with `--kind branch.renamed`.
 - [ ] Start a local Shell/Codex/Claude/Cursor session, send at least one
-  composer message, refresh History, and confirm the saved Linux session appears.
+  composer message, refresh History, and confirm the saved session appears.
 - [ ] Run `archductor history list --workspace <name>` and confirm the
   saved session row appears with message count and preview.
 - [ ] Run `archductor history show <process-id>` and confirm the saved
@@ -369,7 +409,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] `Ctrl+R` refreshes the visible workspace state.
 - [ ] Confirm routine setup/run/stop, PR refresh/merge/review actions, terminal
   shell start/stop, and workspace archive/restore/delete update only their
-  affected GTK surfaces; use `Ctrl+R` or command-palette Refresh for a full
+  affected desktop surfaces; use `Ctrl+R` or command-palette Refresh for a full
   manual refresh.
 - [ ] `Ctrl+B` toggles the sidebar.
 - [ ] Use the command palette to navigate Dashboard, Projects, History,
@@ -377,18 +417,18 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   Processes, and Checkpoints.
 - [ ] Confirm command palette workspace-tab commands are hidden until a
   workspace is selected.
-- [ ] Launch `archductor-gtk --workspace <name> --tab checks` and confirm
-  the workspace opens on Checks.
-- [ ] Launch `archductor-gtk 'archductor://workspace/<name>?tab=review'`
-  and confirm the workspace opens on Review.
-- [ ] Launch `archductor-gtk 'archductor://history'` and confirm
-  History opens directly.
+- [ ] Launch the desktop app with a workspace Checks deep link and confirm the
+  workspace opens on Checks.
+- [ ] Launch the desktop app with `archductor://workspace/<name>?tab=review` and
+  confirm the workspace opens on Review.
+- [ ] Launch the desktop app with `archductor://history` and confirm History
+  opens directly.
 - [ ] Set `customization.workspace_defaults.default_visible_tab = "checks"` and
   confirm opening/selecting that workspace lands on Checks when no explicit tab
   is passed.
 - [ ] Set `customization.view.theme = "light"`, `accent_color = "blue"`, and
-  `density = "compact"` and confirm selecting the workspace changes the GTK
-  stylesheet.
+  `density = "compact"` and confirm selecting the workspace changes the
+  Electron desktop styling.
 - [ ] Set `customization.view.keybindings = "vim"` and confirm Ctrl+P opens the
   command palette while the palette shows configured Refresh/Sidebar shortcuts.
 - [ ] Set `customization.view.terminal_font` and
@@ -409,13 +449,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Deeper layout/theme coverage is not complete.
 - [ ] Full naming-template, hook, notification, shortcut, prompt-pack, and
   non-terminal preset customization is not complete.
-- [ ] GitHub review-thread resolution has CLI and GTK GraphQL controls with a
-  live-proven CLI mutation path; check/deployment aggregation has live-proven
-  CLI coverage for success/failure/pending/error commit statuses,
+- [ ] GitHub review-thread resolution has CLI coverage and still needs Electron
+  desktop parity where not yet ported; check/deployment aggregation has
+  live-proven CLI coverage for success/failure/pending/error commit statuses,
   success/failure/pending/inactive deployments, PR-head deployment API
   coverage, rollup/head-status de-duplication, and real provider
   cancelled/skipped check rollups.
-- [ ] Visual parity with Archductor is not complete.
+- [ ] Visual parity with upstream Conductor is not complete.
 
 ## Packaging Smoke
 
@@ -438,12 +478,21 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   publishes matching release downloads, install instructions, supported targets,
   known limits, and GitHub release links.
 
+## macOS Compile Smoke
+
+- [ ] On macOS, run `cargo test -p archductor-core -p archductor`.
+- [ ] On macOS, run `cargo build --workspace --locked`.
+- [ ] On macOS, run `cd desktop && pnpm typecheck && pnpm test && pnpm build`.
+- [ ] Launch the Electron desktop app in dev mode and confirm archcar starts,
+  `archductor doctor` reports native paths, and a local repository can be added.
+
 ## Windows Preview Smoke
 
-- [ ] Windows CI builds all workspace targets with MSYS2 UCRT64 GTK4 and
-  libadwaita.
+- [ ] Windows CI builds all workspace targets with the native Windows toolchain
+  required by the release workflow.
 - [ ] Extract `archductor-<version>-windows-x86_64.zip` on a clean Windows
-  machine and launch `archductor-gtk.exe` without MSYS2 on `PATH`.
+  machine and launch the packaged Electron desktop app without build tools on
+  `PATH`.
 - [ ] Run `archductor.exe doctor`; confirm native Windows/AppData paths and
   Git, GitHub CLI, SSH, and provider detection.
 - [ ] Add and clone a repository, create a Git worktree workspace, and confirm
@@ -451,9 +500,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Run a one-shot command and setup/run scripts through `cmd.exe`; start a
   Shell, Codex, and Claude PTY session and send input.
 - [ ] Stop runtime/session process trees and confirm no child processes remain.
-- [ ] Quit and relaunch the GTK app; confirm archcar reconnects through its
+- [ ] Quit and relaunch the desktop app; confirm archcar reconnects through its
   per-user loopback endpoint and persisted state reloads.
 - [ ] Open a workspace folder, external URL, and Windows Terminal session from
-  GTK/CLI controls.
+  desktop/CLI controls.
 - [ ] Verify `SHA256SUMS-windows.txt`, replace an older extracted preview with
   the new bundle, and repeat GUI/CLI launch smoke.

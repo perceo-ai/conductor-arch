@@ -35,6 +35,10 @@ interface ArchductorApi {
     { ok: true; avatarUrl: string } | { ok: false; error: string }
   >;
   openExternal(target: string): Promise<{ ok: boolean; error?: string }>;
+  checkForUpdates(): Promise<
+    | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
+    | { ok: false; currentVersion: string; error: string }
+  >;
 }
 
 declare global {
@@ -86,3 +90,6 @@ export const repoAvatar = (opts: { rootPath: string; remoteName?: string }) =>
 
 /** Open a URL in the browser or a filesystem path in the OS default app. */
 export const openExternal = (target: string) => api().openExternal(target);
+
+/** Check GitHub releases for a newer packaged Archductor build. */
+export const checkForUpdates = () => api().checkForUpdates();

@@ -1,8 +1,10 @@
 import { For, Show, createEffect, createResource, createSignal } from "solid-js";
 import { repositoriesStore, prefsStore } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
-import { send } from "@/bridge/client";
+import { checkForUpdates, openExternal, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
+import { updateStatusText, type UpdateStatus } from "@/lib/update";
+import { SetupReadinessCard } from "@/components/SetupReadiness";
 
 // Settings page — two panes per scope:
 //   Effective : the merged, read-only config (get_settings) for reference.
@@ -14,9 +16,12 @@ import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
 type Layer = "repository" | "local";
 
 export function SettingsPage() {
-  // undefined scope = global; otherwise a repository name.
   const [repo, setRepo] = createSignal<string | undefined>(undefined);
   const [layer, setLayer] = createSignal<Layer>("repository");
+  const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = createSignal(false);
+  const [recoveryStatus, setRecoveryStatus] = createSignal("Recovery has not run in this window.");
+  const [recovering, setRecovering] = createSignal(false);
 
   const [effective, { refetch: refetchEffective }] = createResource(
     () => repo() ?? "\0global",
@@ -46,8 +51,6 @@ export function SettingsPage() {
     },
   );
 
-  // Available prompt packs for the selected repository (read-only discovery;
-  // switch by editing `[prompt_pack] active` in the source editor below).
   const [promptPacks, { refetch: refetchPacks, mutate: mutatePacks }] = createResource(
     () => repo(),
     async (repository): Promise<{ packs: string[]; active?: string }> => {
@@ -59,6 +62,7 @@ export function SettingsPage() {
       }
     },
   );
+
   async function switchPack(pack: string) {
     const repository = repo();
     if (!repository) return;
@@ -77,7 +81,6 @@ export function SettingsPage() {
 
   const [draft, setDraft] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal("");
-  // Reset the editor draft whenever a fresh source load arrives.
   createEffect(() => {
     const s = source();
     if (s != null) {
@@ -90,7 +93,7 @@ export function SettingsPage() {
   async function save() {
     const toml = draft();
     if (toml == null) return;
-    setStatus("Saving…");
+    setStatus("Saving...");
     try {
       const res = await send({
         type: "save_settings",
@@ -108,6 +111,48 @@ export function SettingsPage() {
       }
     } catch (err) {
       setStatus(`Save failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function runUpdateCheck() {
+    if (checkingUpdates()) return;
+    setCheckingUpdates(true);
+    try {
+      const result = await checkForUpdates();
+      setUpdateStatus(
+        result.ok
+          ? {
+              currentVersion: result.currentVersion,
+              latestVersion: result.latestVersion,
+              updateAvailable: result.updateAvailable,
+              releaseUrl: result.releaseUrl,
+            }
+          : { currentVersion: result.currentVersion, error: result.error },
+      );
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
+
+  async function runRecoveryCheck() {
+    if (recovering()) return;
+    setRecovering(true);
+    try {
+      const res = await send({ type: "recover_workspace_lifecycle_jobs" });
+      if (res.type === "workspace_lifecycle_recovery") {
+        const total = res.recovered + res.reconciled_processes;
+        setRecoveryStatus(
+          total === 0
+            ? "No pending workspace lifecycle jobs or stale script processes needed recovery."
+            : `Recovered ${res.recovered} lifecycle job${res.recovered === 1 ? "" : "s"} and reconciled ${res.reconciled_processes} stale script process${res.reconciled_processes === 1 ? "" : "es"}.`,
+        );
+      } else if (res.type === "error") {
+        setRecoveryStatus(`Recovery failed: ${res.message}`);
+      }
+    } catch (err) {
+      setRecoveryStatus(`Recovery failed: ${(err as Error).message}`);
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -189,6 +234,36 @@ export function SettingsPage() {
             </div>
           </div>
         </div>
+        <div class="settings-health-grid">
+          <SetupReadinessCard />
+          <div class="settings-field settings-health-card">
+            <div class="settings-field-title">Updates</div>
+            <div class="settings-status">
+              {updateStatus() ? updateStatusText(updateStatus()!) : "Check GitHub releases for a newer build."}
+            </div>
+            <div class="settings-action-row">
+              <button class="ui-button-secondary" disabled={checkingUpdates()} onClick={() => void runUpdateCheck()}>
+                {checkingUpdates() ? "Checking..." : "Check for updates"}
+              </button>
+              <Show when={updateStatus()?.releaseUrl}>
+                {(url) => (
+                  <button class="ui-button-secondary" onClick={() => void openExternal(url())}>
+                    Open release
+                  </button>
+                )}
+              </Show>
+            </div>
+          </div>
+          <div class="settings-field settings-health-card">
+            <div class="settings-field-title">Recovery</div>
+            <div class="settings-status">{recoveryStatus()}</div>
+            <div class="settings-action-row">
+              <button class="ui-button-secondary" disabled={recovering()} onClick={() => void runRecoveryCheck()}>
+                {recovering() ? "Checking..." : "Run recovery check"}
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="project-tabs">
           <button
             class="ws-tab-shell"
@@ -219,9 +294,7 @@ export function SettingsPage() {
                     class="settings-pack-chip"
                     classList={{ "settings-pack-chip-active": promptPacks()?.active === pack }}
                     disabled={promptPacks()?.active === pack}
-                    title={
-                      promptPacks()?.active === pack ? "Active pack" : `Switch to ${pack}`
-                    }
+                    title={promptPacks()?.active === pack ? "Active pack" : `Switch to ${pack}`}
                     onClick={() => void switchPack(pack)}
                   >
                     {pack}
@@ -284,7 +357,7 @@ export function SettingsPage() {
             <span class="section-title">Effective (read-only)</span>
           </div>
           <div class="ws-diff-view">
-            <Show when={!effective.loading} fallback={<div class="empty-state">Loading…</div>}>
+            <Show when={!effective.loading} fallback={<div class="empty-state">Loading...</div>}>
               <pre class="ws-diff-text">{effective()}</pre>
             </Show>
           </div>

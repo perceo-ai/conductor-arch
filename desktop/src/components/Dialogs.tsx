@@ -240,9 +240,9 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
   // {prefix}/gh-{issue|pr}-{n} branch scheme.
   type Source = "prompt" | "branch" | "github" | "linear";
   const [source, setSource] = createSignal<Source>("prompt");
-  const [linearIssue, setLinearIssue] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selected, setSelected] = createSignal<GithubWorkItem | null>(null);
+  const [linearIssue, setLinearIssue] = createSignal("");
   const [filter, setFilter] = createSignal("");
   // Branch/base source (restores the GTK "create from branch/base" flow).
   const [wsName, setWsName] = createSignal("");
@@ -307,20 +307,116 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     }
   }, props.onDone);
 
-  const sources: { key: Source; label: string }[] = [
-    { key: "prompt", label: "Prompt" },
-    { key: "branch", label: "Branch" },
-    { key: "github", label: "Github" },
-    { key: "linear", label: "Linear" },
+  const sourceMeta: Record<Source, { label: string; detail: string }> = {
+    prompt: {
+      label: "Prompt",
+      detail: "Start from a task brief and let the agent shape the workspace.",
+    },
+    branch: {
+      label: "Branch",
+      detail: "Create a named workspace from a base branch.",
+    },
+    github: {
+      label: "GitHub",
+      detail: "Start from an open issue or pull request using local gh auth.",
+    },
+    linear: {
+      label: "Linear",
+      detail: "Start from a Linear issue when LINEAR_API_KEY is available.",
+    },
+  };
+
+  const sourceState = (key: Source) => {
+    if (key === "github") {
+      if (!rootPath()) return "No project path";
+      if (work.loading) return "Loading";
+      if (work()?.ok === false) return "Needs gh";
+      return "Ready";
+    }
+    if (key === "linear") return "Needs key";
+    return "Ready";
+  };
+
+  const missingRequirement = () => {
+    if (source() === "github" && !selected()) return "Select a GitHub issue or pull request.";
+    if (source() === "linear" && !linearIssue().trim()) return "Enter a Linear issue ID.";
+    return "";
+  };
+  const canSubmit = () => !busy() && !missingRequirement();
+  const previewRows = (): [string, string][] => {
+    if (source() === "prompt") {
+      return [
+        ["Source", "Prompt"],
+        ["Workspace", "Generated automatically"],
+        ["First message", prompt().trim() ? "Prompt will be sent to the agent" : "No first message"],
+      ];
+    }
+    if (source() === "branch") {
+      return [
+        ["Source", "Branch"],
+        ["Workspace", wsName().trim() || "Generated automatically"],
+        ["Branch", wsBranch().trim() || "Generated automatically"],
+        ["Base", wsBase().trim() || "Repository default branch"],
+      ];
+    }
+    if (source() === "linear") {
+      return [
+        ["Source", "Linear"],
+        ["Issue", linearIssue().trim() || "Required"],
+        ["Auth", "Requires LINEAR_API_KEY in archcar environment"],
+      ];
+    }
+    const item = selected();
+    return [
+      ["Source", "GitHub"],
+      ["Selection", item ? `${item.kind === "pr" ? "PR" : "Issue"} #${item.number}` : "Required"],
+      ["Auth", "Uses local gh authentication"],
+    ];
+  };
+
+  const submitLabel = () =>
+    busy()
+      ? "Creating..."
+      : source() === "prompt"
+        ? "Start workspace"
+        : source() === "github"
+          ? "Create from selection"
+          : "Create workspace";
+
+  const submitTitle = () => missingRequirement() || submitLabel();
+
+  const sourceClass = (key: Source) => ({
+    "dialog-source-active": source() === key,
+    "dialog-source-warning": sourceState(key).startsWith("Needs"),
+  });
+
+  const sourceTone = (key: Source) =>
+    sourceState(key) === "Ready" ? "dialog-source-state-ready" : "dialog-source-state-action";
+
+  const sourceItems: { key: Source; label: string; detail: string }[] = [
+    { key: "prompt", ...sourceMeta.prompt },
+    { key: "branch", ...sourceMeta.branch },
+    { key: "github", ...sourceMeta.github },
+    { key: "linear", ...sourceMeta.linear },
   ];
 
   return (
     <div class="dialog-form">
-      <div class="dialog-tabs">
-        <For each={sources}>
+      <div class="dialog-source-grid">
+        <For each={sourceItems}>
           {(s) => (
-            <button class="ui-button-sm" classList={{ active: source() === s.key }} onClick={() => setSource(s.key)}>
-              {s.label}
+            <button
+              class="dialog-source-card"
+              classList={sourceClass(s.key)}
+              onClick={() => setSource(s.key)}
+            >
+              <span class="dialog-source-card-head">
+                <span class="dialog-source-label">{s.label}</span>
+                <span class={`dialog-source-state ${sourceTone(s.key)}`}>
+                  {sourceState(s.key)}
+                </span>
+              </span>
+              <span class="dialog-source-detail">{s.detail}</span>
             </button>
           )}
         </For>
@@ -425,17 +521,29 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
         </Match>
       </Switch>
 
+      <div class="dialog-preview">
+        <div class="dialog-preview-title">Workspace preview</div>
+        <For each={previewRows()}>
+          {([label, value]) => (
+            <div class="dialog-preview-row">
+              <span class="dialog-preview-label">{label}</span>
+              <span class="dialog-preview-value">{value}</span>
+            </div>
+          )}
+        </For>
+      </div>
+
       <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
+      <Show when={missingRequirement()}>{(msg) => <div class="dialog-hint">{msg()}</div>}</Show>
       <div class="dialog-actions">
         <button class="ui-button" onClick={props.onDone}>Cancel</button>
-        <button class="ui-button-primary" disabled={busy()} onClick={() => submit()}>
-          {busy()
-            ? "Creating…"
-            : source() === "prompt"
-              ? "Start workspace"
-              : source() === "branch" || source() === "linear"
-                ? "Create workspace"
-                : "Create from selection"}
+        <button
+          class="ui-button-primary"
+          disabled={!canSubmit()}
+          title={submitTitle()}
+          onClick={() => submit()}
+        >
+          {submitLabel()}
         </button>
       </div>
     </div>
@@ -448,7 +556,7 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
   const [dupName, setDupName] = createSignal(`${props.workspace}-copy`);
   const [branch, setBranch] = createSignal("");
   const [target, setTarget] = createSignal("");
-  const [provider, setProvider] = createSignal("");
+  const [provider, setProvider] = createSignal("codex");
   const [links, { refetch: refetchLinks }] = createResource(
     () => props.workspace,
     async (ws): Promise<{ target_workspace: string; link_path: string }[]> => {
@@ -466,36 +574,57 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
 
   return (
     <div class="dialog-form">
-      <label class="dialog-field"><span>Rename to</span>
-        <input value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} /></label>
-      <div class="dialog-actions">
-        <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.renameWorkspace(props.workspace, newName().trim()).then(props.onDone))}>Rename</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Lifecycle</span>
+          <span class="dialog-section-copy">Rename, duplicate, archive, or restore this workspace.</span>
+        </div>
+        <label class="dialog-field"><span>Rename to</span>
+          <input value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} /></label>
+        <div class="dialog-actions">
+          <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.renameWorkspace(props.workspace, newName().trim()).then(props.onDone))}>Rename</button>
+        </div>
+        <label class="dialog-field"><span>Duplicate as</span>
+          <input value={dupName()} onInput={(e) => setDupName(e.currentTarget.value)} /></label>
+        <div class="dialog-actions">
+          <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.duplicateWorkspace(props.workspace, dupName().trim()).then(props.onDone))}>Duplicate</button>
+          <Show
+            when={row()?.status === "archived"}
+            fallback={
+              <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.archiveWorkspace(props.workspace))}>Archive</button>
+            }
+          >
+            <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.restoreWorkspace(props.workspace))}>Restore</button>
+          </Show>
+        </div>
       </div>
 
-      <label class="dialog-field"><span>Duplicate as</span>
-        <input value={dupName()} onInput={(e) => setDupName(e.currentTarget.value)} /></label>
-      <div class="dialog-actions">
-        <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.duplicateWorkspace(props.workspace, dupName().trim()).then(props.onDone))}>Duplicate</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Branch</span>
+          <span class="dialog-section-copy">Create, switch, rename, or delete the workspace branch.</span>
+        </div>
+        <label class="dialog-field"><span>Branch</span>
+          <input value={branch()} onInput={(e) => setBranch(e.currentTarget.value)} placeholder="branch name" /></label>
+        <div class="dialog-actions dialog-actions-wrap">
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.createBranch(props.workspace, branch().trim()))}>Create</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.checkoutBranch(props.workspace, branch().trim()))}>Checkout</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.renameBranch(props.workspace, branch().trim()))}>Rename branch</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.deleteBranch(props.workspace, branch().trim()))}>Delete branch</button>
+        </div>
       </div>
 
-      <div class="dialog-divider" />
-
-      <label class="dialog-field"><span>Branch</span>
-        <input value={branch()} onInput={(e) => setBranch(e.currentTarget.value)} placeholder="branch name" /></label>
-      <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.createBranch(props.workspace, branch().trim()))}>Create</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.checkoutBranch(props.workspace, branch().trim()))}>Checkout</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.renameBranch(props.workspace, branch().trim()))}>Rename branch</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.deleteBranch(props.workspace, branch().trim()))}>Delete branch</button>
-      </div>
-
-      <div class="dialog-divider" />
-
-      <label class="dialog-field"><span>Link directory from workspace</span>
-        <input value={target()} onInput={(e) => setTarget(e.currentTarget.value)} placeholder="target workspace name" /></label>
-      <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Link</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Unlink</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Linked directories</span>
+          <span class="dialog-section-copy">Expose another workspace under this workspace's context links.</span>
+        </div>
+        <label class="dialog-field"><span>Link directory from workspace</span>
+          <input value={target()} onInput={(e) => setTarget(e.currentTarget.value)} placeholder="target workspace name" /></label>
+        <div class="dialog-actions dialog-actions-wrap">
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Link</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Unlink</button>
+        </div>
       </div>
       <Show when={(links() ?? []).length > 0}>
         <div class="dialog-linked-list">
@@ -510,26 +639,39 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
         </div>
       </Show>
 
-      <label class="dialog-field"><span>Default agent provider</span>
-        <input value={provider()} onInput={(e) => setProvider(e.currentTarget.value)} placeholder="codex | claude | cursor" /></label>
-      <div class="dialog-actions">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.setDefaultAgentProvider(props.workspace, provider().trim()))}>Set default</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Default agent</span>
+          <span class="dialog-section-copy">Choose the provider used when this workspace opens a new chat.</span>
+        </div>
+        <div class="dialog-provider-grid">
+          <For each={["codex", "claude", "cursor"]}>
+            {(p) => (
+              <button
+                class="dialog-provider-chip"
+                classList={{ "dialog-provider-chip-active": provider() === p }}
+                onClick={() => setProvider(p)}
+              >
+                {p}
+              </button>
+            )}
+          </For>
+        </div>
+        <div class="dialog-actions">
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.setDefaultAgentProvider(props.workspace, provider().trim()))}>Set default</button>
+        </div>
       </div>
 
-      <div class="dialog-divider" />
-
-      <div class="dialog-actions dialog-actions-wrap">
-        <Show
-          when={row()?.status === "archived"}
-          fallback={
-            <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.archiveWorkspace(props.workspace))}>Archive</button>
-          }
-        >
-          <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.restoreWorkspace(props.workspace))}>Restore</button>
-        </Show>
+      <div class="dialog-action-section dialog-danger-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Danger zone</span>
+          <span class="dialog-section-copy">Remove this workspace row and its worktree from disk.</span>
+        </div>
+        <div class="dialog-actions dialog-actions-wrap">
         <button class="ui-button-destructive" disabled={busy()} onClick={() => submit(() => actions.deleteWorkspace(props.workspace, true, false).then(props.onDone))}>
           Delete (remove worktree)
         </button>
+        </div>
       </div>
       <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
     </div>

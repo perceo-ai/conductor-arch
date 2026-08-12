@@ -11,6 +11,7 @@ export interface WorkspaceStatusInput {
   prNumber?: number;
   prState?: string;
   changedFiles?: number;
+  openTodos?: number;
 }
 
 // Precedence: archived first, then live work (running), then an open PR under
@@ -38,3 +39,62 @@ export const STATUS_LABEL: Record<WorkspaceStatusKind, string> = {
   idle: "Idle",
   archived: "Archived",
 };
+
+export type DashboardTriageBadgeTone = "agent" | "run" | "pr" | "changes" | "todo";
+
+export interface DashboardTriageBadge {
+  tone: DashboardTriageBadgeTone;
+  label: string;
+  title: string;
+}
+
+function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralLabel}`;
+}
+
+export function dashboardTriageBadges(w: WorkspaceStatusInput): DashboardTriageBadge[] {
+  const activeAgents = w.activeSessions ?? 0;
+  const changedFiles = w.changedFiles ?? 0;
+  const openTodos = w.openTodos ?? 0;
+  const badges: DashboardTriageBadge[] = [
+    {
+      tone: "agent",
+      label: activeAgents > 0 ? plural(activeAgents, "agent") : "No agents",
+      title:
+        activeAgents > 0
+          ? `${plural(activeAgents, "active agent session")}`
+          : "No active agent sessions",
+    },
+    {
+      tone: "run",
+      label: w.runRunning ? "Run live" : "Run idle",
+      title: w.runRunning ? "Run script is running" : "No run script is running",
+    },
+  ];
+
+  if (w.prNumber != null) {
+    const state = (w.prState ?? "").trim();
+    badges.push({
+      tone: "pr",
+      label: state ? `PR #${w.prNumber} ${state}` : `PR #${w.prNumber}`,
+      title: state
+        ? `Pull request #${w.prNumber} is ${state}`
+        : `Pull request #${w.prNumber}`,
+    });
+  }
+
+  badges.push(
+    {
+      tone: "changes",
+      label: changedFiles > 0 ? plural(changedFiles, "file") : "Clean",
+      title: changedFiles > 0 ? plural(changedFiles, "changed file") : "No changed files",
+    },
+    {
+      tone: "todo",
+      label: openTodos > 0 ? plural(openTodos, "todo", "todos") : "No todos",
+      title: openTodos > 0 ? plural(openTodos, "open todo", "open todos") : "No open todos",
+    },
+  );
+
+  return badges;
+}

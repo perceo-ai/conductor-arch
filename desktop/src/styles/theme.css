@@ -774,12 +774,52 @@ button.ui-button-destructive:hover {
 }
 
 .card-branch,
+.card-state,
 .card-diff,
 .column-empty,
 .empty-label,
 .status-detail,
 .info-text {
     color: #8a8a8a;
+}
+.card-state,
+.triage-badge {
+    border-radius: 6px;
+    border: 1px solid #343434;
+    background-color: #202020;
+    color: #b8b8b8;
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 16px;
+}
+.card-state {
+    padding: 1px 6px;
+    text-transform: capitalize;
+}
+.triage-badge-agent {
+    border-color: #36513f;
+    background-color: #17251d;
+    color: #8fd2a6;
+}
+.triage-badge-run {
+    border-color: #345445;
+    background-color: #14271f;
+    color: #9adfbd;
+}
+.triage-badge-pr {
+    border-color: #334768;
+    background-color: #151f33;
+    color: #9bbcf4;
+}
+.triage-badge-changes {
+    border-color: #5a4a2e;
+    background-color: #2a2214;
+    color: #e2c071;
+}
+.triage-badge-todo {
+    border-color: #57445f;
+    background-color: #241a2a;
+    color: #d7a6ea;
 }
 
 .metric-value {
@@ -1285,6 +1325,51 @@ button.ui-button-destructive:hover {
     font-size: 12px;
 }
 
+.settings-health-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+}
+
+.settings-health-card {
+    align-items: stretch;
+}
+
+.settings-readiness-card {
+    grid-column: 1 / -1;
+}
+
+.settings-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.settings-readiness-pill {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    border: 1px solid #5a2a2a;
+    background: #321b1b;
+    color: #ffaaaa;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 750;
+}
+
+.settings-readiness-pill-ready {
+    border-color: #2f6b4d;
+    background: #193225;
+    color: #9be7bb;
+}
+
+.settings-action-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .settings-inspector {
     margin-top: 2px;
 }
@@ -1730,6 +1815,37 @@ button.ui-button-destructive:hover {
     background-color: #ffffff;
     border-color: #d9e0e8;
 }
+.lc-theme-light .card-state,
+.lc-theme-light .triage-badge {
+    background-color: #f8fafc;
+    border-color: #d9e0e8;
+    color: #475467;
+}
+.lc-theme-light .triage-badge-agent {
+    background-color: #ecfdf3;
+    border-color: #b7e4c7;
+    color: #087443;
+}
+.lc-theme-light .triage-badge-run {
+    background-color: #eefbf4;
+    border-color: #b7e4c7;
+    color: #067647;
+}
+.lc-theme-light .triage-badge-pr {
+    background-color: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1d4ed8;
+}
+.lc-theme-light .triage-badge-changes {
+    background-color: #fffbeb;
+    border-color: #fde68a;
+    color: #92400e;
+}
+.lc-theme-light .triage-badge-todo {
+    background-color: #faf5ff;
+    border-color: #e9d5ff;
+    color: #7e22ce;
+}
 .lc-theme-light .dashboard-subtitle {
     color: #667085;
 }
@@ -1973,6 +2089,33 @@ button.ui-button-destructive:hover {
 .lc-theme-light .ws-topbar-branch {
     color: #1f2937;
 }
+.lc-theme-light .ws-topbar-summary {
+    color: #64748b;
+}
+.lc-theme-light .ws-briefing {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-briefing-kicker,
+.lc-theme-light .ws-briefing-label {
+    color: #64748b;
+}
+.lc-theme-light .ws-briefing-action,
+.lc-theme-light .ws-briefing-value {
+    color: #172033;
+}
+.lc-theme-light .ws-briefing-tile {
+    background: #ffffff;
+    border: 1px solid #dbe3ef;
+}
+.lc-theme-light .ws-briefing-tile:hover {
+    border-color: #b9c6d8;
+    background: #f4f7fb;
+}
+.lc-theme-light .nav-button-count {
+    background: #e2e8f0;
+    color: #334155;
+}
 /* Code editor: dark --lc-surface container + light --lc-text base color meant
    the editor was a dark block with invisible plain text in light mode. */
 .lc-theme-light .ws-file-editor-scroll {
@@ -2063,6 +2206,18 @@ button.ui-button-destructive:hover {
 .lc-theme-light .ws-run-tab-btn:hover {
     background-color: #e2e8f0;
 }
+.lc-theme-light .ws-chat-tab-meta {
+    color: #64748b;
+}
+.lc-theme-light .ws-chat-tab-meta-active {
+    color: #2563eb;
+}
+.lc-theme-light .ws-chat-tab-meta-needs-input {
+    color: #b45309;
+}
+.lc-theme-light .chat-queue-heading {
+    color: #64748b;
+}
 .lc-theme-light .ws-run-prompt {
     background-color: #ffffff;
     color: #334155;
@@ -2126,6 +2281,25 @@ button.ui-button-destructive:hover {
 .lc-theme-light .ws-tab-shell.ws-tab-active .ws-tab-label,
 .lc-theme-light .nav-button-active {
     color: #111827;
+}
+.lc-theme-light .settings-readiness-pill {
+    background: #fff1f2;
+    border-color: #fecdd3;
+    color: #be123c;
+}
+.lc-theme-light .settings-readiness-pill-ready {
+    background: #ecfdf5;
+    border-color: #bbf7d0;
+    color: #047857;
+}
+.lc-theme-light .ws-blocker-chip {
+    background: #fff1f2;
+    border-color: #fecdd3;
+    color: #be123c;
+}
+.lc-theme-light .ws-blocker-chip:hover {
+    background: #ffe4e6;
+    border-color: #fda4af;
 }
 .lc-theme-light .history-row .workspace-name,
 .lc-theme-light .project-workspace-row .workspace-name {
@@ -2204,6 +2378,77 @@ button.ui-button-destructive:hover {
 .lc-theme-light button.ui-button-sm.active {
     background-color: #e2e8f0;
     color: #111827;
+}
+.lc-theme-light .dialog-source-card {
+    background: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .dialog-source-card:hover {
+    background: #f8fafc;
+    border-color: #b9c6d8;
+}
+.lc-theme-light .dialog-source-active {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+.lc-theme-light .dialog-source-warning {
+    border-color: #fed7aa;
+}
+.lc-theme-light .dialog-source-detail,
+.lc-theme-light .dialog-preview-label {
+    color: #64748b;
+}
+.lc-theme-light .dialog-source-state {
+    background: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #475569;
+}
+.lc-theme-light .dialog-source-state-ready {
+    background: #ecfdf5;
+    border-color: #bbf7d0;
+    color: #047857;
+}
+.lc-theme-light .dialog-source-state-action {
+    background: #fff7ed;
+    border-color: #fed7aa;
+    color: #c2410c;
+}
+.lc-theme-light .dialog-preview {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-preview-title,
+.lc-theme-light .dialog-preview-value {
+    color: #1f2937;
+}
+.lc-theme-light .dialog-action-section {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-danger-section {
+    background: #fff1f2;
+    border-color: #fecdd3;
+}
+.lc-theme-light .dialog-section-title {
+    color: #111827;
+}
+.lc-theme-light .dialog-section-copy {
+    color: #64748b;
+}
+.lc-theme-light .dialog-provider-chip {
+    background: #ffffff;
+    border-color: #d9e0e8;
+    color: #334155;
+}
+.lc-theme-light .dialog-provider-chip:hover {
+    background: #f1f5f9;
+    border-color: #b9c6d8;
+}
+.lc-theme-light .dialog-provider-chip-active {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
 }
 .lc-theme-light .modal-body input,
 .lc-theme-light .dialog-field input,
@@ -2346,6 +2591,68 @@ button.ui-button-destructive:hover {
 .ws-center {
     background-color: #191919;
 }
+.ws-topbar-summary {
+    color: #8e8e8e;
+}
+.ws-briefing {
+    background: #171717;
+    border-color: #252525;
+}
+.ws-briefing-kicker,
+.ws-briefing-label {
+    color: #7f8792;
+}
+.ws-briefing-action,
+.ws-briefing-value {
+    color: #e2e8f0;
+}
+.ws-briefing-tile {
+    background: #1d1d1d;
+    border: 1px solid #2c2c2c;
+    box-shadow: none;
+}
+.ws-briefing-tile:hover {
+    background: #232323;
+    border-color: #3a3a3a;
+}
+.ws-briefing-running {
+    border-color: rgba(63, 178, 127, 0.42);
+    background: rgba(63, 178, 127, 0.08);
+}
+.ws-briefing-review {
+    border-color: rgba(91, 141, 239, 0.42);
+    background: rgba(91, 141, 239, 0.08);
+}
+.ws-briefing-changes {
+    border-color: rgba(195, 155, 80, 0.45);
+    background: rgba(195, 155, 80, 0.09);
+}
+.ws-briefing-danger {
+    border-color: rgba(255, 138, 138, 0.48);
+    background: rgba(255, 138, 138, 0.09);
+}
+.ws-briefing-archived {
+    opacity: 0.72;
+}
+.nav-button-count {
+    background: #343434;
+    color: #d8d8d8;
+}
+.ws-blocker-chip {
+    background: rgba(255, 138, 138, 0.09);
+    border: 1px solid rgba(255, 138, 138, 0.34);
+    color: #ffb4b4;
+}
+.ws-blocker-chip:hover {
+    background: rgba(255, 138, 138, 0.15);
+    border-color: rgba(255, 138, 138, 0.52);
+}
+.ws-force-push-action {
+    opacity: 0.72;
+}
+.ws-force-push-action:hover {
+    opacity: 1;
+}
 .ws-tab-bar {
     min-height: 46px;
     padding: 0 18px;
@@ -2422,6 +2729,15 @@ button.ws-tab-shell {
     color: #f0c36a;
     font-size: 18px;
     font-weight: 700;
+}
+.ws-chat-tab-meta {
+    color: #777777;
+}
+.ws-chat-tab-meta-active {
+    color: #b6c7e8;
+}
+.ws-chat-tab-meta-needs-input {
+    color: #f2bf7e;
 }
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
@@ -2783,6 +3099,65 @@ button.ws-tab-shell {
 }
 .ws-run-panel {
     padding: 4px 12px 10px;
+}
+.ws-run-script-list {
+    display: grid;
+    gap: 6px;
+    margin: 8px 0 10px;
+}
+.ws-run-script-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+    padding: 7px 9px;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    background: #171717;
+}
+.ws-run-script-disabled {
+    opacity: 0.58;
+}
+.ws-run-script-main,
+.ws-run-script-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.ws-run-script-meta {
+    justify-content: flex-end;
+}
+.ws-run-script-id {
+    color: #e2e2e2;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ws-run-script-badge,
+.ws-run-script-env {
+    flex: none;
+    border-radius: 999px;
+    border: 1px solid #343434;
+    padding: 2px 7px;
+    color: #a8a8a8;
+    font-size: 11px;
+    line-height: 1.25;
+}
+.ws-run-script-badge {
+    color: #d8d8d8;
+    border-color: #4a4a4a;
+    background: #202020;
+}
+.ws-run-script-status {
+    color: #8c8c8c;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ws-run-terminal-panel {
     padding: 0;
@@ -3382,6 +3757,9 @@ button.chat-inline-event-expander label {
     border-radius: 8px;
     background-color: rgba(18, 18, 18, 0.96);
 }
+.chat-queue-heading {
+    color: #858585;
+}
 .chat-queued-composer-row {
     padding: 5px 6px;
     border-radius: 6px;
@@ -3535,6 +3913,78 @@ button.chat-inline-event-expander label {
 .settings-page .settings-editor-shell:focus-within {
     border-color: #8a8a8a;
     box-shadow: none;
+}
+
+.dialog-source-card {
+    background: #1c1c1c;
+    border: 1px solid #2c2c2c;
+    color: #d8d8d8;
+}
+.dialog-source-card:hover {
+    background: #222222;
+    border-color: #3a3a3a;
+}
+.dialog-source-active {
+    background: #232323;
+    border-color: #5b5b5b;
+}
+.dialog-source-warning {
+    border-color: rgba(242, 191, 126, 0.34);
+}
+.dialog-source-detail,
+.dialog-preview-label {
+    color: #858585;
+}
+.dialog-source-state {
+    border: 1px solid #343434;
+    background: #202020;
+    color: #a8a8a8;
+}
+.dialog-source-state-ready {
+    border-color: #2f6b4d;
+    background: #193225;
+    color: #9be7bb;
+}
+.dialog-source-state-action {
+    border-color: #5f4526;
+    background: #2c2114;
+    color: #f2bf7e;
+}
+.dialog-preview {
+    background: #181818;
+    border: 1px solid #2a2a2a;
+}
+.dialog-preview-title,
+.dialog-preview-value {
+    color: #d8d8d8;
+}
+.dialog-action-section {
+    background: #181818;
+    border: 1px solid #2a2a2a;
+}
+.dialog-danger-section {
+    border-color: rgba(255, 138, 138, 0.26);
+    background: rgba(255, 138, 138, 0.05);
+}
+.dialog-section-title {
+    color: #e0e0e0;
+}
+.dialog-section-copy {
+    color: #858585;
+}
+.dialog-provider-chip {
+    background: #202020;
+    border: 1px solid #343434;
+    color: #b8b8b8;
+}
+.dialog-provider-chip:hover {
+    background: #262626;
+    border-color: #454545;
+}
+.dialog-provider-chip-active {
+    background: #263044;
+    border-color: #4d6ca3;
+    color: #dbe8ff;
 }
 
 .chat-context-usage-danger {
@@ -4094,9 +4544,16 @@ textarea:focus {
 .lc-custom-colors .column-count,
 .lc-custom-colors .empty-label,
 .lc-custom-colors .card-branch,
+.lc-custom-colors .card-state,
 .lc-custom-colors .card-diff,
+.lc-custom-colors .triage-badge,
 .lc-custom-colors .workspace-row-branch-icon {
     color: var(--lc-text-muted);
+}
+.lc-custom-colors .card-state,
+.lc-custom-colors .triage-badge {
+    background-color: var(--lc-surface);
+    border-color: var(--lc-border);
 }
 
 .lc-custom-colors .dashboard-title,

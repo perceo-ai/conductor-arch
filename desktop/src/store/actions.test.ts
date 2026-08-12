@@ -84,6 +84,21 @@ describe("actions.createWorkspace", () => {
       base_ref: "main",
     });
   });
+
+  it("sends create_workspace_from_linear with the issue id", async () => {
+    routeByType({ create_workspace_from_linear: { type: "workspace_created", name: "arc-123" } });
+    const { actions } = await import("./actions");
+    await actions.createWorkspaceFromLinear({ repository: "demo", issueId: "ARC-123" });
+
+    const call = api.request.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .find((p) => p.type === "create_workspace_from_linear");
+    expect(call).toMatchObject({
+      type: "create_workspace_from_linear",
+      repository: "demo",
+      issue_id: "ARC-123",
+    });
+  });
 });
 
 describe("actions.deleteWorkspace", () => {

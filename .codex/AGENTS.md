@@ -46,14 +46,15 @@ Use caveman mode:
 Be real with the user:
 
 - Do not call a phase, feature, connector, or flow "done" unless it has current
-  evidence from code, written tests, CLI smoke, and GTK smoke where applicable.
-- Distinguish clearly between backend support, CLI support, GTK controls, and
-  actual end-to-end product behavior. One layer does not prove the others.
+  evidence from code, written tests, CLI smoke, and Electron desktop smoke where
+  applicable.
+- Distinguish clearly between backend support, CLI support, desktop controls,
+  and actual end-to-end product behavior. One layer does not prove the others.
 - If auth, API keys, display server, network, local tools, or test data are
   missing, say exactly what was not verified.
 - Do not market scaffolding as a feature. A button that calls nothing real is
-  not a feature. A CLI path with no GTK path is not a GUI feature. A GTK path
-  with no core behavior is not real.
+  not a feature. A CLI path with no Electron path is not a GUI feature. An
+  Electron path with no core behavior is not real.
 - When progress docs are stale or too optimistic, fix them before continuing.
 
 Use Superpowers:
@@ -74,27 +75,29 @@ Every behavior change must be verified at all three layers that matter for the
 change:
 
 - Written tests: run the narrowest automated tests that cover the edited core,
-  CLI, and/or GTK code. Prefer focused tests first, then broader package tests
-  when the change crosses boundaries.
+  CLI, and/or Electron desktop code. Prefer focused tests first, then broader
+  package tests when the change crosses boundaries.
 - CLI smoke: run the relevant `archductor` command or CLI test path that proves
   the behavior reaches the command boundary. Do not treat core-only tests as CLI
   verification.
 - Desktop smoke: the desktop UI is the Electron app in `desktop/`. For visible
   UI changes, build/run it (`cd desktop && pnpm typecheck && pnpm build`, or a
   real launch when the environment supports it) to prove the behavior reaches
-  the app surface.
+  the app surface. The retired GTK app is historical context only unless the
+  change explicitly touches legacy GTK code.
 
-Keep CLI and GTK inline:
+Keep CLI and desktop inline:
 
 - Core behavior that is visible to users should not land in only one surface.
-  Update the CLI and GTK paths together, or explicitly report the missing side
-  as incomplete.
+  Update the CLI and Electron desktop paths together, or explicitly report the
+  missing side as incomplete.
 - Shared parsing, projection, state, and provider behavior should live in core
-  whenever practical so CLI and GTK render the same semantics.
-- If the CLI renders a provider/session/workspace concept one way, GTK should
-  use the same names, statuses, filtering rules, and lifecycle assumptions.
-- Before final response, name the written tests, CLI smoke, and GTK smoke that
-  ran. If any layer was skipped, say why.
+  whenever practical so CLI and desktop render the same semantics.
+- If the CLI renders a provider/session/workspace concept one way, the desktop
+  app should use the same names, statuses, filtering rules, and lifecycle
+  assumptions.
+- Before final response, name the written tests, CLI smoke, and Electron desktop
+  smoke that ran. If any layer was skipped, say why.
 
 ## Always-on Project Rules
 
@@ -129,7 +132,7 @@ source. The practical summary:
   session events, `chat_threads`, `chat_messages`, and native provider IDs over
   raw terminal-log inference.
 - CLI session commands currently support Shell, Codex, and Claude. Cursor is a
-  GTK launch path when configured.
+  desktop launch path when configured.
 
 Do not describe the project as MVP complete. Do not call packaging
 release-ready until the GUI-first flow passes the manual checklist on the
@@ -178,7 +181,7 @@ Agents should understand the repo before editing:
   - main desktop product surface (Electron + Solid): workspace command center,
     chat UI, history, terminal UI, app state
 - `crates/cli`
-  - fallback CLI, automation hooks, durable helper paths used by the GTK app
+  - fallback CLI, automation hooks, durable helper paths used by the desktop app
 - `docs`
   - MVP target, parity map, manual testing, deployment, release notes, UI
     sketches
@@ -193,7 +196,8 @@ Current architectural direction:
 - PTY-backed agent harnesses
 - thread-first chat persistence
 - workspace-centered review/merge loop
-- Linux-primary product quality with enforced native Windows portability
+- Linux-primary product quality with macOS and native Windows compile/basic
+  smoke portability
 
 ## Implementation Priorities
 
@@ -202,10 +206,10 @@ Follow the handoff phases:
 1. Keep docs aligned with the corrected GUI-first MVP and current `progress.md`.
 2. Finish project onboarding/settings polish and clear managed/user setting
    separation.
-3. Keep workspace command center behavior real across core, CLI, and GTK where
-   the feature has both surfaces.
-4. Continue splitting large GTK/core files only when it directly reduces active
-   task complexity.
+3. Keep workspace command center behavior real across core, CLI, and Electron
+   desktop where the feature has both surfaces.
+4. Continue splitting large desktop/core files only when it directly reduces
+   active task complexity.
 5. Harden PTY/provider session recovery, archcar runtime ownership, and
    thread-first chat behavior.
 6. Polish git/diff/review/GitHub PR/check/merge GUI workflows.
@@ -223,9 +227,9 @@ Follow the handoff phases:
 - Use `rg`/`rg --files` for search.
 - Use `apply_patch` for manual file edits.
 - Keep changes scoped to the requested phase/task.
-- Run written tests plus relevant CLI and GTK smoke for the change.
-- If a frontend/GTK change affects visible UI, run or build enough to prove it
-  still works.
+- Run written tests plus relevant CLI and Electron desktop smoke for the change.
+- If a frontend/Electron change affects visible UI, run or build enough to prove
+  it still works.
 
 ## Product North Star
 
