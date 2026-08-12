@@ -556,7 +556,7 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
   const [dupName, setDupName] = createSignal(`${props.workspace}-copy`);
   const [branch, setBranch] = createSignal("");
   const [target, setTarget] = createSignal("");
-  const [provider, setProvider] = createSignal("");
+  const [provider, setProvider] = createSignal("codex");
   const [links, { refetch: refetchLinks }] = createResource(
     () => props.workspace,
     async (ws): Promise<{ target_workspace: string; link_path: string }[]> => {
@@ -574,36 +574,57 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
 
   return (
     <div class="dialog-form">
-      <label class="dialog-field"><span>Rename to</span>
-        <input value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} /></label>
-      <div class="dialog-actions">
-        <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.renameWorkspace(props.workspace, newName().trim()).then(props.onDone))}>Rename</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Lifecycle</span>
+          <span class="dialog-section-copy">Rename, duplicate, archive, or restore this workspace.</span>
+        </div>
+        <label class="dialog-field"><span>Rename to</span>
+          <input value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} /></label>
+        <div class="dialog-actions">
+          <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.renameWorkspace(props.workspace, newName().trim()).then(props.onDone))}>Rename</button>
+        </div>
+        <label class="dialog-field"><span>Duplicate as</span>
+          <input value={dupName()} onInput={(e) => setDupName(e.currentTarget.value)} /></label>
+        <div class="dialog-actions">
+          <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.duplicateWorkspace(props.workspace, dupName().trim()).then(props.onDone))}>Duplicate</button>
+          <Show
+            when={row()?.status === "archived"}
+            fallback={
+              <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.archiveWorkspace(props.workspace))}>Archive</button>
+            }
+          >
+            <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.restoreWorkspace(props.workspace))}>Restore</button>
+          </Show>
+        </div>
       </div>
 
-      <label class="dialog-field"><span>Duplicate as</span>
-        <input value={dupName()} onInput={(e) => setDupName(e.currentTarget.value)} /></label>
-      <div class="dialog-actions">
-        <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.duplicateWorkspace(props.workspace, dupName().trim()).then(props.onDone))}>Duplicate</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Branch</span>
+          <span class="dialog-section-copy">Create, switch, rename, or delete the workspace branch.</span>
+        </div>
+        <label class="dialog-field"><span>Branch</span>
+          <input value={branch()} onInput={(e) => setBranch(e.currentTarget.value)} placeholder="branch name" /></label>
+        <div class="dialog-actions dialog-actions-wrap">
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.createBranch(props.workspace, branch().trim()))}>Create</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.checkoutBranch(props.workspace, branch().trim()))}>Checkout</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.renameBranch(props.workspace, branch().trim()))}>Rename branch</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.deleteBranch(props.workspace, branch().trim()))}>Delete branch</button>
+        </div>
       </div>
 
-      <div class="dialog-divider" />
-
-      <label class="dialog-field"><span>Branch</span>
-        <input value={branch()} onInput={(e) => setBranch(e.currentTarget.value)} placeholder="branch name" /></label>
-      <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.createBranch(props.workspace, branch().trim()))}>Create</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.checkoutBranch(props.workspace, branch().trim()))}>Checkout</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.renameBranch(props.workspace, branch().trim()))}>Rename branch</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.deleteBranch(props.workspace, branch().trim()))}>Delete branch</button>
-      </div>
-
-      <div class="dialog-divider" />
-
-      <label class="dialog-field"><span>Link directory from workspace</span>
-        <input value={target()} onInput={(e) => setTarget(e.currentTarget.value)} placeholder="target workspace name" /></label>
-      <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Link</button>
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Unlink</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Linked directories</span>
+          <span class="dialog-section-copy">Expose another workspace under this workspace's context links.</span>
+        </div>
+        <label class="dialog-field"><span>Link directory from workspace</span>
+          <input value={target()} onInput={(e) => setTarget(e.currentTarget.value)} placeholder="target workspace name" /></label>
+        <div class="dialog-actions dialog-actions-wrap">
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.linkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Link</button>
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.unlinkWorkspaceDirectory(props.workspace, target().trim()).then(() => refetchLinks()))}>Unlink</button>
+        </div>
       </div>
       <Show when={(links() ?? []).length > 0}>
         <div class="dialog-linked-list">
@@ -618,26 +639,39 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
         </div>
       </Show>
 
-      <label class="dialog-field"><span>Default agent provider</span>
-        <input value={provider()} onInput={(e) => setProvider(e.currentTarget.value)} placeholder="codex | claude | cursor" /></label>
-      <div class="dialog-actions">
-        <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.setDefaultAgentProvider(props.workspace, provider().trim()))}>Set default</button>
+      <div class="dialog-action-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Default agent</span>
+          <span class="dialog-section-copy">Choose the provider used when this workspace opens a new chat.</span>
+        </div>
+        <div class="dialog-provider-grid">
+          <For each={["codex", "claude", "cursor"]}>
+            {(p) => (
+              <button
+                class="dialog-provider-chip"
+                classList={{ "dialog-provider-chip-active": provider() === p }}
+                onClick={() => setProvider(p)}
+              >
+                {p}
+              </button>
+            )}
+          </For>
+        </div>
+        <div class="dialog-actions">
+          <button class="ui-button-sm" disabled={busy()} onClick={() => submit(() => actions.setDefaultAgentProvider(props.workspace, provider().trim()))}>Set default</button>
+        </div>
       </div>
 
-      <div class="dialog-divider" />
-
-      <div class="dialog-actions dialog-actions-wrap">
-        <Show
-          when={row()?.status === "archived"}
-          fallback={
-            <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.archiveWorkspace(props.workspace))}>Archive</button>
-          }
-        >
-          <button class="ui-button" disabled={busy()} onClick={() => submit(() => actions.restoreWorkspace(props.workspace))}>Restore</button>
-        </Show>
+      <div class="dialog-action-section dialog-danger-section">
+        <div class="dialog-section-head">
+          <span class="dialog-section-title">Danger zone</span>
+          <span class="dialog-section-copy">Remove this workspace row and its worktree from disk.</span>
+        </div>
+        <div class="dialog-actions dialog-actions-wrap">
         <button class="ui-button-destructive" disabled={busy()} onClick={() => submit(() => actions.deleteWorkspace(props.workspace, true, false).then(props.onDone))}>
           Delete (remove worktree)
         </button>
+        </div>
       </div>
       <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
     </div>

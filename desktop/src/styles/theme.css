@@ -2422,6 +2422,34 @@ button.ui-button-destructive:hover {
 .lc-theme-light .dialog-preview-value {
     color: #1f2937;
 }
+.lc-theme-light .dialog-action-section {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-danger-section {
+    background: #fff1f2;
+    border-color: #fecdd3;
+}
+.lc-theme-light .dialog-section-title {
+    color: #111827;
+}
+.lc-theme-light .dialog-section-copy {
+    color: #64748b;
+}
+.lc-theme-light .dialog-provider-chip {
+    background: #ffffff;
+    border-color: #d9e0e8;
+    color: #334155;
+}
+.lc-theme-light .dialog-provider-chip:hover {
+    background: #f1f5f9;
+    border-color: #b9c6d8;
+}
+.lc-theme-light .dialog-provider-chip-active {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
 .lc-theme-light .modal-body input,
 .lc-theme-light .dialog-field input,
 .lc-theme-light .dialog-field textarea {
@@ -3929,6 +3957,34 @@ button.chat-inline-event-expander label {
 .dialog-preview-title,
 .dialog-preview-value {
     color: #d8d8d8;
+}
+.dialog-action-section {
+    background: #181818;
+    border: 1px solid #2a2a2a;
+}
+.dialog-danger-section {
+    border-color: rgba(255, 138, 138, 0.26);
+    background: rgba(255, 138, 138, 0.05);
+}
+.dialog-section-title {
+    color: #e0e0e0;
+}
+.dialog-section-copy {
+    color: #858585;
+}
+.dialog-provider-chip {
+    background: #202020;
+    border: 1px solid #343434;
+    color: #b8b8b8;
+}
+.dialog-provider-chip:hover {
+    background: #262626;
+    border-color: #454545;
+}
+.dialog-provider-chip-active {
+    background: #263044;
+    border-color: #4d6ca3;
+    color: #dbe8ff;
 }
 
 .chat-context-usage-danger {
