@@ -284,6 +284,19 @@ impl WorkspaceStore {
         Ok(tasks)
     }
 
+    /// Load a task, refusing one that belongs to a different workspace. Ids are
+    /// global primary keys, so every workspace-scoped mutation resolves through
+    /// here rather than trusting the id alone.
+    pub fn task_in_workspace(&self, workspace_name: &str, id: i64) -> Result<Task> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let task = self.get_task(id)?;
+        anyhow::ensure!(
+            task.workspace_id == workspace.id,
+            "task {id} not found in workspace {workspace_name}"
+        );
+        Ok(task)
+    }
+
     pub fn get_task(&self, id: i64) -> Result<Task> {
         self.conn
             .query_row(
@@ -294,12 +307,12 @@ impl WorkspaceStore {
             .with_context(|| format!("load task {id}"))
     }
 
-    pub fn update_task(&self, id: i64, update: TaskUpdate) -> Result<Task> {
+    pub fn update_task(&self, workspace_name: &str, id: i64, update: TaskUpdate) -> Result<Task> {
         anyhow::ensure!(
             !update.is_empty(),
             "task update requires at least one field"
         );
-        let existing = self.get_task(id)?;
+        let existing = self.task_in_workspace(workspace_name, id)?;
 
         let title = match update.title {
             Some(ref value) => {
@@ -374,8 +387,8 @@ impl WorkspaceStore {
         Ok(task)
     }
 
-    pub fn delete_task(&self, id: i64) -> Result<()> {
-        let task = self.get_task(id)?;
+    pub fn delete_task(&self, workspace_name: &str, id: i64) -> Result<()> {
+        let task = self.task_in_workspace(workspace_name, id)?;
         self.conn.execute(
             "UPDATE chat_threads SET task_id = NULL WHERE task_id = ?1",
             [id],
@@ -390,19 +403,18 @@ impl WorkspaceStore {
 
     /// Attach an agent session (chat thread) to a task so per-agent diffs and
     /// summaries can be grouped by intent.
-    pub fn assign_session_task(&self, session_id: i64, task_id: Option<i64>) -> Result<()> {
-        let workspace_id: i64 = self
-            .conn
-            .query_row(
-                "SELECT workspace_id FROM chat_threads WHERE id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("load session {session_id}"))?;
+    pub fn assign_session_task(
+        &self,
+        workspace_name: &str,
+        session_id: i64,
+        task_id: Option<i64>,
+    ) -> Result<()> {
+        let workspace = self.get_by_name(workspace_name)?;
+        self.ensure_session_in_workspace(workspace.id, session_id)?;
         if let Some(task_id) = task_id {
             let task = self.get_task(task_id)?;
             anyhow::ensure!(
-                task.workspace_id == workspace_id,
+                task.workspace_id == workspace.id,
                 "task {task_id} belongs to a different workspace than session {session_id}"
             );
         }
@@ -415,12 +427,23 @@ impl WorkspaceStore {
 
     /// Record the files/areas a session intends to touch, so overlap warnings
     /// can fire before two agents collide.
-    pub fn set_session_intended_areas(&self, session_id: i64, areas: &[String]) -> Result<()> {
+    pub fn set_session_intended_areas(
+        &self,
+        workspace_name: &str,
+        session_id: i64,
+        areas: &[String],
+    ) -> Result<()> {
+        let workspace = self.get_by_name(workspace_name)?;
+        // Scope the write to the named workspace: an id alone is a global key,
+        // and a caller must not reach into a workspace it did not name.
         let changed = self.conn.execute(
-            "UPDATE chat_threads SET intended_areas = ?1 WHERE id = ?2",
-            params![join_list(areas), session_id],
+            "UPDATE chat_threads SET intended_areas = ?1 WHERE id = ?2 AND workspace_id = ?3",
+            params![join_list(areas), session_id, workspace.id],
         )?;
-        anyhow::ensure!(changed > 0, "session {session_id} not found");
+        anyhow::ensure!(
+            changed > 0,
+            "session {session_id} not found in workspace {workspace_name}"
+        );
         Ok(())
     }
 
@@ -549,11 +572,16 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
-    pub fn delete_summary(&self, id: i64) -> Result<()> {
-        let changed = self
-            .conn
-            .execute("DELETE FROM summaries WHERE id = ?1", [id])?;
-        anyhow::ensure!(changed > 0, "summary {id} not found");
+    pub fn delete_summary(&self, workspace_name: &str, id: i64) -> Result<()> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let changed = self.conn.execute(
+            "DELETE FROM summaries WHERE id = ?1 AND workspace_id = ?2",
+            params![id, workspace.id],
+        )?;
+        anyhow::ensure!(
+            changed > 0,
+            "summary {id} not found in workspace {workspace_name}"
+        );
         Ok(())
     }
 
@@ -765,11 +793,16 @@ impl WorkspaceStore {
             .with_context(|| format!("load context attachment {id}"))
     }
 
-    pub fn remove_context_attachment(&self, id: i64) -> Result<()> {
-        let changed = self
-            .conn
-            .execute("DELETE FROM context_attachments WHERE id = ?1", [id])?;
-        anyhow::ensure!(changed > 0, "context attachment {id} not found");
+    pub fn remove_context_attachment(&self, workspace_name: &str, id: i64) -> Result<()> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let changed = self.conn.execute(
+            "DELETE FROM context_attachments WHERE id = ?1 AND workspace_id = ?2",
+            params![id, workspace.id],
+        )?;
+        anyhow::ensure!(
+            changed > 0,
+            "context attachment {id} not found in workspace {workspace_name}"
+        );
         Ok(())
     }
 
@@ -1135,6 +1168,116 @@ mod tests {
         store
     }
 
+    /// A second workspace in the same repository, so cross-workspace access can
+    /// be exercised with real ids.
+    fn add_sibling_workspace(store: &WorkspaceStore) {
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "oslo".to_owned(),
+                branch: "lc/oslo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_scoped_mutations_refuse_ids_from_another_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        add_sibling_workspace(&store);
+
+        // Everything below belongs to `berlin`; every call names `oslo`.
+        let task = store.create_task("berlin", "Berlin work", "", &[]).unwrap();
+        let summary = store
+            .save_summary("berlin", "workspace", None, "berlin body", &[])
+            .unwrap();
+        let attachment = store
+            .add_context_attachment("berlin", "local", "note", "berlin note", "", false)
+            .unwrap();
+
+        let refused = [
+            store
+                .update_task(
+                    "oslo",
+                    task.id,
+                    TaskUpdate {
+                        status: Some("done".to_owned()),
+                        ..TaskUpdate::default()
+                    },
+                )
+                .map(|_| ())
+                .unwrap_err(),
+            store.delete_task("oslo", task.id).unwrap_err(),
+            store.delete_summary("oslo", summary.id).unwrap_err(),
+            store
+                .remove_context_attachment("oslo", attachment.id)
+                .unwrap_err(),
+        ];
+        for err in &refused {
+            assert!(
+                err.to_string().contains("oslo"),
+                "error should name the workspace that was asked for: {err}"
+            );
+        }
+
+        // None of the refused calls touched berlin's rows.
+        assert_eq!(store.list_tasks("berlin").unwrap().len(), 1);
+        assert_eq!(store.list_tasks("berlin").unwrap()[0].status, "todo");
+        assert_eq!(store.list_summaries("berlin").unwrap().len(), 1);
+        assert_eq!(store.list_context_attachments("berlin").unwrap().len(), 1);
+
+        // The owning workspace still works.
+        store.delete_summary("berlin", summary.id).unwrap();
+        store
+            .remove_context_attachment("berlin", attachment.id)
+            .unwrap();
+        store.delete_task("berlin", task.id).unwrap();
+        assert!(store.list_tasks("berlin").unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_metadata_mutations_are_scoped_to_the_named_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        add_sibling_workspace(&store);
+
+        let session = store
+            .create_chat_thread("berlin", "codex", "berlin agent", None)
+            .unwrap();
+        let task = store.create_task("berlin", "Berlin work", "", &[]).unwrap();
+
+        let err = store
+            .assign_session_task("oslo", session.id, Some(task.id))
+            .unwrap_err();
+        assert!(err.to_string().contains("different workspace"), "{err}");
+
+        let err = store
+            .set_session_intended_areas("oslo", session.id, &["crates/core".to_owned()])
+            .unwrap_err();
+        assert!(err.to_string().contains("oslo"), "{err}");
+
+        // The session kept its own workspace's metadata.
+        let contributions = store.session_contributions("berlin").unwrap();
+        assert_eq!(contributions.len(), 1);
+        assert!(contributions[0].task_id.is_none());
+        assert!(contributions[0].intended_areas.is_empty());
+
+        // Naming the owning workspace works.
+        store
+            .assign_session_task("berlin", session.id, Some(task.id))
+            .unwrap();
+        store
+            .set_session_intended_areas("berlin", session.id, &["crates/core".to_owned()])
+            .unwrap();
+        let contributions = store.session_contributions("berlin").unwrap();
+        assert_eq!(contributions[0].task_id, Some(task.id));
+        assert_eq!(
+            contributions[0].intended_areas,
+            vec!["crates/core".to_owned()]
+        );
+    }
+
     #[test]
     fn tasks_are_created_listed_updated_and_deleted() {
         let temp = tempfile::tempdir().unwrap();
@@ -1154,6 +1297,7 @@ mod tests {
 
         let updated = store
             .update_task(
+                "berlin",
                 task.id,
                 TaskUpdate {
                     status: Some("in_progress".to_owned()),
@@ -1163,7 +1307,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, "in_progress");
 
-        store.delete_task(task.id).unwrap();
+        store.delete_task("berlin", task.id).unwrap();
         assert!(store.list_tasks("berlin").unwrap().is_empty());
     }
 
@@ -1175,6 +1319,7 @@ mod tests {
 
         let err = store
             .update_task(
+                "berlin",
                 task.id,
                 TaskUpdate {
                     status: Some("wobbly".to_owned()),
@@ -1186,6 +1331,7 @@ mod tests {
 
         let err = store
             .update_task(
+                "berlin",
                 task.id,
                 TaskUpdate {
                     status: Some("blocked".to_owned()),
@@ -1197,6 +1343,7 @@ mod tests {
 
         let blocked = store
             .update_task(
+                "berlin",
                 task.id,
                 TaskUpdate {
                     status: Some("blocked".to_owned()),
@@ -1252,6 +1399,7 @@ mod tests {
             .unwrap();
         store
             .update_task(
+                "berlin",
                 task.id,
                 TaskUpdate {
                     status: Some("blocked".to_owned()),
@@ -1276,6 +1424,7 @@ mod tests {
             .unwrap();
         store
             .update_task(
+                "berlin",
                 task.id,
                 TaskUpdate {
                     status: Some("blocked".to_owned()),
@@ -1338,7 +1487,7 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, note.id, "pinned attachments sort first");
 
-        store.remove_context_attachment(file.id).unwrap();
+        store.remove_context_attachment("berlin", file.id).unwrap();
         assert_eq!(store.list_context_attachments("berlin").unwrap().len(), 1);
 
         let err = store

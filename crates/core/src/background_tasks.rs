@@ -10,6 +10,8 @@
 //! daemon ticks. Every transition is idempotent enough to re-run after a
 //! restart, since the daemon may die mid-flight.
 
+use std::sync::{Mutex, MutexGuard};
+
 use anyhow::{Context, Result};
 use rusqlite::{params, Row};
 use serde::{Deserialize, Serialize};
@@ -125,6 +127,15 @@ pub fn title_from_prompt(prompt: &str) -> String {
     title
 }
 
+/// Serializes background-task transitions across the supervisor thread and any
+/// manual tick in this process. Held only for the duration of one task's step.
+static ADVANCE_CLAIM: Mutex<()> = Mutex::new(());
+
+fn claim_advance() -> MutexGuard<'static, ()> {
+    // A panic in one transition must not wedge every later one.
+    ADVANCE_CLAIM.lock().unwrap_or_else(|err| err.into_inner())
+}
+
 impl WorkspaceStore {
     /// Create the workspace and the tracking rows for a background task. The
     /// agent session itself is spawned by the daemon, which owns processes.
@@ -155,6 +166,7 @@ impl WorkspaceStore {
         )?;
         let task = self.create_task(&workspace.name, &title, prompt, &[])?;
         self.update_task(
+            &workspace.name,
             task.id,
             crate::workspace_intel::TaskUpdate {
                 status: Some("in_progress".to_owned()),
@@ -222,6 +234,9 @@ impl WorkspaceStore {
     }
 
     pub fn cancel_background_task(&self, id: i64) -> Result<BackgroundTask> {
+        // Wait for any in-flight transition so the cancel lands between steps
+        // rather than in the middle of one.
+        let _claim = claim_advance();
         let task = self.get_background_task(id)?;
         anyhow::ensure!(
             !background_task_is_terminal(&task.status),
@@ -230,6 +245,18 @@ impl WorkspaceStore {
         );
         self.set_background_task_status(id, "cancelled", "Cancelled by request")?;
         self.get_background_task(id)
+    }
+
+    /// Force a task to `cancelled` even from a terminal state. Only used by
+    /// tests that need to model a cancel racing an in-flight transition.
+    #[cfg(test)]
+    fn force_cancelled(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE background_tasks SET status = 'cancelled', detail = 'Cancelled by request'
+              WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
     }
 
     /// Mark the agent session as started, so the supervisor stops waiting for
@@ -246,6 +273,11 @@ impl WorkspaceStore {
     /// Returns the task after the step. Non-terminal statuses are safe to call
     /// repeatedly.
     pub fn advance_background_task(&self, id: i64, agent_active: bool) -> Result<BackgroundTask> {
+        // The supervisor thread and a manual tick can arrive together. Without
+        // this, both could read the same status and run the same transition —
+        // committing twice, pushing twice, or opening two pull requests.
+        let _claim = claim_advance();
+
         let task = self.get_background_task(id)?;
         if background_task_is_terminal(&task.status) {
             return Ok(task);
@@ -334,6 +366,7 @@ impl WorkspaceStore {
         if let Some(task_id) = task.task_id {
             // The agent is done with the task even if a human still has to review.
             let _ = self.update_task(
+                workspace,
                 task_id,
                 crate::workspace_intel::TaskUpdate {
                     status: Some("review".to_owned()),
@@ -441,9 +474,11 @@ impl WorkspaceStore {
 
     fn fail_background_task(&self, id: i64, error: &str) -> Result<()> {
         let now = timestamp();
+        // Never resurrect a task that reached a terminal state while this
+        // transition was running — a cancel must stay cancelled.
         self.conn.execute(
             "UPDATE background_tasks SET status = 'failed', error = ?1, updated_at = ?2
-              WHERE id = ?3",
+              WHERE id = ?3 AND status NOT IN ('ready', 'failed', 'cancelled')",
             params![error, now, id],
         )?;
         Ok(())
@@ -453,7 +488,8 @@ impl WorkspaceStore {
         debug_assert!(BACKGROUND_TASK_STATUSES.contains(&status));
         let now = timestamp();
         self.conn.execute(
-            "UPDATE background_tasks SET status = ?1, detail = ?2, updated_at = ?3 WHERE id = ?4",
+            "UPDATE background_tasks SET status = ?1, detail = ?2, updated_at = ?3
+              WHERE id = ?4 AND status NOT IN ('ready', 'failed', 'cancelled')",
             params![status, detail, now, id],
         )?;
         Ok(())
@@ -630,6 +666,66 @@ mod tests {
             "ready"
         );
         assert!(store.tick_background_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cancel_that_lands_mid_transition_is_not_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store(&temp);
+        let background = start(&store, false);
+
+        // Model a cancel that arrives while a transition is already running:
+        // the in-flight step still writes its status afterwards.
+        store.force_cancelled(background.id).unwrap();
+        store
+            .set_background_task_status(background.id, "summarizing", "mid-flight write")
+            .unwrap();
+
+        let after = store.get_background_task(background.id).unwrap();
+        assert_eq!(after.status, "cancelled", "{after:?}");
+
+        // A failure landing late must not resurrect it either.
+        store
+            .fail_background_task(background.id, "late failure")
+            .unwrap();
+        assert_eq!(
+            store.get_background_task(background.id).unwrap().status,
+            "cancelled"
+        );
+
+        // And the supervisor leaves it alone.
+        assert!(store.tick_background_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_ticks_run_one_transition_at_a_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store(&temp);
+        let background = start(&store, false);
+        let db_path = temp.path().join("state.db");
+
+        // Two tickers racing the same task, the way the supervisor thread and a
+        // manual tick can. Every transition is claimed, so the task walks the
+        // state machine once rather than running steps twice.
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let db_path = db_path.clone();
+                std::thread::spawn(move || {
+                    let store = WorkspaceStore::open(&db_path).unwrap();
+                    for _ in 0..4 {
+                        store.tick_background_tasks().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let finished = store.get_background_task(background.id).unwrap();
+        assert_eq!(finished.status, "ready", "{finished:?}");
+        // One workspace summary, not one per racing tick.
+        assert_eq!(store.list_summaries("berlin").unwrap().len(), 1);
     }
 
     #[test]

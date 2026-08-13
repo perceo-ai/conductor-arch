@@ -2193,44 +2193,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             let task = store.create_task(&workspace, &title, &body, &intended_areas)?;
             Ok(ArchcarResponse::TaskSaved { task })
         }),
+        // Every id below is a global primary key, so the store resolves it
+        // against the workspace the request named.
         ArchcarRequest::UpdateTask {
             workspace,
             task_id,
             update,
         } => with_store(state, |store| {
-            let task = store.get_task(task_id)?;
-            let owner = store.get_by_name(&workspace)?;
-            anyhow::ensure!(
-                task.workspace_id == owner.id,
-                "task {task_id} does not belong to workspace {workspace}"
-            );
-            let task = store.update_task(task_id, update)?;
+            let task = store.update_task(&workspace, task_id, update)?;
             Ok(ArchcarResponse::TaskSaved { task })
         }),
         ArchcarRequest::DeleteTask { workspace, task_id } => with_store(state, |store| {
-            let task = store.get_task(task_id)?;
-            let owner = store.get_by_name(&workspace)?;
-            anyhow::ensure!(
-                task.workspace_id == owner.id,
-                "task {task_id} does not belong to workspace {workspace}"
-            );
-            store.delete_task(task_id)?;
+            store.delete_task(&workspace, task_id)?;
             Ok(ArchcarResponse::TaskDeleted { task_id })
         }),
         ArchcarRequest::AssignSessionTask {
-            workspace: _,
+            workspace,
             session_id,
             task_id,
         } => with_store(state, |store| {
-            store.assign_session_task(session_id, task_id)?;
+            store.assign_session_task(&workspace, session_id, task_id)?;
             Ok(ArchcarResponse::Ack)
         }),
         ArchcarRequest::SetSessionIntendedAreas {
-            workspace: _,
+            workspace,
             session_id,
             areas,
         } => with_store(state, |store| {
-            store.set_session_intended_areas(session_id, &areas)?;
+            store.set_session_intended_areas(&workspace, session_id, &areas)?;
             Ok(ArchcarResponse::Ack)
         }),
         ArchcarRequest::ListSummaries { workspace } => with_store(state, |store| {
@@ -2257,10 +2247,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             Ok(ArchcarResponse::SummarySaved { summary })
         }),
         ArchcarRequest::DeleteSummary {
-            workspace: _,
+            workspace,
             summary_id,
         } => with_store(state, |store| {
-            store.delete_summary(summary_id)?;
+            store.delete_summary(&workspace, summary_id)?;
             Ok(ArchcarResponse::SummaryDeleted { summary_id })
         }),
         ArchcarRequest::DraftSummary {
@@ -2302,10 +2292,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             Ok(ArchcarResponse::ContextAttachmentAdded { attachment })
         }),
         ArchcarRequest::RemoveContextAttachment {
-            workspace: _,
+            workspace,
             attachment_id,
         } => with_store(state, |store| {
-            store.remove_context_attachment(attachment_id)?;
+            store.remove_context_attachment(&workspace, attachment_id)?;
             Ok(ArchcarResponse::ContextAttachmentRemoved { attachment_id })
         }),
         ArchcarRequest::ListSessionContributions { workspace } => with_store(state, |store| {
@@ -2448,7 +2438,7 @@ fn start_background_task(
     }
 
     match WorkspaceStore::open_app(&db_path).and_then(|store| {
-        store.assign_session_task(thread_id, task.task_id)?;
+        store.assign_session_task(&workspace, thread_id, task.task_id)?;
         store.mark_background_task_running(task.id)
     }) {
         Ok(task) => ArchcarResponse::BackgroundTaskSaved { task },
