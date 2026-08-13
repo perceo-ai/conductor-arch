@@ -63,11 +63,32 @@ paths and known rough edges.
   runtime state (a managed session's process stays alive between turns).
   Providers are restricted to codex/claude; a shell has no idle signal.
 
-Not yet built from the strategy doc: an Archductor MCP server (`mcp.rs` only
-detects MCP servers configured for a workspace), remote/server daemon access
-(archcar is local-socket only), session/task-scoped checkpoints and
-checkpoint-vs-branch comparison, and any live Archivum integration (the Context
-tab has the local half plus an explicit "not connected" state).
+Reach, added 2026-08-13:
+
+- **Remote access**: archcar can bind a TCP listener guarded by a shared token
+  (`crates/core/src/archcar/remote.rs`). It is opt-in via
+  `ARCHDUCTOR_ARCHCAR_LISTEN`, a bare port means loopback, and non-loopback
+  binds log a warning. Every connection must send the token as its first line;
+  a bad token gets a normal protocol error, not a decode failure. Clients point
+  at it with `ARCHDUCTOR_ARCHCAR_REMOTE` + `ARCHDUCTOR_ARCHCAR_TOKEN`.
+- **MCP server**: `archductor mcp serve` speaks MCP (2025-06-18) over stdio and
+  maps 24 tools onto archcar requests — workspaces, tasks, sessions, prompts,
+  summaries, context, changes/diffs, checks, review status, PR draft/create, and
+  background tasks. No presentation state, per the strategy's non-goal.
+  `--read-only` hides every mutating tool. Because the tools are archcar
+  requests, an MCP client can drive a remote daemon by setting the two remote
+  environment variables.
+- **Native background service**: `archductor mcp setup` (or the desktop
+  Settings card) installs and starts a per-user launchd agent on macOS or a
+  systemd user unit on Linux (`crates/core/src/service.rs`), ensures the access
+  token exists, and prints the MCP client configuration.
+  `archductor service install|uninstall|status|token` manage it directly, and
+  archcar exposes the same operations as RPCs so the app can do it.
+
+Deliberately not built: Archivum context (the attachment `source` stays in the
+protocol, but the Context tab's Archivum section is commented out rather than
+advertising a capability that does not exist), and richer checkpoints —
+manual create/restore/delete is the product decision for now.
 
 ## Conductor Reference Cross-Check (2026-08-06)
 
@@ -390,15 +411,18 @@ Historical GTK surface (superseded, kept for reference):
   terminal emulator.
 - Project onboarding/settings need more polish and clearer managed/user setting
   separation.
-- No Archductor MCP server yet: `mcp.rs` only reports the MCP servers a
-  workspace has configured. The strategy doc wants MCP/API/CLI near-parity for
-  workspaces, tasks, sessions, summaries, review, and PR primitives.
-- archcar is local-socket only. Remote/server daemon access (and how to secure
-  it) is unbuilt.
+- Remote archcar access is token-only: there is no TLS, no per-client identity,
+  and no revocation beyond rotating the single token. Expose a non-loopback
+  listener only behind a firewall or a reverse proxy you trust.
+- The service installer covers launchd (macOS) and systemd user units (Linux).
+  Windows reports "unsupported"; run `archcar` yourself there.
+- The launchd/systemd unit does not carry `XDG_*` overrides, so an installed
+  service always uses the default per-user paths, not an isolated dev instance.
 - Checkpoints support manual create/restore/delete only; session-scoped and
-  task-scoped checkpoints and checkpoint-vs-branch comparison are unbuilt.
-- The Context tab covers branch-local notes/files and shows an explicit
-  "Archivum is not connected" state; there is no Archivum client.
+  task-scoped checkpoints and checkpoint-vs-branch comparison are intentionally
+  unbuilt.
+- There is no Archivum client. The Context tab's Archivum section is commented
+  out; only branch-local notes and files are surfaced.
 - Prompt-pack import/export, naming templates, hooks, and richer notifications
   are not fully surfaced in the GUI. (Now surfaced: theme/accent/density
   controls, prompt-pack switching, the local check runner, and run/stop/log
@@ -459,6 +483,36 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Remote access, MCP server, and background service on 2026-08-13:
+
+- Added `archcar/remote.rs` (token file, TCP bind, handshake), `service.rs`
+  (launchd/systemd unit generation and lifecycle), and `mcp_server.rs` (stdio
+  MCP with 24 tools), plus a `DuplexStream` abstraction so archcar serves the
+  same RPCs over the local endpoint and TCP.
+- Added `archductor mcp serve`, `archductor mcp setup`, and
+  `archductor service install|uninstall|status|token`, plus archcar RPCs
+  (`get_service_status`, `install_service`, `uninstall_service`,
+  `get_remote_access`, `rotate_remote_token`) and a desktop Settings card.
+- Passed `cargo test -p archductor-core --lib` (718 passed; the 4 failures are
+  the pre-existing macOS ones listed above), `cargo test -p archductor`,
+  `cargo fmt --all -- --check`, and
+  `cargo clippy -p archductor-core -p archductor -p archcar --all-targets -- -D warnings`.
+- Passed desktop `pnpm typecheck`, `pnpm test` (68), `pnpm build`.
+- Live smoke, isolated `XDG_*` dirs, daemon started with
+  `ARCHDUCTOR_ARCHCAR_LISTEN=127.0.0.1:7451`: MCP `initialize` returned the
+  protocol version, `tools/list` returned 24 tools, and
+  `tools/call list_workspaces` returned the real workspace inventory.
+- Live remote smoke: with `ARCHDUCTOR_ARCHCAR_REMOTE` + `ARCHDUCTOR_ARCHCAR_TOKEN`
+  set and the local `XDG_*` unset, `archcar workspaces` and an MCP `tools/call`
+  both drove the daemon over TCP; a wrong token printed
+  `archcar authentication failed`.
+- Live service smoke on macOS with a sandboxed `HOME`: `service install`
+  wrote the plist, `launchctl list` showed the job, `service status` reported it
+  running, `mcp setup` printed the client configuration and token, and
+  `service uninstall` removed both the job and the plist with nothing left in
+  the real `HOME`. The systemd path is covered by unit tests only — no Linux
+  machine was available here.
 
 Archductor UX strategy slice on 2026-08-12:
 

@@ -2732,3 +2732,19 @@ pre.ws-file-editor-highlight.hljs {
 .background-task-tone-cancelled {
   border-left: 3px solid #4a4a4a;
 }
+
+.settings-listen-input {
+  max-width: 140px;
+}
+.settings-token {
+  font-family: var(--lc-mono, monospace);
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 4px;
+  word-break: break-all;
+}
+.settings-hint {
+  font-size: 11px;
+  opacity: 0.8;
+}

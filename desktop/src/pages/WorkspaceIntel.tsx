@@ -399,7 +399,6 @@ export function ContextPanel(props: { workspace: string }) {
   const [feedback, setFeedback] = createSignal("");
 
   const local = () => (attachments() ?? []).filter((a) => a.source === "local");
-  const archivum = () => (attachments() ?? []).filter((a) => a.source === "archivum");
 
   async function add(pinned: boolean) {
     const body = value().trim();
@@ -498,6 +497,11 @@ export function ContextPanel(props: { workspace: string }) {
           )}
         </For>
       </Show>
+      {/* Archivum context is intentionally not surfaced yet: there is no
+          Archivum client, and an empty section would advertise a capability
+          that does not exist. The `archivum` attachment source stays in the
+          protocol so this can be re-enabled without a migration.
+
       <div class="detail-label">Archivum</div>
       <Show
         when={archivum().length > 0}
@@ -523,6 +527,7 @@ export function ContextPanel(props: { workspace: string }) {
           )}
         </For>
       </Show>
+      */}
     </div>
   );
 }

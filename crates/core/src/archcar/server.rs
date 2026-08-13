@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -21,10 +21,11 @@ use crate::archcar::protocol::{
     ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse, ArchcarRunScript,
     ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
 };
+use crate::archcar::remote;
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
 };
-use crate::archcar::transport::{self, LocalListener, LocalStream};
+use crate::archcar::transport::{self, DuplexStream, LocalListener};
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
 use crate::provider_interactions::ProviderInteractionStore;
@@ -40,7 +41,16 @@ use crate::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 pub struct ArchcarServer {
     listener: LocalListener,
     endpoint_path: PathBuf,
+    /// Optional token-guarded TCP listener for clients that are not on this
+    /// machine. Off unless the operator asked for it.
+    remote: Option<RemoteListener>,
     state: Arc<Mutex<ServerState>>,
+}
+
+struct RemoteListener {
+    listener: std::net::TcpListener,
+    token: String,
+    addr: std::net::SocketAddr,
 }
 
 struct ServerState {
@@ -132,6 +142,11 @@ impl ArchcarServer {
         }
         let listener = transport::bind(&endpoint_path)
             .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?;
+        let remote = match remote::listen_addr_from_env() {
+            Some(Ok(addr)) => Some(bind_remote_listener(&paths, addr)?),
+            Some(Err(err)) => return Err(err),
+            None => None,
+        };
         let state = Arc::new(Mutex::new(ServerState {
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
@@ -145,13 +160,17 @@ impl ArchcarServer {
         Ok(Self {
             listener,
             endpoint_path,
+            remote,
             state,
         })
     }
 
-    pub fn serve(self) -> Result<()> {
+    pub fn serve(mut self) -> Result<()> {
         let shutdown = Arc::new(AtomicBool::new(false));
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
+        if let Some(remote) = self.remote.take() {
+            spawn_remote_listener(remote, &self.state, Arc::clone(&shutdown));
+        }
         let shutdown_for_signal = Arc::clone(&shutdown);
         ctrlc::set_handler(move || {
             shutdown_for_signal.store(true, Ordering::SeqCst);
@@ -192,6 +211,62 @@ impl ArchcarServer {
             (None, result) => result,
         }
     }
+}
+
+fn bind_remote_listener(paths: &AppPaths, addr: std::net::SocketAddr) -> Result<RemoteListener> {
+    let token = remote::ensure_token(paths)?;
+    let listener = remote::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    if remote::is_public_addr(&addr) {
+        warn!(
+            %addr,
+            token_path = %remote::token_path(paths).display(),
+            "archcar is listening on a non-loopback address; the access token is the only guard"
+        );
+    } else {
+        info!(%addr, "archcar remote listener bound to loopback");
+    }
+    Ok(RemoteListener {
+        listener,
+        token,
+        addr,
+    })
+}
+
+/// Serve token-authenticated TCP clients alongside the local endpoint. Failed
+/// handshakes are dropped quietly; one bad client must not stop the daemon.
+fn spawn_remote_listener(
+    remote: RemoteListener,
+    state: &Arc<Mutex<ServerState>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            match remote::accept_authenticated(&remote.listener, &remote.token) {
+                Ok(Some((stream, peer))) => {
+                    info!(%peer, listener = %remote.addr, "archcar remote client authenticated");
+                    if let Err(err) = stream.set_nonblocking(false) {
+                        warn!(error = %err, "archcar remote stream setup failed");
+                        continue;
+                    }
+                    let state = Arc::clone(&state);
+                    std::thread::spawn(move || {
+                        let _ = handle_connection(stream, state);
+                    });
+                }
+                Ok(None) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => {
+                    warn!(error = %err, "archcar remote listener accept failed");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 /// Workspaces whose live agent sessions are mid-turn. A managed session keeps
@@ -274,8 +349,8 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
     });
 }
 
-fn handle_connection(stream: LocalStream, state: Arc<Mutex<ServerState>>) -> Result<()> {
-    let mut writer = stream.try_clone()?;
+fn handle_connection<S: DuplexStream>(stream: S, state: Arc<Mutex<ServerState>>) -> Result<()> {
+    let mut writer = stream.try_clone_stream()?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -2036,6 +2111,33 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        // ---- Daemon service and remote access ---------------------------
+        // Service management reads the process environment's paths, which is
+        // where this daemon's own state lives.
+        ArchcarRequest::GetServiceStatus => match crate::service::status(&AppPaths::from_env()) {
+            Ok(status) => ArchcarResponse::ServiceStatus { status },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::InstallService { input } => {
+            match crate::service::install(&AppPaths::from_env(), &input) {
+                Ok(status) => ArchcarResponse::ServiceStatus { status },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::UninstallService => {
+            match crate::service::uninstall(&AppPaths::from_env()) {
+                Ok(status) => ArchcarResponse::ServiceStatus { status },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetRemoteAccess => remote_access_response(false),
+        ArchcarRequest::RotateRemoteToken => remote_access_response(true),
         // ---- Background development tasks -------------------------------
         ArchcarRequest::StartBackgroundTask { input } => start_background_task(state, input),
         ArchcarRequest::ListBackgroundTasks { active_only } => with_store(state, |store| {
@@ -2222,6 +2324,30 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }),
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
+        },
+    }
+}
+
+/// Report (or rotate) the token and address a remote client needs. The listen
+/// address comes from this process's configuration, so it reflects the daemon
+/// that is actually running rather than what a unit file once said.
+fn remote_access_response(rotate: bool) -> ArchcarResponse {
+    let paths = AppPaths::from_env();
+    let token = if rotate {
+        remote::rotate_token(&paths)
+    } else {
+        remote::ensure_token(&paths)
+    };
+    match token {
+        Ok(token) => ArchcarResponse::RemoteAccess {
+            listen: remote::listen_addr_from_env()
+                .and_then(|addr| addr.ok())
+                .map(|addr| addr.to_string()),
+            token,
+            token_path: remote::token_path(&paths).display().to_string(),
+        },
+        Err(err) => ArchcarResponse::Error {
+            message: err.to_string(),
         },
     }
 }
@@ -2694,6 +2820,8 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }
             | ArchcarRequest::GetPullRequestDraft { .. }
+            | ArchcarRequest::GetServiceStatus
+            | ArchcarRequest::GetRemoteAccess
             | ArchcarRequest::ListBackgroundTasks { .. }
             | ArchcarRequest::GetBackgroundTask { .. }
             | ArchcarRequest::ListTasks { .. }

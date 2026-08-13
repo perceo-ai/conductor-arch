@@ -5,6 +5,7 @@ use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
     QueuedArchcarInput, WorkspaceChangeScope,
 };
+use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::background_tasks::StartBackgroundTask;
 use archductor_core::doctor;
@@ -13,6 +14,7 @@ use archductor_core::paths::AppPaths;
 use archductor_core::provider_adapters::claude_hooks::handle_claude_hook_json;
 use archductor_core::provider_interactions::ProviderInteractionRecord;
 use archductor_core::repository::{AddRepository, RepositoryStore};
+use archductor_core::service;
 use archductor_core::settings::{
     app_shared_settings_to_toml, save_app_shared_settings_from_toml,
     save_repository_settings_from_toml, SettingsLayer,
@@ -142,6 +144,11 @@ enum Command {
     Archcar {
         #[command(subcommand)]
         command: ArchcarCommand,
+    },
+    /// Manage the archcar background service (launchd / systemd).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
 }
 
@@ -667,7 +674,51 @@ enum ArchcarInteractionsCommand {
 
 #[derive(Debug, Subcommand)]
 enum McpCommand {
-    Status { workspace: String },
+    Status {
+        workspace: String,
+    },
+    /// Run the Archductor MCP server on stdio (what an MCP client spawns).
+    Serve {
+        /// Refuse tools that change state.
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// First-run setup: install the archcar background service, make sure an
+    /// access token exists, and print the MCP client configuration.
+    Setup {
+        /// Address for the token-guarded TCP listener. Defaults to loopback.
+        #[arg(long)]
+        listen: Option<String>,
+        /// Skip installing the native background service.
+        #[arg(long)]
+        no_service: bool,
+        /// Path to the archcar binary, when it is not beside this one.
+        #[arg(long)]
+        archcar_path: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Install and start the archcar background service for this user.
+    Install {
+        /// Address for the token-guarded TCP listener (e.g. `7420`, or
+        /// `0.0.0.0:7420` to accept connections from other machines).
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        archcar_path: Option<String>,
+    },
+    /// Stop and remove the archcar background service.
+    Uninstall,
+    /// Show whether the background service is installed and running.
+    Status,
+    /// Print the remote access token, creating one if needed.
+    Token {
+        /// Replace the existing token, invalidating current remote clients.
+        #[arg(long)]
+        rotate: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2442,14 +2493,48 @@ fn run_cli() -> Result<()> {
                 .with_context(|| format!("launch editor {editor} for workspace {workspace}"))?;
             println!("Opened {} in {editor}", launch.cwd.display());
         }
-        Command::Mcp { command } => {
-            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
-            match command {
-                McpCommand::Status { workspace } => {
-                    print_mcp_status(store.mcp_status(&workspace)?);
-                }
+        Command::Mcp { command } => match command {
+            McpCommand::Status { workspace } => {
+                let store =
+                    WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
+                print_mcp_status(store.mcp_status(&workspace)?);
             }
-        }
+            McpCommand::Serve { read_only } => {
+                let client = ArchcarClient::from_paths(&paths);
+                archductor_core::mcp_server::serve_stdio(&client, read_only)?;
+            }
+            McpCommand::Setup {
+                listen,
+                no_service,
+                archcar_path,
+            } => run_mcp_setup(&paths, listen, no_service, archcar_path)?,
+        },
+        Command::Service { command } => match command {
+            ServiceCommand::Install {
+                listen,
+                archcar_path,
+            } => {
+                let status = service::install(
+                    &paths,
+                    &service::InstallService {
+                        listen,
+                        archcar_path,
+                    },
+                )?;
+                print_service_status(&status);
+            }
+            ServiceCommand::Uninstall => print_service_status(&service::uninstall(&paths)?),
+            ServiceCommand::Status => print_service_status(&service::status(&paths)?),
+            ServiceCommand::Token { rotate } => {
+                let token = if rotate {
+                    remote::rotate_token(&paths)?
+                } else {
+                    remote::ensure_token(&paths)?
+                };
+                println!("{token}");
+                eprintln!("stored in {}", remote::token_path(&paths).display());
+            }
+        },
         Command::Review { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
@@ -3024,6 +3109,16 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspace_script_prompt workspace={workspace} kind={kind}");
             println!("{prompt}");
         }
+        ArchcarResponse::ServiceStatus { status } => print_service_status(&status),
+        ArchcarResponse::RemoteAccess {
+            listen,
+            token,
+            token_path,
+        } => {
+            println!("remote listen={}", listen.as_deref().unwrap_or("disabled"));
+            println!("token stored in {token_path}");
+            println!("{token}");
+        }
         ArchcarResponse::BackgroundTaskSaved { task } => {
             println!(
                 "background_task #{} [{}] {} (workspace {})",
@@ -3525,6 +3620,96 @@ fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
         SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
         SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
     }
+}
+
+fn print_service_status(status: &service::ServiceStatus) {
+    println!(
+        "service manager={} installed={} running={}",
+        status.manager, status.installed, status.running
+    );
+    if let Some(path) = &status.unit_path {
+        println!("unit {path}");
+    }
+    if let Some(listen) = &status.listen {
+        println!("listening on {listen}");
+    }
+    if !status.detail.is_empty() {
+        println!("{}", status.detail);
+    }
+}
+
+/// First-run MCP setup: make the daemon a managed background service, make sure
+/// a token exists, and hand back the exact client configuration to paste.
+fn run_mcp_setup(
+    paths: &AppPaths,
+    listen: Option<String>,
+    no_service: bool,
+    archcar_path: Option<String>,
+) -> anyhow::Result<()> {
+    let listen = listen.unwrap_or_else(|| remote::DEFAULT_REMOTE_PORT.to_string());
+    let address = remote::parse_listen_addr(&listen)?;
+    let token = remote::ensure_token(paths)?;
+
+    if no_service {
+        println!("skipped service install (--no-service)");
+    } else {
+        match service::install(
+            paths,
+            &service::InstallService {
+                listen: Some(listen.clone()),
+                archcar_path,
+            },
+        ) {
+            Ok(status) => print_service_status(&status),
+            // A missing service manager should not block the rest of setup.
+            Err(err) => eprintln!(
+                "service install failed: {err:#}
+start archcar yourself, then rerun with --no-service"
+            ),
+        }
+    }
+
+    println!();
+    println!("Archductor MCP server is `archductor mcp serve` (stdio).");
+    println!("Add this to your MCP client configuration:");
+    println!();
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "archductor".to_owned());
+    println!("{}", mcp_client_config_json(&exe));
+    println!();
+    println!(
+        "archcar listens on {address}; token stored in {}",
+        remote::token_path(paths).display()
+    );
+    if remote::is_public_addr(&address) {
+        println!(
+            "WARNING: {address} is reachable from other machines. The token is the only guard — \
+             put it behind a firewall or reverse proxy you trust."
+        );
+    }
+    println!(
+        "To drive this daemon from another machine, set {}=<host>:{} and {}=<token> there.",
+        remote::REMOTE_ENV,
+        address.port(),
+        remote::TOKEN_ENV
+    );
+    println!("Token: {token}");
+    Ok(())
+}
+
+/// The `mcpServers` entry an MCP client needs. Kept as a helper so it is
+/// covered by a test and cannot drift from the actual command name.
+fn mcp_client_config_json(executable: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "archductor": {
+                "command": executable,
+                "args": ["mcp", "serve"],
+            }
+        }
+    }))
+    .unwrap_or_default()
 }
 
 fn print_mcp_status(status: archductor_core::mcp::McpStatus) {
@@ -4233,6 +4418,21 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mcp_client_config_points_at_this_binary_and_the_serve_subcommand() {
+        let config = super::mcp_client_config_json("/usr/local/bin/archductor");
+
+        let value: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(
+            value["mcpServers"]["archductor"]["command"],
+            "/usr/local/bin/archductor"
+        );
+        assert_eq!(
+            value["mcpServers"]["archductor"]["args"],
+            serde_json::json!(["mcp", "serve"])
+        );
+    }
+
     use super::*;
     use std::ffi::OsString;
 

@@ -7,6 +7,7 @@ use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::doctor::SetupReport;
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
+use crate::service::{InstallService, ServiceStatus};
 use crate::session_state::AgentSessionState;
 use crate::workspace::{
     ChatEventRecord, ChatMessageRecord, Checkpoint, DiffFileSummary, ReviewComment,
@@ -544,6 +545,15 @@ pub enum ArchcarRequest {
         interaction_id: String,
         native_response: serde_json::Value,
     },
+    // ---- Daemon service and remote access ---------------------------------
+    GetServiceStatus,
+    InstallService {
+        input: InstallService,
+    },
+    UninstallService,
+    /// Remote access details for setting up a client on another machine.
+    GetRemoteAccess,
+    RotateRemoteToken,
     // ---- Background development tasks -------------------------------------
     StartBackgroundTask {
         input: StartBackgroundTask,
@@ -900,6 +910,17 @@ pub enum ArchcarResponse {
     PullRequestCreated {
         workspace: String,
         output: String,
+    },
+    ServiceStatus {
+        status: ServiceStatus,
+    },
+    RemoteAccess {
+        /// Address the daemon is currently listening on, when it has a remote
+        /// listener.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<String>,
+        token: String,
+        token_path: String,
     },
     BackgroundTaskSaved {
         task: BackgroundTask,
@@ -1640,6 +1661,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetPullRequestDraft { workspace } => {
             format!("get_pull_request_draft workspace={workspace}")
         }
+        ArchcarRequest::GetServiceStatus => "get_service_status".to_owned(),
+        ArchcarRequest::InstallService { input } => format!(
+            "install_service listen={}",
+            input.listen.as_deref().unwrap_or("none")
+        ),
+        ArchcarRequest::UninstallService => "uninstall_service".to_owned(),
+        ArchcarRequest::GetRemoteAccess => "get_remote_access".to_owned(),
+        ArchcarRequest::RotateRemoteToken => "rotate_remote_token".to_owned(),
         ArchcarRequest::StartBackgroundTask { input } => format!(
             "start_background_task repository={} provider={} open_pr={} prompt_chars={}",
             input.repository,
@@ -1987,6 +2016,16 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "pull_request_draft workspace={workspace} title_chars={} body_chars={}",
             title.chars().count(),
             body.chars().count()
+        ),
+        ArchcarResponse::ServiceStatus { status } => format!(
+            "service_status manager={} installed={} running={}",
+            status.manager, status.installed, status.running
+        ),
+        // The token is a credential: report its length, never its value.
+        ArchcarResponse::RemoteAccess { listen, token, .. } => format!(
+            "remote_access listen={} token_chars={}",
+            listen.as_deref().unwrap_or("none"),
+            token.chars().count()
         ),
         ArchcarResponse::BackgroundTaskSaved { task } => format!(
             "background_task_saved id={} status={} workspace={}",

@@ -88,6 +88,12 @@ export type ArchcarRequest =
   | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
   | { type: "get_setup_readiness"; recheck?: boolean }
+  // Daemon background service + remote access.
+  | { type: "get_service_status" }
+  | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
+  | { type: "uninstall_service" }
+  | { type: "get_remote_access" }
+  | { type: "rotate_remote_token" }
   // Background development tasks.
   | { type: "start_background_task"; input: StartBackgroundTaskInput }
   | { type: "list_background_tasks"; active_only?: boolean }
@@ -472,6 +478,8 @@ export type ArchcarResponse =
   | { type: "workspace_updated"; name: string }
   | { type: "workspace_removed"; name: string }
   | { type: "review_comment_added"; comment: ReviewComment }
+  | { type: "service_status"; status: ServiceStatus }
+  | { type: "remote_access"; listen?: string; token: string; token_path: string }
   | { type: "background_task_saved"; task: BackgroundTask }
   | { type: "background_tasks"; tasks: BackgroundTask[] }
   | { type: "pull_request_created"; workspace: string; output: string }
@@ -489,6 +497,18 @@ export type ArchcarResponse =
   | { type: "session_contributions"; workspace: string; contributions: SessionContribution[] }
   | { type: "session_overlaps"; workspace: string; overlaps: SessionOverlap[] }
   | { type: "error"; message: string };
+
+// --- Daemon service (launchd / systemd) ------------------------------------
+// Mirrors crates/core/src/service.rs.
+
+export interface ServiceStatus {
+  manager: string; // "launchd" | "systemd" | "unsupported"
+  installed: boolean;
+  running: boolean;
+  unit_path?: string | null;
+  listen?: string | null;
+  detail: string;
+}
 
 // --- Background development tasks -----------------------------------------
 // Mirrors crates/core/src/background_tasks.rs.
