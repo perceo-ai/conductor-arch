@@ -113,14 +113,17 @@ jobs:
             fi
           fi
 
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
-          echo "metadata_only=$metadata_only" >> "$GITHUB_OUTPUT"
+          run_rust=true
           if [ "$docs_only" = "true" ] || [ "$metadata_only" = "true" ]; then
-            echo "run_rust=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_rust=true" >> "$GITHUB_OUTPUT"
+            run_rust=false
           fi
+
+          {
+            echo "docs_only=$docs_only"
+            echo "docs_changed=$docs_changed"
+            echo "metadata_only=$metadata_only"
+            echo "run_rust=$run_rust"
+          } >> "$GITHUB_OUTPUT"
 
   pr-description:
     name: PR Description
