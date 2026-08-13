@@ -1,0 +1,1349 @@
+//! Workspace intelligence: tasks, operational summaries, and context
+//! attachments.
+//!
+//! These are the branch-local coordination objects from the Archductor UX
+//! strategy: a workspace (a branch) holds many tasks, many agent sessions, and
+//! operational summaries that make continuation and review possible. They are
+//! deliberately *not* durable memory — everything here is scoped to one
+//! workspace and dies with it.
+
+use std::collections::{BTreeSet, HashMap};
+
+use anyhow::{Context, Result};
+use rusqlite::{params, Row};
+use serde::{Deserialize, Serialize};
+
+use crate::workspace::{timestamp, WorkspaceStore};
+
+/// Task lifecycle states. Kept small on purpose: this is lightweight
+/// coordination, not enterprise project management.
+pub const TASK_STATUSES: [&str; 5] = ["todo", "in_progress", "blocked", "review", "done"];
+
+/// Summary scopes from the strategy doc's data model.
+pub const SUMMARY_SCOPES: [&str; 5] = ["workspace", "session", "task", "review", "handoff"];
+
+/// Where a context attachment came from. `archivum` is reserved for the
+/// suite-level memory service; Archductor never writes durable memory itself.
+pub const CONTEXT_SOURCES: [&str; 2] = ["local", "archivum"];
+
+/// Context attachment shapes.
+pub const CONTEXT_KINDS: [&str; 5] = ["note", "summary", "context_pack", "file", "memory"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Task {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub owner_session_id: Option<i64>,
+    pub intended_areas: Vec<String>,
+    pub blocked_reason: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Partial task update. `None` leaves the field untouched; `Some(None)` on the
+/// nullable fields clears them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<Option<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended_areas: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<Option<String>>,
+}
+
+impl TaskUpdate {
+    pub fn is_empty(&self) -> bool {
+        self == &TaskUpdate::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub scope_type: String,
+    pub scope_id: i64,
+    pub body_markdown: String,
+    pub source_refs: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextAttachment {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub source: String,
+    pub kind: String,
+    pub body_or_ref: String,
+    pub scope: String,
+    pub pinned: bool,
+    pub created_at: String,
+}
+
+/// One agent session's contribution to the branch, for per-agent review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContribution {
+    pub session_id: i64,
+    pub title: String,
+    pub provider: String,
+    pub status: String,
+    pub task_id: Option<i64>,
+    pub task_title: Option<String>,
+    pub files_touched: Vec<String>,
+    /// Files this session touched that still differ from the base ref.
+    pub still_present: Vec<String>,
+    pub intended_areas: Vec<String>,
+    pub summary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Open/blocked task counts for one workspace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCounts {
+    pub open: usize,
+    pub blocked: usize,
+}
+
+/// Two sessions aiming at the same files. Advisory only — Archductor does not
+/// lock files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOverlap {
+    pub session_id: i64,
+    pub session_title: String,
+    pub other_session_id: i64,
+    pub other_session_title: String,
+    pub paths: Vec<String>,
+}
+
+fn join_list(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_owned())
+        .collect()
+}
+
+fn validate(value: &str, allowed: &[&str], label: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        allowed.contains(&value.as_str()),
+        "unknown {label} `{value}` (expected one of {})",
+        allowed.join(", ")
+    );
+    Ok(value)
+}
+
+/// Parse a provider `diff_file_change` body — one `<kind> <path>` line per
+/// changed file, as written by the Codex app-server adapter.
+pub fn parse_file_change_body(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            // Everything after the first word is the path (paths may contain
+            // spaces; the change kind never does).
+            let path = line.split_once(' ').map(|(_, rest)| rest).unwrap_or(line);
+            let path = path.trim();
+            (!path.is_empty()).then(|| path.to_owned())
+        })
+        .collect()
+}
+
+/// Present a touched file relative to its workspace when it sits inside it, so
+/// per-agent contributions line up with the branch diff's paths.
+fn relative_workspace_path(path: &str, workspace_path: &str) -> String {
+    let workspace_path = workspace_path.trim_end_matches('/');
+    if workspace_path.is_empty() {
+        return path.to_owned();
+    }
+    path.strip_prefix(workspace_path)
+        .map(|rest| rest.trim_start_matches('/').to_owned())
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or_else(|| path.to_owned())
+}
+
+fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        title: row.get(2)?,
+        body: row.get(3)?,
+        status: row.get(4)?,
+        owner_session_id: row.get(5)?,
+        intended_areas: split_list(&row.get::<_, String>(6)?),
+        blocked_reason: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+const TASK_COLUMNS: &str = "id, workspace_id, title, body, status, owner_session_id, \
+     intended_areas, blocked_reason, created_at, updated_at";
+
+fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<Summary> {
+    Ok(Summary {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        scope_type: row.get(2)?,
+        scope_id: row.get(3)?,
+        body_markdown: row.get(4)?,
+        source_refs: split_list(&row.get::<_, String>(5)?),
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+const SUMMARY_COLUMNS: &str =
+    "id, workspace_id, scope_type, scope_id, body_markdown, source_refs, created_at, updated_at";
+
+fn row_to_context_attachment(row: &Row<'_>) -> rusqlite::Result<ContextAttachment> {
+    Ok(ContextAttachment {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        source: row.get(2)?,
+        kind: row.get(3)?,
+        body_or_ref: row.get(4)?,
+        scope: row.get(5)?,
+        pinned: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
+    })
+}
+
+const CONTEXT_COLUMNS: &str =
+    "id, workspace_id, source, kind, body_or_ref, scope, pinned, created_at";
+
+// ---- Tasks -----------------------------------------------------------------
+
+impl WorkspaceStore {
+    pub fn create_task(
+        &self,
+        workspace_name: &str,
+        title: &str,
+        body: &str,
+        intended_areas: &[String],
+    ) -> Result<Task> {
+        let title = title.trim();
+        anyhow::ensure!(!title.is_empty(), "task title is required");
+        let workspace = self.get_by_name(workspace_name)?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO tasks (
+                workspace_id, title, body, status, intended_areas, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 'todo', ?4, ?5, ?6)",
+            params![
+                workspace.id,
+                title,
+                body.trim(),
+                join_list(intended_areas),
+                now,
+                now
+            ],
+        )?;
+        let task = self.get_task(self.conn.last_insert_rowid())?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "task.created",
+            &format!("Task #{} created: {}", task.id, task.title),
+        )?;
+        Ok(task)
+    }
+
+    pub fn list_tasks(&self, workspace_name: &str) -> Result<Vec<Task>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE workspace_id = ?1 ORDER BY id"
+        ))?;
+        let tasks = stmt
+            .query_map([workspace.id], row_to_task)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tasks)
+    }
+
+    pub fn get_task(&self, id: i64) -> Result<Task> {
+        self.conn
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+                [id],
+                row_to_task,
+            )
+            .with_context(|| format!("load task {id}"))
+    }
+
+    pub fn update_task(&self, id: i64, update: TaskUpdate) -> Result<Task> {
+        anyhow::ensure!(
+            !update.is_empty(),
+            "task update requires at least one field"
+        );
+        let existing = self.get_task(id)?;
+
+        let title = match update.title {
+            Some(ref value) => {
+                let value = value.trim();
+                anyhow::ensure!(!value.is_empty(), "task title is required");
+                value.to_owned()
+            }
+            None => existing.title.clone(),
+        };
+        let body = update
+            .body
+            .as_ref()
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| existing.body.clone());
+        let status = match update.status {
+            Some(ref value) => validate(value, &TASK_STATUSES, "task status")?,
+            None => existing.status.clone(),
+        };
+        let owner_session_id = match update.owner_session_id {
+            Some(value) => {
+                if let Some(session_id) = value {
+                    self.ensure_session_in_workspace(existing.workspace_id, session_id)?;
+                }
+                value
+            }
+            None => existing.owner_session_id,
+        };
+        let intended_areas = update
+            .intended_areas
+            .as_deref()
+            .map(join_list)
+            .unwrap_or_else(|| join_list(&existing.intended_areas));
+        let blocked_reason = match update.blocked_reason {
+            Some(value) => value.and_then(|reason| {
+                let reason = reason.trim().to_owned();
+                (!reason.is_empty()).then_some(reason)
+            }),
+            None => existing.blocked_reason.clone(),
+        };
+        anyhow::ensure!(
+            status != "blocked" || blocked_reason.is_some(),
+            "blocked tasks require a blocked_reason"
+        );
+
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE tasks
+                SET title = ?1, body = ?2, status = ?3, owner_session_id = ?4,
+                    intended_areas = ?5, blocked_reason = ?6, updated_at = ?7
+              WHERE id = ?8",
+            params![
+                title,
+                body,
+                status,
+                owner_session_id,
+                intended_areas,
+                blocked_reason,
+                now,
+                id
+            ],
+        )?;
+        let task = self.get_task(id)?;
+        if task.status != existing.status {
+            let workspace_name = self.intel_workspace_name(existing.workspace_id)?;
+            self.record_workspace_event(
+                existing.workspace_id,
+                &workspace_name,
+                "task.status_changed",
+                &format!("Task #{} {} → {}", task.id, existing.status, task.status),
+            )?;
+        }
+        Ok(task)
+    }
+
+    pub fn delete_task(&self, id: i64) -> Result<()> {
+        let task = self.get_task(id)?;
+        self.conn.execute(
+            "UPDATE chat_threads SET task_id = NULL WHERE task_id = ?1",
+            [id],
+        )?;
+        self.conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "DELETE FROM summaries WHERE workspace_id = ?1 AND scope_type = 'task' AND scope_id = ?2",
+            params![task.workspace_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// Attach an agent session (chat thread) to a task so per-agent diffs and
+    /// summaries can be grouped by intent.
+    pub fn assign_session_task(&self, session_id: i64, task_id: Option<i64>) -> Result<()> {
+        let workspace_id: i64 = self
+            .conn
+            .query_row(
+                "SELECT workspace_id FROM chat_threads WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("load session {session_id}"))?;
+        if let Some(task_id) = task_id {
+            let task = self.get_task(task_id)?;
+            anyhow::ensure!(
+                task.workspace_id == workspace_id,
+                "task {task_id} belongs to a different workspace than session {session_id}"
+            );
+        }
+        self.conn.execute(
+            "UPDATE chat_threads SET task_id = ?1 WHERE id = ?2",
+            params![task_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Record the files/areas a session intends to touch, so overlap warnings
+    /// can fire before two agents collide.
+    pub fn set_session_intended_areas(&self, session_id: i64, areas: &[String]) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE chat_threads SET intended_areas = ?1 WHERE id = ?2",
+            params![join_list(areas), session_id],
+        )?;
+        anyhow::ensure!(changed > 0, "session {session_id} not found");
+        Ok(())
+    }
+
+    fn intel_workspace_name(&self, workspace_id: i64) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT name FROM workspaces WHERE id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("load workspace name for id {workspace_id}"))
+    }
+
+    fn ensure_session_in_workspace(&self, workspace_id: i64, session_id: i64) -> Result<()> {
+        let owner: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT workspace_id FROM chat_threads WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match owner {
+            Some(owner) if owner == workspace_id => Ok(()),
+            Some(_) => anyhow::bail!("session {session_id} belongs to a different workspace"),
+            None => anyhow::bail!("session {session_id} not found"),
+        }
+    }
+
+    /// Open/blocked task counts per workspace id, for left-rail and dashboard
+    /// indicators. One query for every workspace so listing stays cheap.
+    pub fn task_counts_by_workspace(&self) -> Result<HashMap<i64, TaskCounts>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workspace_id,
+                    SUM(CASE WHEN status <> 'done' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END)
+               FROM tasks GROUP BY workspace_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    TaskCounts {
+                        open: row.get::<_, i64>(1)?.max(0) as usize,
+                        blocked: row.get::<_, i64>(2)?.max(0) as usize,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    // ---- Summaries ---------------------------------------------------------
+
+    pub fn save_summary(
+        &self,
+        workspace_name: &str,
+        scope_type: &str,
+        scope_id: Option<i64>,
+        body_markdown: &str,
+        source_refs: &[String],
+    ) -> Result<Summary> {
+        let scope_type = validate(scope_type, &SUMMARY_SCOPES, "summary scope")?;
+        let scope_id = scope_id.unwrap_or(0);
+        anyhow::ensure!(
+            scope_type == "workspace" || scope_id != 0,
+            "{scope_type} summaries require a scope_id"
+        );
+        let body_markdown = body_markdown.trim();
+        anyhow::ensure!(!body_markdown.is_empty(), "summary body is required");
+        let workspace = self.get_by_name(workspace_name)?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO summaries (
+                workspace_id, scope_type, scope_id, body_markdown, source_refs, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(workspace_id, scope_type, scope_id) DO UPDATE SET
+                body_markdown = excluded.body_markdown,
+                source_refs = excluded.source_refs,
+                updated_at = excluded.updated_at",
+            params![
+                workspace.id,
+                scope_type,
+                scope_id,
+                body_markdown,
+                join_list(source_refs),
+                now,
+                now
+            ],
+        )?;
+        self.get_summary(workspace_name, &scope_type, Some(scope_id))?
+            .context("summary was not stored")
+    }
+
+    pub fn get_summary(
+        &self,
+        workspace_name: &str,
+        scope_type: &str,
+        scope_id: Option<i64>,
+    ) -> Result<Option<Summary>> {
+        let scope_type = validate(scope_type, &SUMMARY_SCOPES, "summary scope")?;
+        let workspace = self.get_by_name(workspace_name)?;
+        let summary = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {SUMMARY_COLUMNS} FROM summaries
+                     WHERE workspace_id = ?1 AND scope_type = ?2 AND scope_id = ?3"
+                ),
+                params![workspace.id, scope_type, scope_id.unwrap_or(0)],
+                row_to_summary,
+            )
+            .ok();
+        Ok(summary)
+    }
+
+    pub fn list_summaries(&self, workspace_name: &str) -> Result<Vec<Summary>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SUMMARY_COLUMNS} FROM summaries WHERE workspace_id = ?1
+             ORDER BY scope_type, scope_id"
+        ))?;
+        let summaries = stmt
+            .query_map([workspace.id], row_to_summary)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(summaries)
+    }
+
+    pub fn delete_summary(&self, id: i64) -> Result<()> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM summaries WHERE id = ?1", [id])?;
+        anyhow::ensure!(changed > 0, "summary {id} not found");
+        Ok(())
+    }
+
+    /// Build the branch-local continuity summary: goal, files touched, checks,
+    /// blockers, and next actions. This is the minimum quality bar for the
+    /// Summary tab when no external memory service is enabled.
+    pub fn draft_workspace_summary(&self, workspace_name: &str) -> Result<String> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let checks = self.checks_summary(workspace_name)?;
+        let changed = self.changed_files(workspace_name).unwrap_or_default();
+        let tasks = self.list_tasks(workspace_name)?;
+        let sessions = self.list_chat_threads(workspace_name)?;
+        let contributions = self
+            .session_contributions(workspace_name)
+            .unwrap_or_default();
+
+        let mut out = String::new();
+        out.push_str(&format!("# {} ({})\n\n", workspace.name, workspace.branch));
+
+        out.push_str("## Goal\n\n");
+        let goal = tasks
+            .iter()
+            .find(|task| task.status != "done")
+            .map(|task| task.title.clone())
+            .or_else(|| sessions.first().map(|session| session.title.clone()))
+            .unwrap_or_else(|| format!("Work on branch {}", workspace.branch));
+        out.push_str(&format!("{goal}\n\n"));
+
+        out.push_str("## Files touched\n\n");
+        if changed.is_empty() {
+            out.push_str("- No uncommitted changes\n");
+        } else {
+            for path in changed.iter().take(30) {
+                out.push_str(&format!("- {path}\n"));
+            }
+            if changed.len() > 30 {
+                out.push_str(&format!("- …and {} more\n", changed.len() - 30));
+            }
+        }
+        out.push('\n');
+
+        out.push_str("## Sessions\n\n");
+        if contributions.is_empty() {
+            out.push_str("- No agent sessions yet\n");
+        } else {
+            for contribution in &contributions {
+                out.push_str(&format!(
+                    "- {} ({}, {}) — {} file(s) touched\n",
+                    contribution.title,
+                    contribution.provider,
+                    contribution.status,
+                    contribution.files_touched.len()
+                ));
+            }
+        }
+        out.push('\n');
+
+        out.push_str("## Checks\n\n");
+        out.push_str(&format!(
+            "- Latest check: {}\n- Latest run: {}\n- Active sessions: {}\n",
+            checks
+                .check_status
+                .map(|status| status.as_str().to_owned())
+                .unwrap_or_else(|| "none".to_owned()),
+            checks
+                .run_status
+                .map(|status| status.as_str().to_owned())
+                .unwrap_or_else(|| "none".to_owned()),
+            checks.active_sessions
+        ));
+        out.push('\n');
+
+        out.push_str("## Blockers\n\n");
+        let blocked: Vec<&Task> = tasks
+            .iter()
+            .filter(|task| task.status == "blocked")
+            .collect();
+        if blocked.is_empty() && checks.conflicting_workspaces.is_empty() {
+            out.push_str("- None recorded\n");
+        } else {
+            for task in blocked {
+                out.push_str(&format!(
+                    "- Task #{} {}: {}\n",
+                    task.id,
+                    task.title,
+                    task.blocked_reason.as_deref().unwrap_or("blocked")
+                ));
+            }
+            for (other, paths) in &checks.conflicting_workspaces {
+                out.push_str(&format!(
+                    "- Overlaps workspace {other} on {} file(s)\n",
+                    paths.len()
+                ));
+            }
+        }
+        out.push('\n');
+
+        out.push_str("## Next actions\n\n");
+        for action in next_actions(&checks, &tasks, changed.len()) {
+            out.push_str(&format!("- {action}\n"));
+        }
+
+        Ok(out)
+    }
+
+    /// Draft a per-session handoff summary from what that session actually did.
+    pub fn draft_session_summary(&self, workspace_name: &str, session_id: i64) -> Result<String> {
+        let contribution = self
+            .session_contributions(workspace_name)?
+            .into_iter()
+            .find(|contribution| contribution.session_id == session_id)
+            .with_context(|| format!("session {session_id} not found in {workspace_name}"))?;
+
+        let mut out = String::new();
+        out.push_str(&format!("# {}\n\n", contribution.title));
+        out.push_str(&format!(
+            "- Harness: {}\n- Status: {}\n",
+            contribution.provider, contribution.status
+        ));
+        if let Some(task_title) = &contribution.task_title {
+            out.push_str(&format!(
+                "- Task: #{} {}\n",
+                contribution.task_id.unwrap_or_default(),
+                task_title
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("## Files touched\n\n");
+        if contribution.files_touched.is_empty() {
+            out.push_str("- None recorded\n");
+        } else {
+            for path in &contribution.files_touched {
+                let marker = if contribution.still_present.contains(path) {
+                    " (still changed in branch)"
+                } else {
+                    ""
+                };
+                out.push_str(&format!("- {path}{marker}\n"));
+            }
+        }
+        out.push('\n');
+
+        out.push_str("## Handoff\n\n");
+        out.push_str(if contribution.still_present.is_empty() {
+            "- No outstanding uncommitted changes from this session\n"
+        } else {
+            "- Review this session's changes before committing\n"
+        });
+
+        Ok(out)
+    }
+
+    // ---- Context attachments ----------------------------------------------
+
+    pub fn add_context_attachment(
+        &self,
+        workspace_name: &str,
+        source: &str,
+        kind: &str,
+        body_or_ref: &str,
+        scope: &str,
+        pinned: bool,
+    ) -> Result<ContextAttachment> {
+        let source = validate(source, &CONTEXT_SOURCES, "context source")?;
+        let kind = validate(kind, &CONTEXT_KINDS, "context kind")?;
+        let body_or_ref = body_or_ref.trim();
+        anyhow::ensure!(
+            !body_or_ref.is_empty(),
+            "context body or reference is required"
+        );
+        let workspace = self.get_by_name(workspace_name)?;
+        self.conn.execute(
+            "INSERT INTO context_attachments (
+                workspace_id, source, kind, body_or_ref, scope, pinned, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                workspace.id,
+                source,
+                kind,
+                body_or_ref,
+                scope.trim(),
+                i64::from(pinned),
+                timestamp()
+            ],
+        )?;
+        self.get_context_attachment(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_context_attachments(&self, workspace_name: &str) -> Result<Vec<ContextAttachment>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CONTEXT_COLUMNS} FROM context_attachments WHERE workspace_id = ?1
+             ORDER BY pinned DESC, id DESC"
+        ))?;
+        let attachments = stmt
+            .query_map([workspace.id], row_to_context_attachment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(attachments)
+    }
+
+    pub fn get_context_attachment(&self, id: i64) -> Result<ContextAttachment> {
+        self.conn
+            .query_row(
+                &format!("SELECT {CONTEXT_COLUMNS} FROM context_attachments WHERE id = ?1"),
+                [id],
+                row_to_context_attachment,
+            )
+            .with_context(|| format!("load context attachment {id}"))
+    }
+
+    pub fn remove_context_attachment(&self, id: i64) -> Result<()> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM context_attachments WHERE id = ?1", [id])?;
+        anyhow::ensure!(changed > 0, "context attachment {id} not found");
+        Ok(())
+    }
+
+    /// Draft a pull-request title and body from branch-local evidence: the
+    /// workspace summary, per-session contributions, checks, and known risks.
+    /// This is what makes background PRs reviewable.
+    pub fn draft_pull_request(&self, workspace_name: &str) -> Result<(String, String)> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let tasks = self.list_tasks(workspace_name)?;
+        let contributions = self
+            .session_contributions(workspace_name)
+            .unwrap_or_default();
+        let checks = self.checks_summary(workspace_name)?;
+        let changed = self.changed_files(workspace_name).unwrap_or_default();
+        let stored = self.get_summary(workspace_name, "workspace", None)?;
+
+        let title = tasks
+            .iter()
+            .find(|task| task.status != "done")
+            .map(|task| task.title.clone())
+            .unwrap_or_else(|| {
+                let branch = workspace
+                    .branch
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&workspace.branch);
+                branch.replace(['-', '_'], " ")
+            });
+
+        let mut body = String::new();
+        body.push_str("## Summary\n\n");
+        match stored {
+            Some(summary) => {
+                body.push_str(summary.body_markdown.trim());
+                body.push_str("\n\n");
+            }
+            None => {
+                body.push_str(&format!(
+                    "Changes on `{}` ({} file(s) changed).\n\n",
+                    workspace.branch,
+                    changed.len()
+                ));
+            }
+        }
+
+        if !tasks.is_empty() {
+            body.push_str("## Tasks\n\n");
+            for task in &tasks {
+                body.push_str(&format!("- [{}] {}\n", task.status, task.title));
+            }
+            body.push('\n');
+        }
+
+        if !contributions.is_empty() {
+            body.push_str("## Agent contributions\n\n");
+            for contribution in &contributions {
+                body.push_str(&format!(
+                    "- **{}** ({}): {} file(s) touched\n",
+                    contribution.title,
+                    contribution.provider,
+                    contribution.files_touched.len()
+                ));
+            }
+            body.push('\n');
+        }
+
+        body.push_str("## Checks\n\n");
+        body.push_str(&format!(
+            "- Latest check run: {}\n- Open review comments: {}\n",
+            checks
+                .check_status
+                .map(|status| status.as_str().to_owned())
+                .unwrap_or_else(|| "not run".to_owned()),
+            checks.open_review_comments
+        ));
+        body.push('\n');
+
+        body.push_str("## Risks\n\n");
+        let mut risks = Vec::new();
+        for task in tasks.iter().filter(|task| task.status == "blocked") {
+            risks.push(format!(
+                "Task #{} blocked: {}",
+                task.id,
+                task.blocked_reason
+                    .as_deref()
+                    .unwrap_or("no reason recorded")
+            ));
+        }
+        for (other, paths) in &checks.conflicting_workspaces {
+            risks.push(format!(
+                "Overlaps workspace {other} on {} file(s)",
+                paths.len()
+            ));
+        }
+        if checks.check_status.is_none() {
+            risks.push("No checks were run in this workspace".to_owned());
+        }
+        if risks.is_empty() {
+            body.push_str("- None identified\n");
+        } else {
+            for risk in risks {
+                body.push_str(&format!("- {risk}\n"));
+            }
+        }
+
+        Ok((title, body))
+    }
+
+    // ---- Per-session contributions ----------------------------------------
+
+    /// Per-agent diff contributions: which session touched which files, and
+    /// whether those files still differ in the branch.
+    pub fn session_contributions(&self, workspace_name: &str) -> Result<Vec<SessionContribution>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let changed = self.changed_files(workspace_name).unwrap_or_default();
+        let summaries = self.list_summaries(workspace_name)?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.title, t.provider, t.status, t.task_id, t.intended_areas,
+                    t.created_at, t.updated_at, tk.title
+               FROM chat_threads t
+               LEFT JOIN tasks tk ON tk.id = t.task_id
+              WHERE t.workspace_id = ?1
+              ORDER BY t.id",
+        )?;
+        let rows = stmt
+            .query_map([workspace.id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut contributions = Vec::new();
+        for (
+            session_id,
+            title,
+            provider,
+            status,
+            task_id,
+            intended_areas,
+            created_at,
+            updated_at,
+            task_title,
+        ) in rows
+        {
+            let files_touched =
+                self.session_files_touched(session_id, &workspace.path.to_string_lossy())?;
+            let still_present = files_touched
+                .iter()
+                .filter(|path| changed.contains(path))
+                .cloned()
+                .collect();
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.scope_type == "session" && summary.scope_id == session_id)
+                .map(|summary| summary.body_markdown.clone());
+            contributions.push(SessionContribution {
+                session_id,
+                title,
+                provider,
+                status,
+                task_id,
+                task_title,
+                files_touched,
+                still_present,
+                intended_areas: intended_areas
+                    .as_deref()
+                    .map(split_list)
+                    .unwrap_or_default(),
+                summary,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(contributions)
+    }
+
+    fn session_files_touched(&self, session_id: i64, workspace_path: &str) -> Result<Vec<String>> {
+        let mut paths: BTreeSet<String> = BTreeSet::new();
+
+        // TUI-parsed transcripts record the path directly on the chat event.
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT path FROM chat_events
+              WHERE thread_id = ?1 AND path IS NOT NULL AND path <> ''",
+        )?;
+        for path in stmt
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            paths.insert(relative_workspace_path(&path, workspace_path));
+        }
+
+        // Managed sessions (Codex app-server, Claude stream-json) report file
+        // changes as provider events instead, one `<kind> <path>` line each.
+        let mut stmt = self.conn.prepare(
+            "SELECT normalized_payload_json FROM provider_events
+              WHERE chat_thread_id = ?1 AND kind = 'diff_file_change'",
+        )?;
+        for payload in stmt
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            let body = serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("body")
+                        .and_then(|body| body.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            for path in parse_file_change_body(&body) {
+                paths.insert(relative_workspace_path(&path, workspace_path));
+            }
+        }
+
+        Ok(paths.into_iter().collect())
+    }
+
+    /// Advisory overlap warnings between concurrent sessions in one workspace:
+    /// same files touched, or declared intended areas that collide.
+    pub fn session_overlaps(&self, workspace_name: &str) -> Result<Vec<SessionOverlap>> {
+        let contributions = self.session_contributions(workspace_name)?;
+        let mut overlaps = Vec::new();
+        for (index, contribution) in contributions.iter().enumerate() {
+            for other in contributions.iter().skip(index + 1) {
+                let mut paths: Vec<String> = contribution
+                    .files_touched
+                    .iter()
+                    .filter(|path| other.files_touched.contains(path))
+                    .cloned()
+                    .collect();
+                for area in &contribution.intended_areas {
+                    if other.intended_areas.contains(area) && !paths.contains(area) {
+                        paths.push(area.clone());
+                    }
+                }
+                if paths.is_empty() {
+                    continue;
+                }
+                paths.sort();
+                overlaps.push(SessionOverlap {
+                    session_id: contribution.session_id,
+                    session_title: contribution.title.clone(),
+                    other_session_id: other.session_id,
+                    other_session_title: other.title.clone(),
+                    paths,
+                });
+            }
+        }
+        Ok(overlaps)
+    }
+}
+
+fn next_actions(
+    checks: &crate::workspace::ChecksSummary,
+    tasks: &[Task],
+    changed_files: usize,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if let Some(task) = tasks.iter().find(|task| task.status == "blocked") {
+        actions.push(format!(
+            "Unblock task #{}: {}",
+            task.id,
+            task.blocked_reason
+                .as_deref()
+                .unwrap_or("no reason recorded")
+        ));
+    }
+    if let Some(task) = tasks.iter().find(|task| task.status == "in_progress") {
+        actions.push(format!("Finish task #{}: {}", task.id, task.title));
+    }
+    if checks.open_review_comments > 0 {
+        actions.push(format!(
+            "Resolve {} open review comment(s)",
+            checks.open_review_comments
+        ));
+    }
+    if changed_files > 0 && checks.pull_request.is_none() {
+        actions.push("Commit changes and open a pull request".to_owned());
+    }
+    if checks.pull_request.is_some() {
+        actions.push("Review pull request checks and merge blockers".to_owned());
+    }
+    if actions.is_empty() {
+        actions.push("Start a task or an agent session".to_owned());
+    }
+    actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::{AddRepository, RepositoryStore};
+    use crate::workspace::CreateWorkspace;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn init_repo(path: PathBuf) -> PathBuf {
+        std::fs::create_dir_all(&path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        std::fs::write(path.join("README.md"), "demo\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .status()
+            .unwrap();
+        path
+    }
+
+    fn store_with_workspace(temp: &tempfile::TempDir) -> WorkspaceStore {
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn tasks_are_created_listed_updated_and_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+
+        let task = store
+            .create_task(
+                "berlin",
+                "Port right panel tabs",
+                "Tasks/Summary/Context",
+                &["desktop/src/pages".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(task.status, "todo");
+        assert_eq!(task.intended_areas, vec!["desktop/src/pages".to_owned()]);
+        assert_eq!(store.list_tasks("berlin").unwrap(), vec![task.clone()]);
+
+        let updated = store
+            .update_task(
+                task.id,
+                TaskUpdate {
+                    status: Some("in_progress".to_owned()),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.status, "in_progress");
+
+        store.delete_task(task.id).unwrap();
+        assert!(store.list_tasks("berlin").unwrap().is_empty());
+    }
+
+    #[test]
+    fn task_status_is_validated_and_blocked_requires_a_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let task = store.create_task("berlin", "Ship it", "", &[]).unwrap();
+
+        let err = store
+            .update_task(
+                task.id,
+                TaskUpdate {
+                    status: Some("wobbly".to_owned()),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown task status"), "{err}");
+
+        let err = store
+            .update_task(
+                task.id,
+                TaskUpdate {
+                    status: Some("blocked".to_owned()),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked_reason"), "{err}");
+
+        let blocked = store
+            .update_task(
+                task.id,
+                TaskUpdate {
+                    status: Some("blocked".to_owned()),
+                    blocked_reason: Some(Some("waiting on API key".to_owned())),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            blocked.blocked_reason.as_deref(),
+            Some("waiting on API key")
+        );
+    }
+
+    #[test]
+    fn summaries_upsert_per_scope_and_reject_unknown_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+
+        let first = store
+            .save_summary(
+                "berlin",
+                "workspace",
+                None,
+                "first body",
+                &["git status".to_owned()],
+            )
+            .unwrap();
+        let second = store
+            .save_summary("berlin", "workspace", None, "second body", &[])
+            .unwrap();
+        assert_eq!(first.id, second.id, "workspace summary should upsert");
+        assert_eq!(second.body_markdown, "second body");
+        assert_eq!(store.list_summaries("berlin").unwrap().len(), 1);
+
+        let err = store
+            .save_summary("berlin", "galaxy", None, "body", &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown summary scope"), "{err}");
+
+        let err = store
+            .save_summary("berlin", "session", None, "body", &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("require a scope_id"), "{err}");
+    }
+
+    #[test]
+    fn workspace_summary_draft_reports_goal_blockers_and_next_actions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let task = store
+            .create_task("berlin", "Wire the Context tab", "", &[])
+            .unwrap();
+        store
+            .update_task(
+                task.id,
+                TaskUpdate {
+                    status: Some("blocked".to_owned()),
+                    blocked_reason: Some(Some("needs archivum endpoint".to_owned())),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let draft = store.draft_workspace_summary("berlin").unwrap();
+        assert!(draft.contains("Wire the Context tab"), "{draft}");
+        assert!(draft.contains("needs archivum endpoint"), "{draft}");
+        assert!(draft.contains("## Next actions"), "{draft}");
+    }
+
+    #[test]
+    fn pull_request_draft_reports_tasks_checks_and_risks() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let task = store
+            .create_task("berlin", "Add the PR tab", "", &[])
+            .unwrap();
+        store
+            .update_task(
+                task.id,
+                TaskUpdate {
+                    status: Some("blocked".to_owned()),
+                    blocked_reason: Some(Some("waiting on gh auth".to_owned())),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let (title, body) = store.draft_pull_request("berlin").unwrap();
+        assert_eq!(title, "Add the PR tab");
+        assert!(body.contains("## Summary"), "{body}");
+        assert!(body.contains("## Tasks"), "{body}");
+        assert!(body.contains("waiting on gh auth"), "{body}");
+        assert!(body.contains("No checks were run"), "{body}");
+    }
+
+    #[test]
+    fn file_change_bodies_parse_into_workspace_relative_paths() {
+        assert_eq!(
+            parse_file_change_body("changed /ws/berlin/README.md\nadded /ws/berlin/src/main.rs"),
+            vec![
+                "/ws/berlin/README.md".to_owned(),
+                "/ws/berlin/src/main.rs".to_owned()
+            ]
+        );
+        assert!(parse_file_change_body("   \n").is_empty());
+        assert_eq!(
+            relative_workspace_path("/ws/berlin/src/main.rs", "/ws/berlin"),
+            "src/main.rs"
+        );
+        // Paths outside the workspace stay absolute rather than being mangled.
+        assert_eq!(
+            relative_workspace_path("/elsewhere/file.rs", "/ws/berlin"),
+            "/elsewhere/file.rs"
+        );
+    }
+
+    #[test]
+    fn context_attachments_are_added_listed_and_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+
+        let note = store
+            .add_context_attachment(
+                "berlin",
+                "local",
+                "note",
+                "Ports are allocated per workspace",
+                "",
+                true,
+            )
+            .unwrap();
+        assert!(note.pinned);
+        let file = store
+            .add_context_attachment("berlin", "local", "file", "docs/strategy.md", "repo", false)
+            .unwrap();
+
+        let listed = store.list_context_attachments("berlin").unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, note.id, "pinned attachments sort first");
+
+        store.remove_context_attachment(file.id).unwrap();
+        assert_eq!(store.list_context_attachments("berlin").unwrap().len(), 1);
+
+        let err = store
+            .add_context_attachment("berlin", "elsewhere", "note", "body", "", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown context source"), "{err}");
+    }
+}

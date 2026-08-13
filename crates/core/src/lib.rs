@@ -1,5 +1,6 @@
 pub mod agent_tools;
 pub mod archcar;
+pub mod background_tasks;
 pub mod chat_attachments;
 pub mod chat_store;
 pub mod codex_tui;
@@ -34,6 +35,7 @@ pub mod terminal_logs;
 pub mod todos;
 pub mod workflow_actions;
 pub mod workspace;
+pub mod workspace_intel;
 
 #[cfg(test)]
 mod pty_tests {

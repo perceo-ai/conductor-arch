@@ -8,17 +8,10 @@ import type { ArchcarChecksSummary } from "@/bridge/protocol";
 import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
-import WorkspacePrBar from "./WorkspacePrBar";
 import TerminalDock from "./TerminalDock";
-import {
-  ChecksPanel,
-  ReviewPanel,
-  TodosPanel,
-  CheckpointsPanel,
-  ProcessesPanel,
-  TimelinePanel,
-} from "./WorkspaceTabs";
-import type { RightPanelTab } from "@/store/nav";
+import { ChecksPanel, ReviewPanel, CheckpointsPanel } from "./WorkspaceTabs";
+import { TasksPanel, SummaryPanel, ContextPanel, PrPanel } from "./WorkspaceIntel";
+import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
@@ -26,19 +19,14 @@ import { createPersistedWidth } from "@/lib/persistedWidth";
 const RIGHT_MIN = 280;
 const RIGHT_MAX = 640;
 
-// Right-panel tabs. Browse/Changes lead (the common review flow); the rest
-// restore the GTK command-center panels (Checks/Review/Todos/Checkpoints/
-// Processes) that were defined but previously unreachable in the Electron UI.
-const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = [
-  { tab: "browse", label: "Browse" },
-  { tab: "changes", label: "Changes" },
-  { tab: "checks", label: "Checks" },
-  { tab: "review", label: "Review" },
-  { tab: "todos", label: "Todos" },
-  { tab: "checkpoints", label: "Checkpoints" },
-  { tab: "processes", label: "Processes" },
-  { tab: "timeline", label: "Timeline" },
-];
+// Right-panel tabs: the workspace-intelligence surfaces from the UX strategy
+// (Tasks/Summary/Files/Changes/Checks/Context/Review/PR) above the terminal
+// dock. The older GTK-era panels did not disappear — Todos live under Tasks,
+// Timeline under Summary, Checkpoints under Changes, and Processes in the
+// terminal dock.
+const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_TABS.map(
+  (tab) => ({ tab: tab.id, label: tab.label }),
+);
 
 // Workspace command center — port of workspace_command_center.rs. Three regions:
 //   center  : draggable top bar (repo > branch) + chat/file surface + composer
@@ -103,10 +91,10 @@ function WorkspaceBriefing(props: { workspace: string; checks?: ArchcarChecksSum
               class="ws-briefing-tile"
               classList={{ [`ws-briefing-${tile.tone}`]: true }}
               onClick={() => {
-                if (tile.label === "Review") nav.setRightPanelTab("checks");
+                if (tile.label === "Review") nav.setRightPanelTab("review");
                 if (tile.label === "Changes") nav.setRightPanelTab("changes");
                 if (tile.label === "Agents" || tile.label === "Scripts")
-                  nav.setRightPanelTab("processes");
+                  nav.setRightPanelTab("summary");
                 if (tile.label === "Checks") nav.setRightPanelTab("checks");
               }}
             >
@@ -123,21 +111,36 @@ function WorkspaceBriefing(props: { workspace: string; checks?: ArchcarChecksSum
 function RightPanel(props: { workspace: string }) {
   const [width, setWidth] = createPersistedWidth("rightPanel.width", 340, RIGHT_MIN, RIGHT_MAX);
   const row = () => workspacesStore.row(props.workspace);
+  const [openTasks] = createResource(
+    () => props.workspace,
+    async (ws): Promise<number> => {
+      try {
+        const res = await send({ type: "list_tasks", workspace: ws });
+        if (res.type !== "tasks") return 0;
+        return res.tasks.filter((task) => task.status !== "done").length;
+      } catch {
+        return 0;
+      }
+    },
+  );
   const tabCount = (tab: RightPanelTab) => {
     const r = row();
     if (!r) return "";
+    if (tab === "tasks") {
+      const open = openTasks() ?? 0;
+      const total = open + r.openTodos;
+      return total > 0 ? String(total) : "";
+    }
     if (tab === "changes" && r.changedFiles > 0) return String(r.changedFiles);
-    if (tab === "todos" && r.openTodos > 0) return String(r.openTodos);
-    if (tab === "processes" && (r.activeSessions > 0 || r.runRunning)) {
+    if (tab === "checks" && (r.activeSessions > 0 || r.runRunning)) {
       return r.runRunning ? "run" : String(r.activeSessions);
     }
-    if (tab === "checks" && r.prNumber != null) return "PR";
+    if (tab === "pr" && r.prNumber != null) return `#${r.prNumber}`;
     return "";
   };
   return (
     <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
       <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
-      <WorkspacePrBar workspace={props.workspace} />
       <div class="ws-right-mid">
         <div class="command-center-strip ws-right-tabs">
           <For each={RIGHT_TABS}>
@@ -157,7 +160,13 @@ function RightPanel(props: { workspace: string }) {
         </div>
         <div class="ws-right-body">
           <Switch>
-            <Match when={nav.rightPanelTab() === "browse"}>
+            <Match when={nav.rightPanelTab() === "tasks"}>
+              <TasksPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "summary"}>
+              <SummaryPanel workspace={props.workspace} />
+            </Match>
+            <Match when={nav.rightPanelTab() === "files"}>
               <WorkspaceFiles
                 workspace={props.workspace}
                 openFile={(p) => openFileInCenter(props.workspace, p)}
@@ -168,24 +177,19 @@ function RightPanel(props: { workspace: string }) {
                 workspace={props.workspace}
                 openFile={(p) => openFileInCenter(props.workspace, p)}
               />
+              <CheckpointsPanel workspace={props.workspace} />
             </Match>
             <Match when={nav.rightPanelTab() === "checks"}>
               <ChecksPanel workspace={props.workspace} />
             </Match>
+            <Match when={nav.rightPanelTab() === "context"}>
+              <ContextPanel workspace={props.workspace} />
+            </Match>
             <Match when={nav.rightPanelTab() === "review"}>
               <ReviewPanel workspace={props.workspace} />
             </Match>
-            <Match when={nav.rightPanelTab() === "todos"}>
-              <TodosPanel workspace={props.workspace} />
-            </Match>
-            <Match when={nav.rightPanelTab() === "checkpoints"}>
-              <CheckpointsPanel workspace={props.workspace} />
-            </Match>
-            <Match when={nav.rightPanelTab() === "processes"}>
-              <ProcessesPanel workspace={props.workspace} />
-            </Match>
-            <Match when={nav.rightPanelTab() === "timeline"}>
-              <TimelinePanel workspace={props.workspace} />
+            <Match when={nav.rightPanelTab() === "pr"}>
+              <PrPanel workspace={props.workspace} />
             </Match>
           </Switch>
         </div>

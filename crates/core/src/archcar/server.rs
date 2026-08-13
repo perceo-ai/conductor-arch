@@ -33,6 +33,7 @@ use crate::provider_projection::{
     provider_projection_item_text,
 };
 use crate::repository::{AddRepository, RepositoryStore};
+use crate::session_state::AgentSessionState;
 use crate::workspace::WorkspaceStatusLine;
 use crate::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 
@@ -52,6 +53,9 @@ struct ServerState {
     sessions: HashMap<i64, SessionHandle>,
     subscribers: Vec<Sender<ArchcarEvent>>,
 }
+
+/// How often the daemon advances background development tasks.
+const BACKGROUND_TASK_TICK: Duration = Duration::from_secs(10);
 
 struct QueueDrainGuard {
     state: Arc<Mutex<ServerState>>,
@@ -147,6 +151,7 @@ impl ArchcarServer {
 
     pub fn serve(self) -> Result<()> {
         let shutdown = Arc::new(AtomicBool::new(false));
+        spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
         let shutdown_for_signal = Arc::clone(&shutdown);
         ctrlc::set_handler(move || {
             shutdown_for_signal.store(true, Ordering::SeqCst);
@@ -187,6 +192,86 @@ impl ArchcarServer {
             (None, result) => result,
         }
     }
+}
+
+/// Workspaces whose live agent sessions are mid-turn. A managed session keeps
+/// its process alive between turns, so only the runtime state distinguishes
+/// "still working" from "waiting for the next prompt".
+fn busy_agent_workspaces(state: &Arc<Mutex<ServerState>>) -> HashSet<String> {
+    let guard = state.lock().unwrap();
+    guard
+        .sessions
+        .values()
+        .filter_map(|handle| {
+            let snapshot = handle.snapshot.lock().ok()?.clone();
+            let busy = matches!(
+                snapshot.runtime_state,
+                AgentSessionState::Starting
+                    | AgentSessionState::Running
+                    | AgentSessionState::Streaming
+                    | AgentSessionState::ToolRunning
+            );
+            busy.then_some(snapshot.workspace)
+        })
+        .collect()
+}
+
+/// Workspaces that have a live session handle at all, busy or not. If a
+/// workspace has one, its runtime state is authoritative and the database's
+/// process rows must not be consulted.
+fn workspaces_with_live_sessions(state: &Arc<Mutex<ServerState>>) -> HashSet<String> {
+    let guard = state.lock().unwrap();
+    guard
+        .sessions
+        .values()
+        .filter_map(|handle| Some(handle.snapshot.lock().ok()?.workspace.clone()))
+        .collect()
+}
+
+fn tick_background_tasks(
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<Vec<crate::background_tasks::BackgroundTask>> {
+    let (db_path, logs_dir) = {
+        let guard = state.lock().unwrap();
+        (guard.db_path.clone(), guard.logs_dir.clone())
+    };
+    let busy = busy_agent_workspaces(state);
+    let live = workspaces_with_live_sessions(state);
+    let store = WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)?;
+    store.tick_background_tasks_with(|workspace| {
+        if live.contains(workspace) {
+            return busy.contains(workspace);
+        }
+        store.workspace_has_active_agent(workspace).unwrap_or(false)
+    })
+}
+
+/// Periodically advance background development tasks: once an agent goes idle,
+/// checks run, the summary is written, and (when asked) a pull request opens —
+/// without a human at the keyboard.
+fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: Arc<AtomicBool>) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            std::thread::sleep(BACKGROUND_TASK_TICK);
+            if shutdown.load(Ordering::SeqCst) || state.lock().unwrap().shutting_down {
+                break;
+            }
+            match tick_background_tasks(&state) {
+                Ok(tasks) if !tasks.is_empty() => {
+                    for task in tasks {
+                        info!(
+                            background_task = task.id,
+                            status = %task.status,
+                            "background task advanced"
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => warn!(error = %err, "background task tick failed"),
+            }
+        }
+    });
 }
 
 fn handle_connection(stream: LocalStream, state: Arc<Mutex<ServerState>>) -> Result<()> {
@@ -603,6 +688,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|store| {
                 let lines = store.list_status()?;
+                let task_counts = store.task_counts_by_workspace().unwrap_or_default();
                 Ok(lines
                     .into_iter()
                     .map(|line| {
@@ -616,7 +702,11 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         } else {
                             0
                         };
-                        workspace_summary_from_status_line(line, changed_files)
+                        let tasks = task_counts
+                            .get(&line.workspace.id)
+                            .copied()
+                            .unwrap_or_default();
+                        workspace_summary_from_status_line(line, changed_files, tasks)
                     })
                     .collect::<Vec<_>>())
             }) {
@@ -1946,8 +2036,313 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        // ---- Background development tasks -------------------------------
+        ArchcarRequest::StartBackgroundTask { input } => start_background_task(state, input),
+        ArchcarRequest::ListBackgroundTasks { active_only } => with_store(state, |store| {
+            Ok(ArchcarResponse::BackgroundTasks {
+                tasks: store.list_background_tasks(active_only)?,
+            })
+        }),
+        ArchcarRequest::GetBackgroundTask { background_task_id } => with_store(state, |store| {
+            Ok(ArchcarResponse::BackgroundTaskSaved {
+                task: store.get_background_task(background_task_id)?,
+            })
+        }),
+        ArchcarRequest::CancelBackgroundTask { background_task_id } => with_store(state, |store| {
+            Ok(ArchcarResponse::BackgroundTaskSaved {
+                task: store.cancel_background_task(background_task_id)?,
+            })
+        }),
+        ArchcarRequest::TickBackgroundTasks => match tick_background_tasks(state) {
+            Ok(tasks) => ArchcarResponse::BackgroundTasks { tasks },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::CreatePullRequest {
+            workspace,
+            title,
+            body,
+            draft,
+        } => with_store(state, |store| {
+            let output =
+                store.create_pull_request(&workspace, title.as_deref(), body.as_deref(), draft)?;
+            Ok(ArchcarResponse::PullRequestCreated { workspace, output })
+        }),
+        ArchcarRequest::GetPullRequestDraft { workspace } => with_store(state, |store| {
+            let (title, body) = store.draft_pull_request(&workspace)?;
+            Ok(ArchcarResponse::PullRequestDraft {
+                workspace,
+                title,
+                body,
+            })
+        }),
+        // ---- Workspace intelligence -------------------------------------
+        ArchcarRequest::ListTasks { workspace } => with_store(state, |store| {
+            let tasks = store.list_tasks(&workspace)?;
+            Ok(ArchcarResponse::Tasks { workspace, tasks })
+        }),
+        ArchcarRequest::CreateTask {
+            workspace,
+            title,
+            body,
+            intended_areas,
+        } => with_store(state, |store| {
+            let task = store.create_task(&workspace, &title, &body, &intended_areas)?;
+            Ok(ArchcarResponse::TaskSaved { task })
+        }),
+        ArchcarRequest::UpdateTask {
+            workspace,
+            task_id,
+            update,
+        } => with_store(state, |store| {
+            let task = store.get_task(task_id)?;
+            let owner = store.get_by_name(&workspace)?;
+            anyhow::ensure!(
+                task.workspace_id == owner.id,
+                "task {task_id} does not belong to workspace {workspace}"
+            );
+            let task = store.update_task(task_id, update)?;
+            Ok(ArchcarResponse::TaskSaved { task })
+        }),
+        ArchcarRequest::DeleteTask { workspace, task_id } => with_store(state, |store| {
+            let task = store.get_task(task_id)?;
+            let owner = store.get_by_name(&workspace)?;
+            anyhow::ensure!(
+                task.workspace_id == owner.id,
+                "task {task_id} does not belong to workspace {workspace}"
+            );
+            store.delete_task(task_id)?;
+            Ok(ArchcarResponse::TaskDeleted { task_id })
+        }),
+        ArchcarRequest::AssignSessionTask {
+            workspace: _,
+            session_id,
+            task_id,
+        } => with_store(state, |store| {
+            store.assign_session_task(session_id, task_id)?;
+            Ok(ArchcarResponse::Ack)
+        }),
+        ArchcarRequest::SetSessionIntendedAreas {
+            workspace: _,
+            session_id,
+            areas,
+        } => with_store(state, |store| {
+            store.set_session_intended_areas(session_id, &areas)?;
+            Ok(ArchcarResponse::Ack)
+        }),
+        ArchcarRequest::ListSummaries { workspace } => with_store(state, |store| {
+            let summaries = store.list_summaries(&workspace)?;
+            Ok(ArchcarResponse::Summaries {
+                workspace,
+                summaries,
+            })
+        }),
+        ArchcarRequest::SaveSummary {
+            workspace,
+            scope_type,
+            scope_id,
+            body_markdown,
+            source_refs,
+        } => with_store(state, |store| {
+            let summary = store.save_summary(
+                &workspace,
+                &scope_type,
+                scope_id,
+                &body_markdown,
+                &source_refs,
+            )?;
+            Ok(ArchcarResponse::SummarySaved { summary })
+        }),
+        ArchcarRequest::DeleteSummary {
+            workspace: _,
+            summary_id,
+        } => with_store(state, |store| {
+            store.delete_summary(summary_id)?;
+            Ok(ArchcarResponse::SummaryDeleted { summary_id })
+        }),
+        ArchcarRequest::DraftSummary {
+            workspace,
+            session_id,
+        } => with_store(state, |store| {
+            let body_markdown = match session_id {
+                Some(session_id) => store.draft_session_summary(&workspace, session_id)?,
+                None => store.draft_workspace_summary(&workspace)?,
+            };
+            Ok(ArchcarResponse::SummaryDraft {
+                workspace,
+                body_markdown,
+            })
+        }),
+        ArchcarRequest::ListContextAttachments { workspace } => with_store(state, |store| {
+            let attachments = store.list_context_attachments(&workspace)?;
+            Ok(ArchcarResponse::ContextAttachments {
+                workspace,
+                attachments,
+            })
+        }),
+        ArchcarRequest::AddContextAttachment {
+            workspace,
+            source,
+            kind,
+            body_or_ref,
+            scope,
+            pinned,
+        } => with_store(state, |store| {
+            let attachment = store.add_context_attachment(
+                &workspace,
+                &source,
+                &kind,
+                &body_or_ref,
+                &scope,
+                pinned,
+            )?;
+            Ok(ArchcarResponse::ContextAttachmentAdded { attachment })
+        }),
+        ArchcarRequest::RemoveContextAttachment {
+            workspace: _,
+            attachment_id,
+        } => with_store(state, |store| {
+            store.remove_context_attachment(attachment_id)?;
+            Ok(ArchcarResponse::ContextAttachmentRemoved { attachment_id })
+        }),
+        ArchcarRequest::ListSessionContributions { workspace } => with_store(state, |store| {
+            let contributions = store.session_contributions(&workspace)?;
+            Ok(ArchcarResponse::SessionContributions {
+                workspace,
+                contributions,
+            })
+        }),
+        ArchcarRequest::ListSessionOverlaps { workspace } => with_store(state, |store| {
+            let overlaps = store.session_overlaps(&workspace)?;
+            Ok(ArchcarResponse::SessionOverlaps {
+                workspace,
+                overlaps,
+            })
+        }),
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
+        },
+    }
+}
+
+/// Start a background development task: create the workspace and tracking rows
+/// in core, then open a chat thread, queue the prompt, and spawn the agent
+/// session so the work actually runs without a human at the keyboard.
+fn start_background_task(
+    state: &Arc<Mutex<ServerState>>,
+    input: crate::background_tasks::StartBackgroundTask,
+) -> ArchcarResponse {
+    let (db_path, logs_dir) = {
+        let guard = state.lock().unwrap();
+        (guard.db_path.clone(), guard.logs_dir.clone())
+    };
+    let provider = input.provider.clone();
+    let started = WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
+        .and_then(|store| store.start_background_task(input));
+    let task = match started {
+        Ok(task) => task,
+        Err(err) => {
+            return ArchcarResponse::Error {
+                message: err.to_string(),
+            };
+        }
+    };
+    let Some(workspace) = task.workspace_name.clone() else {
+        return ArchcarResponse::BackgroundTaskSaved { task };
+    };
+
+    // A start failure after the workspace exists must land on the task row;
+    // otherwise the supervisor would retry a task that can never proceed.
+    let fail = |message: String| -> ArchcarResponse {
+        let recorded = WorkspaceStore::open_app(&db_path)
+            .and_then(|store| store.mark_background_task_failed(task.id, &message));
+        match recorded {
+            Ok(task) => ArchcarResponse::BackgroundTaskSaved { task },
+            Err(err) => ArchcarResponse::Error {
+                message: format!("{message} (and the failure could not be recorded: {err})"),
+            },
+        }
+    };
+
+    // Core rejects anything but a managed provider before we get here.
+    let kind = if provider == "claude" {
+        SessionKind::Claude
+    } else {
+        SessionKind::Codex
+    };
+
+    // Reuse the normal chat path so a background workspace looks exactly like
+    // one a human started: a thread with the prompt queued, then a session.
+    let thread = dispatch_request(
+        ArchcarRequest::CreateChatThread {
+            workspace: workspace.clone(),
+            provider: provider.clone(),
+            title: task.title.clone(),
+        },
+        state,
+    );
+    let thread_id = match thread {
+        ArchcarResponse::ChatThreadCreated { thread } => thread.id,
+        other => {
+            return fail(format!(
+                "created workspace {workspace} but no chat thread: {}",
+                archcar_response_summary(&other)
+            ));
+        }
+    };
+
+    // Session first, then the prompt: the queue drains into a session that is
+    // already coming up, which is the same order the desktop uses.
+    let spawned = dispatch_request(
+        ArchcarRequest::EnsureChatThreadSession {
+            workspace: workspace.clone(),
+            thread_id,
+            kind,
+            harness: None,
+        },
+        state,
+    );
+    if let ArchcarResponse::Error { message } = spawned {
+        return fail(format!("could not start its agent: {message}"));
+    }
+
+    let queued = dispatch_request(
+        ArchcarRequest::QueueChatInput {
+            thread_id,
+            input: task.prompt.clone(),
+            visible_input: Some(task.prompt.clone()),
+            kind: crate::archcar::protocol::ArchcarInputKind::User,
+            session_kind: kind,
+        },
+        state,
+    );
+    if let ArchcarResponse::Error { message } = queued {
+        return fail(format!("could not queue its prompt: {message}"));
+    }
+
+    match WorkspaceStore::open_app(&db_path).and_then(|store| {
+        store.assign_session_task(thread_id, task.task_id)?;
+        store.mark_background_task_running(task.id)
+    }) {
+        Ok(task) => ArchcarResponse::BackgroundTaskSaved { task },
+        Err(err) => ArchcarResponse::Error {
+            message: err.to_string(),
+        },
+    }
+}
+
+/// Open the app store and map any failure to a protocol error response. Keeps
+/// the workspace-intelligence handlers to their happy path.
+fn with_store(
+    state: &Arc<Mutex<ServerState>>,
+    body: impl FnOnce(&WorkspaceStore) -> Result<ArchcarResponse>,
+) -> ArchcarResponse {
+    let db_path = state.lock().unwrap().db_path.clone();
+    match WorkspaceStore::open_app(&db_path).and_then(|store| body(&store)) {
+        Ok(response) => response,
+        Err(err) => ArchcarResponse::Error {
+            message: err.to_string(),
         },
     }
 }
@@ -2298,6 +2693,15 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListPromptPacks { .. }
             | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }
+            | ArchcarRequest::GetPullRequestDraft { .. }
+            | ArchcarRequest::ListBackgroundTasks { .. }
+            | ArchcarRequest::GetBackgroundTask { .. }
+            | ArchcarRequest::ListTasks { .. }
+            | ArchcarRequest::ListSummaries { .. }
+            | ArchcarRequest::DraftSummary { .. }
+            | ArchcarRequest::ListContextAttachments { .. }
+            | ArchcarRequest::ListSessionContributions { .. }
+            | ArchcarRequest::ListSessionOverlaps { .. }
     )
 }
 
@@ -2541,6 +2945,7 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
 fn workspace_summary_from_status_line(
     line: WorkspaceStatusLine,
     changed_files: usize,
+    tasks: crate::workspace_intel::TaskCounts,
 ) -> ArchcarWorkspaceSummary {
     let WorkspaceStatusLine {
         workspace,
@@ -2561,6 +2966,8 @@ fn workspace_summary_from_status_line(
         base_ref: workspace.base_ref,
         status: workspace.status,
         open_todos,
+        open_tasks: tasks.open,
+        blocked_tasks: tasks.blocked,
         active_sessions,
         run_running,
         changed_files,
@@ -5366,6 +5773,169 @@ default = true
         assert!(
             matches!(stopped, ArchcarResponse::WorkspaceProcessStopped { ref process, .. } if process.kind == "run" && process.status == "stopped"),
             "stop_workspace_run got {stopped:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_intelligence_dispatch_end_to_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+
+        let created = dispatch_request(
+            ArchcarRequest::CreateTask {
+                workspace: "berlin".to_owned(),
+                title: "Port the right panel".to_owned(),
+                body: String::new(),
+                intended_areas: vec!["desktop/src/pages".to_owned()],
+            },
+            &state,
+        );
+        let ArchcarResponse::TaskSaved { task } = created else {
+            panic!("create_task got {created:?}");
+        };
+        assert_eq!(task.status, "todo");
+
+        let updated = dispatch_request(
+            ArchcarRequest::UpdateTask {
+                workspace: "berlin".to_owned(),
+                task_id: task.id,
+                update: crate::workspace_intel::TaskUpdate {
+                    status: Some("in_progress".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &state,
+        );
+        assert!(
+            matches!(updated, ArchcarResponse::TaskSaved { ref task } if task.status == "in_progress"),
+            "update_task got {updated:?}"
+        );
+
+        let listed = dispatch_request(
+            ArchcarRequest::ListTasks {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(listed, ArchcarResponse::Tasks { ref tasks, .. } if tasks.len() == 1),
+            "list_tasks got {listed:?}"
+        );
+
+        let drafted = dispatch_request(
+            ArchcarRequest::DraftSummary {
+                workspace: "berlin".to_owned(),
+                session_id: None,
+            },
+            &state,
+        );
+        let ArchcarResponse::SummaryDraft { body_markdown, .. } = drafted else {
+            panic!("draft_summary got {drafted:?}");
+        };
+        assert!(
+            body_markdown.contains("Port the right panel"),
+            "{body_markdown}"
+        );
+
+        let saved = dispatch_request(
+            ArchcarRequest::SaveSummary {
+                workspace: "berlin".to_owned(),
+                scope_type: "workspace".to_owned(),
+                scope_id: None,
+                body_markdown: body_markdown.clone(),
+                source_refs: vec!["draft".to_owned()],
+            },
+            &state,
+        );
+        assert!(
+            matches!(saved, ArchcarResponse::SummarySaved { .. }),
+            "save_summary got {saved:?}"
+        );
+
+        let attached = dispatch_request(
+            ArchcarRequest::AddContextAttachment {
+                workspace: "berlin".to_owned(),
+                source: "local".to_owned(),
+                kind: "note".to_owned(),
+                body_or_ref: "review base is main".to_owned(),
+                scope: String::new(),
+                pinned: true,
+            },
+            &state,
+        );
+        let ArchcarResponse::ContextAttachmentAdded { attachment } = attached else {
+            panic!("add_context_attachment got {attached:?}");
+        };
+
+        let context = dispatch_request(
+            ArchcarRequest::ListContextAttachments {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(context, ArchcarResponse::ContextAttachments { ref attachments, .. } if attachments.len() == 1),
+            "list_context_attachments got {context:?}"
+        );
+
+        let removed = dispatch_request(
+            ArchcarRequest::RemoveContextAttachment {
+                workspace: "berlin".to_owned(),
+                attachment_id: attachment.id,
+            },
+            &state,
+        );
+        assert!(
+            matches!(removed, ArchcarResponse::ContextAttachmentRemoved { .. }),
+            "remove_context_attachment got {removed:?}"
+        );
+
+        let deleted = dispatch_request(
+            ArchcarRequest::DeleteTask {
+                workspace: "berlin".to_owned(),
+                task_id: task.id,
+            },
+            &state,
+        );
+        assert!(
+            matches!(deleted, ArchcarResponse::TaskDeleted { .. }),
+            "delete_task got {deleted:?}"
         );
     }
 

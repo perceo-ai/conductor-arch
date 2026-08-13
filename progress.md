@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-08-11.
+Current as of 2026-08-12.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -26,6 +26,48 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
+
+## Archductor UX Strategy Alignment (2026-08-12)
+
+`docs/2026-08-12-archductor-ux-backend-strategy.md` defines the product shape:
+"Conductor feel, Archductor reach". These pieces of it now exist end to end
+(core -> archcar -> CLI -> Electron):
+
+- **Workspace intelligence objects** (`crates/core/src/workspace_intel.rs`):
+  tasks, operational summaries (workspace/session/task/review/handoff scopes),
+  branch-local context attachments, per-session diff contributions, and
+  advisory session-overlap warnings. New tables: `tasks`, `summaries`,
+  `context_attachments`, plus `chat_threads.task_id`/`intended_areas`.
+- **Summary drafting**: `draft_workspace_summary` (goal, files touched,
+  sessions, checks, blockers, next actions) and `draft_session_summary`
+  (handoff notes per agent). This is the standalone-context quality bar when no
+  external memory service is connected.
+- **Per-agent diffs**: session contributions read touched files from both TUI
+  chat events and managed-session `diff_file_change` provider events, and mark
+  which of those files still differ in the branch.
+- **PR handoff**: `draft_pull_request` builds a title/body from the summary,
+  tasks, agent contributions, check evidence, and risks; `create_pull_request`
+  is now reachable over archcar/CLI (previously core-only).
+- **Right panel tabs** are the strategy set: Tasks, Summary, Files, Changes,
+  Checks, Context, Review, PR. Nothing was dropped — Todos live under Tasks,
+  Timeline under Summary, Checkpoints under Changes, Processes moved into the
+  terminal dock. The dock is now a draggable, persisted vertical split.
+- **Left rail indicators**: active agent count, blocked-task and open-task
+  chips, and PR state per workspace row; `blocked` is a new status kind that
+  outranks running/review in the status dot.
+- **Background development tasks** (`crates/core/src/background_tasks.rs`):
+  start from CLI/API -> archductor creates the workspace, opens a chat thread,
+  spawns the managed agent, and queues the prompt; an archcar supervisor thread
+  ticks every 10s and advances the task through checks -> summary -> optional
+  commit/push/PR -> ready for review. Agent liveness comes from live session
+  runtime state (a managed session's process stays alive between turns).
+  Providers are restricted to codex/claude; a shell has no idle signal.
+
+Not yet built from the strategy doc: an Archductor MCP server (`mcp.rs` only
+detects MCP servers configured for a workspace), remote/server daemon access
+(archcar is local-socket only), session/task-scoped checkpoints and
+checkpoint-vs-branch comparison, and any live Archivum integration (the Context
+tab has the local half plus an explicit "not connected" state).
 
 ## Conductor Reference Cross-Check (2026-08-06)
 
@@ -348,6 +390,15 @@ Historical GTK surface (superseded, kept for reference):
   terminal emulator.
 - Project onboarding/settings need more polish and clearer managed/user setting
   separation.
+- No Archductor MCP server yet: `mcp.rs` only reports the MCP servers a
+  workspace has configured. The strategy doc wants MCP/API/CLI near-parity for
+  workspaces, tasks, sessions, summaries, review, and PR primitives.
+- archcar is local-socket only. Remote/server daemon access (and how to secure
+  it) is unbuilt.
+- Checkpoints support manual create/restore/delete only; session-scoped and
+  task-scoped checkpoints and checkpoint-vs-branch comparison are unbuilt.
+- The Context tab covers branch-local notes/files and shows an explicit
+  "Archivum is not connected" state; there is no Archivum client.
 - Prompt-pack import/export, naming templates, hooks, and richer notifications
   are not fully surfaced in the GUI. (Now surfaced: theme/accent/density
   controls, prompt-pack switching, the local check runner, and run/stop/log
@@ -408,6 +459,47 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Archductor UX strategy slice on 2026-08-12:
+
+- Added `workspace_intel.rs` (tasks/summaries/context/contributions/overlaps)
+  and `background_tasks.rs` (background development task state machine) with
+  17 new written tests.
+- Added archcar requests for tasks, summaries, context attachments, session
+  contributions/overlaps, session-task assignment, intended areas, PR draft/
+  create, and background task start/list/get/cancel/tick, with matching CLI
+  commands and TypeScript protocol types.
+- Electron: new Tasks/Summary/Context/PR panels, right-panel tab set from the
+  strategy doc, resizable terminal dock with a Processes tab, dashboard
+  background-task strip, and a "New background task" dialog.
+- Passed `cargo test -p archductor-core --lib workspace_intel` (10),
+  `background_tasks` (7), `archcar::protocol` (37), and
+  `workspace_intelligence_dispatch_end_to_end`.
+- Passed `cargo test -p archductor` (35 + 14 + 1).
+- Passed `cargo fmt --all -- --check` and
+  `cargo clippy -p archductor-core -p archductor -p archcar --all-targets -- -D warnings`.
+- Passed desktop `pnpm typecheck`, `pnpm test` (68 tests), `pnpm build`.
+- Live socket smoke against `target/debug/archcar` with isolated
+  `XDG_DATA_HOME`/`XDG_STATE_HOME`: create-task/tasks/update-task,
+  draft-summary/save-summary/summaries, add-context/context/remove-context,
+  assign-session-task, session-areas, contributions, overlaps, and pr-draft all
+  round-tripped.
+- Live background-task smoke with a real managed Codex session: the daemon
+  created the workspace, spawned the agent, delivered the queued prompt (the
+  agent edited `README.md`), and then advanced the task through
+  `running -> summarizing -> ready`, writing the workspace summary. Per-session
+  contributions reported the touched file afterwards.
+- Not verified here: background PR creation (needs authenticated `gh` and a
+  remote), and the managed **Claude** background path — a live Claude session on
+  this machine stayed `ready=false` under local SessionStart hooks, so its
+  queued prompt never drained. That is the pre-existing managed-Claude
+  readiness gap, not the background-task layer.
+- Pre-existing macOS test failures unrelated to this work (also fail at HEAD):
+  `session_launch_uses_configured_monorepo_working_directory`,
+  `setup_workspace_uses_configured_monorepo_working_directory`,
+  `terminal_command_uses_configured_monorepo_working_directory` (`/var` vs
+  `/private/var`), and
+  `raw_terminal_write_failure_emits_error_and_terminates_session`.
 
 Conductor script baseline + Electron run dock/update/recovery on 2026-08-11:
 

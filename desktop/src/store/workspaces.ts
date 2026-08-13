@@ -18,6 +18,8 @@ export interface WorkspaceRow {
   additions: number;
   deletions: number;
   openTodos: number;
+  openTasks: number;
+  blockedTasks: number;
   activeSessions: number;
   runRunning: boolean;
   changedFiles: number;
@@ -45,6 +47,8 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
     additions: s.diff_additions,
     deletions: s.diff_deletions,
     openTodos: s.open_todos,
+    openTasks: s.open_tasks ?? 0,
+    blockedTasks: s.blocked_tasks ?? 0,
     activeSessions: s.active_sessions,
     runRunning: s.run_running,
     changedFiles: s.changed_files,

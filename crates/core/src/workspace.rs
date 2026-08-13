@@ -1196,7 +1196,7 @@ struct StartProcessInput<'a> {
 }
 
 pub struct WorkspaceStore {
-    conn: Connection,
+    pub(crate) conn: Connection,
     db_path: PathBuf,
     logs_dir: PathBuf,
     app_settings_path: Option<PathBuf>,
@@ -7794,7 +7794,7 @@ mutation($threadId: ID!) {{
         )
     }
 
-    fn get_by_name(&self, name: &str) -> Result<Workspace> {
+    pub(crate) fn get_by_name(&self, name: &str) -> Result<Workspace> {
         self.conn
             .query_row(
                 "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
@@ -8261,7 +8261,7 @@ mutation($threadId: ID!) {{
             .with_context(|| format!("load repository name for id {id}"))
     }
 
-    fn record_workspace_event(
+    pub(crate) fn record_workspace_event(
         &self,
         workspace_id: i64,
         workspace_name: &str,
@@ -10759,7 +10759,7 @@ fn command_exists(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
