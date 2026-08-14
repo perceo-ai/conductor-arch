@@ -1,5 +1,6 @@
 pub mod agent_tools;
 pub mod archcar;
+pub mod background_tasks;
 pub mod chat_attachments;
 pub mod chat_store;
 pub mod codex_tui;
@@ -12,6 +13,7 @@ pub mod import;
 pub mod linear;
 pub mod local_chat;
 pub mod mcp;
+pub mod mcp_server;
 pub mod model_registry;
 pub mod paths;
 pub mod platform;
@@ -25,6 +27,7 @@ pub mod pty;
 pub mod redaction;
 pub mod repository;
 pub mod runtime_session_store;
+pub mod service;
 pub mod session_event;
 pub mod session_pipeline;
 pub mod session_state;
@@ -34,6 +37,7 @@ pub mod terminal_logs;
 pub mod todos;
 pub mod workflow_actions;
 pub mod workspace;
+pub mod workspace_intel;
 
 #[cfg(test)]
 mod pty_tests {

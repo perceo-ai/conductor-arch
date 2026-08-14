@@ -1,8 +1,15 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs } from "@/store";
 import type { WorkspaceRow } from "@/store";
+import { send } from "@/bridge/client";
+import type { BackgroundTask } from "@/bridge/protocol";
 import { titleCaseWorkspace } from "@/lib/text";
 import { dashboardTriageBadges, workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
+import {
+  backgroundTaskIsActive,
+  backgroundTaskSummary,
+  backgroundTaskTone,
+} from "@/lib/backgroundTasks";
 
 // Kanban dashboard — port of crates/gtk-app/src/dashboard.rs. Workspaces bucket
 // into Ready/Running/Review/Archived columns, filterable by project tab.
@@ -27,6 +34,86 @@ const COLUMNS: { bucket: Bucket; title: string; empty: string }[] = [
   { bucket: "review", title: "Review", empty: "Nothing in review" },
   { bucket: "archived", title: "Archived", empty: "No archived workspaces" },
 ];
+
+// Background development tasks: agents working without a human at the keyboard.
+// Polled, since archcar emits no background-task event yet.
+function BackgroundTaskStrip(props: { repository: string | null }) {
+  const [tasks, { refetch }] = createResource(async (): Promise<BackgroundTask[]> => {
+    try {
+      const res = await send({ type: "list_background_tasks", active_only: false });
+      return res.type === "background_tasks" ? res.tasks : [];
+    } catch {
+      return [];
+    }
+  });
+  const timer = setInterval(() => void refetch(), 5000);
+  onCleanup(() => clearInterval(timer));
+
+  const visible = createMemo(() => {
+    const rows = (tasks() ?? []).filter(
+      (task) => props.repository == null || task.repository_name === props.repository,
+    );
+    // Everything in flight, plus the most recent finished ones for triage.
+    const active = rows.filter((task) => backgroundTaskIsActive(task.status));
+    const finished = rows.filter((task) => !backgroundTaskIsActive(task.status)).slice(-3);
+    return [...active, ...finished];
+  });
+
+  async function cancel(task: BackgroundTask) {
+    try {
+      await send({ type: "cancel_background_task", background_task_id: task.id });
+    } finally {
+      await refetch();
+    }
+  }
+
+  return (
+    <Show when={visible().length > 0 || props.repository != null}>
+      <div class="background-task-strip">
+        <div class="background-task-head">
+          <span class="section-title">Background tasks</span>
+          <Show when={props.repository}>
+            {(repository) => (
+              <button
+                class="secondary-action"
+                onClick={() => dialogs.open({ kind: "background-task", repository: repository() })}
+              >
+                New background task
+              </button>
+            )}
+          </Show>
+        </div>
+        <For each={visible()}>
+          {(task) => (
+            <div
+              class="background-task-row"
+              classList={{ [`background-task-tone-${backgroundTaskTone(task.status)}`]: true }}
+            >
+              <div class="background-task-main">
+                <span class="background-task-title">{task.title}</span>
+                <span class="background-task-detail" title={backgroundTaskSummary(task)}>
+                  {backgroundTaskSummary(task)}
+                </span>
+              </div>
+              <Show when={task.workspace_name}>
+                {(workspace) => (
+                  <button class="secondary-action" onClick={() => nav.selectWorkspace(workspace())}>
+                    Open
+                  </button>
+                )}
+              </Show>
+              <Show when={backgroundTaskIsActive(task.status)}>
+                <button class="ui-button-destructive" onClick={() => void cancel(task)}>
+                  Cancel
+                </button>
+              </Show>
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
+}
 
 function ProjectTab(props: { label: string; active: boolean; onClick: () => void }) {
   return (
@@ -176,6 +263,7 @@ export function DashboardPage() {
           </div>
         }
       >
+        <BackgroundTaskStrip repository={project()} />
         <div class="kanban-board page-board">
           <For each={COLUMNS}>
             {(col) => (

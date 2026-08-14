@@ -9,6 +9,7 @@ export type DialogSpec =
   | { kind: "add-project" }
   | { kind: "create-workspace"; repository: string }
   | { kind: "workspace-actions"; workspace: string }
+  | { kind: "background-task"; repository: string }
   // Reliable in-app confirm / prompt (window.confirm/prompt are unreliable in
   // Electron renderers). With `input` it collects a value; without, it's a plain
   // confirm. onConfirm runs the action; the caller surfaces any error.

@@ -2,7 +2,13 @@
 // status glyph). Kept dependency-free and structural so it is unit-testable and
 // does not couple to the full WorkspaceRow store type.
 
-export type WorkspaceStatusKind = "archived" | "running" | "review" | "changes" | "idle";
+export type WorkspaceStatusKind =
+  | "archived"
+  | "blocked"
+  | "running"
+  | "review"
+  | "changes"
+  | "idle";
 
 export interface WorkspaceStatusInput {
   status?: string; // "active" | "archived" | …
@@ -12,12 +18,16 @@ export interface WorkspaceStatusInput {
   prState?: string;
   changedFiles?: number;
   openTodos?: number;
+  openTasks?: number;
+  blockedTasks?: number;
 }
 
-// Precedence: archived first, then live work (running), then an open PR under
-// review, then uncommitted changes, else idle. First match wins.
+// Precedence: archived first, then a blocked task (it needs a human), then live
+// work (running), then an open PR under review, then uncommitted changes, else
+// idle. First match wins.
 export function workspaceStatusKind(w: WorkspaceStatusInput): WorkspaceStatusKind {
   if (w.status === "archived") return "archived";
+  if ((w.blockedTasks ?? 0) > 0) return "blocked";
   if (w.runRunning || (w.activeSessions ?? 0) > 0) return "running";
   if (w.prNumber != null && (w.prState ?? "").toLowerCase() === "open") return "review";
   if ((w.changedFiles ?? 0) > 0) return "changes";
@@ -25,6 +35,7 @@ export function workspaceStatusKind(w: WorkspaceStatusInput): WorkspaceStatusKin
 }
 
 export const STATUS_COLOR: Record<WorkspaceStatusKind, string> = {
+  blocked: "#d97706", // orange — a task is blocked and needs a human
   running: "#3fb27f", // green — active session / run
   review: "#5b8def", // blue — open PR
   changes: "#c39b50", // amber — uncommitted changes
@@ -33,6 +44,7 @@ export const STATUS_COLOR: Record<WorkspaceStatusKind, string> = {
 };
 
 export const STATUS_LABEL: Record<WorkspaceStatusKind, string> = {
+  blocked: "Blocked",
   running: "Running",
   review: "In review",
   changes: "Has changes",
@@ -40,7 +52,7 @@ export const STATUS_LABEL: Record<WorkspaceStatusKind, string> = {
   archived: "Archived",
 };
 
-export type DashboardTriageBadgeTone = "agent" | "run" | "pr" | "changes" | "todo";
+export type DashboardTriageBadgeTone = "agent" | "run" | "pr" | "changes" | "todo" | "task";
 
 export interface DashboardTriageBadge {
   tone: DashboardTriageBadgeTone;
@@ -71,6 +83,19 @@ export function dashboardTriageBadges(w: WorkspaceStatusInput): DashboardTriageB
       title: w.runRunning ? "Run script is running" : "No run script is running",
     },
   ];
+
+  const openTasks = w.openTasks ?? 0;
+  const blockedTasks = w.blockedTasks ?? 0;
+  if (openTasks > 0 || blockedTasks > 0) {
+    badges.push({
+      tone: "task",
+      label: blockedTasks > 0 ? `${blockedTasks} blocked` : plural(openTasks, "task"),
+      title:
+        blockedTasks > 0
+          ? `${plural(blockedTasks, "blocked task")} of ${plural(openTasks, "open task")}`
+          : plural(openTasks, "open task"),
+    });
+  }
 
   if (w.prNumber != null) {
     const state = (w.prState ?? "").trim();

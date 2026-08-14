@@ -13,8 +13,100 @@ use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
     ArchcarRequest, ArchcarResponse, RpcEnvelope,
 };
+use crate::archcar::remote;
 use crate::archcar::transport::{self, LocalStream};
 use crate::paths::AppPaths;
+
+/// A connection to archcar: the local endpoint on this machine, or a
+/// token-authenticated TCP connection to a daemon somewhere else.
+pub enum ArchcarStream {
+    Local(LocalStream),
+    Remote(std::net::TcpStream),
+}
+
+impl ArchcarStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Local(stream) => stream.set_read_timeout(timeout),
+            Self::Remote(stream) => stream.set_read_timeout(timeout),
+        }
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Local(stream) => stream.set_write_timeout(timeout),
+            Self::Remote(stream) => stream.set_write_timeout(timeout),
+        }
+    }
+}
+
+impl std::io::Read for ArchcarStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Local(stream) => stream.read(buf),
+            Self::Remote(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for ArchcarStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Local(stream) => stream.write(buf),
+            Self::Remote(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Local(stream) => stream.flush(),
+            Self::Remote(stream) => stream.flush(),
+        }
+    }
+}
+
+/// Where a client should look for archcar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchcarEndpoint {
+    /// This machine's socket/pipe. The client may spawn a sidecar for it.
+    Local(PathBuf),
+    /// A daemon reachable over TCP, addressed as `host:port` with a token.
+    Remote { address: String, token: String },
+}
+
+impl ArchcarEndpoint {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local(path) => path.display().to_string(),
+            Self::Remote { address, .. } => format!("tcp://{address}"),
+        }
+    }
+}
+
+/// Read `ARCHDUCTOR_ARCHCAR_REMOTE` (+ token) so any CLI/MCP process can be
+/// pointed at another machine's daemon without code changes.
+pub fn remote_endpoint_from_env(paths: &AppPaths) -> Result<Option<ArchcarEndpoint>> {
+    let Some(address) = std::env::var(remote::REMOTE_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let token = match std::env::var(remote::TOKEN_ENV) {
+        Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),
+        // A daemon on this machine shares its token file; a remote one needs
+        // the token passed in.
+        _ => remote::read_token(&remote::token_path(paths))?.with_context(|| {
+            format!(
+                "{} is set but no token was found; set {} or copy the daemon's token file",
+                remote::REMOTE_ENV,
+                remote::TOKEN_ENV
+            )
+        })?,
+    };
+    Ok(Some(ArchcarEndpoint::Remote { address, token }))
+}
 
 const ARCHCAR_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(750);
 const ARCHCAR_RPC_TIMEOUT: Duration = Duration::from_secs(30);
@@ -24,17 +116,50 @@ const ARCHCAR_VALIDATION_CACHE_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct ArchcarClient {
+    endpoint: ArchcarEndpoint,
     endpoint_path: PathBuf,
     last_validated_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ArchcarClient {
+    /// Local daemon, unless `ARCHDUCTOR_ARCHCAR_REMOTE` points elsewhere.
     pub fn from_paths(paths: &AppPaths) -> Self {
-        Self::new(paths.archcar_endpoint_path())
+        match remote_endpoint_from_env(paths) {
+            Ok(Some(endpoint)) => Self::with_endpoint(endpoint, paths.archcar_endpoint_path()),
+            Ok(None) => Self::new(paths.archcar_endpoint_path()),
+            Err(err) => {
+                warn!(error = %err, "ignoring archcar remote configuration");
+                Self::new(paths.archcar_endpoint_path())
+            }
+        }
+    }
+
+    pub fn remote(address: impl Into<String>, token: impl Into<String>) -> Self {
+        let address = address.into();
+        Self::with_endpoint(
+            ArchcarEndpoint::Remote {
+                address: address.clone(),
+                token: token.into(),
+            },
+            PathBuf::from(format!("tcp://{address}")),
+        )
+    }
+
+    fn with_endpoint(endpoint: ArchcarEndpoint, endpoint_path: PathBuf) -> Self {
+        Self {
+            endpoint,
+            endpoint_path,
+            last_validated_at: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn endpoint(&self) -> &ArchcarEndpoint {
+        &self.endpoint
     }
 
     fn new(endpoint_path: PathBuf) -> Self {
         Self {
+            endpoint: ArchcarEndpoint::Local(endpoint_path.clone()),
             endpoint_path,
             last_validated_at: Arc::new(Mutex::new(None)),
         }
@@ -68,7 +193,7 @@ impl ArchcarClient {
 
     fn send_on_stream(
         &self,
-        mut stream: LocalStream,
+        mut stream: ArchcarStream,
         request: ArchcarRequest,
     ) -> Result<ArchcarResponse> {
         configure_rpc_timeouts(&stream, ARCHCAR_RPC_TIMEOUT)?;
@@ -167,7 +292,11 @@ impl ArchcarClient {
         Ok(rx)
     }
 
-    fn connect_or_spawn(&self) -> Result<LocalStream> {
+    fn connect_or_spawn(&self) -> Result<ArchcarStream> {
+        // A remote daemon is somebody else's process; never try to spawn it.
+        if let ArchcarEndpoint::Remote { address, token } = &self.endpoint {
+            return remote::connect(address, token).map(ArchcarStream::Remote);
+        }
         match self.connect_validated() {
             Ok(stream) => Ok(stream),
             Err(first_err) => {
@@ -190,8 +319,11 @@ impl ArchcarClient {
         }
     }
 
-    fn connect_validated(&self) -> Result<LocalStream> {
-        let stream = match transport::connect(&self.endpoint_path) {
+    fn connect_validated(&self) -> Result<ArchcarStream> {
+        if let ArchcarEndpoint::Remote { address, token } = &self.endpoint {
+            return remote::connect(address, token).map(ArchcarStream::Remote);
+        }
+        let stream = match transport::connect(&self.endpoint_path).map(ArchcarStream::Local) {
             Ok(stream) => stream,
             Err(err) => {
                 self.clear_validation_cache();
@@ -206,7 +338,7 @@ impl ArchcarClient {
             return Err(err);
         }
         self.mark_sidecar_validated();
-        match transport::connect(&self.endpoint_path) {
+        match transport::connect(&self.endpoint_path).map(ArchcarStream::Local) {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 self.clear_validation_cache();
@@ -273,7 +405,7 @@ impl ArchcarClient {
     }
 }
 
-fn validate_sidecar_responsive(endpoint_path: &Path, mut stream: LocalStream) -> Result<()> {
+fn validate_sidecar_responsive(endpoint_path: &Path, mut stream: ArchcarStream) -> Result<()> {
     configure_rpc_timeouts(&stream, ARCHCAR_HEALTHCHECK_TIMEOUT)?;
     let request = ArchcarRequest::ListProviderInteractions {
         thread_id: None,
@@ -317,21 +449,21 @@ fn validate_sidecar_responsive(endpoint_path: &Path, mut stream: LocalStream) ->
     Ok(())
 }
 
-fn configure_rpc_timeouts(stream: &LocalStream, timeout: Duration) -> Result<()> {
+fn configure_rpc_timeouts(stream: &ArchcarStream, timeout: Duration) -> Result<()> {
     stream
         .set_read_timeout(Some(timeout))
         .context("set archcar read timeout")?;
     configure_write_timeout(stream, timeout)
 }
 
-fn configure_write_timeout(stream: &LocalStream, timeout: Duration) -> Result<()> {
+fn configure_write_timeout(stream: &ArchcarStream, timeout: Duration) -> Result<()> {
     stream
         .set_write_timeout(Some(timeout))
         .context("set archcar write timeout")?;
     Ok(())
 }
 
-fn clear_rpc_timeouts(stream: &LocalStream) -> Result<()> {
+fn clear_rpc_timeouts(stream: &ArchcarStream) -> Result<()> {
     stream
         .set_read_timeout(None)
         .context("clear archcar read timeout")?;

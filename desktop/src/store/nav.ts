@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { normalizeRightPanelTab, type RightPanelTab } from "@/lib/rightPanelTabs";
 
 // Navigation state — mirrors the navigation fields of
 // crates/gtk-app/src/state.rs::AppStateSnapshot. Each field is its own signal so
@@ -7,19 +8,9 @@ import { createSignal } from "solid-js";
 
 export type AppPage = "dashboard" | "projects" | "workspace" | "history" | "settings" | "review";
 
-export type RightPanelTab =
-  | "browse"
-  | "changes"
-  | "checks"
-  | "review"
-  | "todos"
-  | "checkpoints"
-  | "processes"
-  | "timeline";
-
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");
-const [rightPanelTab, setRightPanelTab] = createSignal<RightPanelTab>("browse");
+const [rightPanelTab, setRightPanelTabRaw] = createSignal<RightPanelTab>("summary");
 const [selectedChatThread, setSelectedChatThread] = createSignal<number | null>(null);
 const [windowFocused, setWindowFocused] = createSignal(true);
 
@@ -53,7 +44,7 @@ function apply(entry: NavEntry) {
   if (entry.selectedWorkspace !== selectedWorkspace()) setSelectedChatThread(null);
   setSelectedWorkspaceRaw(entry.selectedWorkspace);
   setActivePage(entry.activePage);
-  setRightPanelTab(entry.rightPanelTab);
+  setRightPanelTabRaw(normalizeRightPanelTab(entry.rightPanelTab));
 }
 
 export const nav = {
@@ -66,7 +57,9 @@ export const nav = {
   canForward,
 
   setWindowFocused,
-  setRightPanelTab,
+  setRightPanelTab(tab: RightPanelTab | string) {
+    setRightPanelTabRaw(normalizeRightPanelTab(tab));
+  },
 
   /** Select a workspace and switch to its page (clears per-workspace selections). */
   selectWorkspace(name: string | null) {

@@ -1,30 +1,33 @@
-// A thin drag strip pinned to one vertical edge of its (position: relative)
-// parent. Dragging reports a new width to the parent, which owns the width
-// state. `edge` is the parent edge the handle sits on: a right-edge handle
-// grows the panel as you drag right; a left-edge handle grows it as you drag
-// left (used by the right-hand workspace panel).
+// A thin drag strip pinned to one edge of its (position: relative) parent.
+// Dragging reports a new size to the parent, which owns the size state. `edge`
+// is the parent edge the handle sits on: a right-edge handle grows the panel as
+// you drag right, a left-edge handle as you drag left (the right-hand workspace
+// panel), and a top-edge handle as you drag up (the bottom terminal dock).
 export default function ResizeHandle(props: {
-  edge: "left" | "right";
+  edge: "left" | "right" | "top";
   width: () => number;
   min: number;
   max: number;
   onChange: (width: number) => void;
 }) {
+  const vertical = () => props.edge === "top";
+
   function onPointerDown(e: PointerEvent) {
     e.preventDefault();
-    const startX = e.clientX;
+    const startPos = vertical() ? e.clientY : e.clientX;
     const startWidth = props.width();
     const move = (ev: PointerEvent) => {
-      const dx = ev.clientX - startX;
-      const raw = props.edge === "right" ? startWidth + dx : startWidth - dx;
+      const delta = (vertical() ? ev.clientY : ev.clientX) - startPos;
+      const raw = props.edge === "right" ? startWidth + delta : startWidth - delta;
       props.onChange(Math.max(props.min, Math.min(props.max, raw)));
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       document.body.classList.remove("resizing-col");
+      document.body.classList.remove("resizing-row");
     };
-    document.body.classList.add("resizing-col");
+    document.body.classList.add(vertical() ? "resizing-row" : "resizing-col");
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   }

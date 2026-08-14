@@ -5,13 +5,16 @@ use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
     QueuedArchcarInput, WorkspaceChangeScope,
 };
+use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::background_tasks::StartBackgroundTask;
 use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use archductor_core::paths::AppPaths;
 use archductor_core::provider_adapters::claude_hooks::handle_claude_hook_json;
 use archductor_core::provider_interactions::ProviderInteractionRecord;
 use archductor_core::repository::{AddRepository, RepositoryStore};
+use archductor_core::service;
 use archductor_core::settings::{
     app_shared_settings_to_toml, save_app_shared_settings_from_toml,
     save_repository_settings_from_toml, SettingsLayer,
@@ -21,6 +24,7 @@ use archductor_core::workspace::{
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
     WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
 };
+use archductor_core::workspace_intel::TaskUpdate;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::HashSet;
 use std::fs;
@@ -140,6 +144,11 @@ enum Command {
     Archcar {
         #[command(subcommand)]
         command: ArchcarCommand,
+    },
+    /// Manage the archcar background service (launchd / systemd).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
 }
 
@@ -445,6 +454,172 @@ enum ArchcarCommand {
     ReopenChat {
         thread_id: i64,
     },
+    /// Start a background development task (creates a workspace, runs an agent).
+    StartBackgroundTask {
+        repository: String,
+        prompt: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long, default_value = "codex")]
+        provider: String,
+        /// Skip the repository's configured checks when the agent goes idle.
+        #[arg(long)]
+        no_checks: bool,
+        /// Commit, push, and open a pull request when the work settles.
+        #[arg(long)]
+        open_pr: bool,
+        /// Open the pull request ready for review instead of as a draft.
+        #[arg(long)]
+        ready_pr: bool,
+    },
+    /// List background development tasks.
+    BackgroundTasks {
+        #[arg(long)]
+        active_only: bool,
+    },
+    /// Show one background development task.
+    BackgroundTask {
+        background_task_id: i64,
+    },
+    /// Cancel a background development task.
+    CancelBackgroundTask {
+        background_task_id: i64,
+    },
+    /// Advance every active background task once, without waiting for the tick.
+    TickBackgroundTasks,
+    /// Create a GitHub pull request for a workspace (uses local `gh` auth).
+    CreatePr {
+        workspace: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        draft: bool,
+        /// Fill title/body from the generated PR draft when not supplied.
+        #[arg(long)]
+        from_draft: bool,
+    },
+    /// Print the generated pull-request title and body for a workspace.
+    PrDraft {
+        workspace: String,
+    },
+    /// List workspace tasks.
+    Tasks {
+        workspace: String,
+    },
+    /// Create a workspace task.
+    CreateTask {
+        workspace: String,
+        title: String,
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Files/areas this task is expected to touch (repeatable).
+        #[arg(long = "area")]
+        areas: Vec<String>,
+    },
+    /// Update a workspace task.
+    UpdateTask {
+        workspace: String,
+        task_id: i64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        /// todo | in_progress | blocked | review | done
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        owner_session: Option<i64>,
+        #[arg(long)]
+        blocked_reason: Option<String>,
+        #[arg(long = "area")]
+        areas: Vec<String>,
+    },
+    /// Delete a workspace task.
+    DeleteTask {
+        workspace: String,
+        task_id: i64,
+    },
+    /// Attach an agent session to a task (omit --task to detach).
+    AssignSessionTask {
+        workspace: String,
+        session_id: i64,
+        #[arg(long = "task")]
+        task_id: Option<i64>,
+    },
+    /// Declare the files/areas an agent session intends to touch.
+    SessionAreas {
+        workspace: String,
+        session_id: i64,
+        #[arg(long = "area")]
+        areas: Vec<String>,
+    },
+    /// List stored workspace summaries.
+    Summaries {
+        workspace: String,
+    },
+    /// Save a summary for a workspace/session/task/review/handoff scope.
+    SaveSummary {
+        workspace: String,
+        /// workspace | session | task | review | handoff
+        #[arg(long, default_value = "workspace")]
+        scope: String,
+        #[arg(long = "scope-id")]
+        scope_id: Option<i64>,
+        body: String,
+        #[arg(long = "source")]
+        source_refs: Vec<String>,
+    },
+    /// Delete a stored summary.
+    DeleteSummary {
+        workspace: String,
+        summary_id: i64,
+    },
+    /// Draft an operational summary without storing it.
+    DraftSummary {
+        workspace: String,
+        #[arg(long = "session")]
+        session_id: Option<i64>,
+    },
+    /// List branch-local context attachments.
+    Context {
+        workspace: String,
+    },
+    /// Add a branch-local context attachment.
+    AddContext {
+        workspace: String,
+        body_or_ref: String,
+        /// local | archivum
+        #[arg(long, default_value = "local")]
+        source: String,
+        /// note | summary | context_pack | file | memory
+        #[arg(long, default_value = "note")]
+        kind: String,
+        #[arg(long, default_value = "")]
+        scope: String,
+        #[arg(long)]
+        pinned: bool,
+    },
+    /// Remove a context attachment.
+    RemoveContext {
+        workspace: String,
+        attachment_id: i64,
+    },
+    /// List per-session diff contributions in a workspace.
+    Contributions {
+        workspace: String,
+    },
+    /// List overlapping agent sessions in a workspace.
+    Overlaps {
+        workspace: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -499,7 +674,51 @@ enum ArchcarInteractionsCommand {
 
 #[derive(Debug, Subcommand)]
 enum McpCommand {
-    Status { workspace: String },
+    Status {
+        workspace: String,
+    },
+    /// Run the Archductor MCP server on stdio (what an MCP client spawns).
+    Serve {
+        /// Refuse tools that change state.
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// First-run setup: install the archcar background service, make sure an
+    /// access token exists, and print the MCP client configuration.
+    Setup {
+        /// Address for the token-guarded TCP listener. Defaults to loopback.
+        #[arg(long)]
+        listen: Option<String>,
+        /// Skip installing the native background service.
+        #[arg(long)]
+        no_service: bool,
+        /// Path to the archcar binary, when it is not beside this one.
+        #[arg(long)]
+        archcar_path: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Install and start the archcar background service for this user.
+    Install {
+        /// Address for the token-guarded TCP listener (e.g. `7420`, or
+        /// `0.0.0.0:7420` to accept connections from other machines).
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        archcar_path: Option<String>,
+    },
+    /// Stop and remove the archcar background service.
+    Uninstall,
+    /// Show whether the background service is installed and running.
+    Status,
+    /// Print the remote access token, creating one if needed.
+    Token {
+        /// Replace the existing token, invalidating current remote clients.
+        #[arg(long)]
+        rotate: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1271,6 +1490,241 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::Todos { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::ListTodos { workspace })?);
                 }
+                ArchcarCommand::StartBackgroundTask {
+                    repository,
+                    prompt,
+                    title,
+                    name,
+                    branch,
+                    base,
+                    provider,
+                    no_checks,
+                    open_pr,
+                    ready_pr,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::StartBackgroundTask {
+                        input: StartBackgroundTask {
+                            repository,
+                            prompt,
+                            title,
+                            workspace_name: name,
+                            branch,
+                            base_ref: base,
+                            provider,
+                            run_checks: !no_checks,
+                            open_pr,
+                            draft_pr: !ready_pr,
+                        },
+                    })?);
+                }
+                ArchcarCommand::BackgroundTasks { active_only } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListBackgroundTasks { active_only })?,
+                    );
+                }
+                ArchcarCommand::BackgroundTask { background_task_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetBackgroundTask { background_task_id })?,
+                    );
+                }
+                ArchcarCommand::CancelBackgroundTask { background_task_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::CancelBackgroundTask { background_task_id })?,
+                    );
+                }
+                ArchcarCommand::TickBackgroundTasks => {
+                    print_archcar_response(client.send(ArchcarRequest::TickBackgroundTasks)?);
+                }
+                ArchcarCommand::CreatePr {
+                    workspace,
+                    title,
+                    body,
+                    draft,
+                    from_draft,
+                } => {
+                    let (title, body) = if from_draft && (title.is_none() || body.is_none()) {
+                        match client.send(ArchcarRequest::GetPullRequestDraft {
+                            workspace: workspace.clone(),
+                        })? {
+                            ArchcarResponse::PullRequestDraft {
+                                title: drafted_title,
+                                body: drafted_body,
+                                ..
+                            } => (
+                                Some(title.unwrap_or(drafted_title)),
+                                Some(body.unwrap_or(drafted_body)),
+                            ),
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            other => {
+                                print_archcar_response(other);
+                                (title, body)
+                            }
+                        }
+                    } else {
+                        (title, body)
+                    };
+                    print_archcar_response(client.send(ArchcarRequest::CreatePullRequest {
+                        workspace,
+                        title,
+                        body,
+                        draft,
+                    })?);
+                }
+                ArchcarCommand::PrDraft { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetPullRequestDraft { workspace })?,
+                    );
+                }
+                ArchcarCommand::Tasks { workspace } => {
+                    print_archcar_response(client.send(ArchcarRequest::ListTasks { workspace })?);
+                }
+                ArchcarCommand::CreateTask {
+                    workspace,
+                    title,
+                    body,
+                    areas,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::CreateTask {
+                        workspace,
+                        title,
+                        body,
+                        intended_areas: areas,
+                    })?);
+                }
+                ArchcarCommand::UpdateTask {
+                    workspace,
+                    task_id,
+                    title,
+                    body,
+                    status,
+                    owner_session,
+                    blocked_reason,
+                    areas,
+                } => {
+                    let update = TaskUpdate {
+                        title,
+                        body,
+                        status,
+                        owner_session_id: owner_session.map(Some),
+                        intended_areas: (!areas.is_empty()).then_some(areas),
+                        blocked_reason: blocked_reason.map(Some),
+                    };
+                    print_archcar_response(client.send(ArchcarRequest::UpdateTask {
+                        workspace,
+                        task_id,
+                        update,
+                    })?);
+                }
+                ArchcarCommand::DeleteTask { workspace, task_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::DeleteTask { workspace, task_id })?,
+                    );
+                }
+                ArchcarCommand::AssignSessionTask {
+                    workspace,
+                    session_id,
+                    task_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::AssignSessionTask {
+                        workspace,
+                        session_id,
+                        task_id,
+                    })?);
+                }
+                ArchcarCommand::SessionAreas {
+                    workspace,
+                    session_id,
+                    areas,
+                } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::SetSessionIntendedAreas {
+                            workspace,
+                            session_id,
+                            areas,
+                        },
+                    )?);
+                }
+                ArchcarCommand::Summaries { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListSummaries { workspace })?,
+                    );
+                }
+                ArchcarCommand::SaveSummary {
+                    workspace,
+                    scope,
+                    scope_id,
+                    body,
+                    source_refs,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::SaveSummary {
+                        workspace,
+                        scope_type: scope,
+                        scope_id,
+                        body_markdown: body,
+                        source_refs,
+                    })?);
+                }
+                ArchcarCommand::DeleteSummary {
+                    workspace,
+                    summary_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::DeleteSummary {
+                        workspace,
+                        summary_id,
+                    })?);
+                }
+                ArchcarCommand::DraftSummary {
+                    workspace,
+                    session_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::DraftSummary {
+                        workspace,
+                        session_id,
+                    })?);
+                }
+                ArchcarCommand::Context { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListContextAttachments { workspace })?,
+                    );
+                }
+                ArchcarCommand::AddContext {
+                    workspace,
+                    body_or_ref,
+                    source,
+                    kind,
+                    scope,
+                    pinned,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::AddContextAttachment {
+                        workspace,
+                        source,
+                        kind,
+                        body_or_ref,
+                        scope,
+                        pinned,
+                    })?);
+                }
+                ArchcarCommand::RemoveContext {
+                    workspace,
+                    attachment_id,
+                } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::RemoveContextAttachment {
+                            workspace,
+                            attachment_id,
+                        },
+                    )?);
+                }
+                ArchcarCommand::Contributions { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListSessionContributions { workspace })?,
+                    );
+                }
+                ArchcarCommand::Overlaps { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListSessionOverlaps { workspace })?,
+                    );
+                }
                 ArchcarCommand::AddTodo { workspace, text } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::AddTodo { workspace, text })?,
@@ -2039,14 +2493,48 @@ fn run_cli() -> Result<()> {
                 .with_context(|| format!("launch editor {editor} for workspace {workspace}"))?;
             println!("Opened {} in {editor}", launch.cwd.display());
         }
-        Command::Mcp { command } => {
-            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
-            match command {
-                McpCommand::Status { workspace } => {
-                    print_mcp_status(store.mcp_status(&workspace)?);
-                }
+        Command::Mcp { command } => match command {
+            McpCommand::Status { workspace } => {
+                let store =
+                    WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
+                print_mcp_status(store.mcp_status(&workspace)?);
             }
-        }
+            McpCommand::Serve { read_only } => {
+                let client = ArchcarClient::from_paths(&paths);
+                archductor_core::mcp_server::serve_stdio(&client, read_only)?;
+            }
+            McpCommand::Setup {
+                listen,
+                no_service,
+                archcar_path,
+            } => run_mcp_setup(&paths, listen, no_service, archcar_path)?,
+        },
+        Command::Service { command } => match command {
+            ServiceCommand::Install {
+                listen,
+                archcar_path,
+            } => {
+                let status = service::install(
+                    &paths,
+                    &service::InstallService {
+                        listen,
+                        archcar_path,
+                    },
+                )?;
+                print_service_status(&status);
+            }
+            ServiceCommand::Uninstall => print_service_status(&service::uninstall(&paths)?),
+            ServiceCommand::Status => print_service_status(&service::status(&paths)?),
+            ServiceCommand::Token { rotate } => {
+                let token = if rotate {
+                    remote::rotate_token(&paths)?
+                } else {
+                    remote::ensure_token(&paths)?
+                };
+                println!("{token}");
+                eprintln!("stored in {}", remote::token_path(&paths).display());
+            }
+        },
         Command::Review { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
@@ -2621,6 +3109,174 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspace_script_prompt workspace={workspace} kind={kind}");
             println!("{prompt}");
         }
+        ArchcarResponse::ServiceStatus { status } => print_service_status(&status),
+        ArchcarResponse::RemoteAccess {
+            listen,
+            token,
+            token_path,
+        } => {
+            println!("remote listen={}", listen.as_deref().unwrap_or("disabled"));
+            println!("token stored in {token_path}");
+            println!("{token}");
+        }
+        ArchcarResponse::BackgroundTaskSaved { task } => {
+            println!(
+                "background_task #{} [{}] {} (workspace {})",
+                task.id,
+                task.status,
+                task.title,
+                task.workspace_name.as_deref().unwrap_or("-")
+            );
+            if !task.detail.is_empty() {
+                println!("{}", task.detail);
+            }
+            if let Some(error) = task.error {
+                eprintln!("error: {error}");
+            }
+        }
+        ArchcarResponse::BackgroundTasks { tasks } => {
+            println!("background_tasks count={}", tasks.len());
+            for task in tasks {
+                println!(
+                    "#{} [{}] {} — {} ({})",
+                    task.id,
+                    task.status,
+                    task.title,
+                    task.detail,
+                    task.workspace_name.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        ArchcarResponse::PullRequestCreated { workspace, output } => {
+            println!("pull_request_created workspace={workspace}");
+            println!("{output}");
+        }
+        ArchcarResponse::PullRequestDraft {
+            workspace,
+            title,
+            body,
+        } => {
+            println!("pull_request_draft workspace={workspace}");
+            println!("title: {title}");
+            println!("{body}");
+        }
+        ArchcarResponse::Tasks { workspace, tasks } => {
+            println!("tasks workspace={workspace} count={}", tasks.len());
+            for task in tasks {
+                println!(
+                    "#{} [{}] {}{}",
+                    task.id,
+                    task.status,
+                    task.title,
+                    task.blocked_reason
+                        .map(|reason| format!(" (blocked: {reason})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        ArchcarResponse::TaskSaved { task } => {
+            println!("task_saved #{} [{}] {}", task.id, task.status, task.title);
+        }
+        ArchcarResponse::TaskDeleted { task_id } => println!("task_deleted #{task_id}"),
+        ArchcarResponse::Summaries {
+            workspace,
+            summaries,
+        } => {
+            println!("summaries workspace={workspace} count={}", summaries.len());
+            for summary in summaries {
+                println!(
+                    "#{} {}:{} ({} chars)",
+                    summary.id,
+                    summary.scope_type,
+                    summary.scope_id,
+                    summary.body_markdown.chars().count()
+                );
+            }
+        }
+        ArchcarResponse::SummarySaved { summary } => {
+            println!(
+                "summary_saved #{} {}:{}",
+                summary.id, summary.scope_type, summary.scope_id
+            );
+        }
+        ArchcarResponse::SummaryDeleted { summary_id } => {
+            println!("summary_deleted #{summary_id}")
+        }
+        ArchcarResponse::SummaryDraft {
+            workspace,
+            body_markdown,
+        } => {
+            println!("summary_draft workspace={workspace}");
+            println!("{body_markdown}");
+        }
+        ArchcarResponse::ContextAttachments {
+            workspace,
+            attachments,
+        } => {
+            println!(
+                "context_attachments workspace={workspace} count={}",
+                attachments.len()
+            );
+            for attachment in attachments {
+                println!(
+                    "#{} {}/{}{} {}",
+                    attachment.id,
+                    attachment.source,
+                    attachment.kind,
+                    if attachment.pinned { " pinned" } else { "" },
+                    attachment.body_or_ref
+                );
+            }
+        }
+        ArchcarResponse::ContextAttachmentAdded { attachment } => {
+            println!(
+                "context_attachment_added #{} {}/{}",
+                attachment.id, attachment.source, attachment.kind
+            );
+        }
+        ArchcarResponse::ContextAttachmentRemoved { attachment_id } => {
+            println!("context_attachment_removed #{attachment_id}")
+        }
+        ArchcarResponse::SessionContributions {
+            workspace,
+            contributions,
+        } => {
+            println!(
+                "session_contributions workspace={workspace} count={}",
+                contributions.len()
+            );
+            for contribution in contributions {
+                println!(
+                    "session {} [{}] {} — {} file(s), {} still changed{}",
+                    contribution.session_id,
+                    contribution.status,
+                    contribution.title,
+                    contribution.files_touched.len(),
+                    contribution.still_present.len(),
+                    contribution
+                        .task_title
+                        .map(|title| format!(" task={title}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        ArchcarResponse::SessionOverlaps {
+            workspace,
+            overlaps,
+        } => {
+            println!(
+                "session_overlaps workspace={workspace} count={}",
+                overlaps.len()
+            );
+            for overlap in overlaps {
+                println!(
+                    "sessions {} and {} overlap on {}",
+                    overlap.session_id,
+                    overlap.other_session_id,
+                    overlap.paths.join(", ")
+                );
+            }
+        }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
@@ -2964,6 +3620,96 @@ fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
         SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
         SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
     }
+}
+
+fn print_service_status(status: &service::ServiceStatus) {
+    println!(
+        "service manager={} installed={} running={}",
+        status.manager, status.installed, status.running
+    );
+    if let Some(path) = &status.unit_path {
+        println!("unit {path}");
+    }
+    if let Some(listen) = &status.listen {
+        println!("listening on {listen}");
+    }
+    if !status.detail.is_empty() {
+        println!("{}", status.detail);
+    }
+}
+
+/// First-run MCP setup: make the daemon a managed background service, make sure
+/// a token exists, and hand back the exact client configuration to paste.
+fn run_mcp_setup(
+    paths: &AppPaths,
+    listen: Option<String>,
+    no_service: bool,
+    archcar_path: Option<String>,
+) -> anyhow::Result<()> {
+    let listen = listen.unwrap_or_else(|| remote::DEFAULT_REMOTE_PORT.to_string());
+    let address = remote::parse_listen_addr(&listen)?;
+    let token = remote::ensure_token(paths)?;
+
+    if no_service {
+        println!("skipped service install (--no-service)");
+    } else {
+        match service::install(
+            paths,
+            &service::InstallService {
+                listen: Some(listen.clone()),
+                archcar_path,
+            },
+        ) {
+            Ok(status) => print_service_status(&status),
+            // A missing service manager should not block the rest of setup.
+            Err(err) => eprintln!(
+                "service install failed: {err:#}
+start archcar yourself, then rerun with --no-service"
+            ),
+        }
+    }
+
+    println!();
+    println!("Archductor MCP server is `archductor mcp serve` (stdio).");
+    println!("Add this to your MCP client configuration:");
+    println!();
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "archductor".to_owned());
+    println!("{}", mcp_client_config_json(&exe));
+    println!();
+    println!(
+        "archcar listens on {address}; token stored in {}",
+        remote::token_path(paths).display()
+    );
+    if remote::is_public_addr(&address) {
+        println!(
+            "WARNING: {address} is reachable from other machines. The token is the only guard — \
+             put it behind a firewall or reverse proxy you trust."
+        );
+    }
+    println!(
+        "To drive this daemon from another machine, set {}=<host>:{} and {}=<token> there.",
+        remote::REMOTE_ENV,
+        address.port(),
+        remote::TOKEN_ENV
+    );
+    println!("Token: {token}");
+    Ok(())
+}
+
+/// The `mcpServers` entry an MCP client needs. Kept as a helper so it is
+/// covered by a test and cannot drift from the actual command name.
+fn mcp_client_config_json(executable: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "archductor": {
+                "command": executable,
+                "args": ["mcp", "serve"],
+            }
+        }
+    }))
+    .unwrap_or_default()
 }
 
 fn print_mcp_status(status: archductor_core::mcp::McpStatus) {
@@ -3672,6 +4418,21 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mcp_client_config_points_at_this_binary_and_the_serve_subcommand() {
+        let config = super::mcp_client_config_json("/usr/local/bin/archductor");
+
+        let value: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(
+            value["mcpServers"]["archductor"]["command"],
+            "/usr/local/bin/archductor"
+        );
+        assert_eq!(
+            value["mcpServers"]["archductor"]["args"],
+            serde_json::json!(["mcp", "serve"])
+        );
+    }
+
     use super::*;
     use std::ffi::OsString;
 

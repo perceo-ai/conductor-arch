@@ -36,6 +36,7 @@ jobs:
       checkout_ref: ${{ steps.checkout-ref.outputs.ref }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       docs_changed: ${{ steps.scope.outputs.docs_changed }}
+      metadata_only: ${{ steps.scope.outputs.metadata_only }}
       run_rust: ${{ steps.scope.outputs.run_rust }}
     steps:
       - name: Resolve checkout ref
@@ -58,6 +59,10 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
+          # `edited` also fires when the PR's base branch changes, which does
+          # change what CI must validate.
+          PR_BASE_CHANGED: ${{ github.event.action == 'edited' && github.event.changes.base != null }}
           PUSH_BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: |
@@ -65,6 +70,16 @@ jobs:
 
           docs_only=false
           docs_changed=true
+
+          # A title/body edit carries the same commits as the run before it. The
+          # `edited` trigger exists for the PR-description check; re-running the
+          # build matrix for it only supersedes the in-flight run.
+          metadata_only=false
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && [ "$PR_ACTION" = "edited" ] \
+            && [ "$PR_BASE_CHANGED" != "true" ]; then
+            metadata_only=true
+          fi
 
           if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             base="$PR_BASE"
@@ -98,13 +113,17 @@ jobs:
             fi
           fi
 
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
-          if [ "$docs_only" = "true" ]; then
-            echo "run_rust=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_rust=true" >> "$GITHUB_OUTPUT"
+          run_rust=true
+          if [ "$docs_only" = "true" ] || [ "$metadata_only" = "true" ]; then
+            run_rust=false
           fi
+
+          {
+            echo "docs_only=$docs_only"
+            echo "docs_changed=$docs_changed"
+            echo "metadata_only=$metadata_only"
+            echo "run_rust=$run_rust"
+          } >> "$GITHUB_OUTPUT"
 
   pr-description:
     name: PR Description
@@ -833,7 +852,11 @@ jobs:
       - windows-release-package
       - linux-musl
       - linux-distros
-    if: ${{ always() }}
+    # `always()` would also run this gate for a run that was cancelled by the
+    # concurrency group, where every lane reports `cancelled` and the gate posts
+    # a red required check for a run nobody is waiting on. `!cancelled()` still
+    # runs the gate when a lane genuinely fails, which is the point of it.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -718,6 +718,112 @@ function ConfirmForm(props: { spec: ConfirmSpec; onDone: () => void }) {
   );
 }
 
+// Start a background development task: archductor creates the workspace, runs
+// the agent on the prompt, then prepares the review (checks, summary, and an
+// optional pull request) without a human at the keyboard.
+function BackgroundTaskForm(props: { repository: string; onDone: () => void }) {
+  const [prompt, setPrompt] = createSignal("");
+  const [provider, setProvider] = createSignal("codex");
+  const [runChecks, setRunChecks] = createSignal(true);
+  const [openPr, setOpenPr] = createSignal(false);
+  const [draftPr, setDraftPr] = createSignal(true);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+
+  async function start() {
+    const text = prompt().trim();
+    if (!text || busy()) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await send({
+        type: "start_background_task",
+        input: {
+          repository: props.repository,
+          prompt: text,
+          provider: provider(),
+          run_checks: runChecks(),
+          open_pr: openPr(),
+          draft_pr: draftPr(),
+        },
+      });
+      if (res.type === "error") {
+        setError(res.message);
+        return;
+      }
+      await actions.refreshInventory();
+      props.onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div class="dialog-form">
+      <label class="dialog-field">
+        <span class="dialog-label">Task for the agent</span>
+        <textarea
+          class="ws-text-input dialog-textarea"
+          rows={5}
+          placeholder="Describe the change. A workspace and branch are created for it."
+          value={prompt()}
+          onInput={(e) => setPrompt(e.currentTarget.value)}
+        />
+      </label>
+      <label class="dialog-field">
+        <span class="dialog-label">Agent</span>
+        <select
+          class="ws-text-input"
+          value={provider()}
+          onChange={(e) => setProvider(e.currentTarget.value)}
+        >
+          <option value="codex">Codex</option>
+          <option value="claude">Claude</option>
+        </select>
+      </label>
+      <label class="dialog-check">
+        <input
+          type="checkbox"
+          checked={runChecks()}
+          onChange={(e) => setRunChecks(e.currentTarget.checked)}
+        />
+        Run configured checks when the agent finishes
+      </label>
+      <label class="dialog-check">
+        <input
+          type="checkbox"
+          checked={openPr()}
+          onChange={(e) => setOpenPr(e.currentTarget.checked)}
+        />
+        Commit, push, and open a pull request (uses local gh auth)
+      </label>
+      <Show when={openPr()}>
+        <label class="dialog-check">
+          <input
+            type="checkbox"
+            checked={draftPr()}
+            onChange={(e) => setDraftPr(e.currentTarget.checked)}
+          />
+          Open it as a draft pull request
+        </label>
+      </Show>
+      <Show when={error()}>
+        <div class="dialog-error">{error()}</div>
+      </Show>
+      <div class="dialog-actions">
+        <button class="ui-button" onClick={props.onDone}>
+          Cancel
+        </button>
+        <button class="ui-button" disabled={!prompt().trim() || busy()} onClick={() => void start()}>
+          {busy() ? "Starting…" : "Start in background"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Dialogs() {
   const spec = dialogs.current;
   const close = () => dialogs.close();
@@ -738,6 +844,14 @@ export default function Dialogs() {
           <Match when={s().kind === "workspace-actions"}>
             <Modal title={`Workspace: ${(s() as { workspace: string }).workspace}`} onClose={close}>
               <WorkspaceActionsForm workspace={(s() as { workspace: string }).workspace} onDone={close} />
+            </Modal>
+          </Match>
+          <Match when={s().kind === "background-task"}>
+            <Modal title="New background task" onClose={close}>
+              <BackgroundTaskForm
+                repository={(s() as { repository: string }).repository}
+                onDone={close}
+              />
             </Modal>
           </Match>
           <Match when={s().kind === "confirm"}>

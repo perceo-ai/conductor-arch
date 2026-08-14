@@ -128,6 +128,32 @@ body {
 .resize-handle-left {
   left: -4px;
 }
+/* Top-edge handle: drags vertically (bottom terminal dock). */
+.resize-handle-top {
+  top: -4px;
+  left: 0;
+  right: 0;
+  bottom: auto;
+  width: auto;
+  height: 8px;
+  cursor: row-resize;
+}
+.resize-handle-top::after {
+  top: 50%;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 2px;
+  transform: translateY(-50%);
+}
+body.resizing-row .resize-handle-top::after {
+  background: var(--lc-accent, #4b7bec);
+}
+body.resizing-row {
+  cursor: row-resize;
+  user-select: none;
+}
 .resize-handle::after {
   content: "";
   position: absolute;
@@ -1830,15 +1856,16 @@ body.resizing-col {
 /* ---- Terminal dock (collapsible, tabbed) ---- */
 /* ---- Run console (Setup / Run / terminals) — GTK ws_run_console ---- */
 .ws-run-section {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
   border-top: 1px solid var(--lc-border, #2a2a2a);
 }
+/* Height is driven inline by the dock's persisted, draggable split. */
 .ws-run-section-expanded {
-  flex: 0 0 42%;
-  min-height: 180px;
+  min-height: 120px;
 }
 .ws-run-tab-bar {
   flex: 0 0 auto;
@@ -2562,4 +2589,162 @@ pre.ws-file-editor-highlight.hljs {
 }
 .context-menu-item-destructive:hover {
   background: rgba(255, 120, 120, 0.14);
+}
+
+
+/* ---- Workspace intelligence panels (Tasks / Summary / Context / PR) ---- */
+.ws-task-row,
+.ws-contribution-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-task-blocked {
+  border-left: 2px solid #d97706;
+  padding-left: 6px;
+}
+.ws-task-status,
+.ws-context-kind {
+  max-width: 120px;
+  flex: 0 0 auto;
+}
+.ws-summary-editor {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  font-family: var(--lc-mono, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 4px;
+  background: var(--lc-surface-muted, #141414);
+  color: inherit;
+}
+.ws-contribution-files {
+  word-break: break-all;
+}
+.ws-pr-draft-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.ws-overlap-row .detail-value {
+  word-break: break-all;
+}
+
+
+/* ---- Left-rail workspace indicators ---- */
+.row-indicators {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.row-chip {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 5px;
+  border-radius: 8px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  color: var(--lc-text-muted, #9a9a9a);
+  white-space: nowrap;
+}
+.row-chip-agent {
+  border-color: #3fb27f;
+  color: #3fb27f;
+}
+.row-chip-blocked {
+  border-color: #d97706;
+  color: #d97706;
+}
+.row-chip-pr {
+  border-color: #5b8def;
+  color: #5b8def;
+}
+
+.dialog-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.dialog-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+}
+
+/* ---- Background development tasks (dashboard strip) ---- */
+.background-task-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.background-task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.background-task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 6px;
+  background: var(--lc-surface-muted, #141414);
+}
+.background-task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.background-task-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.background-task-detail {
+  font-size: 11px;
+  color: var(--lc-text-muted, #9a9a9a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.background-task-tone-ready {
+  border-left: 3px solid #3fb27f;
+}
+.background-task-tone-failed {
+  border-left: 3px solid #c0503f;
+}
+.background-task-tone-active,
+.background-task-tone-waiting {
+  border-left: 3px solid #5b8def;
+}
+.background-task-tone-cancelled {
+  border-left: 3px solid #4a4a4a;
+}
+
+.settings-listen-input {
+  max-width: 140px;
+}
+.settings-token {
+  font-family: var(--lc-mono, monospace);
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 4px;
+  word-break: break-all;
+}
+.settings-hint {
+  font-size: 11px;
+  opacity: 0.8;
 }

@@ -27,6 +27,16 @@ describe("workspaceStatusKind", () => {
     );
   });
 
+  it("blocked when a task is blocked, ahead of running/review/changes", () => {
+    expect(
+      workspaceStatusKind({ status: "active", blockedTasks: 1, runRunning: true, changedFiles: 4 }),
+    ).toBe("blocked");
+    // archived still wins
+    expect(workspaceStatusKind({ status: "archived", blockedTasks: 2 })).toBe("archived");
+    // open tasks alone are not blocking
+    expect(workspaceStatusKind({ status: "active", openTasks: 3 })).toBe("idle");
+  });
+
   it("changes when only uncommitted edits exist", () => {
     expect(workspaceStatusKind({ changedFiles: 3 })).toBe("changes");
   });
@@ -36,7 +46,7 @@ describe("workspaceStatusKind", () => {
   });
 
   it("every kind has a color and label", () => {
-    for (const k of ["running", "review", "changes", "idle", "archived"] as const) {
+    for (const k of ["blocked", "running", "review", "changes", "idle", "archived"] as const) {
       expect(STATUS_COLOR[k]).toMatch(/^#[0-9a-f]{6}$/i);
       expect(STATUS_LABEL[k]).toBeTruthy();
     }
@@ -60,6 +70,28 @@ describe("dashboardTriageBadges", () => {
       { tone: "pr", label: "PR #93 open", title: "Pull request #93 is open" },
       { tone: "changes", label: "4 files", title: "4 changed files" },
       { tone: "todo", label: "1 todo", title: "1 open todo" },
+    ]);
+  });
+
+  it("surfaces blocked tasks ahead of the PR badge", () => {
+    expect(
+      dashboardTriageBadges({
+        activeSessions: 0,
+        runRunning: false,
+        openTasks: 3,
+        blockedTasks: 1,
+        prNumber: 12,
+        prState: "open",
+        changedFiles: 0,
+        openTodos: 0,
+      }),
+    ).toEqual([
+      { tone: "agent", label: "No agents", title: "No active agent sessions" },
+      { tone: "run", label: "Run idle", title: "No run script is running" },
+      { tone: "task", label: "1 blocked", title: "1 blocked task of 3 open tasks" },
+      { tone: "pr", label: "PR #12 open", title: "Pull request #12 is open" },
+      { tone: "changes", label: "Clean", title: "No changed files" },
+      { tone: "todo", label: "No todos", title: "No open todos" },
     ]);
   });
 

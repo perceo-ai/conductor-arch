@@ -88,6 +88,51 @@ export type ArchcarRequest =
   | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
   | { type: "get_setup_readiness"; recheck?: boolean }
+  // Daemon background service + remote access.
+  | { type: "get_service_status" }
+  | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
+  | { type: "uninstall_service" }
+  | { type: "get_remote_access" }
+  | { type: "rotate_remote_token" }
+  // Background development tasks.
+  | { type: "start_background_task"; input: StartBackgroundTaskInput }
+  | { type: "list_background_tasks"; active_only?: boolean }
+  | { type: "get_background_task"; background_task_id: number }
+  | { type: "cancel_background_task"; background_task_id: number }
+  | { type: "tick_background_tasks" }
+  | { type: "create_pull_request"; workspace: string; title?: string; body?: string; draft?: boolean }
+  | { type: "get_pull_request_draft"; workspace: string }
+  // Workspace intelligence: tasks, summaries, context attachments.
+  | { type: "list_tasks"; workspace: string }
+  | { type: "create_task"; workspace: string; title: string; body?: string; intended_areas?: string[] }
+  | { type: "update_task"; workspace: string; task_id: number; update: TaskUpdate }
+  | { type: "delete_task"; workspace: string; task_id: number }
+  | { type: "assign_session_task"; workspace: string; session_id: number; task_id?: number }
+  | { type: "set_session_intended_areas"; workspace: string; session_id: number; areas: string[] }
+  | { type: "list_summaries"; workspace: string }
+  | {
+      type: "save_summary";
+      workspace: string;
+      scope_type: SummaryScope;
+      scope_id?: number;
+      body_markdown: string;
+      source_refs?: string[];
+    }
+  | { type: "delete_summary"; workspace: string; summary_id: number }
+  | { type: "draft_summary"; workspace: string; session_id?: number }
+  | { type: "list_context_attachments"; workspace: string }
+  | {
+      type: "add_context_attachment";
+      workspace: string;
+      source: ContextSource;
+      kind: ContextKind;
+      body_or_ref: string;
+      scope?: string;
+      pinned?: boolean;
+    }
+  | { type: "remove_context_attachment"; workspace: string; attachment_id: number }
+  | { type: "list_session_contributions"; workspace: string }
+  | { type: "list_session_overlaps"; workspace: string }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
   | { type: "close_chat_thread"; thread_id: number }
   | { type: "reopen_chat_thread"; thread_id: number }
@@ -208,6 +253,8 @@ export interface ArchcarWorkspaceSummary {
   base_ref: string;
   status: string;
   open_todos: number;
+  open_tasks?: number;
+  blocked_tasks?: number;
   active_sessions: number;
   run_running: boolean;
   changed_files: number;
@@ -431,7 +478,163 @@ export type ArchcarResponse =
   | { type: "workspace_updated"; name: string }
   | { type: "workspace_removed"; name: string }
   | { type: "review_comment_added"; comment: ReviewComment }
+  | { type: "service_status"; status: ServiceStatus }
+  | { type: "remote_access"; listen?: string; token: string; token_path: string }
+  | { type: "background_task_saved"; task: BackgroundTask }
+  | { type: "background_tasks"; tasks: BackgroundTask[] }
+  | { type: "pull_request_created"; workspace: string; output: string }
+  | { type: "pull_request_draft"; workspace: string; title: string; body: string }
+  | { type: "tasks"; workspace: string; tasks: Task[] }
+  | { type: "task_saved"; task: Task }
+  | { type: "task_deleted"; task_id: number }
+  | { type: "summaries"; workspace: string; summaries: Summary[] }
+  | { type: "summary_saved"; summary: Summary }
+  | { type: "summary_deleted"; summary_id: number }
+  | { type: "summary_draft"; workspace: string; body_markdown: string }
+  | { type: "context_attachments"; workspace: string; attachments: ContextAttachment[] }
+  | { type: "context_attachment_added"; attachment: ContextAttachment }
+  | { type: "context_attachment_removed"; attachment_id: number }
+  | { type: "session_contributions"; workspace: string; contributions: SessionContribution[] }
+  | { type: "session_overlaps"; workspace: string; overlaps: SessionOverlap[] }
   | { type: "error"; message: string };
+
+// --- Daemon service (launchd / systemd) ------------------------------------
+// Mirrors crates/core/src/service.rs.
+
+export interface ServiceStatus {
+  manager: string; // "launchd" | "systemd" | "unsupported"
+  installed: boolean;
+  running: boolean;
+  unit_path?: string | null;
+  listen?: string | null;
+  detail: string;
+}
+
+// --- Background development tasks -----------------------------------------
+// Mirrors crates/core/src/background_tasks.rs.
+
+export type BackgroundTaskStatus =
+  | "pending"
+  | "running"
+  | "checking"
+  | "summarizing"
+  | "opening_pr"
+  | "ready"
+  | "failed"
+  | "cancelled";
+
+export const BACKGROUND_TASK_TERMINAL: BackgroundTaskStatus[] = ["ready", "failed", "cancelled"];
+
+export interface BackgroundTask {
+  id: number;
+  repository_name: string;
+  workspace_name?: string | null;
+  task_id?: number | null;
+  title: string;
+  prompt: string;
+  provider: string;
+  status: BackgroundTaskStatus;
+  run_checks: boolean;
+  open_pr: boolean;
+  draft_pr: boolean;
+  detail: string;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StartBackgroundTaskInput {
+  repository: string;
+  prompt: string;
+  title?: string;
+  workspace_name?: string;
+  branch?: string;
+  base_ref?: string;
+  provider: string;
+  run_checks: boolean;
+  open_pr: boolean;
+  draft_pr: boolean;
+}
+
+// --- Workspace intelligence records ---------------------------------------
+// Mirrors crates/core/src/workspace_intel.rs.
+
+export type TaskStatus = "todo" | "in_progress" | "blocked" | "review" | "done";
+export const TASK_STATUSES: TaskStatus[] = ["todo", "in_progress", "blocked", "review", "done"];
+
+export type SummaryScope = "workspace" | "session" | "task" | "review" | "handoff";
+export type ContextSource = "local" | "archivum";
+export type ContextKind = "note" | "summary" | "context_pack" | "file" | "memory";
+
+export interface Task {
+  id: number;
+  workspace_id: number;
+  title: string;
+  body: string;
+  status: TaskStatus;
+  owner_session_id?: number | null;
+  intended_areas: string[];
+  blocked_reason?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Partial update; omitted fields stay unchanged. */
+export interface TaskUpdate {
+  title?: string;
+  body?: string;
+  status?: TaskStatus;
+  /** `null` detaches the owning session. */
+  owner_session_id?: number | null;
+  intended_areas?: string[];
+  /** `null` clears the blocked reason. */
+  blocked_reason?: string | null;
+}
+
+export interface Summary {
+  id: number;
+  workspace_id: number;
+  scope_type: SummaryScope;
+  scope_id: number;
+  body_markdown: string;
+  source_refs: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContextAttachment {
+  id: number;
+  workspace_id: number;
+  source: ContextSource;
+  kind: ContextKind;
+  body_or_ref: string;
+  scope: string;
+  pinned: boolean;
+  created_at: string;
+}
+
+export interface SessionContribution {
+  session_id: number;
+  title: string;
+  provider: string;
+  status: string;
+  task_id?: number | null;
+  task_title?: string | null;
+  files_touched: string[];
+  still_present: string[];
+  intended_areas: string[];
+  summary?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionOverlap {
+  session_id: number;
+  session_title: string;
+  other_session_id: number;
+  other_session_title: string;
+  paths: string[];
+}
 
 // --- Events (streamed after `subscribe`) -----------------------------------
 export type ArchcarEvent =

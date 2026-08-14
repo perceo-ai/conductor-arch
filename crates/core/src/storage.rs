@@ -336,6 +336,72 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_workspace_lifecycle_jobs_status
           ON workspace_lifecycle_jobs(status, id);
+
+        CREATE TABLE IF NOT EXISTS tasks (
+          id INTEGER PRIMARY KEY,
+          workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+          title TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          owner_session_id INTEGER REFERENCES chat_threads(id),
+          intended_areas TEXT NOT NULL DEFAULT '',
+          blocked_reason TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id, id);
+
+        -- scope_id is 0 for workspace-scoped summaries so the UNIQUE index holds
+        -- (SQLite treats NULLs as distinct).
+        CREATE TABLE IF NOT EXISTS summaries (
+          id INTEGER PRIMARY KEY,
+          workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+          scope_type TEXT NOT NULL,
+          scope_id INTEGER NOT NULL DEFAULT 0,
+          body_markdown TEXT NOT NULL,
+          source_refs TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(workspace_id, scope_type, scope_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS context_attachments (
+          id INTEGER PRIMARY KEY,
+          workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+          source TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          body_or_ref TEXT NOT NULL,
+          scope TEXT NOT NULL DEFAULT '',
+          pinned INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_context_attachments_workspace
+          ON context_attachments(workspace_id, id);
+
+        CREATE TABLE IF NOT EXISTS background_tasks (
+          id INTEGER PRIMARY KEY,
+          repository_id INTEGER NOT NULL REFERENCES repositories(id),
+          repository_name TEXT NOT NULL,
+          workspace_id INTEGER REFERENCES workspaces(id),
+          workspace_name TEXT,
+          task_id INTEGER REFERENCES tasks(id),
+          title TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          status TEXT NOT NULL,
+          run_checks INTEGER NOT NULL DEFAULT 1,
+          open_pr INTEGER NOT NULL DEFAULT 0,
+          draft_pr INTEGER NOT NULL DEFAULT 1,
+          detail TEXT NOT NULL DEFAULT '',
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_background_tasks_status
+          ON background_tasks(status, id);
         ",
     )?;
     remove_chat_events_exact_unique_constraint(conn)?;
@@ -380,6 +446,24 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "provider_events",
         "timeline_seq",
         "ALTER TABLE provider_events ADD COLUMN timeline_seq INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "task_id",
+        "ALTER TABLE chat_threads ADD COLUMN task_id INTEGER REFERENCES tasks(id)",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "intended_areas",
+        "ALTER TABLE chat_threads ADD COLUMN intended_areas TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "context_attachments",
+        "pinned",
+        "ALTER TABLE context_attachments ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
     )?;
     Ok(())
 }

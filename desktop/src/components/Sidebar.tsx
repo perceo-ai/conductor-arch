@@ -150,6 +150,34 @@ function WorkspaceRow(props: { name: string }) {
           )}
         </Show>
       </span>
+      {/* Left-rail indicators from the UX strategy: active agents, blocked
+          work, and PR state, so branches can be triaged without opening them. */}
+      <Show when={row()}>
+        {(r) => (
+          <span class="row-indicators">
+            <Show when={r().activeSessions > 0}>
+              <span class="row-chip row-chip-agent" title={`${r().activeSessions} active agent session(s)`}>
+                ▶ {r().activeSessions}
+              </span>
+            </Show>
+            <Show when={r().blockedTasks > 0}>
+              <span class="row-chip row-chip-blocked" title={`${r().blockedTasks} blocked task(s)`}>
+                ! {r().blockedTasks}
+              </span>
+            </Show>
+            <Show when={r().blockedTasks === 0 && r().openTasks > 0}>
+              <span class="row-chip row-chip-task" title={`${r().openTasks} open task(s)`}>
+                ☰ {r().openTasks}
+              </span>
+            </Show>
+            <Show when={r().prNumber != null}>
+              <span class="row-chip row-chip-pr" title={`Pull request #${r().prNumber} ${r().prState ?? ""}`}>
+                PR #{r().prNumber}
+              </span>
+            </Show>
+          </span>
+        )}
+      </Show>
     </button>
   );
 }

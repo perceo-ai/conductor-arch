@@ -10,7 +10,7 @@ import {
 } from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore } from "@/store";
 import type { Accent } from "@/store/prefs";
-import type { RightPanelTab } from "@/store/nav";
+import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { send } from "@/bridge/client";
@@ -31,16 +31,9 @@ interface Command {
 
 // Right-panel targets the palette can jump to (these actually drive the
 // CommandCenter right panel via nav.setRightPanelTab).
-const WORKSPACE_PANELS: { tab: RightPanelTab; label: string }[] = [
-  { tab: "browse", label: "Browse files" },
-  { tab: "changes", label: "Changes" },
-  { tab: "checks", label: "Checks" },
-  { tab: "review", label: "Review" },
-  { tab: "todos", label: "Todos" },
-  { tab: "checkpoints", label: "Checkpoints" },
-  { tab: "processes", label: "Processes" },
-  { tab: "timeline", label: "Timeline" },
-];
+const WORKSPACE_PANELS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_TABS.map(
+  (tab) => ({ tab: tab.id, label: tab.label }),
+);
 
 export default function CommandPalette() {
   const [open, setOpen] = createSignal(false);

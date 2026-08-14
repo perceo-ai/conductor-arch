@@ -15,6 +15,36 @@ pub type LocalListener = std::os::unix::net::UnixListener;
 #[cfg(unix)]
 pub type LocalStream = std::os::unix::net::UnixStream;
 
+/// A connection archcar can serve RPCs over: the local endpoint, or a TCP
+/// stream from the token-guarded remote listener.
+pub trait DuplexStream: io::Read + io::Write + Send + Sized + 'static {
+    fn try_clone_stream(&self) -> io::Result<Self>;
+    fn set_stream_timeouts(&self, timeout: Option<std::time::Duration>) -> io::Result<()>;
+}
+
+impl DuplexStream for std::net::TcpStream {
+    fn try_clone_stream(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+
+    fn set_stream_timeouts(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)?;
+        self.set_write_timeout(timeout)
+    }
+}
+
+#[cfg(unix)]
+impl DuplexStream for std::os::unix::net::UnixStream {
+    fn try_clone_stream(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+
+    fn set_stream_timeouts(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)?;
+        self.set_write_timeout(timeout)
+    }
+}
+
 #[cfg(unix)]
 pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     if endpoint.exists() {

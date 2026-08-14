@@ -4,6 +4,9 @@ import { terminalStore, nav, threadsStore, toastsStore } from "@/store";
 import TerminalPanel from "./TerminalPanel";
 import type { ArchcarRunScript } from "@/bridge/protocol";
 import { runScriptAvailabilityLabel, runScriptStatusText } from "@/lib/runScripts";
+import { ProcessesPanel } from "./WorkspaceTabs";
+import ResizeHandle from "@/components/ResizeHandle";
+import { createPersistedWidth } from "@/lib/persistedWidth";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -12,9 +15,11 @@ import { runScriptAvailabilityLabel, runScriptStatusText } from "@/lib/runScript
 // so an unopened workspace never starts a process.
 
 const MAX_TERMINALS = 6;
+const DOCK_MIN = 120;
+const DOCK_MAX = 700;
 
-// Active tab is either a prompt tab or a specific terminal id.
-type RunTab = "setup" | "run" | { term: string };
+// Active tab is either a prompt/processes tab or a specific terminal id.
+type RunTab = "setup" | "run" | "processes" | { term: string };
 
 function providerKind(provider: string): "codex" | "claude" | "shell" {
   return provider === "claude" || provider === "shell" ? provider : "codex";
@@ -171,6 +176,8 @@ export default function TerminalDock(props: { workspace: string }) {
   // are still spawned lazily; the Setup tab is the default landing tab.
   const [expanded, setExpanded] = createSignal(true);
   const [tab, setTab] = createSignal<RunTab>("setup");
+  // Right-panel density is high, so the dock split is draggable and persisted.
+  const [height, setHeight] = createPersistedWidth("terminalDock.height", 280, DOCK_MIN, DOCK_MAX);
   const terms = () => terminalStore.terminals(props.workspace);
   const activeTermId = () => {
     const t = tab();
@@ -197,7 +204,14 @@ export default function TerminalDock(props: { workspace: string }) {
   }
 
   return (
-    <div class="ws-run-section" classList={{ "ws-run-section-expanded": expanded() }}>
+    <div
+      class="ws-run-section"
+      classList={{ "ws-run-section-expanded": expanded() }}
+      style={expanded() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
+    >
+      <Show when={expanded()}>
+        <ResizeHandle edge="top" width={height} min={DOCK_MIN} max={DOCK_MAX} onChange={setHeight} />
+      </Show>
       <div class="ws-run-tab-bar">
         <div class="ws-run-tabs-row">
           <button
@@ -219,6 +233,16 @@ export default function TerminalDock(props: { workspace: string }) {
             }}
           >
             Run
+          </button>
+          <button
+            class="ws-run-tab-btn"
+            classList={{ "ws-run-tab-active": tab() === "processes" }}
+            onClick={() => {
+              setTab("processes");
+              setExpanded(true);
+            }}
+          >
+            Processes
           </button>
           <For each={terms()}>
             {(t, i) => (
@@ -265,6 +289,9 @@ export default function TerminalDock(props: { workspace: string }) {
             </Match>
             <Match when={tab() === "run"}>
               <PromptTab workspace={props.workspace} kind="run" />
+            </Match>
+            <Match when={tab() === "processes"}>
+              <ProcessesPanel workspace={props.workspace} />
             </Match>
             <Match when={activeTermId() != null}>
               {/* Keep every terminal mounted so xterm buffers/sessions survive tab

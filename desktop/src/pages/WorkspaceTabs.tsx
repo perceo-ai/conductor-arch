@@ -349,7 +349,7 @@ export function TimelinePanel(props: { workspace: string }) {
 // ---- Checks (DB-only summary) ---------------------------------------------
 
 export function ChecksPanel(props: { workspace: string }) {
-  const [summary, { refetch }] = createResource(
+  const [summary] = createResource(
     () => props.workspace,
     async (ws): Promise<ArchcarChecksSummary | null> => {
       try {
@@ -413,30 +413,6 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
-  const run = (label: string, fn: () => Promise<void>) => async () => {
-    setFeedback(`${label}…`);
-    try {
-      await fn();
-      setFeedback(`${label} ok`);
-      await refetch();
-    } catch (err) {
-      setFeedback(`${label} failed: ${(err as Error).message}`);
-    }
-  };
-
-  // GitHub PR readiness detail (gh pr view) — network/gh-auth gated, load on demand.
-  const [prReadiness, setPrReadiness] = createSignal<string | null>(null);
-  async function loadPrReadiness() {
-    setPrReadiness("Loading…");
-    try {
-      const res = await send({ type: "get_pull_request_readiness", workspace: props.workspace });
-      if (res.type === "pull_request_readiness") setPrReadiness(res.text || "No readiness detail.");
-      else if (res.type === "error") setPrReadiness(res.message);
-      else setPrReadiness("Unavailable.");
-    } catch (err) {
-      setPrReadiness((err as Error).message);
-    }
-  }
 
   const rows = (s: ArchcarChecksSummary): [string, string][] => [
     ["Changed files", String(s.changed_files)],
@@ -503,7 +479,7 @@ export function ChecksPanel(props: { workspace: string }) {
                     <button
                       class="ws-blocker-chip"
                       onClick={() => {
-                        if (blocker.includes("todo")) nav.setRightPanelTab("todos");
+                        if (blocker.includes("todo")) nav.setRightPanelTab("tasks");
                         else if (blocker.includes("review")) nav.setRightPanelTab("review");
                         else if (blocker.includes("check")) nav.setRightPanelTab("checks");
                         else nav.setRightPanelTab("changes");
@@ -542,28 +518,6 @@ export function ChecksPanel(props: { workspace: string }) {
         <pre class="ws-run-prompt">
           {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
         </pre>
-      </Show>
-      <div class="detail-label">PR and branch actions</div>
-      <div class="action-row ws-pr-actions-row">
-        <button class="secondary-action" onClick={run("Refresh PR", () => actions.refreshPullRequest(props.workspace))}>
-          Refresh readiness
-        </button>
-        <button class="secondary-action" onClick={run("Push branch", () => actions.pushBranch(props.workspace))}>
-          Push branch
-        </button>
-        <button class="secondary-action" onClick={loadPrReadiness}>
-          PR readiness detail
-        </button>
-        <button class="suggested-action" onClick={run("Merge PR", () => actions.mergePullRequest(props.workspace))}>
-          Merge PR
-        </button>
-        <button class="secondary-action ws-force-push-action" onClick={run("Force push", () => actions.pushBranch(props.workspace, true))}>
-          Force push
-        </button>
-      </div>
-      <Show when={prReadiness() != null}>
-        <div class="detail-label">GitHub PR readiness</div>
-        <pre class="ws-pr-readiness">{prReadiness()}</pre>
       </Show>
       <Show when={(conflicts() ?? []).length > 0}>
         <div class="detail-label">Conflicting workspaces</div>

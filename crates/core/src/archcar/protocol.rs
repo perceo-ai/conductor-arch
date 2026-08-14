@@ -2,14 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::archcar::harness_contract::HarnessDescriptor;
 use crate::archcar::harness_contract::{ProviderInteractionDraft, ProviderInteractionResolution};
+use crate::background_tasks::{BackgroundTask, StartBackgroundTask};
 use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::doctor::SetupReport;
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
+use crate::service::{InstallService, ServiceStatus};
 use crate::session_state::AgentSessionState;
 use crate::workspace::{
     ChatEventRecord, ChatMessageRecord, Checkpoint, DiffFileSummary, ReviewComment,
     SessionHarnessOptions, SessionKind, Todo,
+};
+use crate::workspace_intel::{
+    ContextAttachment, SessionContribution, SessionOverlap, Summary, Task, TaskUpdate,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -475,6 +480,18 @@ pub enum ArchcarRequest {
     RefreshPullRequest {
         workspace: String,
     },
+    CreatePullRequest {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default)]
+        draft: bool,
+    },
+    GetPullRequestDraft {
+        workspace: String,
+    },
     ResolveReviewThread {
         workspace: String,
         thread_id: String,
@@ -527,6 +544,110 @@ pub enum ArchcarRequest {
     ConsumeProviderInteraction {
         interaction_id: String,
         native_response: serde_json::Value,
+    },
+    // ---- Daemon service and remote access ---------------------------------
+    GetServiceStatus,
+    InstallService {
+        input: InstallService,
+    },
+    UninstallService,
+    /// Remote access details for setting up a client on another machine.
+    GetRemoteAccess,
+    RotateRemoteToken,
+    // ---- Background development tasks -------------------------------------
+    StartBackgroundTask {
+        input: StartBackgroundTask,
+    },
+    ListBackgroundTasks {
+        #[serde(default)]
+        active_only: bool,
+    },
+    GetBackgroundTask {
+        background_task_id: i64,
+    },
+    CancelBackgroundTask {
+        background_task_id: i64,
+    },
+    /// Advance every active background task once, without waiting for the
+    /// daemon's next supervisor tick.
+    TickBackgroundTasks,
+    // ---- Workspace intelligence: tasks, summaries, context ----------------
+    ListTasks {
+        workspace: String,
+    },
+    CreateTask {
+        workspace: String,
+        title: String,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        intended_areas: Vec<String>,
+    },
+    UpdateTask {
+        workspace: String,
+        task_id: i64,
+        update: TaskUpdate,
+    },
+    DeleteTask {
+        workspace: String,
+        task_id: i64,
+    },
+    AssignSessionTask {
+        workspace: String,
+        session_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<i64>,
+    },
+    SetSessionIntendedAreas {
+        workspace: String,
+        session_id: i64,
+        areas: Vec<String>,
+    },
+    ListSummaries {
+        workspace: String,
+    },
+    SaveSummary {
+        workspace: String,
+        scope_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_id: Option<i64>,
+        body_markdown: String,
+        #[serde(default)]
+        source_refs: Vec<String>,
+    },
+    DeleteSummary {
+        workspace: String,
+        summary_id: i64,
+    },
+    DraftSummary {
+        workspace: String,
+        /// `None` drafts the workspace summary; `Some(id)` drafts that
+        /// session's handoff summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<i64>,
+    },
+    ListContextAttachments {
+        workspace: String,
+    },
+    AddContextAttachment {
+        workspace: String,
+        source: String,
+        kind: String,
+        body_or_ref: String,
+        #[serde(default)]
+        scope: String,
+        #[serde(default)]
+        pinned: bool,
+    },
+    RemoveContextAttachment {
+        workspace: String,
+        attachment_id: i64,
+    },
+    ListSessionContributions {
+        workspace: String,
+    },
+    ListSessionOverlaps {
+        workspace: String,
     },
     Subscribe,
 }
@@ -786,6 +907,74 @@ pub enum ArchcarResponse {
     ProviderInteractions {
         interactions: Vec<ProviderInteractionRecord>,
     },
+    PullRequestCreated {
+        workspace: String,
+        output: String,
+    },
+    ServiceStatus {
+        status: ServiceStatus,
+    },
+    RemoteAccess {
+        /// Address the daemon is currently listening on, when it has a remote
+        /// listener.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<String>,
+        token: String,
+        token_path: String,
+    },
+    BackgroundTaskSaved {
+        task: BackgroundTask,
+    },
+    BackgroundTasks {
+        tasks: Vec<BackgroundTask>,
+    },
+    PullRequestDraft {
+        workspace: String,
+        title: String,
+        body: String,
+    },
+    Tasks {
+        workspace: String,
+        tasks: Vec<Task>,
+    },
+    TaskSaved {
+        task: Task,
+    },
+    TaskDeleted {
+        task_id: i64,
+    },
+    Summaries {
+        workspace: String,
+        summaries: Vec<Summary>,
+    },
+    SummarySaved {
+        summary: Summary,
+    },
+    SummaryDeleted {
+        summary_id: i64,
+    },
+    SummaryDraft {
+        workspace: String,
+        body_markdown: String,
+    },
+    ContextAttachments {
+        workspace: String,
+        attachments: Vec<ContextAttachment>,
+    },
+    ContextAttachmentAdded {
+        attachment: ContextAttachment,
+    },
+    ContextAttachmentRemoved {
+        attachment_id: i64,
+    },
+    SessionContributions {
+        workspace: String,
+        contributions: Vec<SessionContribution>,
+    },
+    SessionOverlaps {
+        workspace: String,
+        overlaps: Vec<SessionOverlap>,
+    },
     Error {
         message: String,
     },
@@ -889,6 +1078,10 @@ pub struct ArchcarWorkspaceSummary {
     pub base_ref: String,
     pub status: String,
     pub open_todos: usize,
+    #[serde(default)]
+    pub open_tasks: usize,
+    #[serde(default)]
+    pub blocked_tasks: usize,
     pub active_sessions: usize,
     pub run_running: bool,
     pub changed_files: usize,
@@ -1455,6 +1648,130 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             "consume_provider_interaction id={interaction_id} response_bytes={}",
             native_response.to_string().len()
         ),
+        ArchcarRequest::CreatePullRequest {
+            workspace,
+            title,
+            body,
+            draft,
+        } => format!(
+            "create_pull_request workspace={workspace} draft={draft} title_chars={} body_chars={}",
+            title.as_deref().unwrap_or_default().chars().count(),
+            body.as_deref().unwrap_or_default().chars().count()
+        ),
+        ArchcarRequest::GetPullRequestDraft { workspace } => {
+            format!("get_pull_request_draft workspace={workspace}")
+        }
+        ArchcarRequest::GetServiceStatus => "get_service_status".to_owned(),
+        ArchcarRequest::InstallService { input } => format!(
+            "install_service listen={}",
+            input.listen.as_deref().unwrap_or("none")
+        ),
+        ArchcarRequest::UninstallService => "uninstall_service".to_owned(),
+        ArchcarRequest::GetRemoteAccess => "get_remote_access".to_owned(),
+        ArchcarRequest::RotateRemoteToken => "rotate_remote_token".to_owned(),
+        ArchcarRequest::StartBackgroundTask { input } => format!(
+            "start_background_task repository={} provider={} open_pr={} prompt_chars={}",
+            input.repository,
+            input.provider,
+            input.open_pr,
+            input.prompt.chars().count()
+        ),
+        ArchcarRequest::ListBackgroundTasks { active_only } => {
+            format!("list_background_tasks active_only={active_only}")
+        }
+        ArchcarRequest::GetBackgroundTask { background_task_id } => {
+            format!("get_background_task id={background_task_id}")
+        }
+        ArchcarRequest::CancelBackgroundTask { background_task_id } => {
+            format!("cancel_background_task id={background_task_id}")
+        }
+        ArchcarRequest::TickBackgroundTasks => "tick_background_tasks".to_owned(),
+        ArchcarRequest::ListTasks { workspace } => format!("list_tasks workspace={workspace}"),
+        ArchcarRequest::CreateTask {
+            workspace, title, ..
+        } => format!(
+            "create_task workspace={workspace} title_chars={}",
+            title.chars().count()
+        ),
+        ArchcarRequest::UpdateTask {
+            workspace,
+            task_id,
+            update,
+        } => format!(
+            "update_task workspace={workspace} task={task_id} status={}",
+            update.status.as_deref().unwrap_or("unchanged")
+        ),
+        ArchcarRequest::DeleteTask { workspace, task_id } => {
+            format!("delete_task workspace={workspace} task={task_id}")
+        }
+        ArchcarRequest::AssignSessionTask {
+            workspace,
+            session_id,
+            task_id,
+        } => format!(
+            "assign_session_task workspace={workspace} session={session_id} task={}",
+            task_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_owned())
+        ),
+        ArchcarRequest::SetSessionIntendedAreas {
+            workspace,
+            session_id,
+            areas,
+        } => format!(
+            "set_session_intended_areas workspace={workspace} session={session_id} areas={}",
+            areas.len()
+        ),
+        ArchcarRequest::ListSummaries { workspace } => {
+            format!("list_summaries workspace={workspace}")
+        }
+        ArchcarRequest::SaveSummary {
+            workspace,
+            scope_type,
+            scope_id,
+            body_markdown,
+            ..
+        } => format!(
+            "save_summary workspace={workspace} scope={scope_type} scope_id={} chars={}",
+            scope_id.unwrap_or(0),
+            body_markdown.chars().count()
+        ),
+        ArchcarRequest::DeleteSummary {
+            workspace,
+            summary_id,
+        } => format!("delete_summary workspace={workspace} summary={summary_id}"),
+        ArchcarRequest::DraftSummary {
+            workspace,
+            session_id,
+        } => format!(
+            "draft_summary workspace={workspace} session={}",
+            session_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_owned())
+        ),
+        ArchcarRequest::ListContextAttachments { workspace } => {
+            format!("list_context_attachments workspace={workspace}")
+        }
+        ArchcarRequest::AddContextAttachment {
+            workspace,
+            source,
+            kind,
+            body_or_ref,
+            ..
+        } => format!(
+            "add_context_attachment workspace={workspace} source={source} kind={kind} chars={}",
+            body_or_ref.chars().count()
+        ),
+        ArchcarRequest::RemoveContextAttachment {
+            workspace,
+            attachment_id,
+        } => format!("remove_context_attachment workspace={workspace} attachment={attachment_id}"),
+        ArchcarRequest::ListSessionContributions { workspace } => {
+            format!("list_session_contributions workspace={workspace}")
+        }
+        ArchcarRequest::ListSessionOverlaps { workspace } => {
+            format!("list_session_overlaps workspace={workspace}")
+        }
         ArchcarRequest::Subscribe => "subscribe".to_owned(),
     }
 }
@@ -1687,6 +2004,93 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::ProviderInteractions { interactions } => {
             format!("provider_interactions count={}", interactions.len())
         }
+        ArchcarResponse::PullRequestCreated { workspace, output } => format!(
+            "pull_request_created workspace={workspace} chars={}",
+            output.chars().count()
+        ),
+        ArchcarResponse::PullRequestDraft {
+            workspace,
+            title,
+            body,
+        } => format!(
+            "pull_request_draft workspace={workspace} title_chars={} body_chars={}",
+            title.chars().count(),
+            body.chars().count()
+        ),
+        ArchcarResponse::ServiceStatus { status } => format!(
+            "service_status manager={} installed={} running={}",
+            status.manager, status.installed, status.running
+        ),
+        // The token is a credential: report its length, never its value.
+        ArchcarResponse::RemoteAccess { listen, token, .. } => format!(
+            "remote_access listen={} token_chars={}",
+            listen.as_deref().unwrap_or("none"),
+            token.chars().count()
+        ),
+        ArchcarResponse::BackgroundTaskSaved { task } => format!(
+            "background_task_saved id={} status={} workspace={}",
+            task.id,
+            task.status,
+            task.workspace_name.as_deref().unwrap_or("-")
+        ),
+        ArchcarResponse::BackgroundTasks { tasks } => {
+            format!("background_tasks count={}", tasks.len())
+        }
+        ArchcarResponse::Tasks { workspace, tasks } => {
+            format!("tasks workspace={workspace} count={}", tasks.len())
+        }
+        ArchcarResponse::TaskSaved { task } => {
+            format!("task_saved id={} status={}", task.id, task.status)
+        }
+        ArchcarResponse::TaskDeleted { task_id } => format!("task_deleted id={task_id}"),
+        ArchcarResponse::Summaries {
+            workspace,
+            summaries,
+        } => format!("summaries workspace={workspace} count={}", summaries.len()),
+        ArchcarResponse::SummarySaved { summary } => format!(
+            "summary_saved id={} scope={} chars={}",
+            summary.id,
+            summary.scope_type,
+            summary.body_markdown.chars().count()
+        ),
+        ArchcarResponse::SummaryDeleted { summary_id } => {
+            format!("summary_deleted id={summary_id}")
+        }
+        ArchcarResponse::SummaryDraft {
+            workspace,
+            body_markdown,
+        } => format!(
+            "summary_draft workspace={workspace} chars={}",
+            body_markdown.chars().count()
+        ),
+        ArchcarResponse::ContextAttachments {
+            workspace,
+            attachments,
+        } => format!(
+            "context_attachments workspace={workspace} count={}",
+            attachments.len()
+        ),
+        ArchcarResponse::ContextAttachmentAdded { attachment } => format!(
+            "context_attachment_added id={} source={} kind={}",
+            attachment.id, attachment.source, attachment.kind
+        ),
+        ArchcarResponse::ContextAttachmentRemoved { attachment_id } => {
+            format!("context_attachment_removed id={attachment_id}")
+        }
+        ArchcarResponse::SessionContributions {
+            workspace,
+            contributions,
+        } => format!(
+            "session_contributions workspace={workspace} count={}",
+            contributions.len()
+        ),
+        ArchcarResponse::SessionOverlaps {
+            workspace,
+            overlaps,
+        } => format!(
+            "session_overlaps workspace={workspace} count={}",
+            overlaps.len()
+        ),
         ArchcarResponse::Error { message } => {
             format!("error chars={}", message.chars().count())
         }
@@ -3383,5 +3787,83 @@ mod tests {
             archcar_response_summary(&response),
             "session_status session_id=11 status=running state=tool_running ready=false"
         );
+    }
+
+    #[test]
+    fn workspace_intelligence_requests_round_trip_and_summarize() {
+        let requests = vec![
+            ArchcarRequest::ListTasks {
+                workspace: "berlin".to_owned(),
+            },
+            ArchcarRequest::CreateTask {
+                workspace: "berlin".to_owned(),
+                title: "Wire Context tab".to_owned(),
+                body: "local + archivum".to_owned(),
+                intended_areas: vec!["desktop/src".to_owned()],
+            },
+            ArchcarRequest::UpdateTask {
+                workspace: "berlin".to_owned(),
+                task_id: 4,
+                update: TaskUpdate {
+                    status: Some("blocked".to_owned()),
+                    blocked_reason: Some(Some("needs auth".to_owned())),
+                    ..TaskUpdate::default()
+                },
+            },
+            ArchcarRequest::SaveSummary {
+                workspace: "berlin".to_owned(),
+                scope_type: "session".to_owned(),
+                scope_id: Some(9),
+                body_markdown: "did things".to_owned(),
+                source_refs: vec!["git status".to_owned()],
+            },
+            ArchcarRequest::DraftSummary {
+                workspace: "berlin".to_owned(),
+                session_id: None,
+            },
+            ArchcarRequest::AddContextAttachment {
+                workspace: "berlin".to_owned(),
+                source: "local".to_owned(),
+                kind: "note".to_owned(),
+                body_or_ref: "ports are per-workspace".to_owned(),
+                scope: String::new(),
+                pinned: true,
+            },
+            ArchcarRequest::ListSessionContributions {
+                workspace: "berlin".to_owned(),
+            },
+            ArchcarRequest::ListSessionOverlaps {
+                workspace: "berlin".to_owned(),
+            },
+        ];
+
+        for request in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, request, "round trip {json}");
+        }
+
+        assert_eq!(
+            archcar_request_summary(&ArchcarRequest::UpdateTask {
+                workspace: "berlin".to_owned(),
+                task_id: 4,
+                update: TaskUpdate {
+                    status: Some("blocked".to_owned()),
+                    ..TaskUpdate::default()
+                },
+            }),
+            "update_task workspace=berlin task=4 status=blocked"
+        );
+    }
+
+    #[test]
+    fn workspace_intelligence_responses_summarize_without_bodies() {
+        let response = ArchcarResponse::SummaryDraft {
+            workspace: "berlin".to_owned(),
+            body_markdown: "# secret plans".to_owned(),
+        };
+        let summary = archcar_response_summary(&response);
+        assert_eq!(summary, "summary_draft workspace=berlin chars=14");
+        assert!(!summary.contains("secret"));
     }
 }

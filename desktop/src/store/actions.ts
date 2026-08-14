@@ -41,6 +41,9 @@ export interface CreateWorkspaceInput {
 }
 
 export const actions = {
+  /** Re-pull workspaces + repositories (archcar has no inventory-changed event). */
+  refreshInventory,
+
   // --- Repository / project -------------------------------------------------
   async addRepository(input: AddRepositoryInput): Promise<string | undefined> {
     logAction("add_repository", { path: input.path, name: input.name });
