@@ -2544,8 +2544,14 @@ fn start_background_task(
 /// Stop the agents a partially-started background task already launched.
 /// A failed task must not leave an unsupervised agent editing the workspace,
 /// so: drop every queued prompt (a session that finishes spawning later has
-/// nothing to work on), kill any live session bound to the threads, and close
-/// the threads themselves.
+/// nothing to work on), close the threads, and kill any live session bound to
+/// them.
+///
+/// Ordering matters: threads are closed *before* the session snapshot below.
+/// Session registration checks thread-closed under the state lock, so a
+/// session still spawning either sees the close and terminates itself, or is
+/// registered in time for the snapshot here to kill it. Closing after the
+/// snapshot would let a mid-registration session slip past both.
 fn abort_background_agents(state: &Arc<Mutex<ServerState>>, thread_ids: &[i64]) {
     for &thread_id in thread_ids {
         if let ArchcarResponse::QueuedChatInputs { inputs, .. } =
@@ -2558,6 +2564,9 @@ fn abort_background_agents(state: &Arc<Mutex<ServerState>>, thread_ids: &[i64]) 
                 );
             }
         }
+    }
+    for &thread_id in thread_ids {
+        let _ = dispatch_request(ArchcarRequest::CloseChatThread { thread_id }, state);
     }
     let kills: Vec<_> = {
         let guard = state.lock().unwrap();
@@ -2576,9 +2585,6 @@ fn abort_background_agents(state: &Arc<Mutex<ServerState>>, thread_ids: &[i64]) 
     };
     for command_tx in kills {
         let _ = command_tx.send(crate::archcar::session::SessionCommand::Kill);
-    }
-    for &thread_id in thread_ids {
-        let _ = dispatch_request(ArchcarRequest::CloseChatThread { thread_id }, state);
     }
 }
 
@@ -3612,6 +3618,27 @@ fn ensure_chat_thread_session(
                 if guard.shutting_down {
                     guard.queued_threads.remove(&thread_id);
                     drop(guard);
+                    terminate_managed_handle(&handle);
+                    return;
+                }
+                // Registration race with abort_background_agents: the thread
+                // may have been closed while this session was spawning. The
+                // check runs under the state lock and abort closes threads
+                // *before* it snapshots sessions, so either this sees the
+                // close (terminate here) or the abort snapshot sees the
+                // insert (killed there). A closed thread never keeps an
+                // unsupervised live agent.
+                let closed = WorkspaceStore::open_app(&guard.db_path)
+                    .and_then(|store| store.chat_thread_is_closed(thread_id))
+                    .unwrap_or(false);
+                if closed {
+                    guard.queued_threads.remove(&thread_id);
+                    drop(guard);
+                    info!(
+                        thread_id,
+                        session_id,
+                        "archcar dropping managed session for a thread closed during spawn"
+                    );
                     terminate_managed_handle(&handle);
                     return;
                 }
@@ -6092,7 +6119,20 @@ default = true
             &state,
         );
 
+        // Before the abort the thread reads as open — this is the flag the
+        // spawn-registration path checks under the state lock.
+        assert!(!WorkspaceStore::open_app(&db_path)
+            .unwrap()
+            .chat_thread_is_closed(thread.id)
+            .unwrap());
+
         abort_background_agents(&state, &[thread.id]);
+
+        // The close is what a mid-spawn registration observes and terminates on.
+        assert!(WorkspaceStore::open_app(&db_path)
+            .unwrap()
+            .chat_thread_is_closed(thread.id)
+            .unwrap());
 
         // The queued prompt is gone, so a late-spawning session has no work.
         let queued = dispatch_request(

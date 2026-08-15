@@ -7460,6 +7460,21 @@ mutation($threadId: ID!) {{
         self.update_chat_thread_status(thread_id, "closed", true)
     }
 
+    /// Whether a chat thread has been closed. The daemon checks this before
+    /// registering a freshly spawned session, so a thread closed mid-spawn
+    /// (e.g. by a background-task abort) never gains a live agent.
+    pub fn chat_thread_is_closed(&self, thread_id: i64) -> Result<bool> {
+        let status: String = self
+            .conn
+            .query_row(
+                "SELECT status FROM chat_threads WHERE id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("load chat thread {thread_id}"))?;
+        Ok(status == "closed")
+    }
+
     pub fn reopen_chat_thread(&self, thread_id: i64) -> Result<()> {
         self.update_chat_thread_status(thread_id, "active", false)
     }
