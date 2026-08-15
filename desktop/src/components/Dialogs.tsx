@@ -724,6 +724,7 @@ function ConfirmForm(props: { spec: ConfirmSpec; onDone: () => void }) {
 function BackgroundTaskForm(props: { repository: string; onDone: () => void }) {
   const [prompt, setPrompt] = createSignal("");
   const [provider, setProvider] = createSignal("codex");
+  const [extraAgents, setExtraAgents] = createSignal("");
   const [runChecks, setRunChecks] = createSignal(true);
   const [openPr, setOpenPr] = createSignal(false);
   const [draftPr, setDraftPr] = createSignal(true);
@@ -745,6 +746,11 @@ function BackgroundTaskForm(props: { repository: string; onDone: () => void }) {
           run_checks: runChecks(),
           open_pr: openPr(),
           draft_pr: draftPr(),
+          extra_agents: extraAgents()
+            .split(",")
+            .map((p) => p.trim().toLowerCase())
+            .filter(Boolean)
+            .map((p) => ({ provider: p })),
         },
       });
       if (res.type === "error") {
@@ -782,6 +788,15 @@ function BackgroundTaskForm(props: { repository: string; onDone: () => void }) {
           <option value="codex">Codex</option>
           <option value="claude">Claude</option>
         </select>
+      </label>
+      <label class="dialog-field">
+        <span class="dialog-label">Extra agents (optional)</span>
+        <input
+          class="ws-text-input"
+          placeholder="codex, claude — each runs its own session on the same prompt"
+          value={extraAgents()}
+          onInput={(e) => setExtraAgents(e.currentTarget.value)}
+        />
       </label>
       <label class="dialog-check">
         <input

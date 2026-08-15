@@ -108,6 +108,22 @@ pub fn remote_endpoint_from_env(paths: &AppPaths) -> Result<Option<ArchcarEndpoi
     Ok(Some(ArchcarEndpoint::Remote { address, token }))
 }
 
+/// Where this process's archcar connection will go: the environment first,
+/// then the persisted remote profile (`archductor remote connect`), then the
+/// local daemon. This is the server-hosted execution switch — every CLI/MCP
+/// client resolves through here.
+pub fn configured_remote_endpoint(paths: &AppPaths) -> Result<Option<ArchcarEndpoint>> {
+    if let Some(endpoint) = remote_endpoint_from_env(paths)? {
+        return Ok(Some(endpoint));
+    }
+    Ok(
+        remote::load_profile(paths)?.map(|profile| ArchcarEndpoint::Remote {
+            address: profile.address,
+            token: profile.token,
+        }),
+    )
+}
+
 const ARCHCAR_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(750);
 const ARCHCAR_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const ARCHCAR_STARTUP_ATTEMPTS: usize = 20;
@@ -122,9 +138,10 @@ pub struct ArchcarClient {
 }
 
 impl ArchcarClient {
-    /// Local daemon, unless `ARCHDUCTOR_ARCHCAR_REMOTE` points elsewhere.
+    /// Local daemon, unless `ARCHDUCTOR_ARCHCAR_REMOTE` or a saved remote
+    /// profile points elsewhere.
     pub fn from_paths(paths: &AppPaths) -> Self {
-        match remote_endpoint_from_env(paths) {
+        match configured_remote_endpoint(paths) {
             Ok(Some(endpoint)) => Self::with_endpoint(endpoint, paths.archcar_endpoint_path()),
             Ok(None) => Self::new(paths.archcar_endpoint_path()),
             Err(err) => {

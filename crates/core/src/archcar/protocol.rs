@@ -14,7 +14,8 @@ use crate::workspace::{
     SessionHarnessOptions, SessionKind, Todo,
 };
 use crate::workspace_intel::{
-    ContextAttachment, SessionContribution, SessionOverlap, Summary, Task, TaskUpdate,
+    ContextAttachment, DiffContribution, SessionContribution, SessionOverlap, SessionRunRecord,
+    Summary, Task, TaskUpdate,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,6 +197,11 @@ pub enum ArchcarRequest {
     CreateCheckpoint {
         workspace: String,
         message: String,
+    },
+    /// Diff a checkpoint against the current working tree.
+    CompareCheckpoint {
+        workspace: String,
+        checkpoint_id: i64,
     },
     RestoreCheckpoint {
         workspace: String,
@@ -649,6 +655,24 @@ pub enum ArchcarRequest {
     ListSessionOverlaps {
         workspace: String,
     },
+    /// The commands/checks/runs the daemon executed for one session.
+    ListSessionRuns {
+        workspace: String,
+        session_id: i64,
+    },
+    /// Persist a durable snapshot of one session's diff contribution.
+    SnapshotDiffContribution {
+        workspace: String,
+        session_id: i64,
+        #[serde(default)]
+        risks: Vec<String>,
+        #[serde(default)]
+        blockers: Vec<String>,
+    },
+    /// The stored per-session diff contributions for a workspace.
+    ListDiffContributions {
+        workspace: String,
+    },
     Subscribe,
 }
 
@@ -747,6 +771,12 @@ pub enum ArchcarResponse {
     },
     CheckpointSaved {
         checkpoint: Checkpoint,
+    },
+    CheckpointDiff {
+        workspace: String,
+        checkpoint_id: i64,
+        diff: String,
+        truncated: bool,
     },
     WorkspaceProcesses {
         workspace: String,
@@ -974,6 +1004,18 @@ pub enum ArchcarResponse {
     SessionOverlaps {
         workspace: String,
         overlaps: Vec<SessionOverlap>,
+    },
+    SessionRuns {
+        workspace: String,
+        session_id: i64,
+        runs: Vec<SessionRunRecord>,
+    },
+    DiffContributionSaved {
+        contribution: DiffContribution,
+    },
+    DiffContributions {
+        workspace: String,
+        contributions: Vec<DiffContribution>,
     },
     Error {
         message: String,
@@ -1207,6 +1249,9 @@ pub struct ArchcarChatThread {
     pub provider: String,
     pub title: String,
     pub status: String,
+    /// Explicit model the session was launched with, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
@@ -1368,6 +1413,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::CreateCheckpoint { workspace, message } => {
             format!("create_checkpoint workspace={workspace} chars={}", message.chars().count())
+        }
+        ArchcarRequest::CompareCheckpoint { workspace, checkpoint_id } => {
+            format!("compare_checkpoint workspace={workspace} checkpoint_id={checkpoint_id}")
         }
         ArchcarRequest::RestoreCheckpoint { workspace, checkpoint_id } => {
             format!("restore_checkpoint workspace={workspace} checkpoint_id={checkpoint_id}")
@@ -1772,6 +1820,23 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListSessionOverlaps { workspace } => {
             format!("list_session_overlaps workspace={workspace}")
         }
+        ArchcarRequest::ListSessionRuns {
+            workspace,
+            session_id,
+        } => format!("list_session_runs workspace={workspace} session={session_id}"),
+        ArchcarRequest::SnapshotDiffContribution {
+            workspace,
+            session_id,
+            risks,
+            blockers,
+        } => format!(
+            "snapshot_diff_contribution workspace={workspace} session={session_id} risks={} blockers={}",
+            risks.len(),
+            blockers.len()
+        ),
+        ArchcarRequest::ListDiffContributions { workspace } => {
+            format!("list_diff_contributions workspace={workspace}")
+        }
         ArchcarRequest::Subscribe => "subscribe".to_owned(),
     }
 }
@@ -1887,6 +1952,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::CheckpointSaved { checkpoint } => {
             format!("checkpoint_saved id={}", checkpoint.id)
         }
+        ArchcarResponse::CheckpointDiff {
+            workspace,
+            checkpoint_id,
+            diff,
+            truncated,
+        } => format!(
+            "checkpoint_diff workspace={workspace} checkpoint_id={checkpoint_id} chars={} truncated={truncated}",
+            diff.chars().count()
+        ),
         ArchcarResponse::WorkspaceProcesses { workspace, text } => {
             format!("workspace_processes workspace={workspace} bytes={}", text.len())
         }
@@ -2091,6 +2165,26 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "session_overlaps workspace={workspace} count={}",
             overlaps.len()
         ),
+        ArchcarResponse::SessionRuns {
+            workspace,
+            session_id,
+            runs,
+        } => format!(
+            "session_runs workspace={workspace} session={session_id} count={}",
+            runs.len()
+        ),
+        ArchcarResponse::DiffContributionSaved { contribution } => format!(
+            "diff_contribution_saved session={} files={}",
+            contribution.session_id,
+            contribution.files.len()
+        ),
+        ArchcarResponse::DiffContributions {
+            workspace,
+            contributions,
+        } => format!(
+            "diff_contributions workspace={workspace} count={}",
+            contributions.len()
+        ),
         ArchcarResponse::Error { message } => {
             format!("error chars={}", message.chars().count())
         }
@@ -2163,6 +2257,10 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
         ArchcarEvent::ProviderInteractionResolved { interaction } => format!(
             "provider_interaction_resolved id={} kind={:?} status={:?}",
             interaction.id, interaction.kind, interaction.status
+        ),
+        ArchcarEvent::BackgroundTaskUpdated { task } => format!(
+            "background_task_updated id={} status={}",
+            task.id, task.status
         ),
     }
 }
@@ -2237,6 +2335,11 @@ pub enum ArchcarEvent {
     },
     ProviderInteractionResolved {
         interaction: ProviderInteractionRecord,
+    },
+    /// A background development task advanced (including reaching a terminal
+    /// state), so clients can update their strips and notify the user.
+    BackgroundTaskUpdated {
+        task: BackgroundTask,
     },
 }
 

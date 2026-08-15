@@ -39,7 +39,23 @@ interface ArchductorApi {
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
   >;
+  remoteGet(): Promise<
+    | { ok: true; address: string | null; source: "environment" | "profile" | null }
+    | { ok: false; error: string }
+  >;
+  remoteSet(config: {
+    address: string;
+    token: string;
+  }): Promise<{ ok: true; address: string } | { ok: false; error: string }>;
+  remoteClear(): Promise<{ ok: boolean; error?: string }>;
 }
+
+/** Remote-daemon connection helpers (server-hosted execution). */
+export const remoteDaemon = {
+  get: () => api().remoteGet(),
+  set: (config: { address: string; token: string }) => api().remoteSet(config),
+  clear: () => api().remoteClear(),
+};
 
 declare global {
   interface Window {

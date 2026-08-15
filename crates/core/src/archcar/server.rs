@@ -313,12 +313,24 @@ fn tick_background_tasks(
     let busy = busy_agent_workspaces(state);
     let live = workspaces_with_live_sessions(state);
     let store = WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)?;
-    store.tick_background_tasks_with(|workspace| {
+    let advanced = store.tick_background_tasks_with(|workspace| {
         if live.contains(workspace) {
             return busy.contains(workspace);
         }
         store.workspace_has_active_agent(workspace).unwrap_or(false)
-    })
+    })?;
+    // Every advance is broadcast so clients can refresh their strips and
+    // notify the user when a task reaches ready/failed.
+    if !advanced.is_empty() {
+        let mut guard = state.lock().unwrap();
+        for task in &advanced {
+            broadcast(
+                &mut guard,
+                ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
+            );
+        }
+    }
+    Ok(advanced)
 }
 
 /// Periodically advance background development tasks: once an agent goes idle,
@@ -829,6 +841,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             provider: t.provider,
                             title: t.title,
                             status: t.status,
+                            model: t.model,
                             updated_at: t.updated_at,
                             archived_at: t.archived_at,
                         })
@@ -974,6 +987,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 .and_then(|s| s.checkpoint_create(&workspace, &message, None))
             {
                 Ok(checkpoint) => ArchcarResponse::CheckpointSaved { checkpoint },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CompareCheckpoint {
+            workspace,
+            checkpoint_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_compare(&workspace, checkpoint_id))
+            {
+                Ok((diff, truncated)) => ArchcarResponse::CheckpointDiff {
+                    workspace,
+                    checkpoint_id,
+                    diff,
+                    truncated,
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1628,6 +1660,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         provider: t.provider,
                         title: t.title,
                         status: t.status,
+                        model: t.model,
                         updated_at: t.updated_at,
                         archived_at: t.archived_at,
                     },
@@ -2312,6 +2345,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 overlaps,
             })
         }),
+        ArchcarRequest::ListSessionRuns {
+            workspace,
+            session_id,
+        } => with_store(state, |store| {
+            let runs = store.session_run_history(&workspace, session_id)?;
+            Ok(ArchcarResponse::SessionRuns {
+                workspace,
+                session_id,
+                runs,
+            })
+        }),
+        ArchcarRequest::SnapshotDiffContribution {
+            workspace,
+            session_id,
+            risks,
+            blockers,
+        } => with_store(state, |store| {
+            let contribution =
+                store.snapshot_diff_contribution(&workspace, session_id, &risks, &blockers)?;
+            Ok(ArchcarResponse::DiffContributionSaved { contribution })
+        }),
+        ArchcarRequest::ListDiffContributions { workspace } => with_store(state, |store| {
+            let contributions = store.list_diff_contributions(&workspace)?;
+            Ok(ArchcarResponse::DiffContributions {
+                workspace,
+                contributions,
+            })
+        }),
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
         },
@@ -2354,6 +2415,7 @@ fn start_background_task(
         (guard.db_path.clone(), guard.logs_dir.clone())
     };
     let provider = input.provider.clone();
+    let extra_agents = input.extra_agents.clone();
     let started = WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
         .and_then(|store| store.start_background_task(input));
     let task = match started {
@@ -2381,70 +2443,155 @@ fn start_background_task(
         }
     };
 
-    // Core rejects anything but a managed provider before we get here.
-    let kind = if provider == "claude" {
-        SessionKind::Claude
-    } else {
-        SessionKind::Codex
-    };
-
-    // Reuse the normal chat path so a background workspace looks exactly like
-    // one a human started: a thread with the prompt queued, then a session.
-    let thread = dispatch_request(
-        ArchcarRequest::CreateChatThread {
-            workspace: workspace.clone(),
-            provider: provider.clone(),
-            title: task.title.clone(),
-        },
-        state,
-    );
-    let thread_id = match thread {
-        ArchcarResponse::ChatThreadCreated { thread } => thread.id,
-        other => {
-            return fail(format!(
-                "created workspace {workspace} but no chat thread: {}",
-                archcar_response_summary(&other)
-            ));
-        }
-    };
-
-    // Session first, then the prompt: the queue drains into a session that is
-    // already coming up, which is the same order the desktop uses.
-    let spawned = dispatch_request(
-        ArchcarRequest::EnsureChatThreadSession {
-            workspace: workspace.clone(),
-            thread_id,
-            kind,
-            harness: None,
-        },
-        state,
-    );
-    if let ArchcarResponse::Error { message } = spawned {
-        return fail(format!("could not start its agent: {message}"));
+    // The strategy allows one or more agents per background task: the primary
+    // provider plus any extra specs, each with its own session and prompt.
+    let mut agents = vec![(provider.clone(), task.prompt.clone(), task.title.clone())];
+    for (index, agent) in extra_agents.iter().enumerate() {
+        agents.push((
+            agent.provider.clone(),
+            agent.prompt.clone().unwrap_or_else(|| task.prompt.clone()),
+            format!("{} (agent {})", task.title, index + 2),
+        ));
     }
 
-    let queued = dispatch_request(
-        ArchcarRequest::QueueChatInput {
-            thread_id,
-            input: task.prompt.clone(),
-            visible_input: Some(task.prompt.clone()),
-            kind: crate::archcar::protocol::ArchcarInputKind::User,
-            session_kind: kind,
-        },
-        state,
-    );
-    if let ArchcarResponse::Error { message } = queued {
-        return fail(format!("could not queue its prompt: {message}"));
+    let mut thread_ids = Vec::new();
+    for (agent_provider, prompt, title) in &agents {
+        // Core rejects anything but a managed provider before we get here.
+        let kind = if agent_provider == "claude" {
+            SessionKind::Claude
+        } else {
+            SessionKind::Codex
+        };
+
+        // Reuse the normal chat path so a background workspace looks exactly
+        // like one a human started: a thread with the prompt queued, then a
+        // session.
+        let thread = dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: workspace.clone(),
+                provider: agent_provider.clone(),
+                title: title.clone(),
+            },
+            state,
+        );
+        let thread_id = match thread {
+            ArchcarResponse::ChatThreadCreated { thread } => thread.id,
+            other => {
+                abort_background_agents(state, &thread_ids);
+                return fail(format!(
+                    "created workspace {workspace} but no chat thread: {}",
+                    archcar_response_summary(&other)
+                ));
+            }
+        };
+        // Track the thread before spawning so a failure below also cleans up
+        // this agent, not only the earlier ones.
+        thread_ids.push(thread_id);
+
+        // Session first, then the prompt: the queue drains into a session
+        // that is already coming up, which is the same order the desktop uses.
+        let spawned = dispatch_request(
+            ArchcarRequest::EnsureChatThreadSession {
+                workspace: workspace.clone(),
+                thread_id,
+                kind,
+                harness: None,
+            },
+            state,
+        );
+        if let ArchcarResponse::Error { message } = spawned {
+            abort_background_agents(state, &thread_ids);
+            return fail(format!("could not start its agent: {message}"));
+        }
+
+        let queued = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id,
+                input: prompt.clone(),
+                visible_input: Some(prompt.clone()),
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                session_kind: kind,
+            },
+            state,
+        );
+        if let ArchcarResponse::Error { message } = queued {
+            abort_background_agents(state, &thread_ids);
+            return fail(format!("could not queue its prompt: {message}"));
+        }
     }
 
     match WorkspaceStore::open_app(&db_path).and_then(|store| {
-        store.assign_session_task(&workspace, thread_id, task.task_id)?;
+        for thread_id in &thread_ids {
+            store.assign_session_task(&workspace, *thread_id, task.task_id)?;
+        }
         store.mark_background_task_running(task.id)
     }) {
-        Ok(task) => ArchcarResponse::BackgroundTaskSaved { task },
-        Err(err) => ArchcarResponse::Error {
-            message: err.to_string(),
-        },
+        Ok(task) => {
+            let mut guard = state.lock().unwrap();
+            broadcast(
+                &mut guard,
+                ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
+            );
+            drop(guard);
+            ArchcarResponse::BackgroundTaskSaved { task }
+        }
+        Err(err) => {
+            // The agents are already launched with prompts queued. Leaving
+            // them running against a task stuck in `pending` would be
+            // unsupervised work — stop them and land the failure on the task
+            // row like every earlier startup error.
+            abort_background_agents(state, &thread_ids);
+            fail(format!(
+                "started its agents but could not record them: {err}"
+            ))
+        }
+    }
+}
+
+/// Stop the agents a partially-started background task already launched.
+/// A failed task must not leave an unsupervised agent editing the workspace,
+/// so: drop every queued prompt (a session that finishes spawning later has
+/// nothing to work on), close the threads, and kill any live session bound to
+/// them.
+///
+/// Ordering matters: threads are closed *before* the session snapshot below.
+/// Session registration checks thread-closed under the state lock, so a
+/// session still spawning either sees the close and terminates itself, or is
+/// registered in time for the snapshot here to kill it. Closing after the
+/// snapshot would let a mid-registration session slip past both.
+fn abort_background_agents(state: &Arc<Mutex<ServerState>>, thread_ids: &[i64]) {
+    for &thread_id in thread_ids {
+        if let ArchcarResponse::QueuedChatInputs { inputs, .. } =
+            dispatch_request(ArchcarRequest::ListQueuedChatInputs { thread_id }, state)
+        {
+            for input in inputs {
+                let _ = dispatch_request(
+                    ArchcarRequest::RemoveQueuedChatInput { queue_id: input.id },
+                    state,
+                );
+            }
+        }
+    }
+    for &thread_id in thread_ids {
+        let _ = dispatch_request(ArchcarRequest::CloseChatThread { thread_id }, state);
+    }
+    let kills: Vec<_> = {
+        let guard = state.lock().unwrap();
+        guard
+            .sessions
+            .values()
+            .filter(|handle| {
+                handle
+                    .snapshot
+                    .lock()
+                    .ok()
+                    .is_some_and(|snapshot| thread_ids.contains(&snapshot.thread_id))
+            })
+            .map(|handle| handle.command_tx.clone())
+            .collect()
+    };
+    for command_tx in kills {
+        let _ = command_tx.send(crate::archcar::session::SessionCommand::Kill);
     }
 }
 
@@ -2820,6 +2967,9 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListContextAttachments { .. }
             | ArchcarRequest::ListSessionContributions { .. }
             | ArchcarRequest::ListSessionOverlaps { .. }
+            | ArchcarRequest::ListSessionRuns { .. }
+            | ArchcarRequest::ListDiffContributions { .. }
+            | ArchcarRequest::CompareCheckpoint { .. }
     )
 }
 
@@ -3475,6 +3625,27 @@ fn ensure_chat_thread_session(
                 if guard.shutting_down {
                     guard.queued_threads.remove(&thread_id);
                     drop(guard);
+                    terminate_managed_handle(&handle);
+                    return;
+                }
+                // Registration race with abort_background_agents: the thread
+                // may have been closed while this session was spawning. The
+                // check runs under the state lock and abort closes threads
+                // *before* it snapshots sessions, so either this sees the
+                // close (terminate here) or the abort snapshot sees the
+                // insert (killed there). A closed thread never keeps an
+                // unsupervised live agent.
+                let closed = WorkspaceStore::open_app(&guard.db_path)
+                    .and_then(|store| store.chat_thread_is_closed(thread_id))
+                    .unwrap_or(false);
+                if closed {
+                    guard.queued_threads.remove(&thread_id);
+                    drop(guard);
+                    info!(
+                        thread_id,
+                        session_id,
+                        "archcar dropping managed session for a thread closed during spawn"
+                    );
                     terminate_managed_handle(&handle);
                     return;
                 }
@@ -5891,6 +6062,106 @@ default = true
         assert!(
             matches!(stopped, ArchcarResponse::WorkspaceProcessStopped { ref process, .. } if process.kind == "run" && process.status == "stopped"),
             "stop_workspace_run got {stopped:?}"
+        );
+    }
+
+    #[test]
+    fn abort_background_agents_drains_queues_and_closes_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+        dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+        let created = dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: "berlin".to_owned(),
+                provider: "codex".to_owned(),
+                title: "doomed agent".to_owned(),
+            },
+            &state,
+        );
+        let ArchcarResponse::ChatThreadCreated { thread } = created else {
+            panic!("create_chat_thread got {created:?}");
+        };
+        dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "do the work".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+            &state,
+        );
+
+        // Before the abort the thread reads as open — this is the flag the
+        // spawn-registration path checks under the state lock.
+        assert!(!WorkspaceStore::open_app(&db_path)
+            .unwrap()
+            .chat_thread_is_closed(thread.id)
+            .unwrap());
+
+        abort_background_agents(&state, &[thread.id]);
+
+        // The close is what a mid-spawn registration observes and terminates on.
+        assert!(WorkspaceStore::open_app(&db_path)
+            .unwrap()
+            .chat_thread_is_closed(thread.id)
+            .unwrap());
+
+        // The queued prompt is gone, so a late-spawning session has no work.
+        let queued = dispatch_request(
+            ArchcarRequest::ListQueuedChatInputs {
+                thread_id: thread.id,
+            },
+            &state,
+        );
+        assert!(
+            matches!(queued, ArchcarResponse::QueuedChatInputs { ref inputs, .. } if inputs.is_empty()),
+            "queue should be drained, got {queued:?}"
+        );
+        // The thread is closed, so it no longer lists as an active session.
+        let threads = dispatch_request(
+            ArchcarRequest::ListChatThreads {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(threads, ArchcarResponse::ChatThreads { ref threads, .. } if threads.is_empty()),
+            "thread should be closed, got {threads:?}"
         );
     }
 

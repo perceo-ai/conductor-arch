@@ -44,6 +44,64 @@ pub fn token_path(paths: &AppPaths) -> PathBuf {
     paths.state_dir.join("archcar.token")
 }
 
+/// Client-side connection profile for a server-hosted daemon, persisted so the
+/// CLI and the desktop app can stay pointed at a remote archcar across
+/// restarts without environment variables. Environment overrides still win.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteProfile {
+    /// `host:port` of the remote archcar TCP listener.
+    pub address: String,
+    /// Access token the daemon expects as the first line of every connection.
+    pub token: String,
+}
+
+pub fn profile_path(paths: &AppPaths) -> PathBuf {
+    paths.state_dir.join("remote.json")
+}
+
+/// Persist the remote profile (owner-only: it contains the token).
+pub fn save_profile(paths: &AppPaths, profile: &RemoteProfile) -> Result<()> {
+    anyhow::ensure!(
+        !profile.address.trim().is_empty(),
+        "remote address is required"
+    );
+    anyhow::ensure!(!profile.token.trim().is_empty(), "remote token is required");
+    std::fs::create_dir_all(&paths.state_dir)
+        .with_context(|| format!("create archcar state dir {}", paths.state_dir.display()))?;
+    let path = profile_path(paths);
+    let body = serde_json::to_string_pretty(profile)?;
+    std::fs::write(&path, format!("{body}\n"))
+        .with_context(|| format!("write remote profile {}", path.display()))?;
+    restrict_to_owner(&path)?;
+    Ok(())
+}
+
+pub fn load_profile(paths: &AppPaths) -> Result<Option<RemoteProfile>> {
+    let path = profile_path(paths);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let profile: RemoteProfile = serde_json::from_str(&contents)
+                .with_context(|| format!("parse remote profile {}", path.display()))?;
+            if profile.address.trim().is_empty() || profile.token.trim().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(profile))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read remote profile {}", path.display())),
+    }
+}
+
+/// Remove the remote profile. Returns whether one existed.
+pub fn clear_profile(paths: &AppPaths) -> Result<bool> {
+    let path = profile_path(paths);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("remove remote profile {}", path.display())),
+    }
+}
+
 /// Read the access token, creating one on first use. The file is owner-only:
 /// anyone who can read it can drive every workspace on this machine.
 pub fn ensure_token(paths: &AppPaths) -> Result<String> {
@@ -252,6 +310,74 @@ mod tests {
             .mode();
 
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn saved_profile_resolves_to_a_remote_endpoint() {
+        use crate::archcar::client::{configured_remote_endpoint, ArchcarEndpoint};
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+
+        // No env, no profile: local daemon.
+        assert!(configured_remote_endpoint(&paths).unwrap().is_none());
+
+        save_profile(
+            &paths,
+            &RemoteProfile {
+                address: "devbox:7420".to_owned(),
+                token: "tok-abc".to_owned(),
+            },
+        )
+        .unwrap();
+        let endpoint = configured_remote_endpoint(&paths).unwrap().unwrap();
+        match endpoint {
+            ArchcarEndpoint::Remote { address, token } => {
+                assert_eq!(address, "devbox:7420");
+                assert_eq!(token, "tok-abc");
+            }
+            other => panic!("expected remote endpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_profile_round_trips_and_clears() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+
+        assert!(load_profile(&paths).unwrap().is_none());
+
+        let profile = RemoteProfile {
+            address: "devbox:7420".to_owned(),
+            token: "tok-123".to_owned(),
+        };
+        save_profile(&paths, &profile).unwrap();
+        assert_eq!(load_profile(&paths).unwrap(), Some(profile));
+
+        // Owner-only: the file holds the access token.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(profile_path(&paths))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        assert!(clear_profile(&paths).unwrap());
+        assert!(!clear_profile(&paths).unwrap());
+        assert!(load_profile(&paths).unwrap().is_none());
+
+        // Empty fields are rejected on save and treated as absent on load.
+        let err = save_profile(
+            &paths,
+            &RemoteProfile {
+                address: " ".to_owned(),
+                token: "x".to_owned(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("address"), "{err}");
     }
 
     #[test]

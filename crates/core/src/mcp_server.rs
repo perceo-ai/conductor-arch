@@ -190,7 +190,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "update_task",
             description:
-                "Update a task's status (todo, in_progress, blocked, review, done), title, body, or blocked reason.",
+                "Update a task's status (todo, in_progress, blocked, review, done), title, body, human owner, blocked reason, or review notes.",
             schema: || {
                 object(
                     json!({
@@ -199,7 +199,9 @@ pub fn tools() -> Vec<ToolSpec> {
                         "status": {"type": "string", "enum": ["todo", "in_progress", "blocked", "review", "done"]},
                         "title": {"type": "string"},
                         "body": {"type": "string"},
+                        "owner": {"type": "string"},
                         "blocked_reason": {"type": "string"},
+                        "review_notes": {"type": "string"},
                     }),
                     &["workspace", "task_id"],
                 )
@@ -213,7 +215,9 @@ pub fn tools() -> Vec<ToolSpec> {
                         title: optional_string(args, "title"),
                         body: optional_string(args, "body"),
                         status: optional_string(args, "status"),
+                        owner: optional_string(args, "owner").map(Some),
                         blocked_reason: optional_string(args, "blocked_reason").map(Some),
+                        review_notes: optional_string(args, "review_notes"),
                         ..Default::default()
                     },
                 })
@@ -238,6 +242,63 @@ pub fn tools() -> Vec<ToolSpec> {
             mutating: false,
             build: |args| {
                 Ok(ArchcarRequest::ListSessionContributions {
+                    workspace: string_arg(args, "workspace")?,
+                })
+            },
+        },
+        ToolSpec {
+            name: "session_runs",
+            description:
+                "The commands, checks, and runs the daemon executed for one agent session — its run history.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "session_id": {"type": "integer"},
+                    }),
+                    &["workspace", "session_id"],
+                )
+            },
+            mutating: false,
+            build: |args| {
+                Ok(ArchcarRequest::ListSessionRuns {
+                    workspace: string_arg(args, "workspace")?,
+                    session_id: i64_arg(args, "session_id")?,
+                })
+            },
+        },
+        ToolSpec {
+            name: "snapshot_diff_contribution",
+            description:
+                "Persist a durable snapshot of one session's diff contribution: files, patch, commands, plus supplied risks/blockers.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "session_id": {"type": "integer"},
+                        "risks": {"type": "array", "items": {"type": "string"}},
+                        "blockers": {"type": "array", "items": {"type": "string"}},
+                    }),
+                    &["workspace", "session_id"],
+                )
+            },
+            mutating: true,
+            build: |args| {
+                Ok(ArchcarRequest::SnapshotDiffContribution {
+                    workspace: string_arg(args, "workspace")?,
+                    session_id: i64_arg(args, "session_id")?,
+                    risks: string_list(args, "risks"),
+                    blockers: string_list(args, "blockers"),
+                })
+            },
+        },
+        ToolSpec {
+            name: "diff_contributions",
+            description: "The stored per-session diff contribution snapshots for a workspace.",
+            schema: workspace_schema,
+            mutating: false,
+            build: |args| {
+                Ok(ArchcarRequest::ListDiffContributions {
                     workspace: string_arg(args, "workspace")?,
                 })
             },
@@ -503,6 +564,17 @@ pub fn tools() -> Vec<ToolSpec> {
                         "run_checks": {"type": "boolean"},
                         "open_pr": {"type": "boolean"},
                         "draft_pr": {"type": "boolean"},
+                        "extra_agents": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "provider": {"type": "string", "enum": ["codex", "claude"]},
+                                    "prompt": {"type": "string"},
+                                },
+                                "required": ["provider"],
+                            },
+                        },
                     }),
                     &["repository", "prompt"],
                 )
@@ -522,6 +594,25 @@ pub fn tools() -> Vec<ToolSpec> {
                         run_checks: bool_arg(args, "run_checks", true),
                         open_pr: bool_arg(args, "open_pr", false),
                         draft_pr: bool_arg(args, "draft_pr", true),
+                        extra_agents: args
+                            .get("extra_agents")
+                            .and_then(|value| value.as_array())
+                            .map(|specs| {
+                                specs
+                                    .iter()
+                                    .filter_map(|spec| {
+                                        let provider = spec.get("provider")?.as_str()?.to_owned();
+                                        Some(crate::background_tasks::BackgroundAgentSpec {
+                                            provider,
+                                            prompt: spec
+                                                .get("prompt")
+                                                .and_then(|value| value.as_str())
+                                                .map(str::to_owned),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     },
                 })
             },

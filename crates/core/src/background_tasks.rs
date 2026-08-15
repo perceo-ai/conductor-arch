@@ -55,6 +55,17 @@ pub struct BackgroundTask {
     pub updated_at: String,
 }
 
+/// One extra agent to run inside a background task's workspace. The strategy
+/// allows "one or more agents" per task; each spec spawns its own session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundAgentSpec {
+    /// Managed agent provider (codex, claude).
+    pub provider: String,
+    /// Prompt for this agent; defaults to the task prompt when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartBackgroundTask {
     pub repository: String,
@@ -80,6 +91,10 @@ pub struct StartBackgroundTask {
     /// handoff and not an autonomous merge.
     #[serde(default = "default_true")]
     pub draft_pr: bool,
+    /// Additional agents to run in the same workspace, beyond the primary
+    /// `provider`. Empty means a single agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_agents: Vec<BackgroundAgentSpec>,
 }
 
 fn default_provider() -> String {
@@ -149,6 +164,13 @@ impl WorkspaceStore {
             "background tasks need a managed agent provider (codex or claude), got `{}`",
             input.provider
         );
+        for agent in &input.extra_agents {
+            anyhow::ensure!(
+                matches!(agent.provider.as_str(), "codex" | "claude"),
+                "background tasks need managed agent providers (codex or claude), got `{}`",
+                agent.provider
+            );
+        }
         let title = input
             .title
             .as_deref()
@@ -565,6 +587,7 @@ mod tests {
                 run_checks: true,
                 open_pr,
                 draft_pr: true,
+                extra_agents: Vec::new(),
             })
             .unwrap()
     }
@@ -601,6 +624,29 @@ mod tests {
                 run_checks: true,
                 open_pr: false,
                 draft_pr: true,
+                extra_agents: Vec::new(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("managed agent provider"), "{err}");
+        assert!(store.list_background_tasks(false).unwrap().is_empty());
+
+        // Extra agent specs get the same managed-provider validation.
+        let err = store
+            .start_background_task(StartBackgroundTask {
+                repository: "demo".to_owned(),
+                prompt: "do the thing".to_owned(),
+                title: None,
+                workspace_name: Some("oslo".to_owned()),
+                branch: None,
+                base_ref: None,
+                provider: "codex".to_owned(),
+                run_checks: true,
+                open_pr: false,
+                draft_pr: true,
+                extra_agents: vec![BackgroundAgentSpec {
+                    provider: "shell".to_owned(),
+                    prompt: None,
+                }],
             })
             .unwrap_err();
         assert!(err.to_string().contains("managed agent provider"), "{err}");

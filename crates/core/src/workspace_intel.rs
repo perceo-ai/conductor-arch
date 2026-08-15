@@ -37,8 +37,15 @@ pub struct Task {
     pub body: String,
     pub status: String,
     pub owner_session_id: Option<i64>,
+    /// Human owner (a name or handle), distinct from the owning agent session.
+    pub owner: Option<String>,
     pub intended_areas: Vec<String>,
     pub blocked_reason: Option<String>,
+    /// Notes left for/by the reviewer of this task's work.
+    pub review_notes: String,
+    /// Sessions attached to this task via `chat_threads.task_id`.
+    #[serde(default)]
+    pub linked_session_ids: Vec<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -56,9 +63,13 @@ pub struct TaskUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<Option<i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intended_areas: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notes: Option<String>,
 }
 
 impl TaskUpdate {
@@ -97,6 +108,9 @@ pub struct SessionContribution {
     pub session_id: i64,
     pub title: String,
     pub provider: String,
+    /// Explicit model the session was launched with, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: String,
     pub task_id: Option<i64>,
     pub task_title: Option<String>,
@@ -114,6 +128,41 @@ pub struct SessionContribution {
 pub struct TaskCounts {
     pub open: usize,
     pub blocked: usize,
+}
+
+/// One command/check/run the daemon executed for a session, from the processes
+/// table — the session's first-class run history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRunRecord {
+    pub process_id: i64,
+    pub kind: String,
+    pub command: String,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// A durable snapshot of one session's diff contribution: the files it
+/// touched, the stored patch, and the commands/risks/blockers that came with
+/// it. Unlike [`SessionContribution`] (recomputed on read), this survives as
+/// first-class provenance for review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffContribution {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub session_id: i64,
+    pub files: Vec<String>,
+    /// Files still different from the base ref when the snapshot was taken.
+    pub still_present: Vec<String>,
+    /// Path (relative to the workspace) of the stored patch, when one existed.
+    pub patch_ref: Option<String>,
+    /// Commands/checks the daemon ran for this session, as `kind: command [status]`.
+    pub commands: Vec<String>,
+    pub risks: Vec<String>,
+    pub blockers: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Two sessions aiming at the same files. Advisory only — Archductor does not
@@ -194,15 +243,18 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         body: row.get(3)?,
         status: row.get(4)?,
         owner_session_id: row.get(5)?,
-        intended_areas: split_list(&row.get::<_, String>(6)?),
-        blocked_reason: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        owner: row.get(6)?,
+        intended_areas: split_list(&row.get::<_, String>(7)?),
+        blocked_reason: row.get(8)?,
+        review_notes: row.get(9)?,
+        linked_session_ids: Vec::new(),
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
-const TASK_COLUMNS: &str = "id, workspace_id, title, body, status, owner_session_id, \
-     intended_areas, blocked_reason, created_at, updated_at";
+const TASK_COLUMNS: &str = "id, workspace_id, title, body, status, owner_session_id, owner, \
+     intended_areas, blocked_reason, review_notes, created_at, updated_at";
 
 fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<Summary> {
     Ok(Summary {
@@ -235,6 +287,25 @@ fn row_to_context_attachment(row: &Row<'_>) -> rusqlite::Result<ContextAttachmen
 
 const CONTEXT_COLUMNS: &str =
     "id, workspace_id, source, kind, body_or_ref, scope, pinned, created_at";
+
+fn row_to_diff_contribution(row: &Row<'_>) -> rusqlite::Result<DiffContribution> {
+    Ok(DiffContribution {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        session_id: row.get(2)?,
+        files: split_list(&row.get::<_, String>(3)?),
+        still_present: split_list(&row.get::<_, String>(4)?),
+        patch_ref: row.get(5)?,
+        commands: split_list(&row.get::<_, String>(6)?),
+        risks: split_list(&row.get::<_, String>(7)?),
+        blockers: split_list(&row.get::<_, String>(8)?),
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+const DIFF_CONTRIBUTION_COLUMNS: &str = "id, workspace_id, session_id, files, still_present, \
+     patch_ref, commands, risks, blockers, created_at, updated_at";
 
 // ---- Tasks -----------------------------------------------------------------
 
@@ -278,10 +349,24 @@ impl WorkspaceStore {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {TASK_COLUMNS} FROM tasks WHERE workspace_id = ?1 ORDER BY id"
         ))?;
-        let tasks = stmt
+        let mut tasks = stmt
             .query_map([workspace.id], row_to_task)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        for task in &mut tasks {
+            task.linked_session_ids = self.task_linked_sessions(task.id)?;
+        }
         Ok(tasks)
+    }
+
+    /// Sessions attached to a task through `chat_threads.task_id`.
+    fn task_linked_sessions(&self, task_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM chat_threads WHERE task_id = ?1 ORDER BY id")?;
+        let ids = stmt
+            .query_map([task_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 
     /// Load a task, refusing one that belongs to a different workspace. Ids are
@@ -298,13 +383,16 @@ impl WorkspaceStore {
     }
 
     pub fn get_task(&self, id: i64) -> Result<Task> {
-        self.conn
+        let mut task = self
+            .conn
             .query_row(
                 &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
                 [id],
                 row_to_task,
             )
-            .with_context(|| format!("load task {id}"))
+            .with_context(|| format!("load task {id}"))?;
+        task.linked_session_ids = self.task_linked_sessions(task.id)?;
+        Ok(task)
     }
 
     pub fn update_task(&self, workspace_name: &str, id: i64, update: TaskUpdate) -> Result<Task> {
@@ -340,6 +428,18 @@ impl WorkspaceStore {
             }
             None => existing.owner_session_id,
         };
+        let owner = match update.owner {
+            Some(value) => value.and_then(|owner| {
+                let owner = owner.trim().to_owned();
+                (!owner.is_empty()).then_some(owner)
+            }),
+            None => existing.owner.clone(),
+        };
+        let review_notes = update
+            .review_notes
+            .as_ref()
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| existing.review_notes.clone());
         let intended_areas = update
             .intended_areas
             .as_deref()
@@ -360,16 +460,18 @@ impl WorkspaceStore {
         let now = timestamp();
         self.conn.execute(
             "UPDATE tasks
-                SET title = ?1, body = ?2, status = ?3, owner_session_id = ?4,
-                    intended_areas = ?5, blocked_reason = ?6, updated_at = ?7
-              WHERE id = ?8",
+                SET title = ?1, body = ?2, status = ?3, owner_session_id = ?4, owner = ?5,
+                    intended_areas = ?6, blocked_reason = ?7, review_notes = ?8, updated_at = ?9
+              WHERE id = ?10",
             params![
                 title,
                 body,
                 status,
                 owner_session_id,
+                owner,
                 intended_areas,
                 blocked_reason,
+                review_notes,
                 now,
                 id
             ],
@@ -897,6 +999,18 @@ impl WorkspaceStore {
                 paths.len()
             ));
         }
+        // Stored per-session provenance carries its own risks/blockers.
+        for stored in self
+            .list_diff_contributions(workspace_name)
+            .unwrap_or_default()
+        {
+            for risk in &stored.risks {
+                risks.push(format!("Session {}: {risk}", stored.session_id));
+            }
+            for blocker in &stored.blockers {
+                risks.push(format!("Session {} blocked: {blocker}", stored.session_id));
+            }
+        }
         if checks.check_status.is_none() {
             risks.push("No checks were run in this workspace".to_owned());
         }
@@ -922,7 +1036,7 @@ impl WorkspaceStore {
 
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.title, t.provider, t.status, t.task_id, t.intended_areas,
-                    t.created_at, t.updated_at, tk.title
+                    t.created_at, t.updated_at, tk.title, t.model
                FROM chat_threads t
                LEFT JOIN tasks tk ON tk.id = t.task_id
               WHERE t.workspace_id = ?1
@@ -940,6 +1054,7 @@ impl WorkspaceStore {
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -955,6 +1070,7 @@ impl WorkspaceStore {
             created_at,
             updated_at,
             task_title,
+            model,
         ) in rows
         {
             let files_touched =
@@ -972,6 +1088,7 @@ impl WorkspaceStore {
                 session_id,
                 title,
                 provider,
+                model,
                 status,
                 task_id,
                 task_title,
@@ -1029,6 +1146,145 @@ impl WorkspaceStore {
         }
 
         Ok(paths.into_iter().collect())
+    }
+
+    /// Persist a durable snapshot of one session's contribution: files touched,
+    /// which still differ from base, its patch (written under `.context`), the
+    /// commands the daemon ran for it, plus caller-supplied risks/blockers.
+    /// Upserts per (workspace, session) so re-snapshotting refreshes the row.
+    pub fn snapshot_diff_contribution(
+        &self,
+        workspace_name: &str,
+        session_id: i64,
+        risks: &[String],
+        blockers: &[String],
+    ) -> Result<DiffContribution> {
+        let workspace = self.get_by_name(workspace_name)?;
+        self.ensure_session_in_workspace(workspace.id, session_id)?;
+
+        let files = self.session_files_touched(session_id, &workspace.path.to_string_lossy())?;
+        let changed = self.changed_files(workspace_name).unwrap_or_default();
+        let still_present: Vec<String> = files
+            .iter()
+            .filter(|path| changed.contains(path))
+            .cloned()
+            .collect();
+        let commands: Vec<String> = self
+            .session_run_history(workspace_name, session_id)?
+            .into_iter()
+            .map(|run| format!("{}: {} [{}]", run.kind, run.command, run.status))
+            .collect();
+
+        // Store the branch diff restricted to this session's files. Best
+        // effort: with several agents on one branch the per-file diff can
+        // include other sessions' edits to the same file.
+        let mut patch = String::new();
+        for path in &files {
+            if let Ok(diff) =
+                self.unified_diff_against_base(workspace_name, Some(std::path::Path::new(path)))
+            {
+                if !diff.trim().is_empty() {
+                    patch.push_str(&diff);
+                    if !diff.ends_with('\n') {
+                        patch.push('\n');
+                    }
+                }
+            }
+        }
+        let patch_ref = if patch.is_empty() {
+            None
+        } else {
+            let relative = format!(".context/archductor/contributions/session-{session_id}.patch");
+            let absolute = workspace.path.join(&relative);
+            if let Some(parent) = absolute.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            std::fs::write(&absolute, &patch)
+                .with_context(|| format!("write {}", absolute.display()))?;
+            Some(relative)
+        };
+
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO diff_contributions (
+                workspace_id, session_id, files, still_present, patch_ref,
+                commands, risks, blockers, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(workspace_id, session_id) DO UPDATE SET
+                files = excluded.files,
+                still_present = excluded.still_present,
+                patch_ref = excluded.patch_ref,
+                commands = excluded.commands,
+                risks = excluded.risks,
+                blockers = excluded.blockers,
+                updated_at = excluded.updated_at",
+            params![
+                workspace.id,
+                session_id,
+                join_list(&files),
+                join_list(&still_present),
+                patch_ref,
+                join_list(&commands),
+                join_list(risks),
+                join_list(blockers),
+                now
+            ],
+        )?;
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {DIFF_CONTRIBUTION_COLUMNS} FROM diff_contributions
+                     WHERE workspace_id = ?1 AND session_id = ?2"
+                ),
+                params![workspace.id, session_id],
+                row_to_diff_contribution,
+            )
+            .context("diff contribution was not stored")
+    }
+
+    /// The stored per-session diff contributions for a workspace.
+    pub fn list_diff_contributions(&self, workspace_name: &str) -> Result<Vec<DiffContribution>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {DIFF_CONTRIBUTION_COLUMNS} FROM diff_contributions
+             WHERE workspace_id = ?1 ORDER BY session_id"
+        ))?;
+        let contributions = stmt
+            .query_map([workspace.id], row_to_diff_contribution)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(contributions)
+    }
+
+    /// The commands, checks, and runs the daemon executed for one session —
+    /// its attached run history, straight from the processes table.
+    pub fn session_run_history(
+        &self,
+        workspace_name: &str,
+        session_id: i64,
+    ) -> Result<Vec<SessionRunRecord>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        self.ensure_session_in_workspace(workspace.id, session_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, command, status, exit_code, started_at, ended_at
+               FROM processes
+              WHERE chat_thread_id = ?1
+              ORDER BY id",
+        )?;
+        let runs = stmt
+            .query_map([session_id], |row| {
+                Ok(SessionRunRecord {
+                    process_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    command: row.get(2)?,
+                    status: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    started_at: row.get(5)?,
+                    ended_at: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(runs)
     }
 
     /// Advisory overlap warnings between concurrent sessions in one workspace:
@@ -1309,6 +1565,175 @@ mod tests {
 
         store.delete_task("berlin", task.id).unwrap();
         assert!(store.list_tasks("berlin").unwrap().is_empty());
+    }
+
+    #[test]
+    fn task_records_human_owner_review_notes_and_linked_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let task = store.create_task("berlin", "Swarm slice", "", &[]).unwrap();
+        assert_eq!(task.owner, None);
+        assert_eq!(task.review_notes, "");
+        assert!(task.linked_session_ids.is_empty());
+
+        let updated = store
+            .update_task(
+                "berlin",
+                task.id,
+                TaskUpdate {
+                    owner: Some(Some("  pranav  ".to_owned())),
+                    review_notes: Some("check the migration ordering".to_owned()),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.owner.as_deref(), Some("pranav"));
+        assert_eq!(updated.review_notes, "check the migration ordering");
+
+        // Linked sessions come from chat_threads.task_id.
+        let first = store
+            .create_chat_thread("berlin", "codex", "agent one", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "codex", "agent two", None)
+            .unwrap();
+        store
+            .assign_session_task("berlin", first.id, Some(task.id))
+            .unwrap();
+        store
+            .assign_session_task("berlin", second.id, Some(task.id))
+            .unwrap();
+        let task = store.get_task(task.id).unwrap();
+        assert_eq!(task.linked_session_ids, vec![first.id, second.id]);
+        assert_eq!(
+            store.list_tasks("berlin").unwrap()[0].linked_session_ids,
+            vec![first.id, second.id]
+        );
+
+        // Clearing the owner works; empty owner strings clear too.
+        let cleared = store
+            .update_task(
+                "berlin",
+                task.id,
+                TaskUpdate {
+                    owner: Some(None),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(cleared.owner, None);
+    }
+
+    #[test]
+    fn session_model_is_first_class_and_run_history_is_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        add_sibling_workspace(&store);
+
+        let session = store
+            .create_chat_thread(
+                "berlin",
+                "codex",
+                "modelled agent",
+                Some("harness=codex;model=gpt-5.6-sol;approval=never"),
+            )
+            .unwrap();
+        assert_eq!(session.model.as_deref(), Some("gpt-5.6-sol"));
+
+        // The model surfaces on per-session contributions too.
+        let contributions = store.session_contributions("berlin").unwrap();
+        assert_eq!(contributions[0].model.as_deref(), Some("gpt-5.6-sol"));
+
+        // Metadata updates keep the column in sync; no model clears it.
+        let updated = store
+            .update_chat_thread_harness_metadata(session.id, Some("harness=codex;plan=true"))
+            .unwrap();
+        assert_eq!(updated.model, None);
+
+        // Run history exists (empty here — no processes ran) and is scoped.
+        assert!(store
+            .session_run_history("berlin", session.id)
+            .unwrap()
+            .is_empty());
+        let err = store.session_run_history("oslo", session.id).unwrap_err();
+        assert!(err.to_string().contains("different workspace"), "{err}");
+    }
+
+    #[test]
+    fn diff_contributions_snapshot_files_patch_and_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        add_sibling_workspace(&store);
+
+        let session = store
+            .create_chat_thread("berlin", "codex", "patch agent", None)
+            .unwrap();
+
+        // Give the session a touched file the same way managed sessions report
+        // one: a diff_file_change provider event, plus a real edit on disk.
+        let workspace_path = store.get_by_name("berlin").unwrap().path;
+        std::fs::write(workspace_path.join("README.md"), "demo\nedited\n").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO provider_events (
+                    identity_key, provider, chat_thread_id, phase, kind,
+                    received_sequence, occurred_at_ms, normalized_payload_json,
+                    raw_json, schema_version, adapter_version, created_at, updated_at
+                 ) VALUES ('k1', 'codex', ?1, 'turn', 'diff_file_change', 1, 0,
+                           ?2, '{}', 1, 'test', '0', '0')",
+                params![
+                    session.id,
+                    format!(
+                        "{{\"body\": \"changed {}\"}}",
+                        workspace_path.join("README.md").display()
+                    )
+                ],
+            )
+            .unwrap();
+
+        let stored = store
+            .snapshot_diff_contribution(
+                "berlin",
+                session.id,
+                &["patch may include sibling edits".to_owned()],
+                &["waiting on review".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(stored.files, vec!["README.md".to_owned()]);
+        assert_eq!(stored.still_present, vec!["README.md".to_owned()]);
+        let patch_ref = stored.patch_ref.clone().expect("patch stored");
+        let patch = std::fs::read_to_string(workspace_path.join(&patch_ref)).unwrap();
+        assert!(patch.contains("+edited"), "{patch}");
+        assert_eq!(stored.risks, vec!["patch may include sibling edits"]);
+        assert_eq!(stored.blockers, vec!["waiting on review"]);
+
+        // Snapshots upsert per session rather than accumulating rows.
+        let again = store
+            .snapshot_diff_contribution("berlin", session.id, &[], &[])
+            .unwrap();
+        assert_eq!(again.id, stored.id);
+        assert!(again.risks.is_empty());
+        assert_eq!(store.list_diff_contributions("berlin").unwrap().len(), 1);
+
+        // Stored risks surface in the PR draft.
+        let risky = store
+            .snapshot_diff_contribution(
+                "berlin",
+                session.id,
+                &["migration ordering".to_owned()],
+                &[],
+            )
+            .unwrap();
+        assert!(risky.patch_ref.is_some());
+        let (_, body) = store.draft_pull_request("berlin").unwrap();
+        assert!(body.contains("migration ordering"), "{body}");
+
+        // Scoped: another workspace cannot snapshot this session.
+        let err = store
+            .snapshot_diff_contribution("oslo", session.id, &[], &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("different workspace"), "{err}");
     }
 
     #[test]

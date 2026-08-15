@@ -6,8 +6,10 @@ import type {
   ArchcarChecksSummary,
   ContextAttachment,
   ContextKind,
+  DiffContribution,
   SessionContribution,
   SessionOverlap,
+  SessionRunRecord,
   Summary,
   Task,
   TaskStatus,
@@ -110,6 +112,19 @@ export function TasksPanel(props: { workspace: string }) {
     });
   }
 
+  async function setOwner(task: Task) {
+    const owner = window.prompt(`Who owns "${task.title}"?`, task.owner ?? "");
+    if (owner === null) return;
+    // An empty answer clears the owner (core treats blank as "no owner").
+    await update(task, { owner: owner.trim() || null });
+  }
+
+  async function setReviewNotes(task: Task) {
+    const notes = window.prompt(`Review notes for "${task.title}":`, task.review_notes);
+    if (notes === null) return;
+    await update(task, { review_notes: notes });
+  }
+
   async function remove(task: Task) {
     try {
       await send({ type: "delete_task", workspace: props.workspace, task_id: task.id });
@@ -179,6 +194,26 @@ export function TasksPanel(props: { workspace: string }) {
               <Show when={task.intended_areas.length > 0}>
                 <div class="card-meta">Areas: {task.intended_areas.join(", ")}</div>
               </Show>
+              <Show when={task.owner || task.linked_session_ids.length > 0}>
+                <div class="card-meta">
+                  {task.owner ? `Owner: ${task.owner}` : ""}
+                  {task.owner && task.linked_session_ids.length > 0 ? " · " : ""}
+                  {task.linked_session_ids.length > 0
+                    ? `Sessions: ${task.linked_session_ids.join(", ")}`
+                    : ""}
+                </div>
+              </Show>
+              <Show when={task.review_notes}>
+                <div class="card-meta">Review notes: {task.review_notes}</div>
+              </Show>
+              <div class="action-row">
+                <button class="ui-button" onClick={() => void setOwner(task)}>
+                  {task.owner ? "Change owner" : "Set owner"}
+                </button>
+                <button class="ui-button" onClick={() => void setReviewNotes(task)}>
+                  {task.review_notes ? "Edit review notes" : "Add review notes"}
+                </button>
+              </div>
             </div>
           )}
         </For>
@@ -213,6 +248,17 @@ export function SummaryPanel(props: { workspace: string }) {
         return res.summaries.find((summary) => summary.scope_type === "workspace") ?? null;
       } catch {
         return null;
+      }
+    },
+  );
+  const [storedContributions, { refetch: refetchStored }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<DiffContribution[]> => {
+      try {
+        const res = await send({ type: "list_diff_contributions", workspace: ws });
+        return res.type === "diff_contributions" ? res.contributions : [];
+      } catch {
+        return [];
       }
     },
   );
@@ -274,6 +320,27 @@ export function SummaryPanel(props: { workspace: string }) {
       }
     } catch (err) {
       setFeedback(`Save failed: ${errorText(err)}`);
+    }
+  }
+
+  async function snapshotContribution(contribution: SessionContribution) {
+    try {
+      const res = await send({
+        type: "snapshot_diff_contribution",
+        workspace: props.workspace,
+        session_id: contribution.session_id,
+      });
+      if (res.type === "diff_contribution_saved") {
+        setFeedback(
+          `Snapshotted ${contribution.title}: ${res.contribution.files.length} file(s)` +
+            (res.contribution.patch_ref ? `, patch at ${res.contribution.patch_ref}` : ""),
+        );
+      } else if (res.type === "error") {
+        setFeedback(res.message);
+      }
+      await refetchStored();
+    } catch (err) {
+      setFeedback(`Snapshot failed: ${errorText(err)}`);
     }
   }
 
@@ -354,11 +421,18 @@ export function SummaryPanel(props: { workspace: string }) {
                 >
                   Summarize
                 </button>
+                <button
+                  class="secondary-action"
+                  onClick={() => void snapshotContribution(contribution)}
+                >
+                  Snapshot diff
+                </button>
               </div>
               <div class="card-meta">
                 {contribution.provider} · {contribution.status} ·{" "}
                 {contribution.files_touched.length} file(s) touched ·{" "}
                 {contribution.still_present.length} still changed
+                <Show when={contribution.model}>{(m) => <> · model: {m()}</>}</Show>
                 <Show when={contribution.task_title}>{(t) => <> · task: {t()}</>}</Show>
               </div>
               <Show when={contribution.files_touched.length > 0}>
@@ -369,12 +443,74 @@ export function SummaryPanel(props: { workspace: string }) {
                     : ""}
                 </div>
               </Show>
+              <SessionRunHistory workspace={props.workspace} sessionId={contribution.session_id} />
+              <Show
+                when={(storedContributions() ?? []).find(
+                  (stored) => stored.session_id === contribution.session_id,
+                )}
+              >
+                {(stored) => (
+                  <div class="card-meta">
+                    Snapshot: {stored().files.length} file(s)
+                    {stored().patch_ref ? ` · patch ${stored().patch_ref}` : ""}
+                    {stored().risks.length > 0 ? ` · risks: ${stored().risks.join("; ")}` : ""}
+                    {stored().blockers.length > 0
+                      ? ` · blockers: ${stored().blockers.join("; ")}`
+                      : ""}
+                  </div>
+                )}
+              </Show>
             </div>
           )}
         </For>
       </Show>
       <TimelinePanel workspace={props.workspace} />
     </div>
+  );
+}
+
+/// On-demand run history for one session: the commands/checks/runs the daemon
+/// executed for it, from the first-class processes record.
+function SessionRunHistory(props: { workspace: string; sessionId: number }) {
+  const [open, setOpen] = createSignal(false);
+  const [runs] = createResource(
+    () => (open() ? `${props.workspace}:${props.sessionId}` : null),
+    async (): Promise<SessionRunRecord[]> => {
+      try {
+        const res = await send({
+          type: "list_session_runs",
+          workspace: props.workspace,
+          session_id: props.sessionId,
+        });
+        return res.type === "session_runs" ? res.runs : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  return (
+    <>
+      <button class="secondary-action" onClick={() => setOpen(!open())}>
+        {open() ? "Hide runs" : "Show runs"}
+      </button>
+      <Show when={open()}>
+        <Show
+          when={(runs() ?? []).length > 0}
+          fallback={
+            <div class="card-meta">{runs.loading ? "Loading…" : "No runs recorded."}</div>
+          }
+        >
+          <For each={runs()}>
+            {(run) => (
+              <div class="card-meta">
+                #{run.process_id} [{run.kind}] {run.command} — {run.status}
+                {run.exit_code != null ? ` (exit ${run.exit_code})` : ""}
+              </div>
+            )}
+          </For>
+        </Show>
+      </Show>
+    </>
   );
 }
 

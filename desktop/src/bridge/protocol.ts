@@ -55,6 +55,7 @@ export type ArchcarRequest =
   | { type: "list_checkpoints"; workspace: string }
   | { type: "create_checkpoint"; workspace: string; message: string }
   | { type: "restore_checkpoint"; workspace: string; checkpoint_id: number }
+  | { type: "compare_checkpoint"; workspace: string; checkpoint_id: number }
   | { type: "get_workspace_processes"; workspace: string }
   | { type: "list_workspace_timeline"; workspace: string }
   | { type: "list_workspace_conflicts"; workspace: string }
@@ -133,6 +134,15 @@ export type ArchcarRequest =
   | { type: "remove_context_attachment"; workspace: string; attachment_id: number }
   | { type: "list_session_contributions"; workspace: string }
   | { type: "list_session_overlaps"; workspace: string }
+  | { type: "list_session_runs"; workspace: string; session_id: number }
+  | {
+      type: "snapshot_diff_contribution";
+      workspace: string;
+      session_id: number;
+      risks?: string[];
+      blockers?: string[];
+    }
+  | { type: "list_diff_contributions"; workspace: string }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
   | { type: "close_chat_thread"; thread_id: number }
   | { type: "reopen_chat_thread"; thread_id: number }
@@ -360,6 +370,8 @@ export interface ArchcarChatThread {
   provider: string;
   title: string;
   status: string;
+  /** Explicit model the session was launched with, when recorded. */
+  model?: string | null;
   updated_at: string;
   archived_at?: string;
 }
@@ -437,6 +449,13 @@ export type ArchcarResponse =
   | { type: "todo_added"; todo: Todo }
   | { type: "checkpoints"; workspace: string; checkpoints: Checkpoint[] }
   | { type: "checkpoint_saved"; checkpoint: Checkpoint }
+  | {
+      type: "checkpoint_diff";
+      workspace: string;
+      checkpoint_id: number;
+      diff: string;
+      truncated: boolean;
+    }
   | { type: "workspace_processes"; workspace: string; text: string }
   | { type: "workspace_timeline"; workspace: string; events: ArchcarTimelineEvent[] }
   | { type: "workspace_conflicts"; workspace: string; conflicts: ArchcarWorkspaceConflict[] }
@@ -496,6 +515,9 @@ export type ArchcarResponse =
   | { type: "context_attachment_removed"; attachment_id: number }
   | { type: "session_contributions"; workspace: string; contributions: SessionContribution[] }
   | { type: "session_overlaps"; workspace: string; overlaps: SessionOverlap[] }
+  | { type: "session_runs"; workspace: string; session_id: number; runs: SessionRunRecord[] }
+  | { type: "diff_contribution_saved"; contribution: DiffContribution }
+  | { type: "diff_contributions"; workspace: string; contributions: DiffContribution[] }
   | { type: "error"; message: string };
 
 // --- Daemon service (launchd / systemd) ------------------------------------
@@ -543,6 +565,12 @@ export interface BackgroundTask {
   updated_at: string;
 }
 
+export interface BackgroundAgentSpec {
+  provider: string;
+  /** Prompt for this agent; defaults to the task prompt when omitted. */
+  prompt?: string;
+}
+
 export interface StartBackgroundTaskInput {
   repository: string;
   prompt: string;
@@ -554,6 +582,8 @@ export interface StartBackgroundTaskInput {
   run_checks: boolean;
   open_pr: boolean;
   draft_pr: boolean;
+  /** Extra agents to run in the same workspace beyond the primary provider. */
+  extra_agents?: BackgroundAgentSpec[];
 }
 
 // --- Workspace intelligence records ---------------------------------------
@@ -573,8 +603,14 @@ export interface Task {
   body: string;
   status: TaskStatus;
   owner_session_id?: number | null;
+  /** Human owner (name/handle), distinct from the owning agent session. */
+  owner?: string | null;
   intended_areas: string[];
   blocked_reason?: string | null;
+  /** Notes left for/by the reviewer of this task's work. */
+  review_notes: string;
+  /** Sessions attached to this task via their `task_id`. */
+  linked_session_ids: number[];
   created_at: string;
   updated_at: string;
 }
@@ -586,9 +622,12 @@ export interface TaskUpdate {
   status?: TaskStatus;
   /** `null` detaches the owning session. */
   owner_session_id?: number | null;
+  /** `null` (or an empty string) clears the human owner. */
+  owner?: string | null;
   intended_areas?: string[];
   /** `null` clears the blocked reason. */
   blocked_reason?: string | null;
+  review_notes?: string;
 }
 
 export interface Summary {
@@ -617,6 +656,8 @@ export interface SessionContribution {
   session_id: number;
   title: string;
   provider: string;
+  /** Explicit model the session was launched with, when recorded. */
+  model?: string | null;
   status: string;
   task_id?: number | null;
   task_title?: string | null;
@@ -636,6 +677,33 @@ export interface SessionOverlap {
   paths: string[];
 }
 
+/** Durable snapshot of one session's diff contribution. */
+export interface DiffContribution {
+  id: number;
+  workspace_id: number;
+  session_id: number;
+  files: string[];
+  still_present: string[];
+  /** Workspace-relative path of the stored patch, when one existed. */
+  patch_ref?: string | null;
+  commands: string[];
+  risks: string[];
+  blockers: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** One command/check/run the daemon executed for a session. */
+export interface SessionRunRecord {
+  process_id: number;
+  kind: string;
+  command: string;
+  status: string;
+  exit_code?: number | null;
+  started_at: string;
+  ended_at?: string | null;
+}
+
 // --- Events (streamed after `subscribe`) -----------------------------------
 export type ArchcarEvent =
   | { type: "session_spawn_queued"; workspace: string; kind: SessionKind }
@@ -649,6 +717,7 @@ export type ArchcarEvent =
   | { type: "session_error"; session_id?: number; thread_id?: number; message: string }
   | { type: "provider_interaction_requested"; interaction: ProviderInteractionRecord }
   | { type: "provider_interaction_resolved"; interaction: ProviderInteractionRecord }
+  | { type: "background_task_updated"; task: BackgroundTask }
   | { type: string; [k: string]: unknown };
 
 // Agent-driven interaction (permission / question / plan approval) surfaced to
