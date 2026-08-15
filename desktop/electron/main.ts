@@ -239,10 +239,30 @@ ipcMain.handle(
     const address = config?.address?.trim();
     const token = config?.token?.trim();
     if (!address || !token) return { ok: false, error: "address and token are required" };
+    // The env override would make the verification below hit the env remote,
+    // not the profile being saved — a success would be a lie.
+    if (process.env.ARCHDUCTOR_ARCHCAR_REMOTE?.trim()) {
+      return {
+        ok: false,
+        error:
+          "ARCHDUCTOR_ARCHCAR_REMOTE is set and overrides the profile; unset it to configure the connection here",
+      };
+    }
+    // Keep the previous profile so a typo doesn't destroy a working remote
+    // connection — restore it if the new daemon is unreachable.
+    let previous: string | null = null;
+    try {
+      previous = fs.readFileSync(remoteProfilePath(), "utf8");
+    } catch {
+      previous = null;
+    }
+    const restore = () => {
+      if (previous === null) fs.rmSync(remoteProfilePath(), { force: true });
+      else fs.writeFileSync(remoteProfilePath(), previous, { mode: 0o600 });
+    };
     try {
       // Persist, then verify through the bridge (it re-reads the profile per
-      // connection); roll the file back if the daemon is unreachable so a typo
-      // doesn't strand the app offline.
+      // connection).
       fs.mkdirSync(path.dirname(remoteProfilePath()), { recursive: true });
       fs.writeFileSync(remoteProfilePath(), JSON.stringify({ address, token }, null, 2) + "\n", {
         mode: 0o600,
@@ -251,7 +271,7 @@ ipcMain.handle(
         type: "get_remote_access",
       });
       if (res.type === "error") {
-        fs.rmSync(remoteProfilePath(), { force: true });
+        restore();
         return { ok: false, error: res.message ?? "remote daemon refused the connection" };
       }
       logLine("remote", `connected to archcar at ${address}`);
@@ -260,7 +280,7 @@ ipcMain.handle(
       bridge.close();
       return { ok: true, address };
     } catch (err) {
-      fs.rmSync(remoteProfilePath(), { force: true });
+      restore();
       return { ok: false, error: (err as Error).message };
     }
   },

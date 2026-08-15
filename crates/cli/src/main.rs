@@ -2701,11 +2701,8 @@ fn run_cli() -> Result<()> {
                     }
                     _ => println!("local daemon ({})", paths.archcar_endpoint_path().display()),
                 }
-                if env_remote.is_none() {
-                    if let Some(profile) = remote::load_profile(&paths)? {
-                        println!("profile file: {}", remote::profile_path(&paths).display());
-                        let _ = profile;
-                    }
+                if env_remote.is_none() && remote::load_profile(&paths)?.is_some() {
+                    println!("profile file: {}", remote::profile_path(&paths).display());
                 }
             }
             RemoteCommand::Disconnect => {
