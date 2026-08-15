@@ -2535,9 +2535,16 @@ fn start_background_task(
             drop(guard);
             ArchcarResponse::BackgroundTaskSaved { task }
         }
-        Err(err) => ArchcarResponse::Error {
-            message: err.to_string(),
-        },
+        Err(err) => {
+            // The agents are already launched with prompts queued. Leaving
+            // them running against a task stuck in `pending` would be
+            // unsupervised work — stop them and land the failure on the task
+            // row like every earlier startup error.
+            abort_background_agents(state, &thread_ids);
+            fail(format!(
+                "started its agents but could not record them: {err}"
+            ))
+        }
     }
 }
 
