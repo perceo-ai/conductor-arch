@@ -1,4 +1,9 @@
-import type { ArchcarEvent, ChatSnapshot, ProviderInteractionRecord } from "@/bridge/protocol";
+import type {
+  ArchcarEvent,
+  BackgroundTask,
+  ChatSnapshot,
+  ProviderInteractionRecord,
+} from "@/bridge/protocol";
 import { send } from "@/bridge/client";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
@@ -144,6 +149,25 @@ export function applyEvent(event: ArchcarEvent) {
     case "session_error": {
       const e = event as { thread_id?: number; message: string };
       if (e.thread_id != null) chatStore.setPhase(e.thread_id, { kind: "failed", message: e.message });
+      break;
+    }
+
+    case "background_task_updated": {
+      // Notify when a background task settles — the user may be away; that is
+      // the point of background work. Non-terminal advances stay silent.
+      const task = (event as { task: BackgroundTask }).task;
+      if (task.status === "ready" || task.status === "failed") {
+        const title =
+          task.status === "ready" ? "Background task ready" : "Background task failed";
+        const body = `#${task.id} ${task.title}${task.workspace_name ? ` (${task.workspace_name})` : ""}: ${task.detail || task.error || task.status}`;
+        try {
+          if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
+            new Notification(title, { body });
+          }
+        } catch {
+          // Notifications are best-effort; the dashboard strip still updates.
+        }
+      }
       break;
     }
 

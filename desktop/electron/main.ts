@@ -5,7 +5,7 @@ import fs from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { ArchcarBridge } from "./archcar.js";
+import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
 
 const execFileP = promisify(execFile);
 
@@ -212,6 +212,69 @@ async function startSubscription() {
 ipcMain.handle("archcar:subscribe", async () => {
   await startSubscription();
   return { ok: true };
+});
+
+// --- Remote daemon configuration (server-hosted execution) -----------------
+// The profile file is shared with the CLI (`archductor remote connect`), so
+// either surface can point this machine at a server-hosted archcar. The token
+// never crosses to the renderer on read.
+
+ipcMain.handle("archcar:remote-get", async () => {
+  try {
+    const envAddress = process.env.ARCHDUCTOR_ARCHCAR_REMOTE?.trim();
+    const config = loadRemoteConfig();
+    return {
+      ok: true,
+      address: config?.address ?? null,
+      source: config ? (envAddress ? "environment" : "profile") : null,
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle(
+  "archcar:remote-set",
+  async (_evt, config: { address?: string; token?: string } | undefined) => {
+    const address = config?.address?.trim();
+    const token = config?.token?.trim();
+    if (!address || !token) return { ok: false, error: "address and token are required" };
+    try {
+      // Persist, then verify through the bridge (it re-reads the profile per
+      // connection); roll the file back if the daemon is unreachable so a typo
+      // doesn't strand the app offline.
+      fs.mkdirSync(path.dirname(remoteProfilePath()), { recursive: true });
+      fs.writeFileSync(remoteProfilePath(), JSON.stringify({ address, token }, null, 2) + "\n", {
+        mode: 0o600,
+      });
+      const res = await bridge.request<{ type: string }, { type: string; message?: string }>({
+        type: "get_remote_access",
+      });
+      if (res.type === "error") {
+        fs.rmSync(remoteProfilePath(), { force: true });
+        return { ok: false, error: res.message ?? "remote daemon refused the connection" };
+      }
+      logLine("remote", `connected to archcar at ${address}`);
+      // Drop the local event stream; the auto-reconnect resubscribes against
+      // the new endpoint because open() re-reads the profile.
+      bridge.close();
+      return { ok: true, address };
+    } catch (err) {
+      fs.rmSync(remoteProfilePath(), { force: true });
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+);
+
+ipcMain.handle("archcar:remote-clear", async () => {
+  try {
+    fs.rmSync(remoteProfilePath(), { force: true });
+    logLine("remote", "cleared remote profile; using the local daemon");
+    bridge.close();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
 });
 
 // Native folder picker for path/destination fields in the Add project dialog.

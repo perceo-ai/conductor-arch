@@ -58,6 +58,20 @@ const api = {
   openExternal: (target: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("shell:open-external", target),
 
+  /** Current remote-daemon connection (address only; the token stays in main). */
+  remoteGet: (): Promise<
+    { ok: true; address: string | null; source: "environment" | "profile" | null } | { ok: false; error: string }
+  > => ipcRenderer.invoke("archcar:remote-get"),
+
+  /** Point the app (and this machine's CLI) at a server-hosted daemon. */
+  remoteSet: (config: { address: string; token: string }): Promise<
+    { ok: true; address: string } | { ok: false; error: string }
+  > => ipcRenderer.invoke("archcar:remote-set", config),
+
+  /** Clear the remote profile and go back to the local daemon. */
+  remoteClear: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("archcar:remote-clear"),
+
   /** Check the latest published GitHub release; install remains manual. */
   checkForUpdates: (): Promise<
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }

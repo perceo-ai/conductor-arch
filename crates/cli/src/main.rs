@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::client::{
+    configured_remote_endpoint, ArchcarClient, ArchcarEndpoint,
+};
 use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
@@ -7,7 +9,7 @@ use archductor_core::archcar::protocol::{
 };
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
-use archductor_core::background_tasks::StartBackgroundTask;
+use archductor_core::background_tasks::{BackgroundAgentSpec, StartBackgroundTask};
 use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use archductor_core::paths::AppPaths;
@@ -150,6 +152,30 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Point this machine's Archductor clients at a server-hosted daemon.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RemoteCommand {
+    /// Save a remote daemon profile (and verify the daemon responds).
+    Connect {
+        /// `host:port` of the remote archcar TCP listener.
+        address: String,
+        /// Access token (print it on the server with `archductor service token`).
+        #[arg(long)]
+        token: String,
+        /// Save the profile without contacting the daemon.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Show where archcar requests from this machine currently go.
+    Status,
+    /// Remove the saved remote profile and use the local daemon again.
+    Disconnect,
 }
 
 #[derive(Debug, Subcommand)]
@@ -390,6 +416,11 @@ enum ArchcarCommand {
         workspace: String,
         checkpoint_id: i64,
     },
+    /// Diff a checkpoint against the current working tree.
+    CheckpointDiff {
+        workspace: String,
+        checkpoint_id: i64,
+    },
     /// Print the processes text (setups/runs/checks/sessions) for a workspace.
     Processes {
         workspace: String,
@@ -477,6 +508,10 @@ enum ArchcarCommand {
         /// Open the pull request ready for review instead of as a draft.
         #[arg(long)]
         ready_pr: bool,
+        /// Extra agent to run in the same workspace, as `provider` or
+        /// `provider=prompt` (repeatable). Prompt defaults to the task prompt.
+        #[arg(long = "agent")]
+        agents: Vec<String>,
     },
     /// List background development tasks.
     BackgroundTasks {
@@ -537,8 +572,14 @@ enum ArchcarCommand {
         status: Option<String>,
         #[arg(long)]
         owner_session: Option<i64>,
+        /// Human owner name/handle; pass an empty string to clear.
+        #[arg(long)]
+        owner: Option<String>,
         #[arg(long)]
         blocked_reason: Option<String>,
+        /// Reviewer notes for this task.
+        #[arg(long)]
+        review_notes: Option<String>,
         #[arg(long = "area")]
         areas: Vec<String>,
     },
@@ -618,6 +659,26 @@ enum ArchcarCommand {
     },
     /// List overlapping agent sessions in a workspace.
     Overlaps {
+        workspace: String,
+    },
+    /// List the commands/checks/runs executed for one agent session.
+    SessionRuns {
+        workspace: String,
+        session_id: i64,
+    },
+    /// Persist a durable snapshot of one session's diff contribution.
+    SnapshotContribution {
+        workspace: String,
+        session_id: i64,
+        /// Known risks to record with the snapshot (repeatable).
+        #[arg(long = "risk")]
+        risks: Vec<String>,
+        /// Blocker details to record with the snapshot (repeatable).
+        #[arg(long = "blocker")]
+        blockers: Vec<String>,
+    },
+    /// List the stored per-session diff contributions in a workspace.
+    DiffContributions {
         workspace: String,
     },
 }
@@ -1017,6 +1078,11 @@ enum CheckpointCommand {
     },
     List {
         workspace: String,
+    },
+    /// Diff a checkpoint against the current working tree.
+    Compare {
+        workspace: String,
+        id: i64,
     },
     Restore {
         workspace: String,
@@ -1501,7 +1567,21 @@ fn run_cli() -> Result<()> {
                     no_checks,
                     open_pr,
                     ready_pr,
+                    agents,
                 } => {
+                    let extra_agents = agents
+                        .into_iter()
+                        .map(|spec| match spec.split_once('=') {
+                            Some((provider, prompt)) => BackgroundAgentSpec {
+                                provider: provider.trim().to_owned(),
+                                prompt: Some(prompt.trim().to_owned()),
+                            },
+                            None => BackgroundAgentSpec {
+                                provider: spec.trim().to_owned(),
+                                prompt: None,
+                            },
+                        })
+                        .collect();
                     print_archcar_response(client.send(ArchcarRequest::StartBackgroundTask {
                         input: StartBackgroundTask {
                             repository,
@@ -1514,6 +1594,7 @@ fn run_cli() -> Result<()> {
                             run_checks: !no_checks,
                             open_pr,
                             draft_pr: !ready_pr,
+                            extra_agents,
                         },
                     })?);
                 }
@@ -1598,7 +1679,9 @@ fn run_cli() -> Result<()> {
                     body,
                     status,
                     owner_session,
+                    owner,
                     blocked_reason,
+                    review_notes,
                     areas,
                 } => {
                     let update = TaskUpdate {
@@ -1606,8 +1689,10 @@ fn run_cli() -> Result<()> {
                         body,
                         status,
                         owner_session_id: owner_session.map(Some),
+                        owner: owner.map(Some),
                         intended_areas: (!areas.is_empty()).then_some(areas),
                         blocked_reason: blocked_reason.map(Some),
+                        review_notes,
                     };
                     print_archcar_response(client.send(ArchcarRequest::UpdateTask {
                         workspace,
@@ -1720,6 +1805,35 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::ListSessionContributions { workspace })?,
                     );
                 }
+                ArchcarCommand::SessionRuns {
+                    workspace,
+                    session_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::ListSessionRuns {
+                        workspace,
+                        session_id,
+                    })?);
+                }
+                ArchcarCommand::SnapshotContribution {
+                    workspace,
+                    session_id,
+                    risks,
+                    blockers,
+                } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::SnapshotDiffContribution {
+                            workspace,
+                            session_id,
+                            risks,
+                            blockers,
+                        },
+                    )?);
+                }
+                ArchcarCommand::DiffContributions { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListDiffContributions { workspace })?,
+                    );
+                }
                 ArchcarCommand::Overlaps { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListSessionOverlaps { workspace })?,
@@ -1745,6 +1859,15 @@ fn run_cli() -> Result<()> {
                     checkpoint_id,
                 } => {
                     print_archcar_response(client.send(ArchcarRequest::RestoreCheckpoint {
+                        workspace,
+                        checkpoint_id,
+                    })?);
+                }
+                ArchcarCommand::CheckpointDiff {
+                    workspace,
+                    checkpoint_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::CompareCheckpoint {
                         workspace,
                         checkpoint_id,
                     })?);
@@ -2535,6 +2658,70 @@ fn run_cli() -> Result<()> {
                 eprintln!("stored in {}", remote::token_path(&paths).display());
             }
         },
+        Command::Remote { command } => match command {
+            RemoteCommand::Connect {
+                address,
+                token,
+                no_verify,
+            } => {
+                let address = address.trim().to_owned();
+                let token = token.trim().to_owned();
+                if !no_verify {
+                    let client = ArchcarClient::remote(address.clone(), token.clone());
+                    match client.send(ArchcarRequest::GetRemoteAccess)? {
+                        ArchcarResponse::Error { message } => {
+                            anyhow::bail!("remote daemon at {address} refused: {message}")
+                        }
+                        _ => println!("Verified archcar at {address}."),
+                    }
+                }
+                remote::save_profile(
+                    &paths,
+                    &remote::RemoteProfile {
+                        address: address.clone(),
+                        token,
+                    },
+                )?;
+                println!("Connected: this machine's Archductor clients now use {address}.");
+                println!("Profile: {}", remote::profile_path(&paths).display());
+                println!("Disconnect with `archductor remote disconnect`.");
+            }
+            RemoteCommand::Status => {
+                let env_remote = std::env::var(remote::REMOTE_ENV)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty());
+                match configured_remote_endpoint(&paths)? {
+                    Some(ArchcarEndpoint::Remote { address, .. }) => {
+                        let source = if env_remote.is_some() {
+                            "environment"
+                        } else {
+                            "saved profile"
+                        };
+                        println!("remote {address} (from {source})");
+                    }
+                    _ => println!("local daemon ({})", paths.archcar_endpoint_path().display()),
+                }
+                if env_remote.is_none() {
+                    if let Some(profile) = remote::load_profile(&paths)? {
+                        println!("profile file: {}", remote::profile_path(&paths).display());
+                        let _ = profile;
+                    }
+                }
+            }
+            RemoteCommand::Disconnect => {
+                if remote::clear_profile(&paths)? {
+                    println!("Removed the remote profile; using the local daemon.");
+                } else {
+                    println!("No remote profile was set.");
+                }
+                if std::env::var(remote::REMOTE_ENV).is_ok() {
+                    println!(
+                        "Note: {} is set in this environment and still overrides the local daemon.",
+                        remote::REMOTE_ENV
+                    );
+                }
+            }
+        },
         Command::Review { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             match command {
@@ -2607,6 +2794,17 @@ fn run_cli() -> Result<()> {
                 CheckpointCommand::List { workspace } => {
                     for cp in store.checkpoint_list(&workspace)? {
                         println!("#{}\t{}\t{}", cp.id, cp.created_at, cp.message);
+                    }
+                }
+                CheckpointCommand::Compare { workspace, id } => {
+                    let (diff, truncated) = store.checkpoint_compare(&workspace, id)?;
+                    if diff.trim().is_empty() {
+                        println!("No differences between checkpoint #{id} and the working tree.");
+                    } else {
+                        println!("{diff}");
+                        if truncated {
+                            println!("[diff truncated]");
+                        }
                     }
                 }
                 CheckpointCommand::Restore { workspace, id } => {
@@ -3163,11 +3361,31 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Tasks { workspace, tasks } => {
             println!("tasks workspace={workspace} count={}", tasks.len());
             for task in tasks {
+                let sessions = if task.linked_session_ids.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (sessions: {})",
+                        task.linked_session_ids
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                };
+                let review = if task.review_notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (review: {})", task.review_notes)
+                };
                 println!(
-                    "#{} [{}] {}{}",
+                    "#{} [{}] {}{}{sessions}{}{review}",
                     task.id,
                     task.status,
                     task.title,
+                    task.owner
+                        .map(|owner| format!(" (owner: {owner})"))
+                        .unwrap_or_default(),
                     task.blocked_reason
                         .map(|reason| format!(" (blocked: {reason})"))
                         .unwrap_or_default()
@@ -3247,12 +3465,16 @@ fn print_archcar_response(response: ArchcarResponse) {
             );
             for contribution in contributions {
                 println!(
-                    "session {} [{}] {} — {} file(s), {} still changed{}",
+                    "session {} [{}] {} — {} file(s), {} still changed{}{}",
                     contribution.session_id,
                     contribution.status,
                     contribution.title,
                     contribution.files_touched.len(),
                     contribution.still_present.len(),
+                    contribution
+                        .model
+                        .map(|model| format!(" model={model}"))
+                        .unwrap_or_default(),
                     contribution
                         .task_title
                         .map(|title| format!(" task={title}"))
@@ -3274,6 +3496,80 @@ fn print_archcar_response(response: ArchcarResponse) {
                     overlap.session_id,
                     overlap.other_session_id,
                     overlap.paths.join(", ")
+                );
+            }
+        }
+        ArchcarResponse::SessionRuns {
+            workspace,
+            session_id,
+            runs,
+        } => {
+            println!(
+                "session_runs workspace={workspace} session={session_id} count={}",
+                runs.len()
+            );
+            for run in runs {
+                println!(
+                    "#{} [{}] {} — {}{}",
+                    run.process_id,
+                    run.kind,
+                    run.command,
+                    run.status,
+                    run.exit_code
+                        .map(|code| format!(" (exit {code})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        ArchcarResponse::CheckpointDiff {
+            workspace,
+            checkpoint_id,
+            diff,
+            truncated,
+        } => {
+            println!("checkpoint_diff workspace={workspace} checkpoint={checkpoint_id}");
+            if diff.trim().is_empty() {
+                println!("No differences from the working tree.");
+            } else {
+                println!("{diff}");
+                if truncated {
+                    println!("[diff truncated]");
+                }
+            }
+        }
+        ArchcarResponse::DiffContributionSaved { contribution } => {
+            println!(
+                "diff_contribution_saved session={} files={} patch={}",
+                contribution.session_id,
+                contribution.files.len(),
+                contribution.patch_ref.as_deref().unwrap_or("-")
+            );
+        }
+        ArchcarResponse::DiffContributions {
+            workspace,
+            contributions,
+        } => {
+            println!(
+                "diff_contributions workspace={workspace} count={}",
+                contributions.len()
+            );
+            for contribution in contributions {
+                let risks = if contribution.risks.is_empty() {
+                    String::new()
+                } else {
+                    format!(", risks: {}", contribution.risks.join("; "))
+                };
+                let blockers = if contribution.blockers.is_empty() {
+                    String::new()
+                } else {
+                    format!(", blockers: {}", contribution.blockers.join("; "))
+                };
+                println!(
+                    "session {} — {} file(s), {} still changed, patch={}{risks}{blockers}",
+                    contribution.session_id,
+                    contribution.files.len(),
+                    contribution.still_present.len(),
+                    contribution.patch_ref.as_deref().unwrap_or("-")
                 );
             }
         }

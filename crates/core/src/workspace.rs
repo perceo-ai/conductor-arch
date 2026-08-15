@@ -749,6 +749,9 @@ pub struct ChatThreadRecord {
     pub status: String,
     pub native_thread_id: Option<String>,
     pub harness_metadata: Option<String>,
+    /// First-class model column, derived from the harness metadata when the
+    /// session was launched with an explicit model.
+    pub model: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,
@@ -5183,6 +5186,23 @@ mutation($threadId: ID!) {{
         Ok(rows)
     }
 
+    /// Unified diff between a checkpoint and the current working tree — the
+    /// user-facing "compare checkpoint to current branch" workflow. Returns
+    /// the diff and whether it was truncated.
+    pub fn checkpoint_compare(&self, name: &str, checkpoint_id: i64) -> Result<(String, bool)> {
+        let workspace = self.get_by_name(name)?;
+        let checkpoint = self.get_checkpoint(checkpoint_id)?;
+        anyhow::ensure!(
+            checkpoint.workspace_id == workspace.id,
+            "checkpoint {checkpoint_id} does not belong to workspace {name}"
+        );
+        let raw = diff_worktree_against_ref(&workspace, &checkpoint.git_ref)?;
+        Ok(truncate_text_at_char_boundary(
+            raw,
+            TURN_CHECKPOINT_DIFF_MAX_BYTES,
+        ))
+    }
+
     pub fn checkpoint_restore(&self, name: &str, checkpoint_id: i64) -> Result<Checkpoint> {
         let workspace = self.get_by_name(name)?;
         let checkpoint = self.get_checkpoint(checkpoint_id)?;
@@ -6233,7 +6253,7 @@ mutation($threadId: ID!) {{
     ) -> Result<Vec<LocalChatThreadRow>> {
         let mut sql = String::from(
             "SELECT t.id, t.workspace_id, t.provider, t.title, t.status, t.native_thread_id,
-                    t.harness_metadata, t.created_at, t.updated_at, t.archived_at,
+                    t.harness_metadata, t.created_at, t.updated_at, t.archived_at, t.model,
                     r.name, w.name, w.path
              FROM chat_threads t
              JOIN workspaces w ON w.id = t.workspace_id
@@ -6507,9 +6527,16 @@ mutation($threadId: ID!) {{
         let now = timestamp();
         self.conn.execute(
             "INSERT INTO chat_threads (
-                workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
-             ) VALUES (?1, ?2, ?3, 'active', NULL, ?4, ?5, ?5, NULL)",
-            params![workspace.id, provider, title, harness_metadata, now],
+                workspace_id, provider, title, status, native_thread_id, harness_metadata, model, created_at, updated_at, archived_at
+             ) VALUES (?1, ?2, ?3, 'active', NULL, ?4, ?5, ?6, ?6, NULL)",
+            params![
+                workspace.id,
+                provider,
+                title,
+                harness_metadata,
+                model_from_harness_metadata(harness_metadata),
+                now
+            ],
         )?;
         self.get_chat_thread(self.conn.last_insert_rowid())
     }
@@ -6522,9 +6549,14 @@ mutation($threadId: ID!) {{
         let now = timestamp();
         self.conn.execute(
             "UPDATE chat_threads
-             SET harness_metadata = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![harness_metadata, now, thread_id],
+             SET harness_metadata = ?1, model = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![
+                harness_metadata,
+                model_from_harness_metadata(harness_metadata),
+                now,
+                thread_id
+            ],
         )?;
         self.get_chat_thread(thread_id)
     }
@@ -6532,7 +6564,7 @@ mutation($threadId: ID!) {{
     pub fn list_chat_threads(&self, workspace_name: &str) -> Result<Vec<ChatThreadRecord>> {
         let workspace = self.get_by_name(workspace_name)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
+            "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at, model
              FROM chat_threads
              WHERE workspace_id = ?1 AND status != 'closed'
              ORDER BY updated_at DESC, id DESC",
@@ -7819,7 +7851,7 @@ mutation($threadId: ID!) {{
     fn get_chat_thread(&self, id: i64) -> Result<ChatThreadRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
+                "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at, model
                  FROM chat_threads WHERE id = ?1",
                 [id],
                 row_to_chat_thread,
@@ -8867,9 +8899,9 @@ fn row_to_local_chat_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lo
 fn row_to_local_chat_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalChatThreadRow> {
     Ok(LocalChatThreadRow {
         thread: row_to_chat_thread(row)?,
-        repository_name: row.get(10)?,
-        workspace_name: row.get(11)?,
-        workspace_path: PathBuf::from(row.get::<_, String>(12)?),
+        repository_name: row.get(11)?,
+        workspace_name: row.get(12)?,
+        workspace_path: PathBuf::from(row.get::<_, String>(13)?),
     })
 }
 
@@ -8885,6 +8917,17 @@ fn row_to_chat_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatThreadRec
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         archived_at: row.get(9)?,
+        model: row.get(10)?,
+    })
+}
+
+/// Extract the explicit model from a `key=value;key=value` harness-metadata
+/// line, so sessions carry their model as a first-class column.
+pub fn model_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
+    metadata?.split(';').find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        let value = value.trim();
+        (key.trim() == "model" && !value.is_empty()).then(|| value.to_owned())
     })
 }
 
@@ -21579,6 +21622,61 @@ spotlight_testing = true
         let list = store.checkpoint_list("berlin").unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, cp.id);
+    }
+
+    #[test]
+    fn checkpoint_compare_diffs_checkpoint_against_current_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        let cp = store
+            .checkpoint_create("berlin", "before edit", None)
+            .unwrap();
+        let (diff, truncated) = store.checkpoint_compare("berlin", cp.id).unwrap();
+        assert!(
+            diff.trim().is_empty(),
+            "clean tree should diff empty: {diff}"
+        );
+        assert!(!truncated);
+
+        std::fs::write(workspace.path.join("README.md"), "demo\ncompare me\n").unwrap();
+        let (diff, _) = store.checkpoint_compare("berlin", cp.id).unwrap();
+        assert!(diff.contains("+compare me"), "{diff}");
+
+        // A checkpoint from another workspace is refused.
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "oslo".to_owned(),
+                branch: "lc/oslo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let err = store.checkpoint_compare("oslo", cp.id).unwrap_err();
+        assert!(err.to_string().contains("does not belong"), "{err}");
     }
 
     #[test]

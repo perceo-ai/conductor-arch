@@ -129,6 +129,30 @@ export function CheckpointsPanel(props: { workspace: string }) {
     }
   }
 
+  const [compareDiff, setCompareDiff] = createSignal<{ id: number; diff: string } | null>(null);
+
+  async function compare(id: number) {
+    // Toggle off when the same checkpoint's diff is already open.
+    if (compareDiff()?.id === id) {
+      setCompareDiff(null);
+      return;
+    }
+    try {
+      const res = await send({ type: "compare_checkpoint", workspace: props.workspace, checkpoint_id: id });
+      if (res.type === "checkpoint_diff") {
+        const body = res.diff.trim()
+          ? res.diff + (res.truncated ? "\n[diff truncated]" : "")
+          : "No differences from the working tree.";
+        setCompareDiff({ id, diff: body });
+        setFeedback("");
+      } else if (res.type === "error") {
+        setFeedback(res.message);
+      }
+    } catch (err) {
+      setFeedback(`Compare checkpoint failed: ${(err as Error).message}`);
+    }
+  }
+
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Checkpoints</div>
@@ -155,17 +179,25 @@ export function CheckpointsPanel(props: { workspace: string }) {
       >
         <For each={checkpoints()}>
           {(c) => (
-            <div class="action-row">
-              <span class="detail-value" style={{ flex: "1 1 auto" }}>
-                #{c.id} {c.created_at} - {c.message}
-              </span>
-              <button class="secondary-action" onClick={() => void restore(c.id)}>
-                Restore
-              </button>
-              <button class="ui-button-destructive" onClick={() => void remove(c.id)}>
-                Delete
-              </button>
-            </div>
+            <>
+              <div class="action-row">
+                <span class="detail-value" style={{ flex: "1 1 auto" }}>
+                  #{c.id} {c.created_at} - {c.message}
+                </span>
+                <button class="secondary-action" onClick={() => void compare(c.id)}>
+                  {compareDiff()?.id === c.id ? "Hide diff" : "Compare"}
+                </button>
+                <button class="secondary-action" onClick={() => void restore(c.id)}>
+                  Restore
+                </button>
+                <button class="ui-button-destructive" onClick={() => void remove(c.id)}>
+                  Delete
+                </button>
+              </div>
+              <Show when={compareDiff()?.id === c.id}>
+                <pre class="ws-run-prompt">{compareDiff()?.diff}</pre>
+              </Show>
+            </>
           )}
         </For>
       </Show>

@@ -60,6 +60,87 @@ function connectOnce(endpoint: string): Promise<net.Socket> {
   });
 }
 
+// --- Remote daemon (server-hosted execution) --------------------------------
+// Mirrors crates/core/src/archcar/{remote,client}.rs: the environment
+// (ARCHDUCTOR_ARCHCAR_REMOTE + ARCHDUCTOR_ARCHCAR_TOKEN) wins, then the
+// remote profile the CLI writes with `archductor remote connect`
+// (state/remote.json), then the local daemon. The profile file is shared with
+// core so one `remote connect` moves every client on this machine.
+
+export interface RemoteConfig {
+  address: string;
+  token: string;
+}
+
+export function remoteProfilePath(): string {
+  return path.join(stateDir(), "remote.json");
+}
+
+/** Pure resolution (exported for tests): env beats profile beats local. */
+export function resolveRemoteConfig(
+  env: Record<string, string | undefined>,
+  readProfile: () => string | null,
+  readLocalToken: () => string | null,
+): RemoteConfig | null {
+  const address = env.ARCHDUCTOR_ARCHCAR_REMOTE?.trim();
+  if (address) {
+    const token = env.ARCHDUCTOR_ARCHCAR_TOKEN?.trim() || readLocalToken()?.trim();
+    if (!token) {
+      throw new Error(
+        "ARCHDUCTOR_ARCHCAR_REMOTE is set but no token was found; set ARCHDUCTOR_ARCHCAR_TOKEN",
+      );
+    }
+    return { address, token };
+  }
+  const raw = readProfile();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { address?: string; token?: string };
+    const parsedAddress = parsed.address?.trim();
+    const parsedToken = parsed.token?.trim();
+    if (parsedAddress && parsedToken) return { address: parsedAddress, token: parsedToken };
+  } catch {
+    // A malformed profile falls back to the local daemon rather than wedging
+    // the app; `remote connect` rewrites it.
+  }
+  return null;
+}
+
+export function loadRemoteConfig(): RemoteConfig | null {
+  const readFile = (p: string): string | null => {
+    try {
+      return fs.readFileSync(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return resolveRemoteConfig(
+    process.env,
+    () => readFile(remoteProfilePath()),
+    () => readFile(path.join(stateDir(), "archcar.token")),
+  );
+}
+
+/** Connect to a remote archcar: TCP, then the token line before any framing. */
+function connectRemote(config: RemoteConfig): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    // The daemon binds host:port; the last colon splits hostname from port.
+    const sep = config.address.lastIndexOf(":");
+    if (sep <= 0) {
+      reject(new Error(`remote archcar address must be host:port, got ${config.address}`));
+      return;
+    }
+    const host = config.address.slice(0, sep);
+    const port = Number(config.address.slice(sep + 1));
+    const socket = net.createConnection({ host, port });
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      socket.write(`${config.token}\n`);
+      resolve(socket);
+    });
+  });
+}
+
 // Windows transport (mirrors transport.rs::connect on Windows): the `.endpoint`
 // file holds "host:port\n<token>\n". Connect over loopback TCP and send the
 // token line before any framing so the sidecar authenticates the connection.
@@ -187,10 +268,21 @@ export class ArchcarBridge {
     return this.endpoint;
   }
 
-  async request<Req, Res>(payload: Req): Promise<Res> {
+  /**
+   * Open one connection: a configured remote daemon (never spawns a sidecar),
+   * or the local endpoint (spawning archcar if needed). Remote config is
+   * re-read per connection so a settings change applies without a restart.
+   */
+  private async open(): Promise<net.Socket> {
+    const remote = loadRemoteConfig();
+    if (remote) return connectRemote(remote);
     const endpoint = this.resolveEndpoint();
     await ensureDaemon(endpoint);
-    const socket = await connectOnce(endpoint);
+    return connectOnce(endpoint);
+  }
+
+  async request<Req, Res>(payload: Req): Promise<Res> {
+    const socket = await this.open();
     const envelope: RpcEnvelope<Req> = { id: randomUUID(), payload };
     return new Promise<Res>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -223,9 +315,7 @@ export class ArchcarBridge {
 
   /** Open the persistent event stream. `onEvent` fires for each ArchcarEvent. */
   async subscribe(onEvent: (event: unknown) => void, onClose: () => void): Promise<void> {
-    const endpoint = this.resolveEndpoint();
-    await ensureDaemon(endpoint);
-    const socket = await connectOnce(endpoint);
+    const socket = await this.open();
     this.subSocket = socket;
     const envelope: RpcEnvelope<{ type: "subscribe" }> = {
       id: randomUUID(),

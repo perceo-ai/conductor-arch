@@ -313,12 +313,24 @@ fn tick_background_tasks(
     let busy = busy_agent_workspaces(state);
     let live = workspaces_with_live_sessions(state);
     let store = WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)?;
-    store.tick_background_tasks_with(|workspace| {
+    let advanced = store.tick_background_tasks_with(|workspace| {
         if live.contains(workspace) {
             return busy.contains(workspace);
         }
         store.workspace_has_active_agent(workspace).unwrap_or(false)
-    })
+    })?;
+    // Every advance is broadcast so clients can refresh their strips and
+    // notify the user when a task reaches ready/failed.
+    if !advanced.is_empty() {
+        let mut guard = state.lock().unwrap();
+        for task in &advanced {
+            broadcast(
+                &mut guard,
+                ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
+            );
+        }
+    }
+    Ok(advanced)
 }
 
 /// Periodically advance background development tasks: once an agent goes idle,
@@ -829,6 +841,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             provider: t.provider,
                             title: t.title,
                             status: t.status,
+                            model: t.model,
                             updated_at: t.updated_at,
                             archived_at: t.archived_at,
                         })
@@ -974,6 +987,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 .and_then(|s| s.checkpoint_create(&workspace, &message, None))
             {
                 Ok(checkpoint) => ArchcarResponse::CheckpointSaved { checkpoint },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::CompareCheckpoint {
+            workspace,
+            checkpoint_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|s| s.checkpoint_compare(&workspace, checkpoint_id))
+            {
+                Ok((diff, truncated)) => ArchcarResponse::CheckpointDiff {
+                    workspace,
+                    checkpoint_id,
+                    diff,
+                    truncated,
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1628,6 +1660,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         provider: t.provider,
                         title: t.title,
                         status: t.status,
+                        model: t.model,
                         updated_at: t.updated_at,
                         archived_at: t.archived_at,
                     },
@@ -2312,6 +2345,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 overlaps,
             })
         }),
+        ArchcarRequest::ListSessionRuns {
+            workspace,
+            session_id,
+        } => with_store(state, |store| {
+            let runs = store.session_run_history(&workspace, session_id)?;
+            Ok(ArchcarResponse::SessionRuns {
+                workspace,
+                session_id,
+                runs,
+            })
+        }),
+        ArchcarRequest::SnapshotDiffContribution {
+            workspace,
+            session_id,
+            risks,
+            blockers,
+        } => with_store(state, |store| {
+            let contribution =
+                store.snapshot_diff_contribution(&workspace, session_id, &risks, &blockers)?;
+            Ok(ArchcarResponse::DiffContributionSaved { contribution })
+        }),
+        ArchcarRequest::ListDiffContributions { workspace } => with_store(state, |store| {
+            let contributions = store.list_diff_contributions(&workspace)?;
+            Ok(ArchcarResponse::DiffContributions {
+                workspace,
+                contributions,
+            })
+        }),
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
         },
@@ -2354,6 +2415,7 @@ fn start_background_task(
         (guard.db_path.clone(), guard.logs_dir.clone())
     };
     let provider = input.provider.clone();
+    let extra_agents = input.extra_agents.clone();
     let started = WorkspaceStore::open_app_with_logs(&db_path, &logs_dir)
         .and_then(|store| store.start_background_task(input));
     let task = match started {
@@ -2381,67 +2443,93 @@ fn start_background_task(
         }
     };
 
-    // Core rejects anything but a managed provider before we get here.
-    let kind = if provider == "claude" {
-        SessionKind::Claude
-    } else {
-        SessionKind::Codex
-    };
-
-    // Reuse the normal chat path so a background workspace looks exactly like
-    // one a human started: a thread with the prompt queued, then a session.
-    let thread = dispatch_request(
-        ArchcarRequest::CreateChatThread {
-            workspace: workspace.clone(),
-            provider: provider.clone(),
-            title: task.title.clone(),
-        },
-        state,
-    );
-    let thread_id = match thread {
-        ArchcarResponse::ChatThreadCreated { thread } => thread.id,
-        other => {
-            return fail(format!(
-                "created workspace {workspace} but no chat thread: {}",
-                archcar_response_summary(&other)
-            ));
-        }
-    };
-
-    // Session first, then the prompt: the queue drains into a session that is
-    // already coming up, which is the same order the desktop uses.
-    let spawned = dispatch_request(
-        ArchcarRequest::EnsureChatThreadSession {
-            workspace: workspace.clone(),
-            thread_id,
-            kind,
-            harness: None,
-        },
-        state,
-    );
-    if let ArchcarResponse::Error { message } = spawned {
-        return fail(format!("could not start its agent: {message}"));
+    // The strategy allows one or more agents per background task: the primary
+    // provider plus any extra specs, each with its own session and prompt.
+    let mut agents = vec![(provider.clone(), task.prompt.clone(), task.title.clone())];
+    for (index, agent) in extra_agents.iter().enumerate() {
+        agents.push((
+            agent.provider.clone(),
+            agent.prompt.clone().unwrap_or_else(|| task.prompt.clone()),
+            format!("{} (agent {})", task.title, index + 2),
+        ));
     }
 
-    let queued = dispatch_request(
-        ArchcarRequest::QueueChatInput {
-            thread_id,
-            input: task.prompt.clone(),
-            visible_input: Some(task.prompt.clone()),
-            kind: crate::archcar::protocol::ArchcarInputKind::User,
-            session_kind: kind,
-        },
-        state,
-    );
-    if let ArchcarResponse::Error { message } = queued {
-        return fail(format!("could not queue its prompt: {message}"));
+    let mut thread_ids = Vec::new();
+    for (agent_provider, prompt, title) in &agents {
+        // Core rejects anything but a managed provider before we get here.
+        let kind = if agent_provider == "claude" {
+            SessionKind::Claude
+        } else {
+            SessionKind::Codex
+        };
+
+        // Reuse the normal chat path so a background workspace looks exactly
+        // like one a human started: a thread with the prompt queued, then a
+        // session.
+        let thread = dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: workspace.clone(),
+                provider: agent_provider.clone(),
+                title: title.clone(),
+            },
+            state,
+        );
+        let thread_id = match thread {
+            ArchcarResponse::ChatThreadCreated { thread } => thread.id,
+            other => {
+                return fail(format!(
+                    "created workspace {workspace} but no chat thread: {}",
+                    archcar_response_summary(&other)
+                ));
+            }
+        };
+
+        // Session first, then the prompt: the queue drains into a session
+        // that is already coming up, which is the same order the desktop uses.
+        let spawned = dispatch_request(
+            ArchcarRequest::EnsureChatThreadSession {
+                workspace: workspace.clone(),
+                thread_id,
+                kind,
+                harness: None,
+            },
+            state,
+        );
+        if let ArchcarResponse::Error { message } = spawned {
+            return fail(format!("could not start its agent: {message}"));
+        }
+
+        let queued = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id,
+                input: prompt.clone(),
+                visible_input: Some(prompt.clone()),
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                session_kind: kind,
+            },
+            state,
+        );
+        if let ArchcarResponse::Error { message } = queued {
+            return fail(format!("could not queue its prompt: {message}"));
+        }
+        thread_ids.push(thread_id);
     }
 
     match WorkspaceStore::open_app(&db_path).and_then(|store| {
-        store.assign_session_task(&workspace, thread_id, task.task_id)?;
+        for thread_id in &thread_ids {
+            store.assign_session_task(&workspace, *thread_id, task.task_id)?;
+        }
         store.mark_background_task_running(task.id)
     }) {
-        Ok(task) => ArchcarResponse::BackgroundTaskSaved { task },
+        Ok(task) => {
+            let mut guard = state.lock().unwrap();
+            broadcast(
+                &mut guard,
+                ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
+            );
+            drop(guard);
+            ArchcarResponse::BackgroundTaskSaved { task }
+        }
         Err(err) => ArchcarResponse::Error {
             message: err.to_string(),
         },
@@ -2820,6 +2908,9 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListContextAttachments { .. }
             | ArchcarRequest::ListSessionContributions { .. }
             | ArchcarRequest::ListSessionOverlaps { .. }
+            | ArchcarRequest::ListSessionRuns { .. }
+            | ArchcarRequest::ListDiffContributions { .. }
+            | ArchcarRequest::CompareCheckpoint { .. }
     )
 }
 

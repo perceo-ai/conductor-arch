@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createResource, createSignal } from "solid-js";
 import { repositoriesStore, prefsStore } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
-import { checkForUpdates, openExternal, send } from "@/bridge/client";
+import { checkForUpdates, openExternal, remoteDaemon, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
@@ -15,6 +15,103 @@ import type { ServiceStatus } from "@/bridge/protocol";
 // committed ("repository") or "local" override layer.
 
 type Layer = "repository" | "local";
+
+// Server-hosted execution: point this app (and the machine's CLI, which shares
+// the profile file) at an archcar daemon running elsewhere. The daemon owns
+// workspaces/sessions; this app becomes a pure client of it.
+function RemoteDaemonCard() {
+  const [current, { refetch }] = createResource(async () => {
+    try {
+      const res = await remoteDaemon.get();
+      return res.ok ? res : null;
+    } catch {
+      return null;
+    }
+  });
+  const [address, setAddress] = createSignal("");
+  const [token, setToken] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [feedback, setFeedback] = createSignal("");
+
+  const stateText = () => {
+    const res = current();
+    if (!res) return "Could not read the remote configuration.";
+    if (!res.address) return "Using the local daemon on this machine.";
+    const source = res.source === "environment" ? "environment variables" : "saved profile";
+    return `Connected to ${res.address} (from ${source}).`;
+  };
+
+  async function connect() {
+    const addr = address().trim();
+    const tok = token().trim();
+    if (!addr || !tok) {
+      setFeedback("Address and token are required.");
+      return;
+    }
+    setBusy(true);
+    setFeedback("Connecting…");
+    try {
+      const res = await remoteDaemon.set({ address: addr, token: tok });
+      setFeedback(res.ok ? `Connected to ${res.address}.` : res.error);
+      if (res.ok) {
+        setToken("");
+        setAddress("");
+      }
+      await refetch();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    try {
+      const res = await remoteDaemon.clear();
+      setFeedback(res.ok ? "Using the local daemon again." : (res.error ?? ""));
+      await refetch();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div class="settings-field settings-health-card">
+      <div class="settings-field-title">Remote daemon</div>
+      <div class="settings-status">{stateText()}</div>
+      <div class="settings-action-row">
+        <input
+          class="ws-text-input"
+          placeholder="host:port (e.g. devbox:7420)"
+          value={address()}
+          onInput={(e) => setAddress(e.currentTarget.value)}
+        />
+        <input
+          class="ws-text-input"
+          type="password"
+          placeholder="access token"
+          value={token()}
+          onInput={(e) => setToken(e.currentTarget.value)}
+        />
+        <button class="ui-button-secondary" disabled={busy()} onClick={() => void connect()}>
+          Connect
+        </button>
+        <Show when={current()?.address && current()?.source === "profile"}>
+          <button class="ui-button-secondary" disabled={busy()} onClick={() => void disconnect()}>
+            Disconnect
+          </button>
+        </Show>
+      </div>
+      <div class="settings-status settings-hint">
+        On the server: `archductor service install --listen 0.0.0.0:7420`, then
+        `archductor service token` for the token. This machine's CLI follows the same
+        connection (`archductor remote status`).
+      </div>
+      <Show when={feedback()}>
+        <div class="settings-status">{feedback()}</div>
+      </Show>
+    </div>
+  );
+}
 
 // Background service + remote access. The daemon has to be running for the app,
 // the CLI, and MCP clients to work, so the OS should keep it up; and a
@@ -383,6 +480,7 @@ export function SettingsPage() {
             </div>
           </div>
           <BackgroundServiceCard />
+          <RemoteDaemonCard />
           <div class="settings-field settings-health-card">
             <div class="settings-field-title">Recovery</div>
             <div class="settings-status">{recoveryStatus()}</div>

@@ -114,6 +114,7 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           status TEXT NOT NULL,
           native_thread_id TEXT,
           harness_metadata TEXT,
+          model TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           archived_at TEXT
@@ -344,8 +345,10 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           body TEXT NOT NULL DEFAULT '',
           status TEXT NOT NULL,
           owner_session_id INTEGER REFERENCES chat_threads(id),
+          owner TEXT,
           intended_areas TEXT NOT NULL DEFAULT '',
           blocked_reason TEXT,
+          review_notes TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -379,6 +382,26 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_context_attachments_workspace
           ON context_attachments(workspace_id, id);
+
+        -- Durable per-session diff provenance: what each agent changed, the
+        -- stored patch, and the commands/risks/blockers that came with it.
+        CREATE TABLE IF NOT EXISTS diff_contributions (
+          id INTEGER PRIMARY KEY,
+          workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+          session_id INTEGER NOT NULL REFERENCES chat_threads(id),
+          files TEXT NOT NULL DEFAULT '',
+          still_present TEXT NOT NULL DEFAULT '',
+          patch_ref TEXT,
+          commands TEXT NOT NULL DEFAULT '',
+          risks TEXT NOT NULL DEFAULT '',
+          blockers TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(workspace_id, session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_diff_contributions_workspace
+          ON diff_contributions(workspace_id, id);
 
         CREATE TABLE IF NOT EXISTS background_tasks (
           id INTEGER PRIMARY KEY,
@@ -464,6 +487,24 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "context_attachments",
         "pinned",
         "ALTER TABLE context_attachments ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "tasks",
+        "owner",
+        "ALTER TABLE tasks ADD COLUMN owner TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "model",
+        "ALTER TABLE chat_threads ADD COLUMN model TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "tasks",
+        "review_notes",
+        "ALTER TABLE tasks ADD COLUMN review_notes TEXT NOT NULL DEFAULT ''",
     )?;
     Ok(())
 }

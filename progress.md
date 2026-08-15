@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-08-12.
+Current as of 2026-08-14.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -85,10 +85,63 @@ Reach, added 2026-08-13:
   `archductor service install|uninstall|status|token` manage it directly, and
   archcar exposes the same operations as RPCs so the app can do it.
 
+Strategy gap closure, added 2026-08-14 (core -> archcar -> CLI -> Electron for
+each):
+
+- **Task model completed against the strategy doc**: tasks now carry a human
+  `owner` (distinct from `owner_session_id`), `review_notes`, and a computed
+  `linked_session_ids` list from `chat_threads.task_id`. CLI
+  `update-task --owner/--review-notes`, MCP `update_task`, and desktop
+  owner/review-notes prompts on the Tasks panel.
+- **Session model first-class fields**: `chat_threads.model` is a real column
+  (derived from harness metadata on create/update, surfaced on threads and
+  contributions), and per-session command/check/run history is exposed as
+  `list_session_runs` (CLI `archcar session-runs`, MCP `session_runs`, a
+  "Show runs" toggle per contribution in the Summary tab).
+- **Durable diff contributions**: `diff_contributions` table stores per-session
+  files, still-present files, a written patch under
+  `.context/archductor/contributions/`, the commands the daemon ran, and
+  caller-supplied risks/blockers (`snapshot_diff_contribution` /
+  `list_diff_contributions`; CLI `snapshot-contribution`/`diff-contributions`;
+  MCP tools; desktop "Snapshot diff" per contribution). Stored risks/blockers
+  feed the PR draft's Risks section.
+- **Checkpoint compare**: `checkpoint_compare` diffs a checkpoint against the
+  current working tree (truncated at 64 KiB), reachable as archcar
+  `compare_checkpoint`, CLI `archductor checkpoint compare` and
+  `archcar checkpoint-diff`, and a Compare button per checkpoint row in the
+  desktop Checkpoints tab.
+- **Multi-agent background tasks**: `StartBackgroundTask.extra_agents` runs
+  one or more managed agents in the same background workspace, each with its
+  own session and prompt (defaulting to the task prompt). CLI
+  `--agent provider[=prompt]` (repeatable), MCP `extra_agents`, desktop
+  "Extra agents" field in the background-task dialog. All sessions are linked
+  to the workspace task, so per-agent provenance still works.
+- **Notify when ready**: every background-task advance broadcasts a
+  `background_task_updated` archcar event; the desktop shows an OS
+  notification when a task reaches `ready`/`failed`.
+- **Stable API documentation**: `docs/api.md` documents the external surface
+  (socket/TCP transports, token auth, protocol shape, workflow objects, MCP,
+  stability policy) and records the decision that archcar RPC + MCP *is* the
+  API — no separate HTTP layer.
+- **Server-hosted execution** (2026-08-14): a client machine can point every
+  Archductor surface at a daemon running elsewhere. Connection resolution is
+  env (`ARCHDUCTOR_ARCHCAR_REMOTE`/`_TOKEN`) > saved remote profile
+  (`state/remote.json`, owner-only, shared by CLI and desktop) > local daemon.
+  New `archductor remote connect|status|disconnect` (connect verifies the
+  daemon before saving); the Electron main process re-reads the profile per
+  connection, speaks TCP + token-line, and never spawns a local sidecar while
+  a remote is configured; Settings gained a "Remote daemon" card (connect
+  verifies and rolls back on failure, token never returns to the renderer).
+  Server side was already in place: `archductor service install --listen`
+  writes the listener into the launchd/systemd unit and provisions the token.
+  `docs/api.md` has the deployment recipe.
+
 Deliberately not built: Archivum context (the attachment `source` stays in the
 protocol, but the Context tab's Archivum section is commented out rather than
-advertising a capability that does not exist), and richer checkpoints —
-manual create/restore/delete is the product decision for now.
+advertising a capability that does not exist), multi-repo workspaces (the
+product model stays one repository per project), and session/task-scoped
+checkpoint creation — manual create/compare/restore/delete is the checkpoint
+surface for now.
 
 ## Conductor Reference Cross-Check (2026-08-06)
 
@@ -413,14 +466,15 @@ Historical GTK surface (superseded, kept for reference):
   separation.
 - Remote archcar access is token-only: there is no TLS, no per-client identity,
   and no revocation beyond rotating the single token. Expose a non-loopback
-  listener only behind a firewall or a reverse proxy you trust.
+  listener only behind a firewall, VPN, SSH tunnel, or a reverse proxy you
+  trust. Server-hosted use assumes agent CLIs and `gh` auth exist on the
+  server.
 - The service installer covers launchd (macOS) and systemd user units (Linux).
   Windows reports "unsupported"; run `archcar` yourself there.
 - The launchd/systemd unit does not carry `XDG_*` overrides, so an installed
   service always uses the default per-user paths, not an isolated dev instance.
-- Checkpoints support manual create/restore/delete only; session-scoped and
-  task-scoped checkpoints and checkpoint-vs-branch comparison are intentionally
-  unbuilt.
+- Checkpoints support manual create/compare/restore/delete; session-scoped and
+  task-scoped checkpoint creation is intentionally unbuilt.
 - There is no Archivum client. The Context tab's Archivum section is commented
   out; only branch-local notes and files are surfaced.
 - Prompt-pack import/export, naming templates, hooks, and richer notifications
@@ -483,6 +537,53 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Server-hosted execution on 2026-08-14:
+
+- Written tests: `archcar::remote` (remote profile round-trip, owner-only
+  permissions, profile→endpoint resolution, empty-field rejection) pass;
+  desktop `electron/archcar.test.ts` (7) covers env>profile>local resolution,
+  malformed profiles, and a real TCP round-trip where the bridge sends the
+  token line then the request envelope against a fake daemon.
+- Live smoke (isolated `XDG_*`, daemon under
+  `ARCHDUCTOR_ARCHCAR_LISTEN=127.0.0.1:7451`): `remote connect` with a wrong
+  token printed `archcar authentication failed`; with the right token it
+  verified, saved the profile, and a plain `archductor archcar workspaces`
+  (no env vars) listed real workspaces over TCP via the profile;
+  `remote status` reported source; `remote disconnect` returned to the local
+  socket.
+- Desktop `pnpm typecheck`, `pnpm test` (75), `pnpm build` pass.
+- Not verified here: a true two-machine deployment (needs a second host) and
+  an interactive Electron session against a remote daemon — the transport and
+  resolution logic are covered by the written TCP test; the Settings card is
+  typecheck/build-verified.
+
+Strategy gap closure (task/session/diff provenance, checkpoint compare,
+multi-agent background, notify, API doc) on 2026-08-14:
+
+- Written tests: `cargo test -p archductor-core --lib` — 726 passed; the only
+  4 failures are the pre-existing macOS ones listed below. New coverage:
+  `task_records_human_owner_review_notes_and_linked_sessions`,
+  `session_model_is_first_class_and_run_history_is_scoped`,
+  `diff_contributions_snapshot_files_patch_and_provenance`,
+  `checkpoint_compare_diffs_checkpoint_against_current_worktree`, and an
+  extra-agent validation case in
+  `unmanaged_providers_are_rejected_before_a_workspace_is_created`.
+- `cargo test -p archductor` (36 + 14 + 1 + 3 + 1), `cargo fmt --all --check`,
+  `cargo clippy -p archductor-core -p archductor -p archcar --all-targets
+  -- -D warnings` all pass.
+- Desktop `pnpm typecheck`, `pnpm test` (68), `pnpm build` all pass.
+- Live socket smoke (isolated `XDG_*`, real DB untouched):
+  `update-task --owner/--review-notes` round-trip; `session-runs` over the
+  socket; contributions showing `model=`; `snapshot-contribution` writing a
+  real patch file plus risks/blockers into `diff-contributions`;
+  `checkpoint-diff` and `checkpoint compare` printing the live diff; and
+  `start-background-task --agent codex` creating one workspace with two
+  managed codex sessions, both linked to the workspace task
+  (`sessions: 2,3`), advancing to `ready`.
+- Not verified live: the desktop OS notification itself (needs an interactive
+  Electron session; the event broadcast and renderer wiring are covered by
+  typecheck/build), and background PR creation (needs authenticated `gh`).
 
 Remote access, MCP server, and background service on 2026-08-13:
 
