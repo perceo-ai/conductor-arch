@@ -6,6 +6,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
+import { parseGithubRepos } from "./githubRepos.js";
 import { resolveWindowIconPath } from "./icon.js";
 
 const execFileP = promisify(execFile);
@@ -399,26 +400,7 @@ ipcMain.handle("gh:list-repos", async () => {
       ],
       { env: spawnEnv(), maxBuffer: 64 * 1024 * 1024 },
     );
-    const raw = JSON.parse(stdout) as {
-      full_name: string;
-      name: string;
-      ssh_url: string;
-      html_url: string;
-      pushed_at: string;
-      owner: { login: string; avatar_url: string };
-    }[];
-    // Most-recently-pushed first — matches how people think about "recent" repos.
-    raw.sort((a, b) => (b.pushed_at ?? "").localeCompare(a.pushed_at ?? ""));
-    const repos = raw.slice(0, 300).map((r) => ({
-      nameWithOwner: r.full_name,
-      name: r.name,
-      sshUrl: r.ssh_url,
-      url: r.html_url,
-      pushedAt: r.pushed_at,
-      owner: r.owner?.login ?? "",
-      avatarUrl: r.owner?.avatar_url ? `${r.owner.avatar_url}&s=64` : "",
-    }));
-    return { ok: true, repos };
+    return { ok: true, repos: parseGithubRepos(stdout) };
   } catch (err) {
     logLine("error", `gh repo list failed: ${(err as Error).message}`);
     return { ok: false, error: (err as Error).message };

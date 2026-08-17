@@ -1543,8 +1543,18 @@ body.resizing-col {
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  flex-shrink: 0;
+  flex: 0 0 auto;
   background: #2a2a2a;
+  object-fit: cover;
+}
+
+.repo-card-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #cfcfcf;
+  font-size: 10px;
+  font-weight: 720;
 }
 .repo-card-text {
   display: flex;
