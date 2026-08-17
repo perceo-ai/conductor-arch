@@ -10,23 +10,23 @@ describe("prefsStore", () => {
   it("defaults to a concrete codex model", async () => {
     const { prefsStore } = await import("./prefs");
     expect(prefsStore.state.defaultProvider).toBe("codex");
-    expect(prefsStore.state.defaultModel).toBe("gpt-5-codex");
+    expect(prefsStore.state.defaultModel).toBe("gpt-5.5");
   });
 
   it("derives the provider when the default model changes", async () => {
     const { prefsStore } = await import("./prefs");
-    prefsStore.setDefaultModel("claude-opus-4-8");
+    prefsStore.setDefaultModel("claude-opus-5");
     expect(prefsStore.state.defaultProvider).toBe("claude");
-    expect(prefsStore.state.defaultModel).toBe("claude-opus-4-8");
+    expect(prefsStore.state.defaultModel).toBe("claude-opus-5");
   });
 
   it("seeds the default model for its own provider, first model otherwise", async () => {
     const { prefsStore } = await import("./prefs");
-    prefsStore.setDefaultModel("claude-sonnet-4-6");
+    prefsStore.setDefaultModel("claude-sonnet-5");
     // Same provider as the default → use the exact default model.
-    expect(prefsStore.seedModelFor("claude")).toBe("claude-sonnet-4-6");
+    expect(prefsStore.seedModelFor("claude")).toBe("claude-sonnet-5");
     // Different provider → fall back to that provider's first model.
-    expect(prefsStore.seedModelFor("codex")).toBe("gpt-5-codex");
+    expect(prefsStore.seedModelFor("codex")).toBe("gpt-5.5");
   });
 
   it("defaults appearance to dark / amber / cozy", async () => {

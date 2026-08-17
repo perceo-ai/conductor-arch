@@ -1,6 +1,8 @@
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ArchcarBridge, resolveRemoteConfig } from "./archcar";
+import { ArchcarBridge, endpointPath, resolveRemoteConfig } from "./archcar";
 
 // Resolution order for server-hosted execution: environment variables win,
 // then the remote profile shared with the CLI, then the local daemon (null).
@@ -52,6 +54,40 @@ describe("resolveRemoteConfig", () => {
     ).toBeNull();
   });
 });
+
+describe("endpointPath", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("prefers an explicit endpoint override", () => {
+    vi.stubEnv("ARCHDUCTOR_ARCHCAR_ENDPOINT", "/tmp/custom-archcar.sock");
+    expect(endpointPath()).toBe("/tmp/custom-archcar.sock");
+  });
+
+  it("uses the core-compatible short socket path when the state path is too long", () => {
+    vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
+    vi.stubEnv("XDG_RUNTIME_DIR", "/tmp/runtime");
+
+    const endpoint = endpointPath();
+
+    expect(endpoint).toMatch(/^\/tmp\/runtime\/archcar-[0-9a-f]{16}\.sock$/);
+    expect(Buffer.byteLength(endpoint)).toBeLessThan(100);
+  });
+
+  it("falls back to temp when XDG_RUNTIME_DIR is absent", () => {
+    vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
+    vi.stubEnv("XDG_RUNTIME_DIR", "");
+
+    expect(endpointPath()).toMatch(
+      new RegExp(`^${escapeRegExp(path.join(os.tmpdir(), "archductor"))}/archcar-[0-9a-f]{16}\\.sock$`),
+    );
+  });
+});
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 describe("ArchcarBridge remote transport", () => {
   afterEach(() => {
