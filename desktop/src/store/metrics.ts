@@ -4,7 +4,7 @@ import { createSignal } from "solid-js";
 // Every targeted store mutation records against a key so we can prove in dev that
 // an event touched ONLY the slice it should have. Toggle with the env flag.
 
-const enabled = import.meta.env.DEV || import.meta.env.VITE_UPDATE_METRICS === "1";
+const enabled = import.meta.env.VITE_UPDATE_METRICS === "1";
 
 const counts = new Map<string, number>();
 const [version, bump] = createSignal(0);

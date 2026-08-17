@@ -8,6 +8,7 @@ import Toasts from "./components/Toasts";
 import ContextMenu from "./components/ContextMenu";
 import CommandPalette from "./components/CommandPalette";
 import ShortcutsHelp from "./components/ShortcutsHelp";
+import Icon from "./components/Icon";
 import { PageStack } from "./pages";
 import {
   startStore,
@@ -142,7 +143,7 @@ export default function App() {
         />
         <Show when={sidebarCollapsed()}>
           <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
-            ⇥
+            <Icon name="panel-right" />
           </button>
         </Show>
         <PageStack />

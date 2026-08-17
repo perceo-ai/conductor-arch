@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   dashboardTriageBadges,
+  workspaceSidebarMeta,
   workspaceStatusKind,
   STATUS_COLOR,
   STATUS_LABEL,
@@ -109,5 +110,26 @@ describe("dashboardTriageBadges", () => {
       { tone: "changes", label: "Clean", title: "No changed files" },
       { tone: "todo", label: "No todos", title: "No open todos" },
     ]);
+  });
+});
+
+describe("workspaceSidebarMeta", () => {
+  it("summarizes branch and diff as one quiet line", () => {
+    expect(
+      workspaceSidebarMeta({
+        status: "active",
+        branch: "feature/chat-first",
+        additions: 274,
+        deletions: 33,
+        activeSessions: 2,
+        openTasks: 5,
+        prNumber: 93,
+        prState: "open",
+      }),
+    ).toBe("feature/chat-first · +274 -33");
+  });
+
+  it("falls back to status when there is no branch or diff", () => {
+    expect(workspaceSidebarMeta({ status: "archived" })).toBe("archived");
   });
 });

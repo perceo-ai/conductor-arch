@@ -4,32 +4,49 @@
    GTK @define-color -> CSS custom properties. Any @lc-name reference becomes var(--lc-name).
    Includes the extra runtime tokens from main.rs CUSTOM_COLOR_TOKENS (lc-accent, lc-accent-fg, lc-warning). */
 :root {
-    --lc-bg: #191919;
-    --lc-surface: #1e1e1e;
-    --lc-surface-raised: #202020;
-    --lc-surface-muted: #181818;
-    --lc-hover: #2a2a2a;
-    --lc-hover-soft: #242424;
-    --lc-border: #2a2a2a;
+    --lc-bg: #111111;
+    --lc-surface: #171717;
+    --lc-surface-raised: #1d1d1d;
+    --lc-surface-muted: #141414;
+    --lc-hover: #242424;
+    --lc-hover-soft: #1f1f1f;
+    --lc-border: #292929;
     --lc-border-strong: #3a3a3a;
-    --lc-text: #e4e4e4;
-    --lc-text-strong: #f8fafc;
+    --lc-text: #d8d8d8;
+    --lc-text-strong: #f0f0f0;
     --lc-text-muted: #8a8a8a;
-    --lc-accent: #c39b50;
+    --lc-accent: #d4a94f;
     --lc-accent-fg: #f5f5f5;
     --lc-success: #d0d0d0;
     --lc-warning: #f59e0b;
     --lc-danger: #ff8a8a;
 
-    --lc-surface-base: #191919;
-    --lc-surface-selected: #2a2a2a;
-    --lc-border-subtle: #2a2a2a;
+    --lc-surface-base: #111111;
+    --lc-surface-selected: #232323;
+    --lc-border-subtle: #262626;
     --lc-border-active: #3a3a3a;
-    --lc-text-primary: #e4e4e4;
+    --lc-text-primary: #d8d8d8;
     --lc-text-secondary: #8a8a8a;
     --lc-status-success: #d0d0d0;
     --lc-status-warning: #f59e0b;
     --lc-status-danger: #ff8a8a;
+
+    --ui-font-sans: "Mona Sans", "Inter", "SF Pro Text", "Segoe UI", sans-serif;
+    --ui-font-mono: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    --ui-text: 13px;
+    --ui-text-sm: 12px;
+    --ui-text-xs: 11px;
+    --ui-line: 1.35;
+    --ui-radius: 6px;
+    --ui-control-h: 30px;
+    --ui-pad-x: 12px;
+    --ui-panel: #151515;
+    --ui-panel-2: #181818;
+    --ui-panel-3: #1d1d1d;
+    --ui-panel-hover: #222222;
+    --ui-border: #282828;
+    --ui-border-strong: #383838;
+    --ui-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.5);
 }
 
 .toast {
@@ -2786,13 +2803,12 @@ button.ws-tab-shell {
 
 /* ── Right panel ── */
 .ws-right-panel {
-    background-color: #151515;
-    border-left: 1px solid #000;
+    background-color: #171717;
+    border-left: 1px solid #272727;
 }
 .ws-right-tabs {
-    min-height: 46px;
-    padding: 0 10px;
-    background-color: #151515;
+    min-height: 38px;
+    background-color: #171717;
     border-bottom: 1px solid #232323;
 }
 .ws-right-tab-btn {
@@ -3172,12 +3188,13 @@ button.ws-tab-shell {
 .ws-run-tab-btn {
     background: transparent;
     border: none;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
+    border-bottom: none;
+    border-radius: 7px;
     color: #7a7a7a;
     font-size: 12px;
-    padding: 4px 12px;
-    min-height: 36px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px 7px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -3747,7 +3764,7 @@ button.chat-inline-event-expander label {
     color: #f0a8a8;
 }
 .chat-composer {
-    padding: 0 16px 16px;
+    padding: 0 22px 14px;
     background-color: #151515;
 }
 .chat-queue-overlay {
@@ -3807,9 +3824,9 @@ button.chat-inline-event-expander label {
     background-color: #262626;
 }
 .chat-composer-box {
-    border: none;
-    border-radius: 14px;
-    background-color: #202020;
+    border: 1px solid #282828;
+    border-radius: 10px;
+    background-color: #1b1b1b;
 }
 .chat-placeholder {
     color: #7f7f7f;
@@ -3830,7 +3847,7 @@ button.chat-inline-event-expander label {
     min-height: 0;
 }
 .chat-toolbar {
-    padding: 6px 8px 8px;
+    padding: 2px 0 0;
     background-color: transparent;
 }
 .chat-footer-toggle .chat-mode-label,
@@ -3997,29 +4014,42 @@ button.chat-inline-event-expander label {
     padding: 14px;
 }
 .chat-send-btn {
+    width: 30px;
+    height: 30px;
     min-width: 0;
     min-height: 0;
-    border-radius: 8px;
-    background-color: #2e2e2e;
-    color: #8a8a8a;
-    border: none;
+    border-radius: 7px;
+    background-color: transparent;
+    color: #9a9a9a;
+    border: 1px solid #2d2d2d;
     box-shadow: none;
     text-shadow: none;
-    font-size: 16px;
-    font-weight: 700;
+    font-size: 13px;
+    font-weight: 650;
     padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.chat-stop-btn {
+    color: #e0b0b0;
+    border-color: #4d3030;
 }
 .chat-send-btn-active {
-    background-color: #333333;
+    background-color: #2b2b2b;
     color: #f5f5f5;
 }
 .chat-send-btn:hover {
-    background-color: #383838;
+    background-color: #262626;
     color: #e4e4e4;
 }
 .chat-send-btn-active:hover {
-    background-color: #3f3f3f;
+    background-color: #333333;
     color: #ffffff;
+}
+.chat-stop-btn:hover {
+    background-color: #2b1f1f;
+    color: #f2c2c2;
 }
 
 /* ── Diff view ── */
@@ -4149,6 +4179,12 @@ body,
     background-color: #1f1f1f;
     border: 1px solid #2b2b2b;
     box-shadow: none;
+}
+
+.chat-composer-box {
+    background-color: #1b1b1b;
+    border: 1px solid #282828;
+    border-radius: 10px;
 }
 
 .dashboard-title,
@@ -4364,7 +4400,7 @@ textarea:focus {
 }
 /* Composer has no boxed outline — keep it flat even when focused. */
 .chat-composer-box:focus-within {
-    border: none;
+    border: 1px solid #3a3a3a;
     box-shadow: none;
 }
 

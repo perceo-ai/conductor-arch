@@ -2,59 +2,12 @@ import { Show, createMemo, createResource, createSignal } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
 import { actions, workspacesStore, toastsStore } from "@/store";
 import type { ArchcarChecksSummary } from "@/bridge/protocol";
+import { deriveWorkspacePrAction, workspacePrActionInput } from "@/lib/workspacePrAction";
 
-// Right-panel top region — port of the GTK workspace PR status panel
-// (workspace_command_center.rs::workspace_pr_status). Shows the PR chip, a
-// one-line status, and a single color-coded primary action that moves the
-// workflow forward. Data comes from the workspace summary (PR number/state/url)
-// plus get_checks_summary (check/run status, ahead/behind, conflicts).
-
-type ActionKind = "push" | "merge" | "view" | "none";
-
-interface PrState {
-  title: string;
-  cssClass: string; // ws-pr-status-{muted,pending,failed,merged,ready}
-  actionLabel?: string;
-  action: ActionKind;
-}
-
-function derive(
-  row: ReturnType<typeof workspacesStore.row>,
-  checks: ArchcarChecksSummary | undefined,
-): PrState {
-  const prNumber = row?.prNumber;
-  const prState = (row?.prState ?? "").toLowerCase();
-  const check = (checks?.check_status ?? "").toLowerCase();
-  const ahead = checks?.branch_ahead ?? checks?.source_branch_ahead ?? 0;
-  const behind = checks?.branch_behind ?? 0;
-  const conflicts = checks?.conflicting_workspaces ?? 0;
-  const changed = row?.changedFiles ?? 0;
-
-  // No PR yet: guide toward pushing so a PR can be opened.
-  if (!prNumber) {
-    if (ahead > 0 || changed > 0)
-      return { title: "No pull request yet", cssClass: "ws-pr-status-muted", actionLabel: "Push branch", action: "push" };
-    return { title: "No changes to publish", cssClass: "ws-pr-status-muted", action: "none" };
-  }
-
-  if (prState === "merged")
-    return { title: `#${prNumber} merged`, cssClass: "ws-pr-status-merged", actionLabel: "View PR", action: "view" };
-  if (prState === "closed")
-    return { title: `#${prNumber} closed`, cssClass: "ws-pr-status-muted", actionLabel: "View PR", action: "view" };
-
-  // Open PR.
-  if (conflicts > 0)
-    return { title: "Merge conflicts", cssClass: "ws-pr-status-failed", actionLabel: "View PR", action: "view" };
-  if (check === "failing" || check === "failure" || check === "error")
-    return { title: "Checks failing", cssClass: "ws-pr-status-failed", actionLabel: "View PR", action: "view" };
-  if (ahead > 0)
-    return { title: "Unpushed commits", cssClass: "ws-pr-status-pending", actionLabel: "Push branch", action: "push" };
-  if (check === "pending" || check === "running" || check === "queued")
-    return { title: "Checks running", cssClass: "ws-pr-status-pending", actionLabel: "View PR", action: "view" };
-  if (behind > 0)
-    return { title: "Behind base branch", cssClass: "ws-pr-status-pending", actionLabel: "View PR", action: "view" };
-  return { title: "Ready to merge", cssClass: "ws-pr-status-ready", actionLabel: "Merge", action: "merge" };
-}
+// Compact top-nav PR control. This keeps PR management present without making
+// it a peer surface beside chat. Data comes from the workspace summary
+// (PR number/state/url) plus get_checks_summary (check/run status,
+// ahead/behind, conflicts).
 
 export default function WorkspacePrBar(props: { workspace: string }) {
   const [busy, setBusy] = createSignal(false);
@@ -71,7 +24,23 @@ export default function WorkspacePrBar(props: { workspace: string }) {
   );
 
   const row = () => workspacesStore.row(props.workspace);
-  const st = createMemo(() => derive(row(), checks()));
+  const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checks())));
+
+  async function createPullRequest() {
+    const draft = await send({ type: "get_pull_request_draft", workspace: props.workspace });
+    if (draft.type === "error") throw new Error(draft.message);
+    if (draft.type !== "pull_request_draft") throw new Error("Unable to draft pull request.");
+    const res = await send({
+      type: "create_pull_request",
+      workspace: props.workspace,
+      title: draft.title.trim(),
+      body: draft.body.trim(),
+      draft: false,
+    });
+    if (res.type === "error") throw new Error(res.message);
+    if (res.type !== "pull_request_created") throw new Error("Pull request was not created.");
+    toastsStore.push(res.output.trim() || "Pull request created.");
+  }
 
   async function runAction() {
     const action = st().action;
@@ -80,6 +49,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     setBusy(true);
     try {
       if (action === "view" && url) await openExternal(url);
+      else if (action === "create") await createPullRequest();
       else if (action === "push") await actions.pushBranch(props.workspace);
       else if (action === "merge") await actions.mergePullRequest(props.workspace);
       await refresh();

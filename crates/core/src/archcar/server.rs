@@ -2205,11 +2205,11 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             Ok(ArchcarResponse::PullRequestCreated { workspace, output })
         }),
         ArchcarRequest::GetPullRequestDraft { workspace } => with_store(state, |store| {
-            let (title, body) = store.draft_pull_request(&workspace)?;
+            let template = store.render_pull_request_template(&workspace)?;
             Ok(ArchcarResponse::PullRequestDraft {
                 workspace,
-                title,
-                body,
+                title: template.title,
+                body: template.body,
             })
         }),
         // ---- Workspace intelligence -------------------------------------

@@ -12,11 +12,14 @@ export type WorkspaceStatusKind =
 
 export interface WorkspaceStatusInput {
   status?: string; // "active" | "archived" | …
+  branch?: string;
   runRunning?: boolean;
   activeSessions?: number;
   prNumber?: number;
   prState?: string;
   changedFiles?: number;
+  additions?: number;
+  deletions?: number;
   openTodos?: number;
   openTasks?: number;
   blockedTasks?: number;
@@ -122,4 +125,17 @@ export function dashboardTriageBadges(w: WorkspaceStatusInput): DashboardTriageB
   );
 
   return badges;
+}
+
+export function workspaceSidebarMeta(w: WorkspaceStatusInput): string {
+  const branch = (w.branch ?? "").trim();
+  const additions = w.additions ?? 0;
+  const deletions = w.deletions ?? 0;
+  const parts: string[] = [];
+
+  if (branch) parts.push(branch);
+  if (additions > 0 || deletions > 0) parts.push(`+${additions} -${deletions}`);
+  if (parts.length === 0) parts.push(w.status ?? "active");
+
+  return parts.join(" · ");
 }

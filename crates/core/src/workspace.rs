@@ -3410,18 +3410,57 @@ impl WorkspaceStore {
     /// `list_workspace_files` helper.
     pub fn list_files(&self, name: &str, cap: usize) -> Result<Vec<String>> {
         let workspace = self.get_by_name(name)?;
+        if let Ok(files) = Self::list_files_from_git(&workspace.path, cap) {
+            return Ok(files);
+        }
         let mut files = Vec::new();
-        Self::list_files_recursive(&workspace.path, &workspace.path, &mut files);
+        Self::list_files_recursive(&workspace.path, &workspace.path, &mut files, cap);
         files.sort();
         files.truncate(cap);
         Ok(files)
     }
 
-    fn list_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>) {
+    fn list_files_from_git(root: &Path, cap: usize) -> Result<Vec<String>> {
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+        let output = git_output_dynamic(
+            root,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?;
+        let mut files = output
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .filter(|path| !Self::skip_workspace_file_path(path))
+            .take(cap)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort();
+        Ok(files)
+    }
+
+    fn skip_workspace_file_path(path: &str) -> bool {
+        path.split('/')
+            .any(|part| matches!(part, ".git" | "target" | "node_modules"))
+    }
+
+    fn list_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>, cap: usize) {
+        if files.len() >= cap {
+            return;
+        }
         let Ok(entries) = fs::read_dir(current) else {
             return;
         };
         for entry in entries.flatten() {
+            if files.len() >= cap {
+                return;
+            }
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -3438,7 +3477,7 @@ impl WorkspaceStore {
                 continue;
             }
             if file_type.is_dir() {
-                Self::list_files_recursive(root, &path, files);
+                Self::list_files_recursive(root, &path, files, cap);
                 continue;
             }
             if file_type.is_file() {
@@ -24166,6 +24205,27 @@ spotlight_testing = true
         assert!(store.read_file("berlin", "../demo/README.md").is_err());
         assert!(store.write_file("berlin", "/etc/passwd", "x").is_err());
         assert!(store.read_file("berlin", "../../escape.txt").is_err());
+    }
+
+    #[test]
+    fn list_files_uses_git_and_excludes_heavy_directories() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::create_dir_all(workspace.path.join("src")).unwrap();
+        fs::create_dir_all(workspace.path.join("target/debug")).unwrap();
+        fs::create_dir_all(workspace.path.join("node_modules/pkg")).unwrap();
+        fs::write(workspace.path.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(workspace.path.join("notes.md"), "notes\n").unwrap();
+        fs::write(workspace.path.join("target/debug/generated.rs"), "slow\n").unwrap();
+        fs::write(workspace.path.join("node_modules/pkg/index.js"), "slow\n").unwrap();
+
+        let files = store.list_files("berlin", 20).unwrap();
+
+        assert!(files.contains(&"README.md".to_owned()));
+        assert!(files.contains(&"src/main.rs".to_owned()));
+        assert!(files.contains(&"notes.md".to_owned()));
+        assert!(!files.iter().any(|path| path.starts_with("target/")));
+        assert!(!files.iter().any(|path| path.starts_with("node_modules/")));
     }
 
     fn test_workspace_store() -> (tempfile::TempDir, WorkspaceStore) {
