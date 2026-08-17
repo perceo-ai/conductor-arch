@@ -1,5 +1,6 @@
 import { For, Show, createMemo, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
+import Icon from "@/components/Icon";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
 // flat, capped file list (list_workspace_files); the tree is built client-side
@@ -56,14 +57,14 @@ function Row(props: {
       when={props.node.dir}
       fallback={
         <button class="ws-file-row" style={indent()} onClick={() => props.openFile(props.node.path)}>
-          <span class="ws-file-icon">·</span>
+          <Icon name="file" class="ws-file-icon" />
           <span class="ws-file-name">{props.node.name}</span>
         </button>
       }
     >
       <button class="ws-dir-row" style={indent()} onClick={() => props.toggle(props.node.path)}>
-        <span class="ws-folder-toggle">{isCollapsed() ? "▸" : "▾"}</span>
-        <span class="ws-folder-icon">▪</span>
+        <Icon name={isCollapsed() ? "chevron-right" : "chevron-down"} class="ws-folder-toggle" />
+        <Icon name="folder" class="ws-folder-icon" />
         <span class="ws-folder-name">{props.node.name}</span>
       </button>
       <Show when={!isCollapsed()}>

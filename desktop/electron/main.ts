@@ -6,6 +6,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
+import { resolveWindowIconPath } from "./icon.js";
 
 const execFileP = promisify(execFile);
 
@@ -126,12 +127,18 @@ function sendToRenderer(channel: string, ...args: unknown[]): void {
 const bridge = new ArchcarBridge();
 
 function createWindow() {
+  const icon = resolveWindowIconPath({
+    moduleDir: __dirname,
+    resourcesPath: process.resourcesPath,
+    platform: process.platform,
+  });
   win = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: "#191919",
+    ...(icon ? { icon } : {}),
     // Frameless so we can render the GTK-style custom window chrome on Linux/Win.
     // macOS keeps native traffic lights via hiddenInset.
     frame: process.platform === "darwin",

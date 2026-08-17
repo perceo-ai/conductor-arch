@@ -9,30 +9,25 @@ import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
 import TerminalDock from "./TerminalDock";
-import { ChecksPanel, ReviewPanel, CheckpointsPanel } from "./WorkspaceTabs";
-import { TasksPanel, SummaryPanel, ContextPanel, PrPanel } from "./WorkspaceIntel";
+import WorkspacePrBar from "./WorkspacePrBar";
+import { ChecksPanel, ReviewPanel } from "./WorkspaceTabs";
 import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+import Icon from "@/components/Icon";
 
-const RIGHT_MIN = 280;
-const RIGHT_MAX = 640;
+const RIGHT_MIN = 260;
+const RIGHT_MAX = 440;
 
-// Right-panel tabs: the workspace-intelligence surfaces from the UX strategy
-// (Tasks/Summary/Files/Changes/Checks/Context/Review/PR) above the terminal
-// dock. The older GTK-era panels did not disappear — Todos live under Tasks,
-// Timeline under Summary, Checkpoints under Changes, and Processes in the
-// terminal dock.
+// Right-panel tabs: a quiet inspector beside the chat. Deeper intelligence
+// records remain in the data model, but they are not promoted as peer surfaces.
 const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_TABS.map(
   (tab) => ({ tab: tab.id, label: tab.label }),
 );
 
-// Workspace command center — port of workspace_command_center.rs. Three regions:
-//   center  : draggable top bar (repo > branch) + chat/file surface + composer
-//   right   : PR status bar (top) / Browse|Changes (mid) / terminals (bottom)
-// The center holds ONLY chats + open files; everything workflow-related lives in
-// the right column, matching the GTK active-workspace layout.
+// Workspace command center. Chat is the primary surface; the right side is a
+// contextual inspector and the terminal dock is utility output.
 
 function TopBar(props: {
   workspace: string;
@@ -59,83 +54,32 @@ function TopBar(props: {
         <span class="ws-topbar-summary">{briefing().topbarSummary}</span>
       </div>
       <div class="ws-topbar-actions">
+        <WorkspacePrBar workspace={props.workspace} />
         <button class="ui-button-icon ws-topbar-btn" title="Open in editor" onClick={props.onOpenEditor}>
-          ⧉
+          <Icon name="external" />
         </button>
         <button
           class="ui-button-icon ws-topbar-btn"
           title={props.rightCollapsed ? "Show right panel" : "Collapse right panel"}
           onClick={props.onToggleRight}
         >
-          {props.rightCollapsed ? "⇤" : "⇥"}
+          <Icon name={props.rightCollapsed ? "panel-left" : "panel-right"} />
         </button>
       </div>
     </div>
   );
 }
 
-function WorkspaceBriefing(props: { workspace: string; checks?: ArchcarChecksSummary }) {
-  const row = () => workspacesStore.row(props.workspace);
-  const briefing = () => deriveWorkspaceBriefing(row(), props.checks);
-
-  return (
-    <div class="ws-briefing" aria-label="Workspace briefing">
-      <div class="ws-briefing-main">
-        <span class="ws-briefing-kicker">Next</span>
-        <span class="ws-briefing-action">{briefing().nextAction}</span>
-      </div>
-      <div class="ws-briefing-tiles">
-        <For each={briefing().tiles}>
-          {(tile) => (
-            <button
-              class="ws-briefing-tile"
-              classList={{ [`ws-briefing-${tile.tone}`]: true }}
-              onClick={() => {
-                if (tile.label === "Review") nav.setRightPanelTab("review");
-                if (tile.label === "Changes") nav.setRightPanelTab("changes");
-                if (tile.label === "Agents" || tile.label === "Scripts")
-                  nav.setRightPanelTab("summary");
-                if (tile.label === "Checks") nav.setRightPanelTab("checks");
-              }}
-            >
-              <span class="ws-briefing-label">{tile.label}</span>
-              <span class="ws-briefing-value">{tile.value}</span>
-            </button>
-          )}
-        </For>
-      </div>
-    </div>
-  );
-}
-
 function RightPanel(props: { workspace: string }) {
-  const [width, setWidth] = createPersistedWidth("rightPanel.width", 340, RIGHT_MIN, RIGHT_MAX);
+  const [width, setWidth] = createPersistedWidth("rightPanel.width", 300, RIGHT_MIN, RIGHT_MAX);
   const row = () => workspacesStore.row(props.workspace);
-  const [openTasks] = createResource(
-    () => props.workspace,
-    async (ws): Promise<number> => {
-      try {
-        const res = await send({ type: "list_tasks", workspace: ws });
-        if (res.type !== "tasks") return 0;
-        return res.tasks.filter((task) => task.status !== "done").length;
-      } catch {
-        return 0;
-      }
-    },
-  );
   const tabCount = (tab: RightPanelTab) => {
     const r = row();
     if (!r) return "";
-    if (tab === "tasks") {
-      const open = openTasks() ?? 0;
-      const total = open + r.openTodos;
-      return total > 0 ? String(total) : "";
-    }
     if (tab === "changes" && r.changedFiles > 0) return String(r.changedFiles);
     if (tab === "checks" && (r.activeSessions > 0 || r.runRunning)) {
       return r.runRunning ? "run" : String(r.activeSessions);
     }
-    if (tab === "pr" && r.prNumber != null) return `#${r.prNumber}`;
     return "";
   };
   return (
@@ -160,12 +104,6 @@ function RightPanel(props: { workspace: string }) {
         </div>
         <div class="ws-right-body">
           <Switch>
-            <Match when={nav.rightPanelTab() === "tasks"}>
-              <TasksPanel workspace={props.workspace} />
-            </Match>
-            <Match when={nav.rightPanelTab() === "summary"}>
-              <SummaryPanel workspace={props.workspace} />
-            </Match>
             <Match when={nav.rightPanelTab() === "files"}>
               <WorkspaceFiles
                 workspace={props.workspace}
@@ -177,19 +115,12 @@ function RightPanel(props: { workspace: string }) {
                 workspace={props.workspace}
                 openFile={(p) => openFileInCenter(props.workspace, p)}
               />
-              <CheckpointsPanel workspace={props.workspace} />
             </Match>
             <Match when={nav.rightPanelTab() === "checks"}>
               <ChecksPanel workspace={props.workspace} />
             </Match>
-            <Match when={nav.rightPanelTab() === "context"}>
-              <ContextPanel workspace={props.workspace} />
-            </Match>
             <Match when={nav.rightPanelTab() === "review"}>
               <ReviewPanel workspace={props.workspace} />
-            </Match>
-            <Match when={nav.rightPanelTab() === "pr"}>
-              <PrPanel workspace={props.workspace} />
             </Match>
           </Switch>
         </div>
@@ -237,7 +168,6 @@ export default function CommandCenter() {
               rightCollapsed={rightCollapsed()}
               onToggleRight={() => setRightCollapsed((c) => !c)}
             />
-            <WorkspaceBriefing workspace={ws()} checks={currentChecks()} />
             <div class="ws-center-content">
               <ChatSurface workspace={ws()} />
             </div>

@@ -10,7 +10,7 @@ export type AppPage = "dashboard" | "projects" | "workspace" | "history" | "sett
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");
-const [rightPanelTab, setRightPanelTabRaw] = createSignal<RightPanelTab>("summary");
+const [rightPanelTab, setRightPanelTabRaw] = createSignal<RightPanelTab>("changes");
 const [selectedChatThread, setSelectedChatThread] = createSignal<number | null>(null);
 const [windowFocused, setWindowFocused] = createSignal(true);
 

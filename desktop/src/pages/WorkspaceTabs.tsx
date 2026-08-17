@@ -1,6 +1,6 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
-import { actions, nav } from "@/store";
+import { actions } from "@/store";
 import type {
   ArchcarChecksSummary,
   ArchcarConfiguredCheck,
@@ -403,7 +403,7 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
-  const [checkLog, { refetch: refetchCheckLog }] = createResource(
+  const [checkLog] = createResource(
     () => props.workspace,
     async (ws): Promise<string> => {
       try {
@@ -414,26 +414,6 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
-  const [feedback, setFeedback] = createSignal("");
-  async function runCheck(check: ArchcarConfiguredCheck) {
-    setFeedback(`Running ${check.label}…`);
-    try {
-      const res = await send({
-        type: "run_workspace_check",
-        workspace: props.workspace,
-        key: check.key,
-      });
-      setFeedback(
-        res.type === "check_started"
-          ? `${check.label} started (pid ${res.pid})`
-          : `${check.label} failed`,
-      );
-      // Give the check a moment to produce output, then pull its log.
-      setTimeout(() => void refetchCheckLog(), 600);
-    } catch (err) {
-      setFeedback(`${check.label} failed: ${(err as Error).message}`);
-    }
-  }
   const [conflicts] = createResource(
     () => props.workspace,
     async (ws): Promise<ArchcarWorkspaceConflict[]> => {
@@ -508,17 +488,9 @@ export function ChecksPanel(props: { workspace: string }) {
               <div class="ws-blocker-list">
                 <For each={blockers(s())}>
                   {(blocker) => (
-                    <button
-                      class="ws-blocker-chip"
-                      onClick={() => {
-                        if (blocker.includes("todo")) nav.setRightPanelTab("tasks");
-                        else if (blocker.includes("review")) nav.setRightPanelTab("review");
-                        else if (blocker.includes("check")) nav.setRightPanelTab("checks");
-                        else nav.setRightPanelTab("changes");
-                      }}
-                    >
+                    <span class="ws-blocker-chip">
                       {blocker}
-                    </button>
+                    </span>
                   )}
                 </For>
               </div>
@@ -526,27 +498,18 @@ export function ChecksPanel(props: { workspace: string }) {
           </div>
         )}
       </Show>
-      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <Show when={(checks() ?? []).length > 0}>
         <div class="detail-label">Local checks</div>
         <For each={checks()}>
           {(check) => (
-            <div class="action-row">
+            <div class="detail-row ws-check-flat-row">
               <span class="detail-value" style={{ flex: "1 1 auto" }} title={check.command}>
                 {check.label}
               </span>
-              <button class="secondary-action" onClick={() => void runCheck(check)}>
-                Run
-              </button>
             </div>
           )}
         </For>
-        <div class="action-row">
-          <span class="detail-label" style={{ flex: "1 1 auto" }}>Latest check log</span>
-          <button class="secondary-action" onClick={() => void refetchCheckLog()}>
-            Refresh log
-          </button>
-        </div>
+        <div class="detail-label">Latest check log</div>
         <pre class="ws-run-prompt">
           {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
         </pre>
@@ -569,7 +532,7 @@ export function ChecksPanel(props: { workspace: string }) {
         {(s) => (
           <For each={rows(s())}>
             {([label, value]) => (
-              <div class="detail-row">
+              <div class="detail-row ws-check-flat-row">
                 <span class="detail-label">{label}</span>
                 <span class="detail-value">{value}</span>
               </div>
@@ -584,7 +547,7 @@ export function ChecksPanel(props: { workspace: string }) {
 // ---- Review (local comments) ----------------------------------------------
 
 export function ReviewPanel(props: { workspace: string }) {
-  const [comments, { refetch }] = createResource(
+  const [comments] = createResource(
     () => props.workspace,
     async (ws): Promise<ReviewComment[]> => {
       try {
@@ -595,46 +558,9 @@ export function ReviewPanel(props: { workspace: string }) {
       }
     },
   );
-  const [file, setFile] = createSignal("");
-  const [line, setLine] = createSignal("");
-  const [body, setBody] = createSignal("");
-  const [feedback, setFeedback] = createSignal("");
-
-  async function add() {
-    if (!file().trim() || !body().trim()) {
-      setFeedback("File path and comment body are required.");
-      return;
-    }
-    const lineNum = line().trim() ? Number(line().trim()) : undefined;
-    try {
-      await actions.addReviewComment({
-        workspace: props.workspace,
-        filePath: file().trim(),
-        lineNumber: Number.isInteger(lineNum) ? lineNum : undefined,
-        body: body().trim(),
-      });
-      setFile("");
-      setLine("");
-      setBody("");
-      setFeedback("");
-      await refetch();
-    } catch (err) {
-      setFeedback(`Add review comment failed: ${(err as Error).message}`);
-    }
-  }
-
   return (
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Review comments</div>
-      <div class="action-row">
-        <input class="ws-text-input" placeholder="file path" value={file()} onInput={(e) => setFile(e.currentTarget.value)} />
-        <input class="ws-text-input" style={{ "max-width": "80px" }} placeholder="line" value={line()} onInput={(e) => setLine(e.currentTarget.value)} />
-      </div>
-      <div class="action-row">
-        <input class="ws-text-input" placeholder="comment…" value={body()} onInput={(e) => setBody(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void add()} />
-        <button class="suggested-action" onClick={() => void add()}>Add</button>
-      </div>
-      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
       <Show
         when={(comments() ?? []).length > 0}
         fallback={<div class="empty-state">{comments.loading ? "Loading…" : "No review comments"}</div>}
@@ -647,21 +573,6 @@ export function ReviewPanel(props: { workspace: string }) {
                 {c.line_number != null ? `:${c.line_number}` : ""} [{c.status}]
               </span>
               <span class="detail-value">{c.body}</span>
-              <Show when={c.github_thread_id}>
-                {(tid) => (
-                  <button
-                    class="secondary-action"
-                    onClick={() =>
-                      void actions
-                        .resolveReviewThread(props.workspace, tid(), c.status !== "resolved")
-                        .then(refetch)
-                        .catch((err) => setFeedback(`Resolve failed: ${(err as Error).message}`))
-                    }
-                  >
-                    {c.status === "resolved" ? "Reopen" : "Resolve"}
-                  </button>
-                )}
-              </Show>
             </div>
           )}
         </For>

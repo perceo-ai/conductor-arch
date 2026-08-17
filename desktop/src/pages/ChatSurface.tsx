@@ -12,14 +12,17 @@ import type {
 import { titleCaseWorkspace } from "@/lib/text";
 import { isDisplayableTimelineItem } from "@/lib/timeline";
 import { DiffView } from "./WorkspaceChanges";
-import ChangesTab from "./WorkspaceChanges";
 import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
 import Diff from "@/components/Diff";
+import CompactSelect from "@/components/CompactSelect";
+import Icon from "@/components/Icon";
+import type { IconName } from "@/components/Icon";
 import { renderMarkdown } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
 import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
+import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -75,7 +78,7 @@ function ThreadTab(props: {
           props.onClose();
         }}
       >
-        ×
+        <Icon name="x" />
       </button>
     </div>
   );
@@ -91,7 +94,7 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
       role="button"
       title={props.path}
     >
-      <span class="ws-file-tab-icon">·</span>
+      <Icon name="file" class="ws-file-tab-icon" />
       <span class="ws-tab-label">{name()}</span>
       <button
         class="ws-tab-close-button"
@@ -101,7 +104,7 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
           props.onClose();
         }}
       >
-        ×
+        <Icon name="x" />
       </button>
     </div>
   );
@@ -116,6 +119,17 @@ function UserBubble(props: { body: string }) {
       />
     </div>
   );
+}
+
+function eventIcon(renderClass: string): IconName {
+  if (renderClass === "command_card" || renderClass === "process_card" || renderClass === "background_card")
+    return "terminal";
+  if (renderClass === "file_card") return "file-text";
+  if (renderClass === "diff_card") return "git-compare";
+  if (renderClass === "reasoning_card") return "brain";
+  if (renderClass === "skill_card" || renderClass === "tool_card" || renderClass === "plugin_card") return "wrench";
+  if (renderClass === "subagent_card" || renderClass === "nested_transcript_card") return "bolt";
+  return "wrench";
 }
 
 // Inline "chip-card" event — GTK's inline_event_widget: a flat row of expander +
@@ -143,8 +157,11 @@ function InlineCard(props: { item: ArchcarProjectionItem }) {
           disabled={!hasBody()}
           onClick={() => setOpen((o) => !o)}
         >
-          {hasBody() ? (open() ? "−" : "+") : "·"}
+          <Show when={hasBody()} fallback={<span class="chat-inline-event-dot" />}>
+            <Icon name={open() ? "chevron-down" : "chevron-right"} />
+          </Show>
         </button>
+        <Icon name={eventIcon(props.item.render_class)} class="chat-inline-event-icon" />
         <span class="chat-inline-event-action">{verb()}</span>
         <Show when={chip()}>
           <span class="chat-inline-event-chip">
@@ -431,6 +448,18 @@ function Composer(props: {
     if (sid != null) await send({ type: "interrupt_turn", session_id: sid }).catch(() => {});
   }
 
+  function defaultEnterSend() {
+    void queueSend();
+  }
+
+  function primaryAction() {
+    if (composerPrimaryAction(running()) === "interrupt") {
+      void interrupt();
+      return;
+    }
+    defaultEnterSend();
+  }
+
   async function removeQueued(queueId: number) {
     await send({ type: "remove_queued_chat_input", queue_id: queueId }).catch(() => {});
   }
@@ -463,7 +492,7 @@ function Composer(props: {
     e.preventDefault();
     // Ctrl/Cmd+Enter skips the queue and steers; plain Enter queues.
     if (e.ctrlKey || e.metaKey) void steerSend();
-    else void queueSend();
+    else defaultEnterSend();
   }
 
   return (
@@ -477,10 +506,10 @@ function Composer(props: {
                 <span class="chat-queued-composer-body">{q.visible_input ?? q.input}</span>
                 <div class="chat-queued-actions">
                   <button class="chat-queued-action-btn" title="Move up" onClick={() => void moveQueued(q.id, true)}>
-                    ↑
+                    <Icon name="arrow-up" />
                   </button>
                   <button class="chat-queued-action-btn" title="Move down" onClick={() => void moveQueued(q.id, false)}>
-                    ↓
+                    <Icon name="arrow-down" />
                   </button>
                   <button
                     class="chat-queued-action-btn"
@@ -488,14 +517,14 @@ function Composer(props: {
                     disabled={sessionId() == null}
                     onClick={() => void steerQueued(q)}
                   >
-                    ⚡
+                    <Icon name="bolt" />
                   </button>
                   <button
                     class="chat-queued-action-btn"
                     title="Remove queued message"
                     onClick={() => void removeQueued(q.id)}
                   >
-                    ×
+                    <Icon name="x" />
                   </button>
                 </div>
               </div>
@@ -509,14 +538,14 @@ function Composer(props: {
             <For each={attachments()}>
               {(a, i) => (
                 <span class="chat-attachment-chip" title={a.path}>
-                  <span class="chat-attachment-chip-icon">📎</span>
+                  <Icon name="paperclip" class="chat-attachment-chip-icon" />
                   <span class="chat-attachment-chip-label">{a.label}</span>
                   <button
                     class="chat-attachment-chip-remove"
                     title="Remove attachment"
                     onClick={() => setAttachments((list) => list.filter((_, j) => j !== i()))}
                   >
-                    ×
+                    <Icon name="x" />
                   </button>
                 </span>
               )}
@@ -526,7 +555,7 @@ function Composer(props: {
         <div class="chat-input-shell">
           <textarea
             class="chat-input-view"
-            placeholder="Ask to make changes, @mention files, or run /commands"
+            placeholder="Add a follow up"
             value={text()}
             onInput={(e) => setText(e.currentTarget.value)}
             onKeyDown={onKeyDown}
@@ -539,34 +568,30 @@ function Composer(props: {
             {/* Provider lives in the composer (like the old GTK bar). Changing it
                 opens a NEW chat with that agent; the current chat keeps its own
                 model/session untouched. */}
-            <select
-              class="chat-picker"
+            <CompactSelect
               title="Agent"
               value={props.provider}
-              onChange={(e) => props.onChangeProvider(e.currentTarget.value)}
-            >
-              <option value="codex">codex</option>
-              <option value="claude">claude</option>
-            </select>
+              options={[
+                { value: "codex", label: "Codex" },
+                { value: "claude", label: "Claude" },
+              ]}
+              onChange={props.onChangeProvider}
+            />
             {/* Model + effort are always shown (even when the provider exposes no
                 switchable models yet) so the composer controls stay consistent. */}
-            <select
-              class="chat-picker"
+            <CompactSelect
               title="Model"
               value={model()}
-              onChange={(e) => changeModel(e.currentTarget.value)}
-            >
-              <option value="">model…</option>
-              <For each={models()}>{(m) => <option value={m}>{m}</option>}</For>
-            </select>
-            <select
-              class="chat-picker"
+              options={[{ value: "", label: "Model" }, ...models().map((m) => ({ value: m, label: m }))]}
+              onChange={changeModel}
+              class="compact-select-model"
+            />
+            <CompactSelect
               title="Reasoning effort"
               value={effort()}
-              onChange={(e) => changeEffort(e.currentTarget.value)}
-            >
-              <For each={EFFORTS}>{(x) => <option value={x}>{x}</option>}</For>
-            </select>
+              options={EFFORTS.map((x) => ({ value: x, label: x }))}
+              onChange={changeEffort}
+            />
           </div>
           <div class="chat-toolbar-right">
             <Show when={contextPercent() != null}>
@@ -574,40 +599,31 @@ function Composer(props: {
                 {contextPercent()}% context
               </span>
             </Show>
-            <span class="chat-status-hint">
-              {running()
-                ? "Agent running · Enter queues next turn · Cmd/Ctrl+Enter steers now"
-                : busy()
-                  ? slowStart()
-                    ? "still starting — messages you send will be queued"
-                    : "starting…"
-                  : "Enter queues next turn · Cmd/Ctrl+Enter steers now"}
-            </span>
-            <Show when={running()}>
+            <Show when={busy()}>
+              <span class="chat-context-usage">{slowStart() ? "Still starting" : "Starting"}</span>
+            </Show>
+            <Show
+              when={composerPrimaryAction(running()) === "interrupt"}
+              fallback={
+                <button
+                  class="chat-send-btn"
+                  classList={{ "chat-send-btn-active": text().trim().length > 0 || attachments().length > 0 }}
+                  onClick={primaryAction}
+                  title="Send"
+                  disabled={text().trim().length === 0 && attachments().length === 0}
+                >
+                  <Icon name="send" />
+                </button>
+              }
+            >
               <button
                 class="chat-send-btn chat-stop-btn"
-                onClick={() => void interrupt()}
-                title="Stop current turn"
+                onClick={primaryAction}
+                title="Interrupt"
               >
-                Stop
+                <Icon name="square" />
               </button>
             </Show>
-            <button
-              class="chat-send-btn chat-steer-btn"
-              classList={{ "chat-send-btn-active": text().trim().length > 0 }}
-              onClick={() => void steerSend()}
-              title="Steer current turn — skip queue (Cmd/Ctrl+Enter)"
-            >
-              Steer
-            </button>
-            <button
-              class="chat-send-btn"
-              classList={{ "chat-send-btn-active": text().trim().length > 0 }}
-              onClick={() => void queueSend()}
-              title="Queue next turn (Enter)"
-            >
-              Queue
-            </button>
           </div>
         </div>
       </div>
@@ -862,7 +878,9 @@ function CommitView(props: { workspace: string; commit: string; onClose: () => v
     <div class="ws-file-view">
       <div class="ws-file-view-header">
         <span class="ws-file-view-path">Commit {props.commit}</span>
-        <button class="ui-button-icon" title="Close" onClick={props.onClose}>×</button>
+        <button class="ui-button-icon" title="Close" onClick={props.onClose}>
+          <Icon name="x" />
+        </button>
       </div>
       <div class="ws-diff-view">
         <Show when={!diff.loading} fallback={<div class="empty-state">Loading…</div>}>
@@ -878,7 +896,6 @@ function CommitView(props: { workspace: string; commit: string; onClose: () => v
 type CenterView =
   | { kind: "chat" }
   | { kind: "file"; path: string }
-  | { kind: "changes" }
   | { kind: "commit"; commit: string };
 
 export default function ChatSurface(props: { workspace: string }) {
@@ -1017,15 +1034,7 @@ export default function ChatSurface(props: { workspace: string }) {
             )}
           </For>
           <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
-            +
-          </button>
-          <button
-            class="ws-tab-shell ws-changes-tab-btn"
-            classList={{ "ws-tab-active": view().kind === "changes" }}
-            title="View all workspace changes"
-            onClick={() => setView({ kind: "changes" })}
-          >
-            <span class="ws-tab-label">Changes</span>
+            <Icon name="plus" />
           </button>
           <Show when={openFiles().length > 0}>
             <span class="ws-tab-sep-v" />
@@ -1046,9 +1055,6 @@ export default function ChatSurface(props: { workspace: string }) {
         </div>
       </div>
       <Switch fallback={<div class="empty-state">Starting chat…</div>}>
-        <Match when={view().kind === "changes"}>
-          <ChangesTab workspace={props.workspace} />
-        </Match>
         <Match when={view().kind === "commit"}>
           <CommitView
             workspace={props.workspace}

@@ -3410,18 +3410,57 @@ impl WorkspaceStore {
     /// `list_workspace_files` helper.
     pub fn list_files(&self, name: &str, cap: usize) -> Result<Vec<String>> {
         let workspace = self.get_by_name(name)?;
+        if let Ok(files) = Self::list_files_from_git(&workspace.path, cap) {
+            return Ok(files);
+        }
         let mut files = Vec::new();
-        Self::list_files_recursive(&workspace.path, &workspace.path, &mut files);
+        Self::list_files_recursive(&workspace.path, &workspace.path, &mut files, cap);
         files.sort();
         files.truncate(cap);
         Ok(files)
     }
 
-    fn list_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>) {
+    fn list_files_from_git(root: &Path, cap: usize) -> Result<Vec<String>> {
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+        let output = git_output_dynamic(
+            root,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?;
+        let mut files = output
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .filter(|path| !Self::skip_workspace_file_path(path))
+            .take(cap)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort();
+        Ok(files)
+    }
+
+    fn skip_workspace_file_path(path: &str) -> bool {
+        path.split('/')
+            .any(|part| matches!(part, ".git" | "target" | "node_modules"))
+    }
+
+    fn list_files_recursive(root: &Path, current: &Path, files: &mut Vec<String>, cap: usize) {
+        if files.len() >= cap {
+            return;
+        }
         let Ok(entries) = fs::read_dir(current) else {
             return;
         };
         for entry in entries.flatten() {
+            if files.len() >= cap {
+                return;
+            }
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -3438,7 +3477,7 @@ impl WorkspaceStore {
                 continue;
             }
             if file_type.is_dir() {
-                Self::list_files_recursive(root, &path, files);
+                Self::list_files_recursive(root, &path, files, cap);
                 continue;
             }
             if file_type.is_file() {
@@ -4587,6 +4626,68 @@ impl WorkspaceStore {
             PromptKind::TestFixing,
             format_pull_request_checks_agent_prompt(name, &checks),
         )
+    }
+
+    pub fn create_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        let template = self.render_pull_request_template(name)?;
+        self.append_resolved_prompt(
+            name,
+            PromptKind::CreatePr,
+            format!(
+                "Prepare this workspace for a pull request.\n\nDraft title:\n{}\n\nDraft body:\n{}\n\nUse the active repository workflow. Commit any appropriate uncommitted changes, push the branch, create the PR with this draft, refresh PR state, and report the final PR URL.",
+                template.title.trim(),
+                template.body.trim()
+            ),
+        )
+    }
+
+    pub fn push_branch_agent_prompt(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let changed_files = self.changed_files(name)?;
+        let files = if changed_files.is_empty() {
+            "No uncommitted files detected.".to_owned()
+        } else {
+            changed_files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        self.append_resolved_prompt(
+            name,
+            PromptKind::PushBranch,
+            format!(
+                "Prepare and push branch `{}` for workspace `{}`.\n\nChanged files:\n{}\n\nInspect the diff, commit any appropriate remaining changes, push the branch to the configured remote, refresh PR state if a PR exists, and report what changed.",
+                workspace.branch, workspace.name, files
+            ),
+        )
+    }
+
+    pub fn merge_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        let readiness = self
+            .pull_request_readiness_agent_prompt(name)
+            .unwrap_or_else(|_| format!("Verify workspace `{name}` is ready to merge."));
+        self.append_resolved_prompt(
+            name,
+            PromptKind::MergePr,
+            format!(
+                "{readiness}\n\nIf the pull request is mergeable, merge it using the repository's configured method. If anything is blocked, fix the blocker or report the exact reason."
+            ),
+        )
+    }
+
+    pub fn review_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        self.pull_request_readiness_agent_prompt(name)
+            .or_else(|_| self.pull_request_review_agent_prompt(name))
+            .or_else(|_| {
+                self.append_resolved_prompt(
+                    name,
+                    PromptKind::CodeReview,
+                    format!(
+                        "Review the pull request state for workspace `{name}`, resolve actionable blockers through code changes where appropriate, and report what remains."
+                    ),
+                )
+            })
     }
 
     pub fn pull_request_review_state(&self, name: &str) -> Result<String> {
@@ -24166,6 +24267,27 @@ spotlight_testing = true
         assert!(store.read_file("berlin", "../demo/README.md").is_err());
         assert!(store.write_file("berlin", "/etc/passwd", "x").is_err());
         assert!(store.read_file("berlin", "../../escape.txt").is_err());
+    }
+
+    #[test]
+    fn list_files_uses_git_and_excludes_heavy_directories() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::create_dir_all(workspace.path.join("src")).unwrap();
+        fs::create_dir_all(workspace.path.join("target/debug")).unwrap();
+        fs::create_dir_all(workspace.path.join("node_modules/pkg")).unwrap();
+        fs::write(workspace.path.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(workspace.path.join("notes.md"), "notes\n").unwrap();
+        fs::write(workspace.path.join("target/debug/generated.rs"), "slow\n").unwrap();
+        fs::write(workspace.path.join("node_modules/pkg/index.js"), "slow\n").unwrap();
+
+        let files = store.list_files("berlin", 20).unwrap();
+
+        assert!(files.contains(&"README.md".to_owned()));
+        assert!(files.contains(&"src/main.rs".to_owned()));
+        assert!(files.contains(&"notes.md".to_owned()));
+        assert!(!files.iter().any(|path| path.starts_with("target/")));
+        assert!(!files.iter().any(|path| path.starts_with("node_modules/")));
     }
 
     fn test_workspace_store() -> (tempfile::TempDir, WorkspaceStore) {

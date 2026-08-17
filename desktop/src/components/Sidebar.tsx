@@ -4,7 +4,13 @@ import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
-import { workspaceStatusKind, STATUS_COLOR, STATUS_LABEL } from "@/lib/workspaceStatus";
+import Icon from "./Icon";
+import {
+  workspaceSidebarMeta,
+  workspaceStatusKind,
+  STATUS_COLOR,
+  STATUS_LABEL,
+} from "@/lib/workspaceStatus";
 
 // Run a lifecycle action and surface any failure as a toast rather than
 // swallowing it — a silently-failing remove/delete is how a dead workspace ends
@@ -111,7 +117,7 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
 }
 
 const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 520;
+const SIDEBAR_MAX = 420;
 
 // Left sidebar: nav group (Dashboard/History) + projects list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
@@ -139,45 +145,9 @@ function WorkspaceRow(props: { name: string }) {
       </span>
       <span class="row-meta">
         <Show when={row()} fallback="…">
-          {(r) => (
-            <>
-              {r().status} · {r().branch}
-              <Show when={r().additions || r().deletions}>
-                {" "}
-                · +{r().additions} −{r().deletions}
-              </Show>
-            </>
-          )}
+          {(r) => workspaceSidebarMeta(r())}
         </Show>
       </span>
-      {/* Left-rail indicators from the UX strategy: active agents, blocked
-          work, and PR state, so branches can be triaged without opening them. */}
-      <Show when={row()}>
-        {(r) => (
-          <span class="row-indicators">
-            <Show when={r().activeSessions > 0}>
-              <span class="row-chip row-chip-agent" title={`${r().activeSessions} active agent session(s)`}>
-                ▶ {r().activeSessions}
-              </span>
-            </Show>
-            <Show when={r().blockedTasks > 0}>
-              <span class="row-chip row-chip-blocked" title={`${r().blockedTasks} blocked task(s)`}>
-                ! {r().blockedTasks}
-              </span>
-            </Show>
-            <Show when={r().blockedTasks === 0 && r().openTasks > 0}>
-              <span class="row-chip row-chip-task" title={`${r().openTasks} open task(s)`}>
-                ☰ {r().openTasks}
-              </span>
-            </Show>
-            <Show when={r().prNumber != null}>
-              <span class="row-chip row-chip-pr" title={`Pull request #${r().prNumber} ${r().prState ?? ""}`}>
-                PR #{r().prNumber}
-              </span>
-            </Show>
-          </span>
-        )}
-      </Show>
     </button>
   );
 }
@@ -219,7 +189,7 @@ function ProjectGroup(props: { repo: string }) {
           title="New workspace"
           onClick={() => dialogs.open({ kind: "create-workspace", repository: props.repo })}
         >
-          +
+          <Icon name="plus" />
         </button>
       </div>
       <For each={names()}>{(name) => <WorkspaceRow name={name} />}</For>
@@ -228,7 +198,7 @@ function ProjectGroup(props: { repo: string }) {
 }
 
 export default function Sidebar(props: { collapsed: boolean; onToggle: () => void }) {
-  const [width, setWidth] = createPersistedWidth("sidebar.width", 320, SIDEBAR_MIN, SIDEBAR_MAX);
+  const [width, setWidth] = createPersistedWidth("sidebar.width", 280, SIDEBAR_MIN, SIDEBAR_MAX);
   return (
     <aside
       class="sidebar"
@@ -246,7 +216,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           onClick={() => nav.back()}
           title="Back"
         >
-          ‹
+          <Icon name="arrow-left" />
         </button>
         <button
           class="ui-button-icon"
@@ -254,10 +224,10 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           onClick={() => nav.forward()}
           title="Forward"
         >
-          ›
+          <Icon name="arrow-right" />
         </button>
         <button class="ui-button-icon" onClick={props.onToggle} title="Hide sidebar">
-          ⇤
+          <Icon name="panel-left" />
         </button>
       </div>
 
@@ -267,7 +237,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           classList={{ active: nav.activePage() === "dashboard" }}
           onClick={() => nav.goToPage("dashboard")}
         >
-          <span class="sidebar-nav-icon">▦</span>
+          <Icon name="layout-dashboard" class="sidebar-nav-icon" />
           <span class="sidebar-nav-label">Dashboard</span>
         </button>
         <button
@@ -275,7 +245,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           classList={{ active: nav.activePage() === "projects" }}
           onClick={() => nav.goToPage("projects")}
         >
-          <span class="sidebar-nav-icon">▢</span>
+          <Icon name="folder" class="sidebar-nav-icon" />
           <span class="sidebar-nav-label">Projects</span>
         </button>
         <button
@@ -283,7 +253,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           classList={{ active: nav.activePage() === "history" }}
           onClick={() => nav.goToPage("history")}
         >
-          <span class="sidebar-nav-icon">◷</span>
+          <Icon name="history" class="sidebar-nav-icon" />
           <span class="sidebar-nav-label">History</span>
         </button>
       </div>
@@ -291,12 +261,12 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
       <div class="projects-header">
         <span class="title">Projects</span>
         <button
-          class="ui-button-icon"
-          title="Add project"
-          onClick={() => dialogs.open({ kind: "add-project" })}
-        >
-          +
-        </button>
+            class="ui-button-icon"
+            title="Add project"
+            onClick={() => dialogs.open({ kind: "add-project" })}
+          >
+            <Icon name="plus" />
+          </button>
       </div>
 
       <div class="workspace-list">
@@ -314,7 +284,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           classList={{ active: nav.activePage() === "settings" }}
           onClick={() => nav.goToPage("settings")}
         >
-          <span class="sidebar-nav-icon">⚙</span>
+          <Icon name="settings" class="sidebar-nav-icon" />
           <span class="sidebar-nav-label">Settings</span>
         </button>
       </div>
