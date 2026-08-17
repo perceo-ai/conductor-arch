@@ -1729,6 +1729,7 @@ body.resizing-col {
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 100%;
   overflow: hidden;
 }
 .ws-topbar-status-dot {
@@ -1738,7 +1739,11 @@ body.resizing-col {
   border-radius: 999px;
 }
 .ws-topbar-repo {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
   font-size: 13px;
+  line-height: 1;
   font-weight: 600;
   color: var(--lc-text, #e4e4e4);
   white-space: nowrap;
@@ -1747,10 +1752,18 @@ body.resizing-col {
   max-width: 60%;
 }
 .ws-topbar-sep {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  line-height: 1;
   color: var(--lc-text-muted, #7a7a7a);
 }
 .ws-topbar-branch {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
   font-size: 12px;
+  line-height: 1;
   color: var(--lc-text-muted, #9a9a9a);
   white-space: nowrap;
   overflow: hidden;

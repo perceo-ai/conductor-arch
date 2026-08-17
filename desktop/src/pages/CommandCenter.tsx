@@ -17,7 +17,7 @@ import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
-import { WORKSPACE_OPEN_APPS } from "@/lib/workspaceOpenApps";
+import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 
 const RIGHT_MIN = 260;
 const RIGHT_MAX = 440;
@@ -47,7 +47,13 @@ function TopBar(props: {
     const items: ContextMenuItem[] = [];
     const root = repoRoot();
     if (root) {
-      items.push({ label: "Open in Finder", icon: "folder", run: () => void openExternal(root) });
+      const defaultOpener = workspaceDefaultOpener();
+      items.push({
+        label: `Open in ${defaultOpener.label}`,
+        iconSrc: defaultOpener.logoSrc,
+        iconAlt: defaultOpener.label,
+        run: () => void openExternal(root),
+      });
       for (const app of WORKSPACE_OPEN_APPS) {
         items.push({
           label: `Open in ${app.label}`,
