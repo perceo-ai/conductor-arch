@@ -35,6 +35,11 @@ const api = {
   pathExists: (p: string): Promise<{ exists: boolean }> =>
     ipcRenderer.invoke("fs:path-exists", p),
 
+  /** Fast local file list for the workspace browser; avoids the daemon queue. */
+  listWorkspaceFiles: (opts: { rootPath: string; cap?: number }): Promise<
+    { ok: true; files: string[] } | { ok: false; error: string }
+  > => ipcRenderer.invoke("fs:list-workspace-files", opts),
+
   /** Resolve a local repo's owner avatar URL from its git remote. */
   repoAvatar: (opts: { rootPath: string; remoteName?: string }): Promise<
     { ok: true; avatarUrl: string } | { ok: false; error: string }

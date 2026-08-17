@@ -45,6 +45,58 @@ function spawnEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: shellPath() };
 }
 
+function skipWorkspaceFilePath(relativePath: string): boolean {
+  return relativePath
+    .split(/[\\/]/)
+    .some((part) => part === ".git" || part === "target" || part === "node_modules");
+}
+
+function listFilesRecursive(root: string, current: string, files: string[], cap: number): void {
+  if (files.length >= cap) return;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(current, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (files.length >= cap) return;
+    if (entry.name === ".git" || entry.name === "target" || entry.name === "node_modules") continue;
+    if (entry.isSymbolicLink()) continue;
+    const full = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      listFilesRecursive(root, full, files, cap);
+      continue;
+    }
+    if (entry.isFile()) {
+      const relative = path.relative(root, full);
+      if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) files.push(relative);
+    }
+  }
+}
+
+async function listWorkspaceFilesLocal(rootPath: string, cap = 400): Promise<string[]> {
+  const root = path.resolve(rootPath);
+  if (cap <= 0) return [];
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { encoding: "utf8", env: spawnEnv(), timeout: 3000, maxBuffer: 1024 * 1024 },
+    );
+    return stdout
+      .split("\0")
+      .filter(Boolean)
+      .filter((file) => !skipWorkspaceFilePath(file))
+      .slice(0, cap)
+      .sort();
+  } catch {
+    const files: string[] = [];
+    listFilesRecursive(root, root, files, cap);
+    return files.sort().slice(0, cap);
+  }
+}
+
 function normalizeVersion(value: string): number[] {
   return value
     .trim()
@@ -191,6 +243,16 @@ ipcMain.handle("archcar:request", async (_evt, payload: unknown) => {
     return { ok: true, value: res };
   } catch (err) {
     logLine("error", `request ${type} failed: ${(err as Error).message}`);
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle("fs:list-workspace-files", async (_evt, opts: { rootPath?: string; cap?: number }) => {
+  try {
+    if (!opts?.rootPath) return { ok: false, error: "missing workspace path" };
+    const files = await listWorkspaceFilesLocal(opts.rootPath, opts.cap ?? 400);
+    return { ok: true, files };
+  } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
 });

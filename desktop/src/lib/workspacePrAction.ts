@@ -56,8 +56,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
   const checksPassed =
     check === "success" ||
     check === "passed" ||
-    check === "pass" ||
-    (check === "exited" && checkExitCode === 0);
+    check === "pass";
   const checksFailed =
     check === "failing" ||
     check === "failed" ||

@@ -261,6 +261,7 @@ export interface ArchcarWorkspaceSummary {
   id: number;
   name: string;
   repository_name: string;
+  path: string;
   branch: string;
   base_ref: string;
   status: string;

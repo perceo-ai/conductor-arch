@@ -3267,6 +3267,7 @@ fn workspace_summary_from_status_line(
         id: workspace.id,
         name: workspace.name,
         repository_name,
+        path: workspace.path.display().to_string(),
         branch: workspace.branch,
         base_ref: workspace.base_ref,
         status: workspace.status,

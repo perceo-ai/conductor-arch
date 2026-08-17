@@ -555,7 +555,7 @@ function Composer(props: {
         <div class="chat-input-shell">
           <textarea
             class="chat-input-view"
-            placeholder="Add a follow up"
+            placeholder="Ask to make changes, @mention files, run /commands"
             value={text()}
             onInput={(e) => setText(e.currentTarget.value)}
             onKeyDown={onKeyDown}
@@ -945,9 +945,10 @@ export default function ChatSurface(props: { workspace: string }) {
         setView({ kind: "chat" });
         void threadsStore.refresh(ws).then((all) => {
           const list = all.filter((t) => t.provider !== "shell");
-          // Every workspace always has at least one chat: if none exist yet
-          // (freshly created, or all closed), start one so the chat UI is never
-          // empty.
+          // Every workspace always has at least one chat thread: if none exist
+          // yet (freshly created, or all closed), create one so the chat UI is
+          // never empty. The live agent session starts on send, not on
+          // selection, so other workspace surfaces stay responsive.
           if (list.length === 0) {
             void newChat();
             return;
@@ -964,12 +965,6 @@ export default function ChatSurface(props: { workspace: string }) {
   function selectThread(thread: ArchcarChatThread) {
     nav.selectChatThread(thread.id);
     setView({ kind: "chat" });
-    void send({
-      type: "ensure_chat_thread_session",
-      workspace: props.workspace,
-      thread_id: thread.id,
-      kind: providerToKind(thread.provider),
-    }).catch(() => {});
     loadThread(thread.id);
   }
 

@@ -1135,6 +1135,7 @@ pub struct ArchcarWorkspaceSummary {
     pub id: i64,
     pub name: String,
     pub repository_name: String,
+    pub path: String,
     pub branch: String,
     pub base_ref: String,
     pub status: String,

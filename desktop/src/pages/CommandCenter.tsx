@@ -124,6 +124,7 @@ function RightPanel(props: { workspace: string }) {
             <Match when={nav.rightPanelTab() === "files"}>
               <WorkspaceFiles
                 workspace={props.workspace}
+                rootPath={row()?.path}
                 openFile={(p) => openFileInCenter(props.workspace, p)}
               />
             </Match>

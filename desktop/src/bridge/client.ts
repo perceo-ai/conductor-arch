@@ -31,6 +31,9 @@ interface ArchductorApi {
     { ok: true; items: GithubWorkItem[] } | { ok: false; error: string }
   >;
   pathExists(p: string): Promise<{ exists: boolean }>;
+  listWorkspaceFiles(opts: { rootPath: string; cap?: number }): Promise<
+    { ok: true; files: string[] } | { ok: false; error: string }
+  >;
   repoAvatar(opts: { rootPath: string; remoteName?: string }): Promise<
     { ok: true; avatarUrl: string } | { ok: false; error: string }
   >;
@@ -99,6 +102,10 @@ export const listGithubWork = (opts: { rootPath: string }) => api().listGithubWo
 
 /** Check whether a filesystem path currently exists. */
 export const pathExists = (p: string) => api().pathExists(p);
+
+/** Fast local file list for the workspace browser. */
+export const listWorkspaceFiles = (opts: { rootPath: string; cap?: number }) =>
+  api().listWorkspaceFiles(opts);
 
 /** Resolve a local repo's owner avatar URL from its git remote. */
 export const repoAvatar = (opts: { rootPath: string; remoteName?: string }) =>

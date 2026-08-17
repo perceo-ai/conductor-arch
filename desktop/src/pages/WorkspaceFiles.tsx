@@ -1,5 +1,5 @@
 import { For, Show, createMemo, createResource, createSignal } from "solid-js";
-import { send } from "@/bridge/client";
+import { listWorkspaceFiles, send } from "@/bridge/client";
 import Icon from "@/components/Icon";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
@@ -84,12 +84,16 @@ function Row(props: {
   );
 }
 
-export default function WorkspaceFiles(props: { workspace: string; openFile?: (path: string) => void }) {
+export default function WorkspaceFiles(props: { workspace: string; rootPath?: string; openFile?: (path: string) => void }) {
   const [files] = createResource(
-    () => props.workspace,
-    async (ws) => {
+    () => ({ workspace: props.workspace, rootPath: props.rootPath }),
+    async ({ workspace, rootPath }) => {
       try {
-        const res = await send({ type: "list_workspace_files", workspace: ws });
+        if (rootPath) {
+          const local = await listWorkspaceFiles({ rootPath, cap: 400 });
+          if (local.ok) return local.files;
+        }
+        const res = await send({ type: "list_workspace_files", workspace });
         return res.type === "workspace_files" ? res.files : [];
       } catch {
         // Daemon/socket unavailable — render an empty tree instead of throwing.

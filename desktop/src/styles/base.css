@@ -3909,8 +3909,44 @@ button.ws-tab-shell.ws-chat-new:hover {
 .workspace-row-shell .row-name {
   flex: 1 1 auto;
   min-width: 0;
+  text-align: left;
   font-size: 13px;
   line-height: 1.2;
+}
+
+.workspace-row-indicators {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  color: #9b9b9b;
+}
+
+.workspace-row-indicator {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: #9a9a9a;
+  background: transparent;
+}
+
+.workspace-row-indicator .ui-icon {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.1;
+}
+
+.workspace-row-indicator-agent,
+.workspace-row-indicator-run {
+  color: #72c293;
+}
+
+.workspace-row-indicator-pr {
+  color: #9aa6b8;
 }
 
 .workspace-row-shell .row-meta {
@@ -3926,6 +3962,17 @@ button.ws-tab-shell.ws-chat-new:hover {
 
 .workspace-row-diff {
   gap: 4px;
+  min-width: max-content;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.workspace-row-additions {
+  color: #74d69a;
+}
+
+.workspace-row-deletions {
+  color: #f17f7f;
 }
 
 .sidebar-footer {
@@ -3933,14 +3980,15 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 
 .ws-topbar {
-  height: 40px;
-  padding: 0 12px;
-  gap: 7px;
-  background: #121212;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 10px;
+  gap: 8px;
+  background: #111111;
 }
 
 .ws-topbar-repo {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 620;
 }
 
@@ -3950,37 +3998,46 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 
 .ws-topbar-actions {
-  gap: 6px;
+  height: 100%;
+  gap: 5px;
 }
 
 .ws-topbar-actions .ui-button-icon {
-  width: 30px;
-  min-width: 30px;
+  width: 28px;
+  min-width: 28px;
   height: 28px;
   min-height: 28px;
-  border-radius: 6px;
+  border-radius: 5px;
 }
 
 .ws-open-menu-button {
-  min-width: 42px;
+  min-width: 40px;
   height: 28px;
   min-height: 28px;
   justify-content: center;
   gap: 3px;
-  padding: 0 7px;
-  border-radius: 6px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: #d7d7d7;
+}
+
+.ws-open-menu-button .ui-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  opacity: 1;
 }
 
 .ws-right-topbar {
   min-height: 36px;
   height: 36px;
-  padding: 0 8px 0 10px;
+  padding: 0 10px;
   gap: 6px;
   background: #111111;
 }
 
 .ws-pr-bar {
-  height: 28px;
+  height: 26px;
   gap: 5px;
 }
 
@@ -3998,16 +4055,17 @@ button.ws-tab-shell.ws-chat-new:hover {
 
 .ws-right-tabs {
   min-height: 36px;
-  padding: 5px 8px;
-  background: #101010;
+  height: 36px;
+  padding: 5px 10px;
+  background: #111111;
 }
 
 .nav-button,
 .ws-right-tabs .nav-button,
 .ws-changes-scope .nav-button {
   min-height: 24px;
-  padding: 0 7px;
-  border-radius: 6px;
+  padding: 0 6px;
+  border-radius: 5px;
   font-size: 11px;
 }
 
@@ -4055,13 +4113,18 @@ button.ws-tab-shell.ws-chat-new:hover {
   background: #111111;
 }
 
+.ws-chat-tabs {
+  height: 36px;
+  padding: 0 10px;
+}
+
 .ws-chat-tabs .ws-tab-shell,
 .ws-chat-tabs button.ws-tab-shell {
   height: 36px;
   min-height: 36px;
   min-width: 0;
-  padding: 0 9px;
-  border-bottom: 2px solid transparent;
+  padding: 0 8px;
+  border-bottom: 1px solid transparent;
   background: transparent;
 }
 
@@ -4080,7 +4143,81 @@ button.ws-tab-shell.ws-chat-new:hover {
 
 .ws-chat-tabs .ws-tab-shell:hover .ws-tab-close-button,
 .ws-chat-tabs .ws-tab-shell.ws-tab-active .ws-tab-close-button {
-  opacity: 0.65;
+  opacity: 0.55;
+}
+
+/* Conductor-density composer and selectors. */
+.chat-composer {
+  padding: 0 10px 10px;
+  background: #121212;
+}
+
+.chat-composer-box {
+  gap: 8px;
+  padding: 11px 12px 10px;
+  border-color: #262626;
+  background: #161616;
+  box-shadow: none;
+}
+
+.chat-input-view {
+  min-height: 82px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-toolbar {
+  min-height: 26px;
+}
+
+.compact-select-trigger {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+  border-color: #292929;
+  border-radius: 5px;
+  background: #181818;
+  color: #c8c8c8;
+  font-size: 11px;
+}
+
+.chat-send-btn {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  border-radius: 5px;
+}
+
+.chat-send-btn .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ws-folder-toggle,
+.ws-folder-icon,
+.ws-file-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  min-height: 15px;
+  opacity: 1;
+  stroke-width: 2.45;
+}
+
+.ws-folder-toggle {
+  color: #b7b7b7;
+}
+
+.ws-folder-icon {
+  color: #d0ad69;
+  fill: rgba(208, 173, 105, 0.34);
+}
+
+.ws-file-icon {
+  color: #c0c6cf;
+  fill: rgba(192, 198, 207, 0.24);
 }
 
 @media (max-width: 1100px) {

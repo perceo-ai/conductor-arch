@@ -6,9 +6,11 @@ import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "./Icon";
 import {
+  dashboardTriageBadges,
   workspaceStatusKind,
   STATUS_COLOR,
   STATUS_LABEL,
+  type DashboardTriageBadgeTone,
 } from "@/lib/workspaceStatus";
 import { titleCaseWorkspace } from "@/lib/text";
 
@@ -119,6 +121,14 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 420;
 
+const ROW_TRIAGE_ICON: Partial<Record<DashboardTriageBadgeTone, "brain" | "play" | "git-compare">> = {
+  agent: "brain",
+  run: "play",
+  pr: "git-compare",
+};
+
+const ROW_TRIAGE_TONES = new Set<DashboardTriageBadgeTone>(["agent", "run", "pr"]);
+
 // Left sidebar: nav group (Dashboard/History) + workspace list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
 // with no workspaces yet still appears. Each workspace row reads only its own
@@ -129,6 +139,10 @@ function WorkspaceRow(props: { name: string }) {
   const selected = () => nav.selectedWorkspace() === props.name;
   const statusKind = () => workspaceStatusKind(row() ?? {});
   const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
+  const compactBadges = () =>
+    dashboardTriageBadges(row() ?? {})
+      .filter((badge) => ROW_TRIAGE_TONES.has(badge.tone))
+      .slice(0, 2);
   return (
     <button
       class="workspace-row-shell"
@@ -143,6 +157,20 @@ function WorkspaceRow(props: { name: string }) {
           title={STATUS_LABEL[statusKind()]}
         />
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
+        <Show when={compactBadges().length > 0}>
+          <span class="workspace-row-indicators">
+            <For each={compactBadges()}>
+              {(badge) => {
+                const icon = ROW_TRIAGE_ICON[badge.tone] ?? "git-compare";
+                return (
+                  <span class={`workspace-row-indicator workspace-row-indicator-${badge.tone}`} title={badge.title}>
+                    <Icon name={icon} />
+                  </span>
+                );
+              }}
+            </For>
+          </span>
+        </Show>
         <Show when={hasDiffStats()}>
           <span class="workspace-row-diff">
             <span class="workspace-row-additions">+{row()?.additions ?? 0}</span>

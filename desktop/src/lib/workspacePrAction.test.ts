@@ -18,7 +18,7 @@ describe("deriveWorkspacePrAction", () => {
     });
   });
 
-  it("moves open clean PRs to merge when checks are clear", () => {
+  it("does not treat a local successful check process as full merge readiness", () => {
     expect(
       deriveWorkspacePrAction({
         prNumber: 42,
@@ -27,13 +27,13 @@ describe("deriveWorkspacePrAction", () => {
         checkExitCode: 0,
       }),
     ).toMatchObject({
-      title: "Ready to merge",
-      actionLabel: "Merge",
-      action: "merge",
+      title: "Checks unknown",
+      actionLabel: "Review",
+      action: "view",
     });
   });
 
-  it("also accepts explicit remote success statuses if supplied", () => {
+  it("moves open clean PRs to merge only with an explicit passed status", () => {
     expect(
       deriveWorkspacePrAction({
         prNumber: 42,
