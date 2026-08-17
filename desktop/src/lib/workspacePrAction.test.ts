@@ -63,11 +63,8 @@ describe("deriveWorkspacePrAction", () => {
     }
   });
 
-  it("routes failed checks to review instead of merge", () => {
-    for (const input of [
-      { checkStatus: "failed" },
-      { checkStatus: "exited", checkExitCode: 7 },
-    ]) {
+  it("routes explicit failed checks to review instead of merge", () => {
+    for (const input of [{ checkStatus: "failed" }]) {
       expect(
         deriveWorkspacePrAction({
           prNumber: 42,
@@ -80,6 +77,21 @@ describe("deriveWorkspacePrAction", () => {
         action: "view",
       });
     }
+  });
+
+  it("does not treat local check process exits as revision-tied PR failures", () => {
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        checkStatus: "exited",
+        checkExitCode: 7,
+      }),
+    ).toMatchObject({
+      title: "Checks unknown",
+      actionLabel: "Review",
+      action: "view",
+    });
   });
 
   it("does not let stale failed checks override local PR changes", () => {

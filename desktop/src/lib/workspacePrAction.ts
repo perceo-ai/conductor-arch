@@ -52,7 +52,6 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
   const behind = input.branchBehind ?? 0;
   const conflicts = input.conflicts ?? 0;
   const changed = input.changedFiles ?? 0;
-  const checkExitCode = input.checkExitCode;
   const checksPassed =
     check === "success" ||
     check === "passed" ||
@@ -61,8 +60,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
     check === "failing" ||
     check === "failed" ||
     check === "failure" ||
-    check === "error" ||
-    (check === "exited" && checkExitCode != null && checkExitCode !== 0);
+    check === "error";
 
   if (!prNumber) {
     if (changed > 0) {

@@ -1,4 +1,4 @@
-import { Show, createMemo, createResource, createSignal } from "solid-js";
+import { Show, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
 import { nav, threadsStore, workspacesStore, toastsStore } from "@/store";
 import type { ArchcarChatThread, ArchcarChecksSummary, SessionKind, WorkspaceGitAction } from "@/bridge/protocol";
@@ -11,7 +11,7 @@ import { deriveWorkspacePrAction, workspacePrActionInput } from "@/lib/workspace
 
 export default function WorkspacePrBar(props: { workspace: string }) {
   const [busy, setBusy] = createSignal(false);
-  const [checks] = createResource(
+  const [checks, { refetch: refetchChecks }] = createResource(
     () => props.workspace,
     async (ws): Promise<ArchcarChecksSummary | undefined> => {
       try {
@@ -22,6 +22,13 @@ export default function WorkspacePrBar(props: { workspace: string }) {
       }
     },
   );
+
+  onMount(() => {
+    const timer = window.setInterval(() => {
+      void refetchChecks();
+    }, 10_000);
+    onCleanup(() => window.clearInterval(timer));
+  });
 
   const row = () => workspacesStore.row(props.workspace);
   const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checks())));
