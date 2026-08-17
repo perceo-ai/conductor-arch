@@ -81,4 +81,24 @@ describe("deriveWorkspacePrAction", () => {
       });
     }
   });
+
+  it("does not let stale failed checks override local PR changes", () => {
+    for (const input of [
+      { changedFiles: 1 },
+      { branchAhead: 1 },
+    ]) {
+      expect(
+        deriveWorkspacePrAction({
+          prNumber: 42,
+          prState: "open",
+          checkStatus: "exited",
+          checkExitCode: 7,
+          ...input,
+        }),
+      ).toMatchObject({
+        actionLabel: "Push",
+        action: "push",
+      });
+    }
+  });
 });

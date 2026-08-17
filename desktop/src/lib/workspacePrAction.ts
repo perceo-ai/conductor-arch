@@ -91,10 +91,12 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
 
   if (conflicts > 0)
     return { title: "Merge conflicts", cssClass: "ws-pr-status-failed", actionLabel: "Resolve", action: "view" };
-  if (checksFailed)
-    return { title: "Checks failing", cssClass: "ws-pr-status-failed", actionLabel: "Fix Checks", action: "view" };
+  if (changed > 0)
+    return { title: "Uncommitted changes", cssClass: "ws-pr-status-pending", actionLabel: "Push", action: "push" };
   if (ahead > 0)
     return { title: "Unpushed commits", cssClass: "ws-pr-status-pending", actionLabel: "Push", action: "push" };
+  if (checksFailed)
+    return { title: "Checks failing", cssClass: "ws-pr-status-failed", actionLabel: "Fix Checks", action: "view" };
   if (check === "pending" || check === "running" || check === "queued")
     return { title: "Checks running", cssClass: "ws-pr-status-pending", actionLabel: "Review", action: "view" };
   if (behind > 0)
