@@ -1753,6 +1753,34 @@ body.resizing-col {
 .ws-topbar-btn {
   -webkit-app-region: no-drag;
 }
+.ws-open-menu-button {
+  height: var(--ui-control-h);
+  min-height: var(--ui-control-h);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid #2f2f2f;
+  border-radius: 6px;
+  background: #191919;
+  color: #cfcfcf;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.ws-open-menu-button:hover {
+  background: #222222;
+  border-color: #3a3a3a;
+  color: #f0f0f0;
+}
+.ws-open-menu-button svg {
+  width: 14px;
+  height: 14px;
+}
+.ws-open-menu-chevron {
+  width: 11px !important;
+  height: 11px !important;
+  color: #8f8f8f;
+}
 
 .ws-briefing {
   flex: 0 0 auto;

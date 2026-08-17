@@ -51,7 +51,6 @@ export function HistoryPage() {
     <div class="page-shell history-view">
       <div class="page-header dashboard-header">
         <div class="dashboard-title">History</div>
-        <div class="dashboard-subtitle">Workspaces across your projects, most active first.</div>
         <div class="project-tabs">
           <For each={FILTERS}>
             {(f) => (

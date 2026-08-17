@@ -119,7 +119,7 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 420;
 
-// Left sidebar: nav group (Dashboard/History) + projects list. Repositories are
+// Left sidebar: nav group (Dashboard/History) + workspace list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
 // with no workspaces yet still appears. Each workspace row reads only its own
 // store slice, so a status change on one workspace re-renders that row alone.
@@ -244,14 +244,6 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         </button>
         <button
           class="sidebar-nav-button"
-          classList={{ active: nav.activePage() === "projects" }}
-          onClick={() => nav.goToPage("projects")}
-        >
-          <Icon name="folder" class="sidebar-nav-icon" />
-          <span class="sidebar-nav-label">Projects</span>
-        </button>
-        <button
-          class="sidebar-nav-button"
           classList={{ active: nav.activePage() === "history" }}
           onClick={() => nav.goToPage("history")}
         >
@@ -261,10 +253,10 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
       </div>
 
       <div class="projects-header">
-        <span class="title">Projects</span>
+        <span class="title">Workspaces</span>
         <button
             class="ui-button-icon"
-            title="Add project"
+            title="Add repository"
             onClick={() => dialogs.open({ kind: "add-project" })}
           >
             <Icon name="plus" />
@@ -274,7 +266,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
       <div class="workspace-list">
         <Show
           when={repositoriesStore.state.order.length > 0}
-          fallback={<div class="empty-state">No projects yet</div>}
+          fallback={<div class="empty-state">No repositories yet</div>}
         >
           <For each={repositoriesStore.state.order}>{(repo) => <ProjectGroup repo={repo} />}</For>
         </Show>

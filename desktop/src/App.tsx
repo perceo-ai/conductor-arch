@@ -92,9 +92,6 @@ export default function App() {
         case "goto-dashboard":
           nav.goToPage("dashboard");
           break;
-        case "goto-projects":
-          nav.goToPage("projects");
-          break;
         case "goto-history":
           nav.goToPage("history");
           break;

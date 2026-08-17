@@ -25,6 +25,11 @@ export function openContextMenu(e: MouseEvent, items: ContextMenuItem[]): void {
   setMenu({ x: e.clientX, y: e.clientY, items });
 }
 
+export function openContextMenuAt(x: number, y: number, items: ContextMenuItem[]): void {
+  if (items.length === 0) return;
+  setMenu({ x, y, items });
+}
+
 export default function ContextMenu() {
   const close = () => setMenu(null);
   // Clamped position, filled in once the menu is measured. Null until then so we

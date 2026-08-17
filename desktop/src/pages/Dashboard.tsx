@@ -216,9 +216,6 @@ export function DashboardPage() {
         <div class="dashboard-heading-row">
           <div>
             <div class="dashboard-title">Dashboard</div>
-            <div class="dashboard-subtitle">
-              See what is ready, running, under review, or archived across your projects.
-            </div>
           </div>
           <Show when={selectedProject()}>
             {(repository) => (
@@ -234,7 +231,7 @@ export function DashboardPage() {
         </div>
         <div class="project-tabs">
           <ProjectTab
-            label="All projects"
+            label="All"
             active={project() == null}
             onClick={() => setProject(null)}
           />
@@ -254,7 +251,7 @@ export function DashboardPage() {
         fallback={
           <div class="dashboard-onboarding">
             <div class="onboarding-card">
-              <div class="onboarding-title">No projects yet</div>
+              <div class="onboarding-title">No repositories yet</div>
               <div class="onboarding-copy">
                 Add a local repository or clone one to create your first workspace and
                 start running agents.
@@ -263,7 +260,7 @@ export function DashboardPage() {
                 class="suggested-action onboarding-cta"
                 onClick={() => dialogs.open({ kind: "add-project" })}
               >
-                Add your first project
+                Add repository
               </button>
             </div>
           </div>

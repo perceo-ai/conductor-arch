@@ -4,7 +4,7 @@ import { send } from "@/bridge/client";
 import { logState } from "@/lib/log";
 import type { ArchcarRepositorySummary } from "@/bridge/protocol";
 
-// Keyed repository store for the sidebar projects list.
+// Keyed repository store for the sidebar workspace grouping.
 
 export interface RepositoryRow {
   id: number;

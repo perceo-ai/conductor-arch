@@ -8,7 +8,6 @@ export type ShortcutAction =
   | "nav-forward"
   | "open-palette"
   | "goto-dashboard"
-  | "goto-projects"
   | "goto-history"
   | "goto-settings"
   | "show-help"
@@ -64,10 +63,8 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
     case "1":
       return "goto-dashboard";
     case "2":
-      return "goto-projects";
-    case "3":
       return "goto-history";
-    case "4":
+    case "3":
       return "goto-settings";
     default:
       return null;
@@ -84,7 +81,7 @@ export const SHORTCUT_HELP: { keys: string; label: string }[] = [
   { keys: "⌘/Ctrl B", label: "Toggle sidebar" },
   { keys: "⌘/Ctrl [", label: "Navigate back" },
   { keys: "⌘/Ctrl ]", label: "Navigate forward" },
-  { keys: "⌘/Ctrl 1–4", label: "Dashboard / Projects / History / Settings" },
+  { keys: "⌘/Ctrl 1–3", label: "Dashboard / History / Settings" },
   { keys: "⌘/Ctrl ,", label: "Settings" },
   { keys: "?", label: "This shortcuts help" },
   { keys: "Esc", label: "Close overlay / palette" },

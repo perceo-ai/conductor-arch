@@ -20,7 +20,9 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("]", true))).toBe("nav-forward");
     expect(resolveShortcut(ev("k", true))).toBe("open-palette");
     expect(resolveShortcut(ev("1", true))).toBe("goto-dashboard");
-    expect(resolveShortcut(ev("4", true))).toBe("goto-settings");
+    expect(resolveShortcut(ev("2", true))).toBe("goto-history");
+    expect(resolveShortcut(ev("3", true))).toBe("goto-settings");
+    expect(resolveShortcut(ev("4", true))).toBeNull();
     expect(resolveShortcut(ev(",", true))).toBe("goto-settings");
   });
 

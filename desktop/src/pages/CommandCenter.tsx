@@ -16,6 +16,7 @@ import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
+import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
 
 const RIGHT_MIN = 260;
 const RIGHT_MAX = 440;
@@ -31,13 +32,30 @@ const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_
 
 function TopBar(props: {
   workspace: string;
-  onOpenEditor: () => void;
   rightCollapsed: boolean;
   onToggleRight: () => void;
   checks?: ArchcarChecksSummary;
 }) {
   const row = () => workspacesStore.row(props.workspace);
   const briefing = () => deriveWorkspaceBriefing(row(), props.checks);
+  const repoRoot = () => {
+    const repo = row()?.repository;
+    return repo ? repositoriesStore.row(repo)?.rootPath : undefined;
+  };
+  const openItems = (): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [];
+    const root = repoRoot();
+    if (root) items.push({ label: "Open repository", run: () => void openExternal(root) });
+    const prUrl = row()?.prUrl;
+    if (prUrl) items.push({ label: "Open pull request", run: () => void openExternal(prUrl) });
+    return items;
+  };
+  function openMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    openContextMenuAt(rect.left, rect.bottom + 4, openItems());
+  }
   return (
     <div class="ws-topbar">
       <div class="ws-topbar-breadcrumb">
@@ -50,24 +68,23 @@ function TopBar(props: {
         <span class="ws-topbar-summary">{briefing().topbarSummary}</span>
       </div>
       <div class="ws-topbar-actions">
-        <button class="ui-button-icon ws-topbar-btn" title="Open in editor" onClick={props.onOpenEditor}>
+        <button class="ws-open-menu-button ws-topbar-btn" title="Open" onClick={openMenu}>
           <Icon name="external" />
+          <Icon name="chevron-down" class="ws-open-menu-chevron" />
         </button>
-        <Show when={props.rightCollapsed}>
-          <button
-            class="ui-button-icon ws-topbar-btn"
-            title="Show right panel"
-            onClick={props.onToggleRight}
-          >
-            <Icon name="panel-left" />
-          </button>
-        </Show>
+        <button
+          class="ui-button-icon ws-topbar-btn"
+          title={props.rightCollapsed ? "Show right panel" : "Collapse right panel"}
+          onClick={props.onToggleRight}
+        >
+          <Icon name={props.rightCollapsed ? "panel-left" : "panel-right"} />
+        </button>
       </div>
     </div>
   );
 }
 
-function RightPanel(props: { workspace: string; onCollapse: () => void }) {
+function RightPanel(props: { workspace: string }) {
   const [width, setWidth] = createPersistedWidth("rightPanel.width", 300, RIGHT_MIN, RIGHT_MAX);
   const row = () => workspacesStore.row(props.workspace);
   const tabCount = (tab: RightPanelTab) => {
@@ -85,9 +102,6 @@ function RightPanel(props: { workspace: string; onCollapse: () => void }) {
       <div class="ws-right-mid">
         <div class="ws-right-topbar">
           <WorkspacePrBar workspace={props.workspace} />
-          <button class="ui-button-icon ws-topbar-btn" title="Collapse right panel" onClick={props.onCollapse}>
-            <Icon name="panel-right" />
-          </button>
         </div>
         <div class="command-center-strip ws-right-tabs">
           <For each={RIGHT_TABS}>
@@ -150,12 +164,6 @@ export default function CommandCenter() {
   );
   const currentChecks = createMemo(() => checks());
 
-  function openEditor(ws: string) {
-    const repo = workspacesStore.row(ws)?.repository;
-    const root = repo ? repositoriesStore.row(repo)?.rootPath : undefined;
-    if (root) void openExternal(root);
-  }
-
   return (
     <Show
       when={workspace()}
@@ -167,7 +175,6 @@ export default function CommandCenter() {
             <TopBar
               workspace={ws()}
               checks={currentChecks()}
-              onOpenEditor={() => openEditor(ws())}
               rightCollapsed={rightCollapsed()}
               onToggleRight={() => setRightCollapsed((c) => !c)}
             />
@@ -176,7 +183,7 @@ export default function CommandCenter() {
             </div>
           </div>
           <Show when={!rightCollapsed()}>
-            <RightPanel workspace={ws()} onCollapse={() => setRightCollapsed(true)} />
+            <RightPanel workspace={ws()} />
           </Show>
         </div>
       )}
