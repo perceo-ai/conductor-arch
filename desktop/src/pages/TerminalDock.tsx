@@ -221,64 +221,76 @@ export default function TerminalDock(props: { workspace: string }) {
         <ResizeHandle edge="top" width={height} min={DOCK_MIN} max={DOCK_MAX} onChange={setHeight} />
       </Show>
       <div class="ws-run-tab-bar">
-        <div class="ws-run-tabs-row">
-          <button
-            class="ws-run-tab-btn"
-            classList={{ "ws-run-tab-active": tab() === "setup" }}
-            title="Setup prompt"
-            onClick={() => {
-              setTab("setup");
-              setExpanded(true);
-            }}
-          >
-            <Icon name="bolt" />
-            <span class="sr-only">Setup</span>
-          </button>
-          <button
-            class="ws-run-tab-btn"
-            classList={{ "ws-run-tab-active": tab() === "run" }}
-            title="Run prompt"
-            onClick={() => {
-              setTab("run");
-              setExpanded(true);
-            }}
-          >
-            <Icon name="play" />
-            <span class="sr-only">Run</span>
-          </button>
-          <For each={terms()}>
-            {(t, i) => (
-              <div
-                class="ws-run-tab-btn ws-run-terminal-tab"
-                classList={{ "ws-run-tab-active": activeTermId() === t.id }}
-                onClick={() => {
-                  setTab({ term: t.id });
-                  setExpanded(true);
-                }}
-              >
-                <span class="ws-run-terminal-tab-label">Terminal {i() + 1}</span>
-                <button
-                  class="ws-tab-close-button"
-                  title="Close terminal"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeTerm(t.id);
+        <Show
+          when={expanded()}
+          fallback={
+            <div class="ws-run-tabs-row ws-run-tabs-row-collapsed">
+              <button class="ws-run-tab-btn" title="Open terminal dock" onClick={() => setExpanded(true)}>
+                <Icon name="terminal" />
+                <span class="sr-only">Terminal dock</span>
+              </button>
+            </div>
+          }
+        >
+          <div class="ws-run-tabs-row">
+            <button
+              class="ws-run-tab-btn"
+              classList={{ "ws-run-tab-active": tab() === "setup" }}
+              title="Setup prompt"
+              onClick={() => {
+                setTab("setup");
+                setExpanded(true);
+              }}
+            >
+              <Icon name="bolt" />
+              <span class="sr-only">Setup</span>
+            </button>
+            <button
+              class="ws-run-tab-btn"
+              classList={{ "ws-run-tab-active": tab() === "run" }}
+              title="Run prompt"
+              onClick={() => {
+                setTab("run");
+                setExpanded(true);
+              }}
+            >
+              <Icon name="play" />
+              <span class="sr-only">Run</span>
+            </button>
+            <For each={terms()}>
+              {(t, i) => (
+                <div
+                  class="ws-run-tab-btn ws-run-terminal-tab"
+                  classList={{ "ws-run-tab-active": activeTermId() === t.id }}
+                  onClick={() => {
+                    setTab({ term: t.id });
+                    setExpanded(true);
                   }}
                 >
-                  <Icon name="x" />
-                </button>
-              </div>
-            )}
-          </For>
-          <button
-            class="ui-button-icon ws-run-add"
-            title="New terminal"
-            disabled={terms().length >= MAX_TERMINALS}
-            onClick={addTerm}
-          >
-            <Icon name="plus" />
-          </button>
-        </div>
+                  <span class="ws-run-terminal-tab-label">Terminal {i() + 1}</span>
+                  <button
+                    class="ws-tab-close-button"
+                    title="Close terminal"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTerm(t.id);
+                    }}
+                  >
+                    <Icon name="x" />
+                  </button>
+                </div>
+              )}
+            </For>
+            <button
+              class="ui-button-icon ws-run-add"
+              title="New terminal"
+              disabled={terms().length >= MAX_TERMINALS}
+              onClick={addTerm}
+            >
+              <Icon name="plus" />
+            </button>
+          </div>
+        </Show>
         <button class="ws-run-collapse-btn" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
           <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
         </button>

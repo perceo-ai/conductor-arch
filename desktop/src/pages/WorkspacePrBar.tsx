@@ -99,29 +99,27 @@ export default function WorkspacePrBar(props: { workspace: string }) {
   }
 
   return (
-    <Show when={st().action !== "none"}>
-      <div class="ws-pr-bar" classList={{ [st().cssClass]: true }}>
-        <Show when={row()?.prNumber}>
-          <button
-            class="ws-pr-chip"
-            title="Open pull request"
-            onClick={() => {
-              const url = row()?.prUrl;
-              if (url) void openExternal(url);
-            }}
-          >
-            #{row()!.prNumber}
-          </button>
-        </Show>
-        <Show when={row()?.prNumber}>
-          <span class="ws-pr-status-title">{st().title}</span>
-        </Show>
-        <Show when={st().actionLabel}>
-          <button class="ws-pr-action-button" disabled={busy()} onClick={() => void runAction()}>
-            {busy() ? "…" : st().actionLabel}
-          </button>
-        </Show>
-      </div>
-    </Show>
+    <div class="ws-pr-bar" classList={{ [st().cssClass]: true }}>
+      <Show when={row()?.prNumber}>
+        <button
+          class="ws-pr-chip"
+          title="Open pull request"
+          onClick={() => {
+            const url = row()?.prUrl;
+            if (url) void openExternal(url);
+          }}
+        >
+          #{row()!.prNumber}
+        </button>
+      </Show>
+      <span class="ws-pr-status-title">{st().title}</span>
+      <button
+        class="ws-pr-action-button"
+        disabled={st().action === "none" || busy()}
+        onClick={() => void runAction()}
+      >
+        {busy() ? "…" : (st().actionLabel ?? "Clean")}
+      </button>
+    </div>
   );
 }

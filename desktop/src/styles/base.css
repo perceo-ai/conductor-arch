@@ -273,6 +273,7 @@ body.resizing-col {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  width: 100%;
 }
 .workspace-status-dot {
   flex: 0 0 auto;
@@ -289,12 +290,56 @@ body.resizing-col {
   white-space: nowrap;
 }
 .workspace-row-shell .row-meta {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  width: 100%;
+  min-width: 0;
+  min-height: 16px;
+  box-sizing: border-box;
   font-size: 12px;
   color: var(--lc-text-muted);
   padding-left: 16px; /* align under the name, past the status dot */
   overflow: hidden;
+}
+.workspace-row-branch {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 54px;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.workspace-row-diff {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+.workspace-row-diff::before {
+  content: "·";
+  color: var(--lc-text-faint);
+  font-weight: 400;
+}
+.card-meta > .workspace-row-diff:first-child {
+  margin-left: 0;
+}
+.card-meta > .workspace-row-diff:first-child::before {
+  content: none;
+}
+.workspace-row-additions {
+  color: #6cc58a;
+}
+.workspace-row-deletions {
+  color: #e06f6f;
+}
+.workspace-row-shell .workspace-row-diff::before {
+  content: none;
 }
 
 /* --- project (repository) groups in the sidebar --- */
@@ -3288,10 +3333,30 @@ button.ws-tab-shell {
   border-left-color: var(--ui-border);
 }
 
+.ws-right-topbar {
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  background: #121212;
+  border-bottom: 1px solid #252525;
+}
+
+.ws-right-topbar .ws-pr-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ws-right-topbar .ws-pr-action-button {
+  min-width: 70px;
+  justify-content: center;
+}
+
 .ws-right-tabs {
   min-height: 42px;
   padding: 6px 12px;
-  background: #151515;
+  background: #121212;
   border-bottom-color: var(--ui-border);
 }
 
@@ -3474,18 +3539,368 @@ button.ws-tab-shell {
   border: 1px solid #303030;
   border-left-width: 3px;
   border-radius: 7px;
-  background: #1d1a19;
+  background: #1d1d1d;
 }
 
 .kanban-column .workspace-card:hover,
 .workspace-card-action:hover .workspace-card {
-  background: #24211f;
-  border-color: #3d3936;
+  background: #242424;
+  border-color: #3a3a3a;
 }
 
 .card-title {
   font-size: 13px;
   font-weight: 650;
+}
+
+/* Populated workspace polish: chat remains the primary surface, while queue,
+   dock, and inspector content read as state instead of stacked command cards. */
+.chat-composer {
+  padding: 0 28px 14px;
+  background: #111111;
+}
+
+.chat-queue-overlay {
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.chat-queue-heading {
+  margin: 0 0 4px;
+  padding: 0 2px;
+  color: #777777;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.chat-queued-composer-row {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #292929;
+  border-radius: 7px;
+  background: #181818;
+}
+
+.chat-queued-composer-body {
+  color: #d4d4d4;
+  font-size: 13px;
+}
+
+.chat-composer-box {
+  gap: 8px;
+  padding: 10px 12px;
+  border-color: #2b2b2b;
+  border-radius: 8px;
+  background: #181818;
+}
+
+.chat-input-view {
+  min-height: 42px;
+  max-height: 112px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-toolbar {
+  min-height: 30px;
+}
+
+.ws-file-summary-panel {
+  gap: 12px;
+}
+
+.ws-file-summary-row-content {
+  min-height: 32px;
+  gap: 8px;
+  padding: 0;
+  border-bottom: 1px solid #252525;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ws-file-summary-row-content:hover {
+  background: transparent;
+}
+
+.ws-file-name {
+  color: #d0d0d0;
+}
+
+.ws-file-summary-state,
+.ws-file-summary-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ws-file-additions {
+  color: #6cc58a;
+}
+
+.ws-file-deletions {
+  color: #e06f6f;
+}
+
+.ws-run-section {
+  background: #111111;
+  border-top-color: #252525;
+}
+
+.ws-run-tab-bar {
+  min-height: 34px;
+  padding: 2px 10px;
+  background: #111111;
+  border-bottom: 0;
+}
+
+.ws-run-tabs-row-collapsed {
+  flex: 1 1 auto;
+}
+
+.ws-run-tab-btn,
+.ws-run-collapse-btn {
+  min-width: 28px;
+  min-height: 28px;
+  color: #858585;
+}
+
+.ws-run-tab-active,
+.ws-run-tab-btn:hover,
+.ws-run-collapse-btn:hover {
+  background: #1f1f1f;
+  color: #dedede;
+}
+
+/* Neutral charcoal pass: avoid slate/blue casts in the workspace chrome. */
+:root {
+  --lc-bg: #0f0f0f;
+  --lc-surface: #151515;
+  --lc-surface-raised: #1a1a1a;
+  --lc-surface-muted: #121212;
+  --lc-hover: #202020;
+  --lc-hover-soft: #1a1a1a;
+  --lc-border: #262626;
+  --lc-border-strong: #363636;
+  --ui-panel: #121212;
+  --ui-panel-2: #151515;
+  --ui-panel-3: #1a1a1a;
+  --ui-panel-hover: #202020;
+  --ui-border: #262626;
+}
+
+.ws-command-center,
+.chat-surface,
+.ws-center,
+.ws-right-panel,
+.ws-file-summary-panel,
+.ws-tab-panel {
+  background: #0f0f0f;
+}
+
+.ws-topbar,
+.ws-chat-tabs-scroll {
+  background: #121212;
+  border-color: #252525;
+}
+
+.ws-right-tabs,
+.ws-run-section,
+.ws-run-tab-bar {
+  background: #0f0f0f;
+}
+
+.triage-badge-pr,
+.triage-badge-todo {
+  background: #202020;
+  border-color: #333333;
+  color: #d0d0d0;
+}
+
+.ws-tab-shell.ws-tab-active,
+.nav-button-active {
+  background: #202020;
+}
+
+/* ---- Dense Conductor-style chrome pass ---- */
+.sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: #121212;
+}
+
+.sidebar-chrome,
+.window-controls {
+  height: 40px;
+  min-height: 40px;
+}
+
+.sidebar-chrome {
+  padding: 0 8px;
+}
+
+.sidebar-nav-group {
+  padding: 6px;
+  gap: 1px;
+}
+
+.sidebar-nav-button {
+  min-height: 30px;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.sidebar-nav-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.projects-header {
+  padding: 10px 12px 4px;
+}
+
+.workspace-list {
+  padding: 3px 6px 8px;
+}
+
+.project-row {
+  min-height: 28px;
+  padding: 4px 6px;
+}
+
+.project-avatar {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace-row-shell {
+  min-height: 34px;
+  padding: 6px 8px;
+  overflow: hidden;
+}
+
+.workspace-row-head {
+  gap: 7px;
+}
+
+.workspace-row-shell .row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.workspace-row-shell .row-meta {
+  padding-left: 14px;
+  padding-right: 0;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.workspace-row-branch {
+  padding-right: 50px;
+}
+
+.workspace-row-diff {
+  gap: 4px;
+}
+
+.sidebar-footer {
+  padding: 5px 6px;
+}
+
+.ws-topbar {
+  height: 40px;
+  padding: 0 12px;
+  gap: 7px;
+  background: #121212;
+}
+
+.ws-topbar-repo {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.ws-topbar-branch,
+.ws-topbar-summary {
+  font-size: 11px;
+}
+
+.ws-right-topbar {
+  min-height: 36px;
+  height: 36px;
+  padding: 0 8px 0 10px;
+  gap: 6px;
+  background: #111111;
+}
+
+.ws-pr-bar {
+  height: 28px;
+  gap: 5px;
+}
+
+.ws-pr-status-title {
+  font-size: 11px;
+  max-width: none;
+}
+
+.ws-pr-action-button {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+
+.ws-right-tabs {
+  min-height: 36px;
+  padding: 5px 8px;
+  background: #101010;
+}
+
+.nav-button,
+.ws-right-tabs .nav-button,
+.ws-changes-scope .nav-button {
+  min-height: 24px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.nav-button-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.dashboard-header,
+.page-header {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.dashboard .page-board {
+  padding-top: 12px;
+}
+
+.kanban-board {
+  gap: 10px;
+}
+
+.kanban-column {
+  gap: 6px;
+}
+
+.workspace-card {
+  gap: 8px;
 }
 
 .card-meta,

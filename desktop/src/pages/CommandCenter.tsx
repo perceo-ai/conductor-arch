@@ -47,30 +47,27 @@ function TopBar(props: {
           aria-label={workspaceBriefingStatusLabel(briefing())}
         />
         <span class="ws-topbar-repo">{titleCaseWorkspace(props.workspace)}</span>
-        <Show when={row()?.branch}>
-          <span class="ws-topbar-sep">›</span>
-          <span class="ws-topbar-branch">{row()!.branch}</span>
-        </Show>
         <span class="ws-topbar-summary">{briefing().topbarSummary}</span>
       </div>
       <div class="ws-topbar-actions">
-        <WorkspacePrBar workspace={props.workspace} />
         <button class="ui-button-icon ws-topbar-btn" title="Open in editor" onClick={props.onOpenEditor}>
           <Icon name="external" />
         </button>
-        <button
-          class="ui-button-icon ws-topbar-btn"
-          title={props.rightCollapsed ? "Show right panel" : "Collapse right panel"}
-          onClick={props.onToggleRight}
-        >
-          <Icon name={props.rightCollapsed ? "panel-left" : "panel-right"} />
-        </button>
+        <Show when={props.rightCollapsed}>
+          <button
+            class="ui-button-icon ws-topbar-btn"
+            title="Show right panel"
+            onClick={props.onToggleRight}
+          >
+            <Icon name="panel-left" />
+          </button>
+        </Show>
       </div>
     </div>
   );
 }
 
-function RightPanel(props: { workspace: string }) {
+function RightPanel(props: { workspace: string; onCollapse: () => void }) {
   const [width, setWidth] = createPersistedWidth("rightPanel.width", 300, RIGHT_MIN, RIGHT_MAX);
   const row = () => workspacesStore.row(props.workspace);
   const tabCount = (tab: RightPanelTab) => {
@@ -86,6 +83,12 @@ function RightPanel(props: { workspace: string }) {
     <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
       <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
       <div class="ws-right-mid">
+        <div class="ws-right-topbar">
+          <WorkspacePrBar workspace={props.workspace} />
+          <button class="ui-button-icon ws-topbar-btn" title="Collapse right panel" onClick={props.onCollapse}>
+            <Icon name="panel-right" />
+          </button>
+        </div>
         <div class="command-center-strip ws-right-tabs">
           <For each={RIGHT_TABS}>
             {(t) => (
@@ -173,7 +176,7 @@ export default function CommandCenter() {
             </div>
           </div>
           <Show when={!rightCollapsed()}>
-            <RightPanel workspace={ws()} />
+            <RightPanel workspace={ws()} onCollapse={() => setRightCollapsed(true)} />
           </Show>
         </div>
       )}

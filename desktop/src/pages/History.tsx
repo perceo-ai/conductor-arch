@@ -87,7 +87,10 @@ export function HistoryPage() {
                 </span>
                 <span class="card-meta">
                   <Show when={r.additions || r.deletions}>
-                    +{r.additions} −{r.deletions}
+                    <span class="workspace-row-diff">
+                      <span class="workspace-row-additions">+{r.additions}</span>
+                      <span class="workspace-row-deletions">-{r.deletions}</span>
+                    </span>
                     <Show when={r.openTodos > 0}> · </Show>
                   </Show>
                   <Show when={r.openTodos > 0}>

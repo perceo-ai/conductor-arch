@@ -2,6 +2,7 @@ import { For, Show, createResource } from "solid-js";
 import { send } from "@/bridge/client";
 import type { DiffFileSummary, WorkspaceChangeScope } from "@/bridge/protocol";
 import Diff from "@/components/Diff";
+import Icon from "@/components/Icon";
 import { langFromPath } from "@/lib/highlight";
 import { openCommitInCenter } from "./openFileBridge";
 
@@ -9,8 +10,16 @@ import { openCommitInCenter } from "./openFileBridge";
 // The right panel shows the summary rows; the main Changes tab shows rows plus
 // the three-section unified diff. Both fetch on demand via createResource.
 
-function countsText(f: DiffFileSummary): string {
-  return f.additions != null && f.deletions != null ? `+${f.additions} -${f.deletions}` : "binary";
+function Counts(props: { file: DiffFileSummary }) {
+  if (props.file.additions == null || props.file.deletions == null) {
+    return <span class="ws-file-summary-counts">binary</span>;
+  }
+  return (
+    <span class="ws-file-summary-counts">
+      <span class="ws-file-additions">+{props.file.additions}</span>
+      <span class="ws-file-deletions">-{props.file.deletions}</span>
+    </span>
+  );
 }
 
 function stateLabel(f: DiffFileSummary): string {
@@ -24,12 +33,12 @@ function stateLabel(f: DiffFileSummary): string {
 function ChangeRow(props: { file: DiffFileSummary; showState: boolean; onOpen?: (path: string) => void }) {
   return (
     <button class="ws-file-summary-row-content" onClick={() => props.onOpen?.(props.file.path)}>
-      <span class="ws-file-icon">·</span>
+      <Icon name="file-code" class="ws-file-icon" />
       <span class="ws-file-name">{props.file.path}</span>
       <Show when={props.showState}>
         <span class="ws-file-summary-state">{stateLabel(props.file)}</span>
       </Show>
-      <span class="ws-file-summary-counts">{countsText(props.file)}</span>
+      <Counts file={props.file} />
     </button>
   );
 }
@@ -38,6 +47,7 @@ export function ChangesRows(props: {
   workspace: string;
   defaultScope?: WorkspaceChangeScope;
   openFile?: (path: string) => void;
+  showCommits?: boolean;
 }) {
   const scope = props.defaultScope ?? "uncommitted";
   const [changes] = createResource(
@@ -78,7 +88,7 @@ export function ChangesRows(props: {
           )}
         </For>
       </Show>
-      <Show when={(commits() ?? "").trim()}>
+      <Show when={props.showCommits && (commits() ?? "").trim()}>
         <div class="ws-commits-section">
           <div class="ws-commits-head">
             <span class="section-title">Recent commits</span>
@@ -133,7 +143,7 @@ export default function ChangesTab(props: { workspace: string }) {
   // right-panel ChangesRows keeps its own default independently.
   return (
     <div class="ws-changes-tab">
-      <ChangesRows workspace={props.workspace} defaultScope="all" />
+      <ChangesRows workspace={props.workspace} defaultScope="all" showCommits />
       <DiffView workspace={props.workspace} />
     </div>
   );

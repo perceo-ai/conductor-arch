@@ -2,7 +2,6 @@
 import { describe, expect, it } from "vitest";
 import {
   dashboardTriageBadges,
-  workspaceSidebarMeta,
   workspaceStatusKind,
   STATUS_COLOR,
   STATUS_LABEL,
@@ -87,16 +86,12 @@ describe("dashboardTriageBadges", () => {
         openTodos: 0,
       }),
     ).toEqual([
-      { tone: "agent", label: "No agents", title: "No active agent sessions" },
-      { tone: "run", label: "Run idle", title: "No run script is running" },
       { tone: "task", label: "1 blocked", title: "1 blocked task of 3 open tasks" },
       { tone: "pr", label: "PR #12 open", title: "Pull request #12 is open" },
-      { tone: "changes", label: "Clean", title: "No changed files" },
-      { tone: "todo", label: "No todos", title: "No open todos" },
     ]);
   });
 
-  it("keeps clean and idle workspace badges compact", () => {
+  it("does not render no-op badges for clean idle workspaces", () => {
     expect(
       dashboardTriageBadges({
         activeSessions: 0,
@@ -104,32 +99,6 @@ describe("dashboardTriageBadges", () => {
         changedFiles: 0,
         openTodos: 0,
       }),
-    ).toEqual([
-      { tone: "agent", label: "No agents", title: "No active agent sessions" },
-      { tone: "run", label: "Run idle", title: "No run script is running" },
-      { tone: "changes", label: "Clean", title: "No changed files" },
-      { tone: "todo", label: "No todos", title: "No open todos" },
-    ]);
-  });
-});
-
-describe("workspaceSidebarMeta", () => {
-  it("summarizes branch and diff as one quiet line", () => {
-    expect(
-      workspaceSidebarMeta({
-        status: "active",
-        branch: "feature/chat-first",
-        additions: 274,
-        deletions: 33,
-        activeSessions: 2,
-        openTasks: 5,
-        prNumber: 93,
-        prState: "open",
-      }),
-    ).toBe("feature/chat-first · +274 -33");
-  });
-
-  it("falls back to status when there is no branch or diff", () => {
-    expect(workspaceSidebarMeta({ status: "archived" })).toBe("archived");
+    ).toEqual([]);
   });
 });

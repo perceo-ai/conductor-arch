@@ -504,7 +504,7 @@ function Composer(props: {
     <div class="chat-composer">
       <Show when={slice().queue.length > 0}>
         <div class="chat-queue-overlay">
-          <div class="chat-queue-heading">Queued for next idle turn</div>
+          <div class="chat-queue-heading">Queued</div>
           <For each={slice().queue}>
             {(q) => (
               <div class="chat-queued-composer-row">

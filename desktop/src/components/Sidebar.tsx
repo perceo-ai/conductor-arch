@@ -6,11 +6,11 @@ import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "./Icon";
 import {
-  workspaceSidebarMeta,
   workspaceStatusKind,
   STATUS_COLOR,
   STATUS_LABEL,
 } from "@/lib/workspaceStatus";
+import { titleCaseWorkspace } from "@/lib/text";
 
 // Run a lifecycle action and surface any failure as a toast rather than
 // swallowing it — a silently-failing remove/delete is how a dead workspace ends
@@ -128,6 +128,7 @@ function WorkspaceRow(props: { name: string }) {
   const row = () => workspacesStore.row(props.name);
   const selected = () => nav.selectedWorkspace() === props.name;
   const statusKind = () => workspaceStatusKind(row() ?? {});
+  const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
   return (
     <button
       class="workspace-row-shell"
@@ -141,11 +142,12 @@ function WorkspaceRow(props: { name: string }) {
           style={{ "background-color": STATUS_COLOR[statusKind()] }}
           title={STATUS_LABEL[statusKind()]}
         />
-        <span class="row-name">{props.name}</span>
-      </span>
-      <span class="row-meta">
-        <Show when={row()} fallback="…">
-          {(r) => workspaceSidebarMeta(r())}
+        <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
+        <Show when={hasDiffStats()}>
+          <span class="workspace-row-diff">
+            <span class="workspace-row-additions">+{row()?.additions ?? 0}</span>
+            <span class="workspace-row-deletions">-{row()?.deletions ?? 0}</span>
+          </span>
         </Show>
       </span>
     </button>
