@@ -75,9 +75,17 @@ describe("endpointPath", () => {
     expect(Buffer.byteLength(endpoint)).toBeLessThan(100);
   });
 
-  it("falls back to temp when XDG_RUNTIME_DIR is absent", () => {
+  it("matches core when XDG_RUNTIME_DIR is empty", () => {
     vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
     vi.stubEnv("XDG_RUNTIME_DIR", "");
+
+    expect(endpointPath()).toMatch(/^archcar-[0-9a-f]{16}\.sock$/);
+  });
+
+  it("falls back to temp when XDG_RUNTIME_DIR is absent", () => {
+    vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
+    vi.unstubAllEnvs();
+    vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
 
     expect(endpointPath()).toMatch(
       new RegExp(`^${escapeRegExp(path.join(os.tmpdir(), "archductor"))}/archcar-[0-9a-f]{16}\\.sock$`),

@@ -54,9 +54,7 @@ export function timelineItemsForSlice(s: ChatSlice): ArchcarProjectionItem[] {
     s.projection.length > 0
       ? s.projection
       : s.messages.map(messageToProjectionItem);
-  const pending = s.pendingMessages
-    .filter((m) => !base.some((item) => item.render_class === "user_chat" && item.body === m.content))
-    .map(messageToProjectionItem);
+  const pending = s.pendingMessages.map(messageToProjectionItem);
   return [...base, ...pending];
 }
 
@@ -92,17 +90,17 @@ export const chatStore = {
     ensure(snap.thread_id);
     const providerEvents: Record<string, ProviderEventRecord> = {};
     for (const ev of snap.provider_events) providerEvents[ev.identity_key] = ev;
-    const persistedUserBodies = new Set(
-      snap.messages.filter((m) => m.role === "user").map((m) => m.content),
+    const pendingMessages = retirePersistedPendingMessages(
+      chat[snap.thread_id]?.pendingMessages ?? [],
+      chat[snap.thread_id]?.messages ?? [],
+      snap.messages,
     );
     setChat(
       snap.thread_id,
       reconcile(
         {
           messages: snap.messages,
-          pendingMessages: (chat[snap.thread_id]?.pendingMessages ?? []).filter(
-            (m) => !persistedUserBodies.has(m.content),
-          ),
+          pendingMessages,
           providerEvents,
           projection: chat[snap.thread_id]?.projection ?? [],
           queue: snap.queued_inputs,
@@ -199,3 +197,33 @@ export const chatStore = {
     recordUpdate(`chat.optimisticRemove.${threadId}`);
   },
 };
+
+function retirePersistedPendingMessages(
+  pending: ArchcarMessage[],
+  previousMessages: ArchcarMessage[],
+  nextMessages: ArchcarMessage[],
+): ArchcarMessage[] {
+  const previous = userBodyCounts(previousMessages);
+  const next = userBodyCounts(nextMessages);
+  const newlyPersisted = new Map<string, number>();
+  for (const [body, count] of next) {
+    const delta = count - (previous.get(body) ?? 0);
+    if (delta > 0) newlyPersisted.set(body, delta);
+  }
+  return pending.filter((message) => {
+    if (message.role !== "user") return true;
+    const count = newlyPersisted.get(message.content) ?? 0;
+    if (count <= 0) return true;
+    newlyPersisted.set(message.content, count - 1);
+    return false;
+  });
+}
+
+function userBodyCounts(messages: ArchcarMessage[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    counts.set(message.content, (counts.get(message.content) ?? 0) + 1);
+  }
+  return counts;
+}

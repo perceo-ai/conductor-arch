@@ -2,12 +2,8 @@ pub const CODEX_PROVIDER: &str = "codex";
 pub const CLAUDE_PROVIDER: &str = "claude";
 
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.5";
-pub const CODEX_MODEL_CHOICES: &[&str] = &[
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.3-codex-spark",
-];
+pub const CODEX_MODEL_CHOICES: &[&str] =
+    &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
 
 pub const CLAUDE_MODEL_CHOICES: &[&str] = &[
     "claude-fable-5",

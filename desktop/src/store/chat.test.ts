@@ -56,6 +56,54 @@ describe("chatStore optimistic messages", () => {
     expect(timelineItemsForSlice(chatStore.slice(7)).map((item) => item.id)).toEqual(["msg-42"]);
   });
 
+  it("does not drop a repeated pending message because an older matching body exists", async () => {
+    const { chatStore, timelineItemsForSlice } = await freshChatStore();
+    chatStore.applySnapshot({
+      ...emptySnapshot(7),
+      messages: [{ id: 41, role: "user", content: "repeat me", source: "user_send" }],
+    });
+    chatStore.optimisticAppend(7, {
+      id: -1,
+      role: "user",
+      content: "repeat me",
+      source: "desktop_optimistic",
+    });
+
+    chatStore.applySnapshot({
+      ...emptySnapshot(7),
+      messages: [{ id: 41, role: "user", content: "repeat me", source: "user_send" }],
+    });
+
+    expect(chatStore.slice(7).pendingMessages.map((m) => m.id)).toEqual([-1]);
+    expect(timelineItemsForSlice(chatStore.slice(7)).map((item) => item.id)).toEqual([
+      "msg-41",
+      "msg--1",
+    ]);
+  });
+
+  it("retires only one pending duplicate per newly persisted matching message", async () => {
+    const { chatStore } = await freshChatStore();
+    chatStore.optimisticAppend(7, {
+      id: -1,
+      role: "user",
+      content: "same",
+      source: "desktop_optimistic",
+    });
+    chatStore.optimisticAppend(7, {
+      id: -2,
+      role: "user",
+      content: "same",
+      source: "desktop_optimistic",
+    });
+
+    chatStore.applySnapshot({
+      ...emptySnapshot(7),
+      messages: [{ id: 42, role: "user", content: "same", source: "user_send" }],
+    });
+
+    expect(chatStore.slice(7).pendingMessages.map((m) => m.id)).toEqual([-2]);
+  });
+
   it("keeps pending user input visible beside structured projection items", async () => {
     const { chatStore, timelineItemsForSlice } = await freshChatStore();
     chatStore.setProjection(7, [

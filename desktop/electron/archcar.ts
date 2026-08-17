@@ -53,7 +53,7 @@ function shortUnixEndpoint(state: string): string {
     process.env.XDG_RUNTIME_DIR,
     path.join(os.tmpdir(), "archductor"),
     "/tmp/archductor",
-  ].filter((base): base is string => Boolean(base && base.trim().length > 0));
+  ].filter((base): base is string => base !== undefined);
   for (const base of bases) {
     const candidate = path.join(base, name);
     if (Buffer.byteLength(candidate) < UNIX_SOCKET_PATH_LIMIT) return candidate;
