@@ -76,7 +76,8 @@ function TopBar(props: {
           aria-label={workspaceBriefingStatusLabel(briefing())}
         />
         <span class="ws-topbar-repo">{titleCaseWorkspace(props.workspace)}</span>
-        <span class="ws-topbar-summary">{briefing().topbarSummary}</span>
+        <span class="ws-topbar-sep">&gt;</span>
+        <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
       </div>
       <div class="ws-topbar-actions">
         <button class="ws-open-menu-button ws-topbar-btn" title="Open" onClick={openMenu}>
