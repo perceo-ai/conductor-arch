@@ -156,7 +156,7 @@ function InlineCard(props: { item: ArchcarProjectionItem }) {
           onClick={() => setOpen((o) => !o)}
         >
           <Show when={hasBody()} fallback={<span class="chat-inline-event-dot" />}>
-            <Icon name={open() ? "chevron-down" : "chevron-right"} />
+            <span class="chat-inline-event-expander-glyph">{open() ? "−" : "+"}</span>
           </Show>
         </button>
         <Icon name={eventIcon(props.item.render_class)} class="chat-inline-event-icon" />

@@ -1,6 +1,6 @@
-import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
 import { listWorkspaceFiles, send } from "@/bridge/client";
-import Icon from "@/components/Icon";
+import { fileIconFor } from "@/lib/fileIconKind";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
 // flat, capped file list (list_workspace_files); the tree is built client-side
@@ -43,6 +43,28 @@ function buildTree(paths: string[]): TreeNode[] {
   return root.children;
 }
 
+function collectDirPaths(nodes: TreeNode[], into = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (!node.dir) continue;
+    into.add(node.path);
+    collectDirPaths(node.children, into);
+  }
+  return into;
+}
+
+function FileKindIcon(props: { path: string }) {
+  const icon = () => fileIconFor(props.path);
+  return (
+    <span
+      class={`ws-file-kind-icon ws-file-kind-${icon().kind}`}
+      title={icon().title}
+      aria-hidden="true"
+    >
+      {icon().label}
+    </span>
+  );
+}
+
 function Row(props: {
   node: TreeNode;
   depth: number;
@@ -57,14 +79,18 @@ function Row(props: {
       when={props.node.dir}
       fallback={
         <button class="ws-file-row" style={indent()} onClick={() => props.openFile(props.node.path)}>
-          <Icon name="file" class="ws-file-icon" />
+          <FileKindIcon path={props.node.path} />
           <span class="ws-file-name">{props.node.name}</span>
         </button>
       }
     >
       <button class="ws-dir-row" style={indent()} onClick={() => props.toggle(props.node.path)}>
-        <Icon name={isCollapsed() ? "chevron-right" : "chevron-down"} class="ws-folder-toggle" />
-        <Icon name="folder" class="ws-folder-icon" />
+        <span
+          class="ws-folder-toggle"
+          classList={{ "ws-folder-toggle-open": !isCollapsed() }}
+          aria-hidden="true"
+        />
+        <span class="ws-folder-kind-icon" aria-hidden="true" />
         <span class="ws-folder-name">{props.node.name}</span>
       </button>
       <Show when={!isCollapsed()}>
@@ -103,6 +129,15 @@ export default function WorkspaceFiles(props: { workspace: string; rootPath?: st
   );
   const tree = createMemo(() => buildTree(files() ?? []));
   const [collapsed, setCollapsed] = createSignal(new Set<string>());
+  let collapseSeed = "";
+  createEffect(() => {
+    const paths = files();
+    if (!paths) return;
+    const nextSeed = `${props.workspace}\0${paths.join("\0")}`;
+    if (collapseSeed === nextSeed) return;
+    collapseSeed = nextSeed;
+    setCollapsed(collectDirPaths(tree()));
+  });
   const toggle = (path: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
