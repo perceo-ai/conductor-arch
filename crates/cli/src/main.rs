@@ -1514,10 +1514,12 @@ fn run_cli() -> Result<()> {
                     );
                 }
                 ArchcarCommand::GitActionPrompt { workspace, action } => {
-                    print_archcar_response(client.send(ArchcarRequest::GetWorkspaceGitActionPrompt {
-                        workspace,
-                        action: action.into(),
-                    })?);
+                    print_archcar_response(client.send(
+                        ArchcarRequest::GetWorkspaceGitActionPrompt {
+                            workspace,
+                            action: action.into(),
+                        },
+                    )?);
                 }
                 ArchcarCommand::SpotlightStatus { workspace } => {
                     print_archcar_response(

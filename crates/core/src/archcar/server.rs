@@ -1215,7 +1215,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             let db_path = state.lock().unwrap().db_path.clone();
             let result = WorkspaceStore::open_app(&db_path).and_then(|s| {
                 let prompt = match action {
-                    WorkspaceGitAction::CreatePr => s.create_pull_request_agent_prompt(&workspace)?,
+                    WorkspaceGitAction::CreatePr => {
+                        s.create_pull_request_agent_prompt(&workspace)?
+                    }
                     WorkspaceGitAction::PushBranch => s.push_branch_agent_prompt(&workspace)?,
                     WorkspaceGitAction::MergePr => s.merge_pull_request_agent_prompt(&workspace)?,
                     WorkspaceGitAction::OpenPr => s.review_pull_request_agent_prompt(&workspace)?,

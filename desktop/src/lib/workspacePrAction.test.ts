@@ -31,4 +31,34 @@ describe("deriveWorkspacePrAction", () => {
       action: "merge",
     });
   });
+
+  it("does not expose merge until checks are positively known to have passed", () => {
+    for (const checkStatus of [undefined, "exited", "stopped"]) {
+      expect(
+        deriveWorkspacePrAction({
+          prNumber: 42,
+          prState: "open",
+          checkStatus,
+        }),
+      ).toMatchObject({
+        title: "Checks unknown",
+        actionLabel: "Review",
+        action: "view",
+      });
+    }
+  });
+
+  it("routes failed checks to review instead of merge", () => {
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        checkStatus: "failed",
+      }),
+    ).toMatchObject({
+      title: "Checks failing",
+      actionLabel: "Fix Checks",
+      action: "view",
+    });
+  });
 });

@@ -50,6 +50,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
   const behind = input.branchBehind ?? 0;
   const conflicts = input.conflicts ?? 0;
   const changed = input.changedFiles ?? 0;
+  const checksPassed = check === "success" || check === "passed" || check === "pass";
 
   if (!prNumber) {
     if (changed > 0) {
@@ -78,7 +79,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
 
   if (conflicts > 0)
     return { title: "Merge conflicts", cssClass: "ws-pr-status-failed", actionLabel: "Resolve", action: "view" };
-  if (check === "failing" || check === "failure" || check === "error")
+  if (check === "failing" || check === "failed" || check === "failure" || check === "error")
     return { title: "Checks failing", cssClass: "ws-pr-status-failed", actionLabel: "Fix Checks", action: "view" };
   if (ahead > 0)
     return { title: "Unpushed commits", cssClass: "ws-pr-status-pending", actionLabel: "Push", action: "push" };
@@ -86,5 +87,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
     return { title: "Checks running", cssClass: "ws-pr-status-pending", actionLabel: "Review", action: "view" };
   if (behind > 0)
     return { title: "Behind base", cssClass: "ws-pr-status-pending", actionLabel: "Update", action: "view" };
+  if (!checksPassed)
+    return { title: "Checks unknown", cssClass: "ws-pr-status-pending", actionLabel: "Review", action: "view" };
   return { title: "Ready to merge", cssClass: "ws-pr-status-ready", actionLabel: "Merge", action: "merge" };
 }
