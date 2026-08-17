@@ -68,7 +68,9 @@ pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
 
 #[cfg(unix)]
 pub fn accept(listener: &LocalListener, _endpoint: &Path) -> io::Result<(LocalStream, ())> {
-    listener.accept().map(|(stream, _)| (stream, ()))
+    let (stream, _) = listener.accept()?;
+    stream.set_nonblocking(false)?;
+    Ok((stream, ()))
 }
 
 #[cfg(unix)]
@@ -99,6 +101,7 @@ pub fn accept(listener: &LocalListener, endpoint: &Path) -> io::Result<(LocalStr
     let expected = endpoint_token(endpoint)?;
     loop {
         let (mut stream, _) = listener.accept()?;
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let mut token = Vec::new();
         let mut byte = [0_u8; 1];
@@ -145,6 +148,7 @@ fn endpoint_token(endpoint: &Path) -> io::Result<String> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use std::time::Duration;
 
     #[test]
     fn local_transport_round_trips() {
@@ -166,6 +170,40 @@ mod tests {
         client.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"pong");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn accepted_stream_from_nonblocking_listener_writes_large_response() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-large-response.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server_endpoint = endpoint.clone();
+        let payload = vec![b'x'; 256 * 1024];
+        let expected_len = payload.len();
+        let server = std::thread::spawn(move || -> io::Result<()> {
+            let (mut stream, _) = loop {
+                match accept(&listener, &server_endpoint) {
+                    Ok(accepted) => break accepted,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+            stream.write_all(&payload)?;
+            stream.write_all(b"\n")?;
+            stream.flush()
+        });
+
+        let mut client = connect(&endpoint).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+
+        server.join().unwrap().unwrap();
+        assert_eq!(received.len(), expected_len + 1);
+        assert_eq!(received.last(), Some(&b'\n'));
     }
 
     #[cfg(unix)]
