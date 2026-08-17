@@ -7,6 +7,7 @@ export interface WorkspacePrActionInput {
   prState?: string | null;
   changedFiles?: number | null;
   checkStatus?: string | null;
+  checkExitCode?: number | null;
   branchAhead?: number | null;
   sourceBranchAhead?: number | null;
   branchBehind?: number | null;
@@ -35,6 +36,7 @@ export function workspacePrActionInput(
     prState: row?.prState,
     changedFiles: row?.changedFiles,
     checkStatus: checks?.check_status,
+    checkExitCode: checks?.check_exit_code,
     branchAhead: checks?.branch_ahead,
     sourceBranchAhead: checks?.source_branch_ahead,
     branchBehind: checks?.branch_behind,
@@ -50,7 +52,18 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
   const behind = input.branchBehind ?? 0;
   const conflicts = input.conflicts ?? 0;
   const changed = input.changedFiles ?? 0;
-  const checksPassed = check === "success" || check === "passed" || check === "pass";
+  const checkExitCode = input.checkExitCode;
+  const checksPassed =
+    check === "success" ||
+    check === "passed" ||
+    check === "pass" ||
+    (check === "exited" && checkExitCode === 0);
+  const checksFailed =
+    check === "failing" ||
+    check === "failed" ||
+    check === "failure" ||
+    check === "error" ||
+    (check === "exited" && checkExitCode != null && checkExitCode !== 0);
 
   if (!prNumber) {
     if (changed > 0) {
@@ -79,7 +92,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
 
   if (conflicts > 0)
     return { title: "Merge conflicts", cssClass: "ws-pr-status-failed", actionLabel: "Resolve", action: "view" };
-  if (check === "failing" || check === "failed" || check === "failure" || check === "error")
+  if (checksFailed)
     return { title: "Checks failing", cssClass: "ws-pr-status-failed", actionLabel: "Fix Checks", action: "view" };
   if (ahead > 0)
     return { title: "Unpushed commits", cssClass: "ws-pr-status-pending", actionLabel: "Push", action: "push" };

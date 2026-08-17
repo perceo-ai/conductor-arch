@@ -23,6 +23,21 @@ describe("deriveWorkspacePrAction", () => {
       deriveWorkspacePrAction({
         prNumber: 42,
         prState: "open",
+        checkStatus: "exited",
+        checkExitCode: 0,
+      }),
+    ).toMatchObject({
+      title: "Ready to merge",
+      actionLabel: "Merge",
+      action: "merge",
+    });
+  });
+
+  it("also accepts explicit remote success statuses if supplied", () => {
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
         checkStatus: "success",
       }),
     ).toMatchObject({
@@ -49,16 +64,21 @@ describe("deriveWorkspacePrAction", () => {
   });
 
   it("routes failed checks to review instead of merge", () => {
-    expect(
-      deriveWorkspacePrAction({
-        prNumber: 42,
-        prState: "open",
-        checkStatus: "failed",
-      }),
-    ).toMatchObject({
-      title: "Checks failing",
-      actionLabel: "Fix Checks",
-      action: "view",
-    });
+    for (const input of [
+      { checkStatus: "failed" },
+      { checkStatus: "exited", checkExitCode: 7 },
+    ]) {
+      expect(
+        deriveWorkspacePrAction({
+          prNumber: 42,
+          prState: "open",
+          ...input,
+        }),
+      ).toMatchObject({
+        title: "Checks failing",
+        actionLabel: "Fix Checks",
+        action: "view",
+      });
+    }
   });
 });

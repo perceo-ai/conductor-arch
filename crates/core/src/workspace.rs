@@ -1101,6 +1101,7 @@ pub struct ChecksSummary {
     pub changed_files: usize,
     pub run_status: Option<ProcessStatus>,
     pub check_status: Option<ProcessStatus>,
+    pub check_exit_code: Option<i32>,
     pub session_status: Option<ProcessStatus>,
     pub active_sessions: usize,
     pub pull_request: Option<PullRequest>,
@@ -5654,7 +5655,9 @@ mutation($threadId: ID!) {{
             0
         };
         let run_status = self.latest_process_status(workspace.id, ProcessKind::Run)?;
-        let check_status = self.latest_process_status(workspace.id, ProcessKind::Check)?;
+        let check_process = self.latest_process_optional(workspace.id, ProcessKind::Check)?;
+        let check_status = check_process.as_ref().map(|process| process.status);
+        let check_exit_code = check_process.and_then(|process| process.exit_code);
         let session_status = self.latest_process_status(workspace.id, ProcessKind::Session)?;
         let active_sessions = self.count_running_processes(workspace.id, ProcessKind::Session)?;
         let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
@@ -5683,6 +5686,7 @@ mutation($threadId: ID!) {{
             changed_files,
             run_status,
             check_status,
+            check_exit_code,
             session_status,
             active_sessions,
             pull_request,
@@ -5719,6 +5723,26 @@ mutation($threadId: ID!) {{
         );
         match result {
             Ok(status) => Ok(Some(ProcessStatus::from_str(&status)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn latest_process_optional(
+        &self,
+        workspace_id: i64,
+        kind: ProcessKind,
+    ) -> Result<Option<ProcessRecord>> {
+        let result = self.conn.query_row(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes
+             WHERE workspace_id = ?1 AND kind = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![workspace_id, kind.as_str()],
+            row_to_process,
+        );
+        match result {
+            Ok(process) => Ok(Some(process)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(err) => Err(err.into()),
         }
@@ -15468,6 +15492,10 @@ lint = "printf 'lint failed\n'; exit 7"
         assert_eq!(
             store.checks_summary("berlin").unwrap().check_status,
             Some(ProcessStatus::Exited)
+        );
+        assert_eq!(
+            store.checks_summary("berlin").unwrap().check_exit_code,
+            Some(0)
         );
     }
 

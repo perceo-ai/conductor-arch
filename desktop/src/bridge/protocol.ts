@@ -334,6 +334,7 @@ export interface ArchcarChecksSummary {
   changed_files: number;
   run_status?: string;
   check_status?: string;
+  check_exit_code?: number;
   session_status?: string;
   active_sessions: number;
   open_todos: number;

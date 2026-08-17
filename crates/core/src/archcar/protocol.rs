@@ -1244,6 +1244,8 @@ pub struct ArchcarChecksSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_status: Option<String>,
     pub active_sessions: usize,
     pub open_todos: usize,

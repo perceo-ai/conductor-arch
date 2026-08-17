@@ -1465,6 +1465,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         changed_files: summary.changed_files,
                         run_status: summary.run_status.map(|s| s.as_str().to_owned()),
                         check_status: summary.check_status.map(|s| s.as_str().to_owned()),
+                        check_exit_code: summary.check_exit_code,
                         session_status: summary.session_status.map(|s| s.as_str().to_owned()),
                         active_sessions: summary.active_sessions,
                         open_todos: summary.open_todos,
