@@ -4212,73 +4212,16 @@ button.ws-tab-shell.ws-chat-new:hover {
   height: 13px;
 }
 
-.ws-folder-toggle,
-.ws-folder-kind-icon,
+.ws-material-icon,
 .ws-folder-icon,
 .ws-file-icon {
   display: block;
   flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
-  min-width: 15px;
-  min-height: 15px;
-  opacity: 1;
-  stroke-width: 2.45;
-}
-
-.ws-folder-toggle {
-  position: relative;
-  color: #b7b7b7;
-}
-
-.ws-folder-toggle::before {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 0;
-  height: 0;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid currentColor;
-  content: "";
-  transform: translate(-35%, -50%);
-}
-
-.ws-folder-toggle-open::before {
-  border-top: 5px solid currentColor;
-  border-right: 4px solid transparent;
-  border-left: 4px solid transparent;
-  border-bottom: 0;
-  transform: translate(-50%, -35%);
-}
-
-.ws-folder-kind-icon,
-.ws-folder-icon {
-  position: relative;
-  color: #d0ad69;
-}
-
-.ws-folder-kind-icon::before {
-  position: absolute;
-  left: 2px;
-  top: 5px;
-  width: 11px;
-  height: 7px;
-  border-radius: 2px;
-  background: rgba(208, 173, 105, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(208, 173, 105, 0.72);
-  content: "";
-}
-
-.ws-folder-kind-icon::after {
-  position: absolute;
-  left: 3px;
-  top: 3px;
-  width: 6px;
-  height: 3px;
-  border-radius: 2px 2px 0 0;
-  background: rgba(208, 173, 105, 0.62);
-  content: "";
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  opacity: 0.94;
 }
 
 .ws-file-icon {
@@ -4306,89 +4249,6 @@ button.ws-tab-shell.ws-chat-new:hover {
   line-height: 1.25;
 }
 
-.ws-file-kind-icon {
-  display: inline-flex;
-  flex: 0 0 15px;
-  width: 15px;
-  height: 15px;
-  min-width: 15px;
-  min-height: 15px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 3px;
-  background: #7f8792;
-  color: #111111;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 6.5px;
-  font-weight: 800;
-  letter-spacing: 0;
-  line-height: 1;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), inset 0 -5px 8px rgba(0, 0, 0, 0.12);
-}
-
-.ws-file-kind-file {
-  background: transparent;
-  box-shadow: inset 0 0 0 1.3px #70747a;
-}
-
-.ws-file-kind-file::before {
-  width: 5px;
-  height: 5px;
-  border-radius: 1px;
-  background: #8c929a;
-  content: "";
-}
-
-.ws-file-kind-typescript {
-  background: #4f9ada;
-}
-
-.ws-file-kind-javascript,
-.ws-file-kind-json,
-.ws-file-kind-package {
-  background: #d9bc55;
-}
-
-.ws-file-kind-rust,
-.ws-file-kind-toml {
-  background: #c77c49;
-}
-
-.ws-file-kind-markdown,
-.ws-file-kind-text,
-.ws-file-kind-config {
-  background: #9aa1aa;
-}
-
-.ws-file-kind-shell {
-  background: #73ba84;
-}
-
-.ws-file-kind-yaml,
-.ws-file-kind-git {
-  background: #cf746d;
-}
-
-.ws-file-kind-css {
-  background: #5b8edc;
-}
-
-.ws-file-kind-html {
-  background: #d98956;
-}
-
-.ws-file-kind-image,
-.ws-file-kind-astro {
-  background: #b48bd8;
-}
-
-.ws-file-kind-docker {
-  background: #62a5d8;
-}
-
-.ws-file-kind-lock {
-  background: #b8a06a;
-}
 
 @media (max-width: 1100px) {
   .chat-composer {

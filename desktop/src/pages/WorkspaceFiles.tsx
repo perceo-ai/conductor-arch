@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
 import { listWorkspaceFiles, send } from "@/bridge/client";
-import { fileIconFor } from "@/lib/fileIconKind";
+import { materialFileIcon, materialFolderIcon } from "@/lib/materialFileIcons";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
 // flat, capped file list (list_workspace_files); the tree is built client-side
@@ -52,16 +52,9 @@ function collectDirPaths(nodes: TreeNode[], into = new Set<string>()): Set<strin
   return into;
 }
 
-function FileKindIcon(props: { path: string }) {
-  const icon = () => fileIconFor(props.path);
+function MaterialIcon(props: { icon: () => { src: string; title: string }; class: string }) {
   return (
-    <span
-      class={`ws-file-kind-icon ws-file-kind-${icon().kind}`}
-      title={icon().title}
-      aria-hidden="true"
-    >
-      {icon().label}
-    </span>
+    <img class={`ws-material-icon ${props.class}`} src={props.icon().src} title={props.icon().title} alt="" loading="lazy" />
   );
 }
 
@@ -79,18 +72,16 @@ function Row(props: {
       when={props.node.dir}
       fallback={
         <button class="ws-file-row" style={indent()} onClick={() => props.openFile(props.node.path)}>
-          <FileKindIcon path={props.node.path} />
+          <MaterialIcon icon={() => materialFileIcon(props.node.path)} class="ws-file-kind-icon" />
           <span class="ws-file-name">{props.node.name}</span>
         </button>
       }
     >
       <button class="ws-dir-row" style={indent()} onClick={() => props.toggle(props.node.path)}>
-        <span
-          class="ws-folder-toggle"
-          classList={{ "ws-folder-toggle-open": !isCollapsed() }}
-          aria-hidden="true"
+        <MaterialIcon
+          icon={() => materialFolderIcon(props.node.path, !isCollapsed())}
+          class="ws-folder-kind-icon"
         />
-        <span class="ws-folder-kind-icon" aria-hidden="true" />
         <span class="ws-folder-name">{props.node.name}</span>
       </button>
       <Show when={!isCollapsed()}>
