@@ -28,10 +28,10 @@ function stateDir(): string {
 }
 
 // UNIX_SOCKET_PATH_LIMIT is ~104-108 bytes; core falls back to a short hashed
-// name when the direct path is too long. For dev/typical installs the direct
-// path fits. Allow an explicit override to stay in lockstep with core when it
-// does hash (ARCHDUCTOR_ARCHCAR_ENDPOINT).
+// name when the direct path is too long. Keep this in lockstep with
+// crates/core/src/paths.rs so deep Conductor workspaces can still auto-spawn.
 const isWindows = process.platform === "win32";
+const UNIX_SOCKET_PATH_LIMIT = 100;
 
 export function endpointPath(): string {
   const override = process.env.ARCHDUCTOR_ARCHCAR_ENDPOINT;
@@ -43,12 +43,31 @@ export function endpointPath(): string {
     return path.join(stateDir(), "archcar.endpoint");
   }
   const direct = path.join(stateDir(), "archcar.sock");
-  if (Buffer.byteLength(direct) < 100) return direct;
-  // Long path: core uses archcar-<hash>.sock. We can't reproduce the hash here
-  // cheaply; require the override in that case.
-  throw new Error(
-    `archcar socket path too long (${direct}); set ARCHDUCTOR_ARCHCAR_ENDPOINT to the value core resolved`,
-  );
+  if (Buffer.byteLength(direct) < UNIX_SOCKET_PATH_LIMIT) return direct;
+  return shortUnixEndpoint(stateDir());
+}
+
+function shortUnixEndpoint(state: string): string {
+  const name = `archcar-${stablePathHash(state)}.sock`;
+  const bases = [
+    process.env.XDG_RUNTIME_DIR,
+    path.join(os.tmpdir(), "archductor"),
+    "/tmp/archductor",
+  ].filter((base): base is string => base !== undefined);
+  for (const base of bases) {
+    const candidate = path.join(base, name);
+    if (Buffer.byteLength(candidate) < UNIX_SOCKET_PATH_LIMIT) return candidate;
+  }
+  return path.join("/tmp", name);
+}
+
+function stablePathHash(value: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(value)) {
+    hash = (hash ^ BigInt(byte)) * 0x100000001b3n;
+    hash &= 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
 
 function connectOnce(endpoint: string): Promise<net.Socket> {

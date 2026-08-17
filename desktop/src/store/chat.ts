@@ -27,6 +27,7 @@ export type ChatUiPhase =
 
 export interface ChatSlice {
   messages: ArchcarMessage[];
+  pendingMessages: ArchcarMessage[];
   // provider events keyed by identity_key for in-place delta merge
   providerEvents: Record<string, ProviderEventRecord>;
   // projected timeline items (built in core, keyed by id for delta reconcile)
@@ -39,11 +40,34 @@ export interface ChatSlice {
 function emptySlice(): ChatSlice {
   return {
     messages: [],
+    pendingMessages: [],
     providerEvents: {},
     projection: [],
     queue: [],
     session: null,
     phase: { kind: "ready" },
+  };
+}
+
+export function timelineItemsForSlice(s: ChatSlice): ArchcarProjectionItem[] {
+  const base: ArchcarProjectionItem[] =
+    s.projection.length > 0
+      ? s.projection
+      : s.messages.map(messageToProjectionItem);
+  const pending = s.pendingMessages.map(messageToProjectionItem);
+  return [...base, ...pending];
+}
+
+function messageToProjectionItem(m: { id: number; role: string; content: string }): ArchcarProjectionItem {
+  return {
+    id: `msg-${m.id}`,
+    sequence: m.id,
+    render_class: m.role === "user" ? "user_chat" : m.role === "system" ? "status_card" : "assistant_chat",
+    role_label: m.role,
+    title: "",
+    body: m.content,
+    status: m.id < 0 ? "pending" : "complete",
+    stream_state: m.id < 0 ? "streaming" : "complete",
   };
 }
 
@@ -66,11 +90,17 @@ export const chatStore = {
     ensure(snap.thread_id);
     const providerEvents: Record<string, ProviderEventRecord> = {};
     for (const ev of snap.provider_events) providerEvents[ev.identity_key] = ev;
+    const pendingMessages = retirePersistedPendingMessages(
+      chat[snap.thread_id]?.pendingMessages ?? [],
+      chat[snap.thread_id]?.messages ?? [],
+      snap.messages,
+    );
     setChat(
       snap.thread_id,
       reconcile(
         {
           messages: snap.messages,
+          pendingMessages,
           providerEvents,
           projection: chat[snap.thread_id]?.projection ?? [],
           queue: snap.queued_inputs,
@@ -146,11 +176,54 @@ export const chatStore = {
     ensure(threadId);
     setChat(
       threadId,
-      "messages",
+      "pendingMessages",
       produce((list) => {
         list.push(message);
       }),
     );
     recordUpdate(`chat.optimisticAppend.${threadId}`);
   },
+
+  removeOptimistic(threadId: number, messageId: number) {
+    ensure(threadId);
+    setChat(
+      threadId,
+      "pendingMessages",
+      produce((list) => {
+        const index = list.findIndex((m) => m.id === messageId);
+        if (index >= 0) list.splice(index, 1);
+      }),
+    );
+    recordUpdate(`chat.optimisticRemove.${threadId}`);
+  },
 };
+
+function retirePersistedPendingMessages(
+  pending: ArchcarMessage[],
+  previousMessages: ArchcarMessage[],
+  nextMessages: ArchcarMessage[],
+): ArchcarMessage[] {
+  const previous = userBodyCounts(previousMessages);
+  const next = userBodyCounts(nextMessages);
+  const newlyPersisted = new Map<string, number>();
+  for (const [body, count] of next) {
+    const delta = count - (previous.get(body) ?? 0);
+    if (delta > 0) newlyPersisted.set(body, delta);
+  }
+  return pending.filter((message) => {
+    if (message.role !== "user") return true;
+    const count = newlyPersisted.get(message.content) ?? 0;
+    if (count <= 0) return true;
+    newlyPersisted.set(message.content, count - 1);
+    return false;
+  });
+}
+
+function userBodyCounts(messages: ArchcarMessage[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    counts.set(message.content, (counts.get(message.content) ?? 0) + 1);
+  }
+  return counts;
+}

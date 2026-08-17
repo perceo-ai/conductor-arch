@@ -63,8 +63,12 @@ publish-tag:
 desktop-install:
 	cd desktop && pnpm install
 
+# Dev mode needs a concrete archcar binary. Run through the branch-scoped
+# environment so Electron resolves ARCHDUCTOR_ARCHCAR_BIN instead of relying on
+# a global PATH install.
 desktop-dev:
-	cd desktop && pnpm dev
+	$(DEV_ENV) cargo build --bin archcar
+	$(DEV_ENV) bash -lc 'cd desktop && pnpm dev'
 
 desktop-build:
 	cd desktop && pnpm build
