@@ -1,6 +1,6 @@
 import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
-import { openExternal, send } from "@/bridge/client";
+import { openExternal, openWorkspaceApp, send } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
 import { STATUS_COLOR } from "@/lib/workspaceStatus";
 import { deriveWorkspaceBriefing, workspaceBriefingStatusLabel } from "@/lib/workspaceBriefing";
@@ -17,6 +17,7 @@ import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
+import { WORKSPACE_OPEN_APPS } from "@/lib/workspaceOpenApps";
 
 const RIGHT_MIN = 260;
 const RIGHT_MAX = 440;
@@ -45,9 +46,19 @@ function TopBar(props: {
   const openItems = (): ContextMenuItem[] => {
     const items: ContextMenuItem[] = [];
     const root = repoRoot();
-    if (root) items.push({ label: "Open repository", run: () => void openExternal(root) });
+    if (root) {
+      items.push({ label: "Open in Finder", icon: "folder", run: () => void openExternal(root) });
+      for (const app of WORKSPACE_OPEN_APPS) {
+        items.push({
+          label: `Open in ${app.label}`,
+          iconSrc: app.logoSrc,
+          iconAlt: app.label,
+          run: () => void openWorkspaceApp({ rootPath: root, appId: app.id }),
+        });
+      }
+    }
     const prUrl = row()?.prUrl;
-    if (prUrl) items.push({ label: "Open pull request", run: () => void openExternal(prUrl) });
+    if (prUrl) items.push({ label: "Open pull request", icon: "external", run: () => void openExternal(prUrl) });
     return items;
   };
   function openMenu(e: MouseEvent) {

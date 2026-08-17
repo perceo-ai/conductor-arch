@@ -63,6 +63,10 @@ const api = {
   openExternal: (target: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("shell:open-external", target),
 
+  /** Open a workspace in a registered local editor app. */
+  openWorkspaceApp: (opts: { rootPath: string; appId: "cursor" | "vscode" }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("shell:open-workspace-app", opts),
+
   /** Current remote-daemon connection (address only; the token stays in main). */
   remoteGet: (): Promise<
     { ok: true; address: string | null; source: "environment" | "profile" | null } | { ok: false; error: string }

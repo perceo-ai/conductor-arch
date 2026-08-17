@@ -2875,14 +2875,38 @@ pre.ws-file-editor-highlight.hljs {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 .context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
   text-align: left;
   padding: 6px 10px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--lc-text, #e4e4e4);
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 16px;
   cursor: pointer;
+}
+.context-menu-item-icon,
+.context-menu-item-logo {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+}
+.context-menu-item-icon {
+  color: #bdbdbd;
+}
+.context-menu-item-logo {
+  display: block;
+  object-fit: contain;
+}
+.context-menu-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .context-menu-item:hover {
   background: var(--lc-hover, rgba(255, 255, 255, 0.08));

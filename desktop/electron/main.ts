@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
@@ -497,6 +497,33 @@ ipcMain.handle("shell:open-external", async (_evt, target: string) => {
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+});
+
+const WORKSPACE_APP_COMMANDS: Record<string, string> = {
+  cursor: "cursor",
+  vscode: "code",
+};
+
+ipcMain.handle("shell:open-workspace-app", async (_evt, opts: { rootPath?: string; appId?: string }) => {
+  const rootPath = opts?.rootPath;
+  const appId = opts?.appId;
+  const command = appId ? WORKSPACE_APP_COMMANDS[appId] : undefined;
+  if (!rootPath || !fs.existsSync(rootPath) || !command) {
+    return { ok: false, error: "invalid workspace app target" };
+  }
+  return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+    const child = spawn(command, [rootPath], {
+      cwd: rootPath,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, PATH: shellPath() },
+    });
+    child.once("error", (err) => resolve({ ok: false, error: err.message }));
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ ok: true });
+    });
+  });
 });
 
 ipcMain.handle("app:check-for-updates", async () => {
