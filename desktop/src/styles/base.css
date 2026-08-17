@@ -1897,54 +1897,6 @@ body.resizing-col {
   }
 }
 
-.ws-checks-readiness {
-  display: grid;
-  gap: 8px;
-}
-
-.ws-tab-panel .detail-row.ws-check-flat-row {
-  min-height: 30px;
-  align-items: center;
-  gap: 10px;
-  padding: 0;
-  border: 0;
-  border-bottom: 1px solid #252525;
-  border-radius: 0;
-  background: transparent;
-}
-
-.ws-tab-panel .detail-row.ws-check-flat-row:last-child {
-  border-bottom: 0;
-}
-
-.ws-check-flat-row .detail-label {
-  min-width: 118px;
-  font-size: 11px;
-  font-weight: 650;
-  color: #777777;
-}
-
-.ws-check-flat-row .detail-value {
-  font-size: 12px;
-  color: #c8c8c8;
-  text-align: right;
-}
-
-.ws-blocker-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ws-blocker-chip {
-  min-height: 28px;
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
 .ws-pr-actions-row {
   align-items: center;
 }
@@ -3575,6 +3527,164 @@ button.ws-tab-shell.ws-chat-new:hover {
   background: #151515;
 }
 
+.ws-checks-panel-flat,
+.ws-review-action-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #151515;
+}
+
+.ws-flat-section-label {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  color: #8a8a8a;
+}
+
+.ws-git-status-line,
+.ws-check-row-flat {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-check-row-flat {
+  padding: 0 2px;
+}
+
+.ws-check-row-flat:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-check-glyph {
+  flex: 0 0 13px;
+  width: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.ws-check-glyph-passed {
+  color: #46c978;
+}
+
+.ws-check-glyph-failed {
+  color: #f06464;
+}
+
+.ws-check-glyph-running {
+  color: #d6a84f;
+}
+
+.ws-check-glyph-unknown {
+  color: #777777;
+}
+
+.ws-check-provider-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  opacity: 0.78;
+}
+
+.ws-check-provider-local {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b8b8b;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ws-check-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-check-status {
+  flex: 0 1 auto;
+  max-width: 82px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-check-open {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  background: transparent;
+  color: #8c8c8c;
+  cursor: pointer;
+}
+
+.ws-check-open:hover {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-check-open .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ws-check-empty {
+  padding: 2px 0;
+  color: #747474;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.ws-review-prompt-button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  border: 1px solid #2d2d2d;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #1c1c1c;
+  color: #dedede;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ws-review-prompt-button:hover {
+  border-color: #3a3a3a;
+  background: #242424;
+}
+
+.ws-review-prompt-button:disabled {
+  cursor: default;
+  opacity: 0.56;
+}
+
 .ws-changes-header,
 .ws-pr-nav,
 .ws-run-header {
@@ -4305,6 +4415,26 @@ button.ws-tab-shell.ws-chat-new:hover {
   line-height: 1.25;
 }
 
+.ws-checks-panel-flat.command-panel,
+.ws-review-action-panel.command-panel {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.ws-right-body .ws-checks-panel-flat,
+.ws-right-body .ws-review-action-panel {
+  padding: 12px 14px;
+}
+
+.ws-right-body .ws-review-prompt-button {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 5px;
+  font-size: 11px;
+}
 
 @media (max-width: 1100px) {
   .chat-composer {
