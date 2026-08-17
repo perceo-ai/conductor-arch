@@ -1,5 +1,6 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import { chatStore, threadsStore, nav, loadThread, interactionsStore, actions, prefsStore } from "@/store";
+import { timelineItemsForSlice } from "@/store/chat";
 import { MODELS, EFFORTS } from "@/lib/models";
 import { send } from "@/bridge/client";
 import type {
@@ -29,6 +30,8 @@ import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
 // Chats are provider sessions (codex/claude) driven by archcar; the projected
 // timeline is built in core (get_chat_projection) so this file only maps
 // render_class -> component.
+
+let optimisticMessageSeq = 0;
 
 function providerToKind(provider: string): SessionKind {
   if (provider === "codex" || provider === "claude" || provider === "shell") return provider;
@@ -250,24 +253,9 @@ function TimelineItem(props: { item: ArchcarProjectionItem }) {
 
 function Timeline(props: { threadId: number }) {
   const slice = () => chatStore.slice(props.threadId);
-  const items = createMemo<ArchcarProjectionItem[]>(() => {
-    const s = slice();
-    const base: ArchcarProjectionItem[] =
-      s.projection.length > 0
-        ? s.projection
-        : s.messages.map((m) => ({
-            id: `msg-${m.id}`,
-            sequence: m.id,
-            render_class:
-              m.role === "user" ? "user_chat" : m.role === "system" ? "status_card" : "assistant_chat",
-            role_label: m.role,
-            title: "",
-            body: m.content,
-            status: "complete",
-            stream_state: "complete",
-          }));
-    return base.filter(isDisplayableTimelineItem);
-  });
+  const items = createMemo<ArchcarProjectionItem[]>(() =>
+    timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+  );
   return (
     <div class="chat-timeline-scroll">
       <div class="chat-messages">
@@ -340,6 +328,17 @@ function Composer(props: {
     return null;
   });
 
+  function addOptimisticMessage(body: string): number {
+    const id = -(Date.now() * 1000 + optimisticMessageSeq++);
+    chatStore.optimisticAppend(props.threadId, {
+      id,
+      role: "user",
+      content: body,
+      source: "desktop_optimistic",
+    });
+    return id;
+  }
+
   function changeModel(next: string) {
     setModel(next);
     const sid = sessionId();
@@ -398,6 +397,7 @@ function Composer(props: {
     // the raw text (payload.input inlines file-reference paths).
     const prevText = text();
     const prevAtts = attachments();
+    const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
     try {
       await send({
@@ -409,6 +409,7 @@ function Composer(props: {
         session_kind: sessionKind(),
       });
     } catch {
+      chatStore.removeOptimistic(props.threadId, pendingId);
       setText(prevText);
       setAttachments(prevAtts);
     }
@@ -426,6 +427,7 @@ function Composer(props: {
     if (!payload) return;
     const prevText = text();
     const prevAtts = attachments();
+    const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
     try {
       await send({
@@ -437,6 +439,7 @@ function Composer(props: {
         delivery: "immediate",
       });
     } catch {
+      chatStore.removeOptimistic(props.threadId, pendingId);
       setText(prevText);
       setAttachments(prevAtts);
     }
@@ -470,6 +473,7 @@ function Composer(props: {
   async function steerQueued(q: { id: number; input: string; visible_input?: string }) {
     const sid = sessionId();
     if (sid == null) return;
+    const pendingId = addOptimisticMessage(q.visible_input ?? q.input);
     try {
       await send({
         type: "send_input",
@@ -483,6 +487,7 @@ function Composer(props: {
       // send would silently discard the user's message.
       await removeQueued(q.id);
     } catch {
+      chatStore.removeOptimistic(props.threadId, pendingId);
       // keep the item queued so the user can retry
     }
   }

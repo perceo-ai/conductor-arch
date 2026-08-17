@@ -59,4 +59,12 @@ describe("isDisplayableTimelineItem", () => {
       isDisplayableTimelineItem(item({ render_class: "user_chat", stream_state: "complete" })),
     ).toBe(true);
   });
+
+  it("shows provider error cards", () => {
+    expect(
+      isDisplayableTimelineItem(
+        item({ render_class: "error_card", status: "failed", stream_state: "complete" }),
+      ),
+    ).toBe(true);
+  });
 });

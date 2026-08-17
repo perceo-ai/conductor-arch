@@ -4,8 +4,8 @@
 // switching) and Settings (default-model preference).
 
 export const MODELS: Record<string, string[]> = {
-  claude: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  codex: ["gpt-5-codex", "gpt-5", "o4-mini"],
+  claude: ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+  codex: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
   shell: [],
 };
 

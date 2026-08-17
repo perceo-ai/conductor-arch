@@ -15,6 +15,7 @@ const DEFAULT_VERB: Record<string, string> = {
   command_card: "Ran",
   process_card: "Ran",
   background_card: "Ran",
+  error_card: "Error",
   file_card: "Read",
   diff_card: "Edited",
   skill_card: "Used",
