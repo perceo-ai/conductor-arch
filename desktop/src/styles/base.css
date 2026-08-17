@@ -689,12 +689,13 @@ body.resizing-col {
 .ws-chat-tab-spinner {
   background: #6f8fbd;
 }
+.ws-chat-tab-needs-input {
+  background: #d97706;
+}
 .ws-chat-tab-text {
   min-width: 0;
   flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  display: block;
 }
 .ws-chat-tab-meta {
   min-width: 0;
@@ -3225,11 +3226,97 @@ button.ws-tab-shell {
   font-weight: 520;
   color: #777777;
 }
+.ws-chat-tab-count {
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #303030;
+  color: #d6d6d6;
+  font-size: 10px;
+  font-weight: 650;
+}
 
 .ws-tab-close-button {
   min-width: 24px;
   min-height: 24px;
   border-radius: 5px;
+}
+
+/* Conductor parity: chat tabs are a slim rail, not two-line cards. */
+.ws-chat-tabs-scroll {
+  min-height: 36px;
+  height: 36px;
+  background: #111111;
+  border-bottom: 1px solid #252525;
+}
+
+.ws-chat-tabs {
+  height: 36px;
+  gap: 0;
+}
+
+.ws-chat-tab-shell.ws-tab-shell,
+.ws-file-tab.ws-tab-shell,
+button.ws-tab-shell.ws-chat-new {
+  min-height: 36px;
+  height: 36px;
+  min-width: 0;
+  max-width: 238px;
+  padding: 0 9px;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+}
+
+.ws-chat-tab-shell.ws-tab-shell {
+  gap: 7px;
+}
+
+.ws-chat-tab-shell.ws-tab-shell:hover,
+.ws-file-tab.ws-tab-shell:hover,
+button.ws-tab-shell.ws-chat-new:hover {
+  background: #171717;
+}
+
+.ws-chat-tab-shell.ws-tab-active,
+.ws-file-tab.ws-tab-active {
+  background: transparent;
+  border-bottom-color: var(--lc-accent);
+}
+
+.ws-chat-tab-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.ws-tab-label {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.ws-tab-close-button {
+  min-width: 22px;
+  width: 22px;
+  min-height: 22px;
+  height: 22px;
+  border-radius: 5px;
+}
+
+.ws-tab-close-button .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ws-chat-new.ui-button-icon {
+  width: 34px;
+  min-width: 34px;
+}
+
+.ws-tab-sep-v {
+  height: 18px;
 }
 
 .chat-messages {
@@ -3862,6 +3949,28 @@ button.ws-tab-shell {
   font-size: 11px;
 }
 
+.ws-topbar-actions {
+  gap: 6px;
+}
+
+.ws-topbar-actions .ui-button-icon {
+  width: 30px;
+  min-width: 30px;
+  height: 28px;
+  min-height: 28px;
+  border-radius: 6px;
+}
+
+.ws-open-menu-button {
+  min-width: 42px;
+  height: 28px;
+  min-height: 28px;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 7px;
+  border-radius: 6px;
+}
+
 .ws-right-topbar {
   min-height: 36px;
   height: 36px;
@@ -3936,6 +4045,42 @@ button.ws-tab-shell {
 .column-empty {
   font-size: 12px;
   color: #858585;
+}
+
+/* Final chat-tab rail override: keep workspace tabs flat even when global tab
+   styles change elsewhere. */
+.ws-chat-tabs-scroll {
+  height: 36px;
+  min-height: 36px;
+  background: #111111;
+}
+
+.ws-chat-tabs .ws-tab-shell,
+.ws-chat-tabs button.ws-tab-shell {
+  height: 36px;
+  min-height: 36px;
+  min-width: 0;
+  padding: 0 9px;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+}
+
+.ws-chat-tabs .ws-tab-shell.ws-tab-active {
+  background: transparent;
+  border-bottom-color: var(--lc-accent);
+}
+
+.ws-chat-tabs .ws-tab-shell:hover {
+  background: #171717;
+}
+
+.ws-chat-tabs .ws-tab-close-button {
+  opacity: 0;
+}
+
+.ws-chat-tabs .ws-tab-shell:hover .ws-tab-close-button,
+.ws-chat-tabs .ws-tab-shell.ws-tab-active .ws-tab-close-button {
+  opacity: 0.65;
 }
 
 @media (max-width: 1100px) {

@@ -47,32 +47,27 @@ function ThreadTab(props: {
   onClose: () => void;
 }) {
   const generating = () => props.thread.status === "running" || props.thread.status === "generating";
-  const statusText = () => {
-    if (props.pendingInteraction) return "needs input";
-    if (props.queued > 0) return `${props.queued} queued`;
-    if (generating()) return "running";
-    return props.thread.status || "ready";
-  };
   return (
     <div
       class="ws-chat-tab-shell ws-tab-shell"
       classList={{ "ws-tab-active": props.active }}
       onClick={props.onClick}
       role="button"
+      title={`${props.thread.provider} · ${props.thread.status || "ready"}`}
     >
-      <span class="ws-chat-tab-dot" classList={{ "ws-chat-tab-spinner": generating() }} />
+      <span
+        class="ws-chat-tab-dot"
+        classList={{
+          "ws-chat-tab-spinner": generating(),
+          "ws-chat-tab-needs-input": props.pendingInteraction,
+        }}
+      />
       <span class="ws-chat-tab-text">
         <span class="ws-tab-label">{props.thread.title || `Chat ${props.thread.id}`}</span>
-        <span
-          class="ws-chat-tab-meta"
-          classList={{
-            "ws-chat-tab-meta-active": generating(),
-            "ws-chat-tab-meta-needs-input": props.pendingInteraction,
-          }}
-        >
-          {props.thread.provider} · {statusText()}
-        </span>
       </span>
+      <Show when={props.queued > 0}>
+        <span class="ws-chat-tab-count">{props.queued}</span>
+      </Show>
       <button
         class="ws-tab-close-button"
         title="Close chat"
