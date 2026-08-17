@@ -10,7 +10,7 @@ describe("right panel product tabs", () => {
       "review",
     ]);
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.label)).toEqual([
-      "All files",
+      "Files",
       "Changes",
       "Checks",
       "Review",

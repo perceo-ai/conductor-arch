@@ -262,12 +262,13 @@ export default function TerminalDock(props: { workspace: string }) {
                 <div
                   class="ws-run-tab-btn ws-run-terminal-tab"
                   classList={{ "ws-run-tab-active": activeTermId() === t.id }}
+                  title={`Terminal ${i() + 1}`}
                   onClick={() => {
                     setTab({ term: t.id });
                     setExpanded(true);
                   }}
                 >
-                  <span class="ws-run-terminal-tab-label">Terminal {i() + 1}</span>
+                  <span class="ws-run-terminal-tab-label">{i() + 1}</span>
                   <button
                     class="ws-tab-close-button"
                     title="Close terminal"

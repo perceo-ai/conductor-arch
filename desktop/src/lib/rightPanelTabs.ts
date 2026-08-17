@@ -1,5 +1,5 @@
 export const PRODUCT_RIGHT_PANEL_TABS = [
-  { id: "files", label: "All files" },
+  { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
   { id: "checks", label: "Checks" },
   { id: "review", label: "Review" },

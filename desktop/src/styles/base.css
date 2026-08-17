@@ -4436,6 +4436,66 @@ button.ws-tab-shell.ws-chat-new:hover {
   font-size: 11px;
 }
 
+.ws-right-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: hidden;
+}
+
+.ws-right-tabs .nav-button {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.ws-right-tabs .nav-button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-run-tab-bar {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ws-run-tabs-row {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ws-run-terminal-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 92px;
+}
+
+.ws-run-terminal-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-run-terminal-tab .ws-tab-close-button {
+  display: none;
+}
+
+.ws-run-terminal-tab:hover .ws-tab-close-button,
+.ws-run-terminal-tab.ws-run-tab-active .ws-tab-close-button {
+  display: inline-flex;
+}
+
+.ws-run-add,
+.ws-run-collapse-btn,
+.ws-run-tabs-row > .ws-run-tab-btn:not(.ws-run-terminal-tab) {
+  flex: 0 0 28px;
+}
+
 @media (max-width: 1100px) {
   .chat-composer {
     padding: 0 18px 16px;
