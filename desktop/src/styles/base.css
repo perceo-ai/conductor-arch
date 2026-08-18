@@ -102,10 +102,17 @@ body {
 }
 
 /* --- sidebar --- */
+/* Column widths (see lib/panelWidths.ts): both side columns are drag-sized and
+   may give ground as the window narrows, but never below their minimum, and
+   never past the centre column's own minimum. */
 .sidebar {
   position: relative;
-  width: 320px;
-  min-width: 320px;
+  width: 280px;
+  min-width: 220px;
+  /* Cap by viewport share too: at the 900px minimum window the two side
+     columns and the centre's 360px minimum add up to exactly the width. */
+  max-width: min(420px, 30vw);
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -422,7 +429,9 @@ body.resizing-col {
 
 /* --- content / page stack --- */
 .content-area {
-  flex: 1 1 auto;
+  /* Basis 0 so the page never bids for its content width — with `auto` a wide
+     chat transcript out-argued the sidebar and squeezed it to its minimum. */
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -594,10 +603,14 @@ body.resizing-col {
   overflow: hidden;
 }
 .ws-center {
-  flex: 1 1 auto;
+  /* Basis 0, not auto: the centre takes the leftover space rather than bidding
+     for its content width, which otherwise squeezed the inspector to its min. */
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  /* Chat stops being usable narrower than this; the tab strip scrolls rather
+     than widening the column, so adding chats never resizes the layout. */
+  min-width: 360px;
   min-height: 0;
 }
 .ws-header {
@@ -629,8 +642,10 @@ body.resizing-col {
 }
 .ws-right-panel {
   position: relative;
-  flex: 0 0 320px;
+  flex: 0 1 320px;
   width: 320px;
+  min-width: 260px;
+  max-width: min(440px, 30vw);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -660,13 +675,10 @@ body.resizing-col {
   overflow: auto;
 }
 
-@media (max-width: 1100px) {
-  .ws-command-center {
-    flex-direction: column;
-  }
-  .ws-center {
-    flex: 1 1 100%;
-  }
+/* The inspector only drops out when the three minimums genuinely cannot fit
+   (below Electron's 900px floor, e.g. a zoomed-in renderer). Above that it
+   shrinks instead — hiding it at 1100px made the centre column jump. */
+@media (max-width: 880px) {
   .ws-right-panel {
     display: none;
   }
@@ -681,10 +693,50 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
+}
+/* Vertical order of the chat column: the timeline absorbs the slack, an agent
+   ask (permission / question / plan) is capped and scrolls, and the composer
+   keeps its height no matter what. Without the cap a long plan card pushed the
+   composer clean off the bottom of a short window. */
+.chat-surface > .chat-interaction,
+.chat-surface > .chat-plan-card {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  overflow-y: auto;
+}
+.chat-surface > .chat-composer {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+/* A long queue is the other way the composer grows without bound. */
+.chat-queue-overlay {
+  max-height: 26vh;
+  overflow-y: auto;
+}
+/* Tab bar: the tab strip scrolls on its own, the new-chat button is pinned so
+   it stays reachable no matter how many chats are open. */
+.ws-chat-tab-bar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 .ws-chat-tabs-scroll {
   overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  scrollbar-width: none;
+}
+.ws-chat-tabs-scroll::-webkit-scrollbar {
+  height: 0;
+}
+.ws-chat-tab-bar > .ws-chat-new {
   flex: 0 0 auto;
+  margin-left: 4px;
 }
 .ws-chat-tabs {
   display: flex;
@@ -699,7 +751,10 @@ body.resizing-col {
   gap: 6px;
   cursor: pointer;
   white-space: nowrap;
-  min-width: 154px;
+  /* Tabs give up width before the strip starts scrolling, so a handful of
+     chats stay visible at once instead of scrolling after three. */
+  flex: 0 1 auto;
+  min-width: 96px;
   max-width: 230px;
 }
 .ws-chat-tab-dot {
@@ -730,7 +785,7 @@ body.resizing-col {
   line-height: 1.15;
 }
 .chat-timeline-scroll {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
 }
@@ -4320,7 +4375,7 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 
 .ws-topbar,
-.ws-chat-tabs-scroll {
+.ws-chat-tab-bar {
   background: #121212;
   border-color: #252525;
 }
@@ -4345,8 +4400,6 @@ button.ws-tab-shell.ws-chat-new:hover {
 
 /* ---- Dense Conductor-style chrome pass ---- */
 .sidebar {
-  width: 280px;
-  min-width: 280px;
   background: #121212;
 }
 
@@ -4621,18 +4674,29 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 
 /* Final chat-tab rail override: keep workspace tabs flat even when global tab
-   styles change elsewhere. */
+   styles change elsewhere. The band owns the background; the strip inside it
+   scrolls, because clipping it hid every tab past the first on a narrow
+   window. */
+.ws-chat-tab-bar {
+  height: 30px;
+  min-height: 30px;
+  padding-right: 6px;
+  background: #111111;
+}
+
 .ws-chat-tabs-scroll {
   height: 30px;
   min-height: 30px;
-  overflow: hidden;
-  background: #111111;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: transparent;
+  border: none;
 }
 
 .ws-chat-tabs {
   height: 30px;
   padding: 0 8px;
-  overflow: hidden;
+  width: max-content;
 }
 
 .ws-chat-tabs .ws-tab-shell,

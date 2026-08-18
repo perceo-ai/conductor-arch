@@ -803,3 +803,22 @@ Not yet manually smoke-verified in this branch:
 - Not done: no MCP tools for the three RPCs (MCP exposes a curated subset and
   already omits `list_chat_threads`/`get_chat_projection`), and no GTK surface
   exists in this tree.
+
+## Shell layout rules (added 2026-08-18)
+
+- Three columns: sidebar (min 220), chat (min 360), inspector (min 260) — they
+  fit exactly at Electron's 900px minimum window. Side columns are drag-sized
+  and remember their width; `lib/panelWidths.ts` caps a drag at what is left
+  after the other panel and the chat minimum, and `max-width: min(Xpx, 30vw)`
+  keeps a remembered width from overflowing a smaller window.
+- `.content-area` and `.ws-center` use `flex-basis: 0`. With `auto` they bid for
+  their content width, which squeezed the sidebar and the inspector down to
+  their minimums on wide windows.
+- The inspector no longer disappears at 1100px (it shrinks instead); the
+  breakpoint that hides it now sits at 880px, below the minimum window.
+- Chat column order: timeline takes the slack, a pending agent ask is capped at
+  45% and scrolls, the composer never shrinks. A long plan card used to push the
+  composer off the bottom of a short window.
+- The chat tab strip scrolls (it was `overflow: hidden`, which hid every tab
+  past the first when the column narrowed) and the new-chat button is pinned
+  outside the scroller.

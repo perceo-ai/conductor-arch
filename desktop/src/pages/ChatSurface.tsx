@@ -1468,8 +1468,9 @@ export default function ChatSurface(props: { workspace: string }) {
 
   return (
     <div class="chat-surface">
-      <div class="ws-chat-tabs-scroll ws-tab-bar">
-        <div class="ws-chat-tabs">
+      <div class="ws-chat-tab-bar ws-tab-bar">
+        <div class="ws-chat-tabs-scroll">
+          <div class="ws-chat-tabs">
           <Show when={openFilePath()}>
             {(path) => (
               <FileTab
@@ -1493,13 +1494,16 @@ export default function ChatSurface(props: { workspace: string }) {
               />
             )}
           </For>
-          <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
-            <Icon name="plus" />
-          </button>
-          <Show when={threads().length === 0 && openFilePath() == null}>
-            <span class="empty-label">Starting chat in {titleCaseWorkspace(props.workspace)}…</span>
-          </Show>
+            <Show when={threads().length === 0 && openFilePath() == null}>
+              <span class="empty-label">Starting chat in {titleCaseWorkspace(props.workspace)}…</span>
+            </Show>
+          </div>
         </div>
+        {/* Pinned outside the scroller: opening a new chat must not require
+            scrolling past every tab you already have. */}
+        <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
+          <Icon name="plus" />
+        </button>
       </div>
       <Switch fallback={<div class="empty-state">Starting chat…</div>}>
         <Match when={view().kind === "commit"}>

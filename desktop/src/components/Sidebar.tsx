@@ -4,6 +4,7 @@ import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+import { SIDEBAR_MAX, SIDEBAR_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
 import Icon, { type IconName } from "./Icon";
 import {
   dashboardTriageBadges,
@@ -116,8 +117,6 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
   ];
 }
 
-const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 420;
 
 const ROW_TRIAGE_ICON: Partial<Record<DashboardTriageBadgeTone, "brain" | "play" | "git-compare">> = {
   agent: "brain",
@@ -240,7 +239,9 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
     <aside
       class="sidebar"
       classList={{ collapsed: props.collapsed }}
-      style={props.collapsed ? undefined : { width: `${width()}px`, "min-width": `${width()}px` }}
+      // flex-basis, not min-width: the column keeps its dragged width but can
+      // still give ground (down to the CSS min) when the window gets narrow.
+      style={props.collapsed ? undefined : { width: `${width()}px`, "flex-basis": `${width()}px` }}
     >
       <div class="sidebar-chrome drag-region">
         {/* Left third of this row is left clear for the window controls (see
@@ -319,7 +320,20 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
       </div>
 
       <Show when={!props.collapsed}>
-        <ResizeHandle edge="right" width={width} min={SIDEBAR_MIN} max={SIDEBAR_MAX} onChange={setWidth} />
+        <ResizeHandle
+          edge="right"
+          width={width}
+          min={SIDEBAR_MIN}
+          max={() =>
+            panelDragMax({
+              viewportWidth: window.innerWidth,
+              otherPanelWidth: measuredWidth(".ws-right-panel"),
+              hardMax: SIDEBAR_MAX,
+              panelMin: SIDEBAR_MIN,
+            })
+          }
+          onChange={setWidth}
+        />
       </Show>
     </aside>
   );

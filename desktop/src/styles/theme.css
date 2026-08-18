@@ -2688,7 +2688,8 @@ button.ui-button-destructive:hover {
     box-shadow: none;
     height: 30px;
     min-height: 30px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 /* GTK scrollbar child -> native scrollbar; use ::-webkit-scrollbar */
 .ws-chat-tabs-scroll::-webkit-scrollbar {

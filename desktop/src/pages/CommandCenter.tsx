@@ -13,12 +13,11 @@ import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTa
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+import { RIGHT_MAX, RIGHT_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 
-const RIGHT_MIN = 260;
-const RIGHT_MAX = 440;
 
 // Right-panel tabs: a quiet inspector beside the chat. Deeper intelligence
 // records remain in the data model, but they are not promoted as peer surfaces.
@@ -110,7 +109,20 @@ function RightPanel(props: { workspace: string }) {
   };
   return (
     <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
-      <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
+      <ResizeHandle
+        edge="left"
+        width={width}
+        min={RIGHT_MIN}
+        max={() =>
+          panelDragMax({
+            viewportWidth: window.innerWidth,
+            otherPanelWidth: measuredWidth(".sidebar"),
+            hardMax: RIGHT_MAX,
+            panelMin: RIGHT_MIN,
+          })
+        }
+        onChange={setWidth}
+      />
       <div class="ws-right-mid">
         <div class="ws-right-topbar">
           <WorkspacePrBar workspace={props.workspace} />
