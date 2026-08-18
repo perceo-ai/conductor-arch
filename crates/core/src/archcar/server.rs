@@ -2392,6 +2392,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             let briefing = store.context_briefing(&workspace, thread_id)?;
             Ok(ArchcarResponse::ContextBriefing { briefing })
         }),
+        ArchcarRequest::SyncChatTasks {
+            workspace,
+            thread_id,
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let result = store.sync_chat_tasks(&workspace, thread_id)?;
+                Ok(ArchcarResponse::TasksSynced { result })
+            });
+            if let ArchcarResponse::TasksSynced { result } = &response {
+                for task_id in &result.task_ids {
+                    broadcast_task_updated(state, &workspace_name, *task_id, "todo");
+                }
+                if result.created > 0 {
+                    refresh_workspace_context_after_change(state, &workspace_name, thread_id);
+                }
+            }
+            response
+        }
         ArchcarRequest::ListContextAttachments { workspace } => with_store(state, |store| {
             let attachments = store.list_context_attachments(&workspace)?;
             Ok(ArchcarResponse::ContextAttachments {

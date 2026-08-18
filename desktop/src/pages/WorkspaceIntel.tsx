@@ -1,6 +1,7 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
 import { actions, nav, workspacesStore } from "@/store";
+import { intelStore } from "@/store/intel";
 import { TASK_STATUSES } from "@/bridge/protocol";
 import type {
   ArchcarChecksSummary,
@@ -31,10 +32,10 @@ function errorText(err: unknown): string {
 
 function TasksSection(props: { workspace: string }) {
   const [tasks, { refetch }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<Task[]> => {
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<Task[]> => {
       try {
-        const res = await send({ type: "list_tasks", workspace: ws });
+        const res = await send({ type: "list_tasks", workspace: props.workspace });
         return res.type === "tasks" ? res.tasks : [];
       } catch {
         return [];
@@ -42,10 +43,10 @@ function TasksSection(props: { workspace: string }) {
     },
   );
   const [overlaps] = createResource(
-    () => props.workspace,
-    async (ws): Promise<SessionOverlap[]> => {
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<SessionOverlap[]> => {
       try {
-        const res = await send({ type: "list_session_overlaps", workspace: ws });
+        const res = await send({ type: "list_session_overlaps", workspace: props.workspace });
         return res.type === "session_overlaps" ? res.overlaps : [];
       } catch {
         return [];
@@ -134,6 +135,30 @@ function TasksSection(props: { workspace: string }) {
     }
   }
 
+  async function syncCurrentChatTasks() {
+    const threadId = nav.selectedChatThread();
+    setFeedback("Syncing chat tasks…");
+    try {
+      const res = await send({
+        type: "sync_chat_tasks",
+        workspace: props.workspace,
+        ...(threadId != null ? { thread_id: threadId } : {}),
+      });
+      if (res.type === "tasks_synced") {
+        setFeedback(
+          res.result.created > 0
+            ? `Created ${res.result.created} task(s).`
+            : "No new action items in chat.",
+        );
+        await refetch();
+      } else if (res.type === "error") {
+        setFeedback(res.message);
+      }
+    } catch (err) {
+      setFeedback(`Sync chat tasks failed: ${errorText(err)}`);
+    }
+  }
+
   return (
     <div class="ws-summary-tasks">
       <div class="section-title">Tasks</div>
@@ -147,6 +172,9 @@ function TasksSection(props: { workspace: string }) {
         />
         <button class="suggested-action" onClick={() => void create()}>
           Add task
+        </button>
+        <button class="secondary-action" onClick={() => void syncCurrentChatTasks()}>
+          Sync chat tasks
         </button>
       </div>
       <div class="action-row">
@@ -240,10 +268,10 @@ function TasksSection(props: { workspace: string }) {
 
 export function SummaryPanel(props: { workspace: string }) {
   const [stored, { refetch }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<Summary | null> => {
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<Summary | null> => {
       try {
-        const res = await send({ type: "list_summaries", workspace: ws });
+        const res = await send({ type: "list_summaries", workspace: props.workspace });
         if (res.type !== "summaries") return null;
         return res.summaries.find((summary) => summary.scope_type === "workspace") ?? null;
       } catch {
@@ -518,7 +546,7 @@ function CurrentChatSection(props: { workspace: string }) {
   const [chatContext] = createResource(
     () => {
       const id = threadId();
-      return id != null ? `${props.workspace}:${id}` : null;
+      return id != null ? `${props.workspace}:${id}:${intelStore.version()}` : null;
     },
     async (): Promise<string | null> => {
       const id = threadId();

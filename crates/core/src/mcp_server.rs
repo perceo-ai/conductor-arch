@@ -436,6 +436,27 @@ pub fn tools() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "sync_chat_tasks",
+            description:
+                "Create or update native workspace tasks from clear action items in the current chat.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "thread_id": {"type": "integer"},
+                    }),
+                    &["workspace"],
+                )
+            },
+            mutating: true,
+            build: |args| {
+                Ok(ArchcarRequest::SyncChatTasks {
+                    workspace: string_arg(args, "workspace")?,
+                    thread_id: args.get("thread_id").and_then(Value::as_i64),
+                })
+            },
+        },
+        ToolSpec {
             name: "add_context",
             description: "Pin a branch-local note or file as context for this workspace.",
             schema: || {
@@ -890,6 +911,7 @@ mod tests {
 
         assert!(names.contains(&"refresh_summary"));
         assert!(names.contains(&"get_context_briefing"));
+        assert!(names.contains(&"sync_chat_tasks"));
         assert!(names.contains(&"create_task"));
         assert!(names.contains(&"update_task"));
         assert!(names.contains(&"get_summary"));

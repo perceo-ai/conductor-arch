@@ -15,7 +15,7 @@ use crate::workspace::{
 };
 use crate::workspace_intel::{
     ContextAttachment, ContextBriefing, DiffContribution, SessionContribution, SessionOverlap,
-    SessionRunRecord, Summary, SummaryRefreshResult, Task, TaskUpdate,
+    SessionRunRecord, Summary, SummaryRefreshResult, Task, TaskSyncResult, TaskUpdate,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -660,6 +660,12 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<i64>,
     },
+    /// Create native workspace tasks from clear action items in chat.
+    SyncChatTasks {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+    },
     ListContextAttachments {
         workspace: String,
     },
@@ -1027,6 +1033,9 @@ pub enum ArchcarResponse {
     },
     ContextBriefing {
         briefing: ContextBriefing,
+    },
+    TasksSynced {
+        result: TaskSyncResult,
     },
     ContextAttachments {
         workspace: String,
@@ -1863,6 +1872,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "-".to_owned())
         ),
+        ArchcarRequest::SyncChatTasks {
+            workspace,
+            thread_id,
+        } => format!(
+            "sync_chat_tasks workspace={workspace} thread={}",
+            thread_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        ),
         ArchcarRequest::ListContextAttachments { workspace } => {
             format!("list_context_attachments workspace={workspace}")
         }
@@ -2220,6 +2238,10 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "context_briefing workspace={} chars={}",
             briefing.workspace,
             briefing.body_markdown.chars().count()
+        ),
+        ArchcarResponse::TasksSynced { result } => format!(
+            "tasks_synced workspace={} created={} updated={}",
+            result.workspace, result.created, result.updated
         ),
         ArchcarResponse::ContextAttachments {
             workspace,

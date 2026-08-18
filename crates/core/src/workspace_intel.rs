@@ -205,6 +205,16 @@ pub struct ContextBriefing {
     pub task_ids: Vec<i64>,
 }
 
+/// Outcome of extracting native tasks from chat evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSyncResult {
+    pub workspace: String,
+    pub thread_id: Option<i64>,
+    pub created: usize,
+    pub updated: usize,
+    pub task_ids: Vec<i64>,
+}
+
 /// Two sessions aiming at the same files. Advisory only — Archductor does not
 /// lock files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1174,6 +1184,70 @@ impl WorkspaceStore {
         })
     }
 
+    // ---- Native chat task sync ---------------------------------------------
+
+    /// Create native workspace tasks from clear action items in chat messages.
+    /// Only bulleted lines that start with an action verb become tasks, titles
+    /// are deduplicated (case-insensitively) against existing tasks, and
+    /// human-created tasks are never replaced.
+    pub fn sync_chat_tasks(
+        &self,
+        workspace_name: &str,
+        thread_id: Option<i64>,
+    ) -> Result<TaskSyncResult> {
+        let workspace = self.get_by_name(workspace_name)?;
+        if let Some(thread_id) = thread_id {
+            self.ensure_session_in_workspace(workspace.id, thread_id)?;
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT m.thread_id, m.content FROM chat_messages m
+               JOIN chat_threads t ON t.id = m.thread_id
+              WHERE t.workspace_id = ?1
+                AND (?2 IS NULL OR m.thread_id = ?2)
+                AND m.role = 'assistant'
+              ORDER BY m.id",
+        )?;
+        let messages = stmt
+            .query_map(params![workspace.id, thread_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let existing = self.list_tasks(workspace_name)?;
+        let mut seen_titles: BTreeSet<String> = existing
+            .iter()
+            .map(|task| normalize_task_title(&task.title))
+            .collect();
+
+        let mut created = 0;
+        let mut task_ids = Vec::new();
+        for (message_thread_id, content) in messages {
+            for title in extract_action_items(&content) {
+                let normalized = normalize_task_title(&title);
+                if !seen_titles.insert(normalized) {
+                    continue;
+                }
+                let task = self.create_task(
+                    workspace_name,
+                    &title,
+                    &format!("Source: chat:{message_thread_id}"),
+                    &[],
+                )?;
+                created += 1;
+                task_ids.push(task.id);
+            }
+        }
+
+        Ok(TaskSyncResult {
+            workspace: workspace_name.to_owned(),
+            thread_id,
+            created,
+            updated: 0,
+            task_ids,
+        })
+    }
+
     // ---- Context attachments ----------------------------------------------
 
     pub fn add_context_attachment(
@@ -1657,6 +1731,58 @@ impl WorkspaceStore {
         }
         Ok(overlaps)
     }
+}
+
+/// Leading verbs that mark a bulleted line as a clear action item. Kept
+/// deliberately small: it is better to miss a vague line than to spam tasks.
+const ACTION_VERBS: [&str; 12] = [
+    "add",
+    "wire",
+    "fix",
+    "investigate",
+    "verify",
+    "follow up",
+    "implement",
+    "remove",
+    "update",
+    "refactor",
+    "test",
+    "document",
+];
+
+fn normalize_task_title(title: &str) -> String {
+    title.trim().to_lowercase()
+}
+
+/// Pull clear action-item titles out of one chat message: bulleted lines
+/// (`- ` / `* `, optionally a `- [ ]` checkbox) that start with an action verb.
+fn extract_action_items(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let item = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))?
+                .trim();
+            let item = item
+                .strip_prefix("[ ]")
+                .or_else(|| item.strip_prefix("[x]"))
+                .unwrap_or(item)
+                .trim();
+            if item.is_empty() || item.chars().count() > 200 {
+                return None;
+            }
+            let lower = item.to_lowercase();
+            ACTION_VERBS
+                .iter()
+                .any(|verb| {
+                    lower.starts_with(verb)
+                        && lower[verb.len()..].chars().next().map_or(true, |c| c == ' ')
+                })
+                .then(|| item.to_owned())
+        })
+        .collect()
 }
 
 fn next_actions(
@@ -2272,6 +2398,47 @@ mod tests {
         assert!(briefing.body_markdown.contains("Add summary tab"));
         assert_eq!(briefing.summary_ids.len(), 2);
         assert_eq!(briefing.task_ids, vec![task.id]);
+    }
+
+    #[test]
+    fn sync_chat_tasks_adds_bulleted_action_items_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        add_sibling_workspace(&store);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Plan work", None)
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "assistant",
+                "Here is the plan:\n- Add Summary tab\n- Wire MCP refresh tool\n- maybe consider caching\nProse stays prose.",
+                "test",
+            )
+            .unwrap();
+        // User messages are not mined for tasks.
+        store
+            .append_chat_message(thread.id, "user", "- Fix everything", "test")
+            .unwrap();
+
+        let synced = store.sync_chat_tasks("berlin", Some(thread.id)).unwrap();
+        let synced_again = store.sync_chat_tasks("berlin", Some(thread.id)).unwrap();
+        let tasks = store.list_tasks("berlin").unwrap();
+
+        assert_eq!(synced.created, 2);
+        assert_eq!(synced.task_ids.len(), 2);
+        assert_eq!(synced_again.created, 0);
+        assert!(synced_again.task_ids.is_empty());
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|task| task.title == "Add Summary tab"));
+        assert!(tasks.iter().any(|task| task.title == "Wire MCP refresh tool"));
+        assert!(tasks
+            .iter()
+            .all(|task| task.body == format!("Source: chat:{}", thread.id)));
+
+        // Existing (human) tasks with the same normalized title block re-creation.
+        let err = store.sync_chat_tasks("oslo", Some(thread.id)).unwrap_err();
+        assert!(err.to_string().contains("workspace"), "{err}");
     }
 
     #[test]

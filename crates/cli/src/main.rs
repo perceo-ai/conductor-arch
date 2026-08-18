@@ -650,6 +650,12 @@ enum ArchcarCommand {
         #[arg(long = "thread-id")]
         thread_id: Option<i64>,
     },
+    /// Create native tasks from clear action items in chat.
+    SyncChatTasks {
+        workspace: String,
+        #[arg(long = "thread-id")]
+        thread_id: Option<i64>,
+    },
     /// List branch-local context attachments.
     Context {
         workspace: String,
@@ -1820,6 +1826,15 @@ fn run_cli() -> Result<()> {
                     thread_id,
                 } => {
                     print_archcar_response(client.send(ArchcarRequest::GetContextBriefing {
+                        workspace,
+                        thread_id,
+                    })?);
+                }
+                ArchcarCommand::SyncChatTasks {
+                    workspace,
+                    thread_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::SyncChatTasks {
                         workspace,
                         thread_id,
                     })?);
@@ -3507,6 +3522,12 @@ fn print_archcar_response(response: ArchcarResponse) {
                 briefing.body_markdown.chars().count()
             );
             println!("{}", briefing.body_markdown);
+        }
+        ArchcarResponse::TasksSynced { result } => {
+            println!(
+                "tasks_synced workspace={} created={} updated={} task_ids={:?}",
+                result.workspace, result.created, result.updated, result.task_ids
+            );
         }
         ArchcarResponse::ContextAttachments {
             workspace,

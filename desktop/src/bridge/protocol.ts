@@ -125,6 +125,7 @@ export type ArchcarRequest =
   | { type: "draft_summary"; workspace: string; session_id?: number }
   | { type: "refresh_summary"; workspace: string; scope_type: SummaryRefreshScopeType; scope_id?: number }
   | { type: "get_context_briefing"; workspace: string; thread_id?: number }
+  | { type: "sync_chat_tasks"; workspace: string; thread_id?: number }
   | { type: "list_context_attachments"; workspace: string }
   | {
       type: "add_context_attachment";
@@ -525,6 +526,7 @@ export type ArchcarResponse =
   | { type: "summary_draft"; workspace: string; body_markdown: string }
   | { type: "summary_refreshed"; workspace: string; result: SummaryRefreshResult }
   | { type: "context_briefing"; briefing: ContextBriefing }
+  | { type: "tasks_synced"; result: TaskSyncResult }
   | { type: "context_attachments"; workspace: string; attachments: ContextAttachment[] }
   | { type: "context_attachment_added"; attachment: ContextAttachment }
   | { type: "context_attachment_removed"; attachment_id: number }
@@ -676,6 +678,15 @@ export interface SummaryRefreshResult {
   summary: Summary;
   state: SummaryRefreshState;
   changed: boolean;
+}
+
+/** Outcome of extracting native tasks from chat evidence. */
+export interface TaskSyncResult {
+  workspace: string;
+  thread_id?: number | null;
+  created: number;
+  updated: number;
+  task_ids: number[];
 }
 
 /** Combined workspace/current-chat/tasks/next-actions briefing. */
