@@ -1,16 +1,13 @@
-import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
-import { openExternal, openWorkspaceApp, send } from "@/bridge/client";
+import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
-import { STATUS_COLOR } from "@/lib/workspaceStatus";
-import { deriveWorkspaceBriefing, workspaceBriefingStatusLabel } from "@/lib/workspaceBriefing";
-import type { ArchcarChecksSummary } from "@/bridge/protocol";
 import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
 import TerminalDock from "./TerminalDock";
 import WorkspacePrBar from "./WorkspacePrBar";
-import { ChecksPanel, ReviewPanel } from "./WorkspaceTabs";
+import { ChecksPanel, ReviewPromptButton } from "./WorkspaceTabs";
 import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
@@ -35,10 +32,8 @@ function TopBar(props: {
   workspace: string;
   rightCollapsed: boolean;
   onToggleRight: () => void;
-  checks?: ArchcarChecksSummary;
 }) {
   const row = () => workspacesStore.row(props.workspace);
-  const briefing = () => deriveWorkspaceBriefing(row(), props.checks);
   const repoRoot = () => {
     const repo = row()?.repository;
     return repo ? repositoriesStore.row(repo)?.rootPath : undefined;
@@ -76,11 +71,6 @@ function TopBar(props: {
   return (
     <div class="ws-topbar">
       <div class="ws-topbar-breadcrumb">
-        <span
-          class="ws-topbar-status-dot"
-          style={{ "background-color": STATUS_COLOR[briefing().status] }}
-          aria-label={workspaceBriefingStatusLabel(briefing())}
-        />
         <span class="ws-topbar-repo">{titleCaseWorkspace(props.workspace)}</span>
         <span class="ws-topbar-sep">&gt;</span>
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
@@ -136,6 +126,7 @@ function RightPanel(props: { workspace: string }) {
               </button>
             )}
           </For>
+          <ReviewPromptButton workspace={props.workspace} />
         </div>
         <div class="ws-right-body">
           <Switch>
@@ -155,9 +146,6 @@ function RightPanel(props: { workspace: string }) {
             <Match when={nav.rightPanelTab() === "checks"}>
               <ChecksPanel workspace={props.workspace} />
             </Match>
-            <Match when={nav.rightPanelTab() === "review"}>
-              <ReviewPanel workspace={props.workspace} />
-            </Match>
           </Switch>
         </div>
       </div>
@@ -169,19 +157,6 @@ function RightPanel(props: { workspace: string }) {
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
   const [rightCollapsed, setRightCollapsed] = createSignal(false);
-  const [checks] = createResource(
-    workspace,
-    async (ws): Promise<ArchcarChecksSummary | undefined> => {
-      if (!ws) return undefined;
-      try {
-        const res = await send({ type: "get_checks_summary", workspace: ws });
-        return res.type === "checks_summary" ? res.summary : undefined;
-      } catch {
-        return undefined;
-      }
-    },
-  );
-  const currentChecks = createMemo(() => checks());
 
   return (
     <Show
@@ -193,7 +168,6 @@ export default function CommandCenter() {
           <div class="ws-center">
             <TopBar
               workspace={ws()}
-              checks={currentChecks()}
               rightCollapsed={rightCollapsed()}
               onToggleRight={() => setRightCollapsed((c) => !c)}
             />

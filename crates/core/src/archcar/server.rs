@@ -2932,16 +2932,75 @@ fn open_lifecycle_workspace_store(state: &Arc<Mutex<ServerState>>) -> Result<Wor
     Ok(store)
 }
 
-/// Clone a remote repository into `dest` using the system `git` binary. The
-/// caller then registers the cloned path with `RepositoryStore::add`.
+struct RepositoryCloneCommand {
+    program: &'static str,
+    args: Vec<String>,
+    failure_context: &'static str,
+}
+
+fn clone_command_for_url(url: &str, dest: &str) -> RepositoryCloneCommand {
+    if is_github_remote_url(url) {
+        return RepositoryCloneCommand {
+            program: "gh",
+            args: vec![
+                "repo".to_owned(),
+                "clone".to_owned(),
+                url.to_owned(),
+                dest.to_owned(),
+            ],
+            failure_context: "run gh repo clone",
+        };
+    }
+
+    RepositoryCloneCommand {
+        program: "git",
+        args: vec!["clone".to_owned(), url.to_owned(), dest.to_owned()],
+        failure_context: "run git clone",
+    }
+}
+
+fn is_github_remote_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://github.com/")
+        || lower.starts_with("http://github.com/")
+        || lower.starts_with("ssh://git@github.com/")
+        || lower.starts_with("git@github.com:")
+}
+
+fn command_failure_message(
+    program: &str,
+    args: &[String],
+    output: &std::process::Output,
+) -> String {
+    let mut message = format!("{program} {} failed ({})", args.join(" "), output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        message.push_str(": ");
+        message.push_str(&stderr);
+        return message;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !stdout.is_empty() {
+        message.push_str(": ");
+        message.push_str(&stdout);
+    }
+    message
+}
+
+/// Clone a remote repository into `dest`. GitHub remotes go through `gh` so the
+/// desktop Clone tab uses the same local GitHub CLI auth it used to list repos.
+/// The caller then registers the cloned path with `RepositoryStore::add`.
 fn clone_repository(url: &str, dest: &str) -> Result<()> {
-    let status = std::process::Command::new("git")
-        .arg("clone")
-        .arg(url)
-        .arg(dest)
-        .status()
-        .context("run git clone")?;
-    anyhow::ensure!(status.success(), "git clone failed ({status})");
+    let command = clone_command_for_url(url, dest);
+    let output = std::process::Command::new(command.program)
+        .args(&command.args)
+        .output()
+        .with_context(|| command.failure_context)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        command_failure_message(command.program, &command.args, &output)
+    );
     Ok(())
 }
 
@@ -4226,6 +4285,44 @@ mod tests {
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessStatus};
     use serde_json::json;
+
+    #[test]
+    fn clone_command_prefers_gh_for_github_remotes() {
+        for url in [
+            "git@github.com:perceo-ai/conductor-arch.git",
+            "https://github.com/perceo-ai/conductor-arch.git",
+            "ssh://git@github.com/perceo-ai/conductor-arch.git",
+        ] {
+            let command = clone_command_for_url(url, "/tmp/conductor-arch");
+            assert_eq!(command.program, "gh");
+            assert_eq!(
+                command.args,
+                vec![
+                    "repo".to_owned(),
+                    "clone".to_owned(),
+                    url.to_owned(),
+                    "/tmp/conductor-arch".to_owned()
+                ]
+            );
+            assert_eq!(command.failure_context, "run gh repo clone");
+        }
+    }
+
+    #[test]
+    fn clone_command_keeps_git_for_non_github_remotes() {
+        let command = clone_command_for_url("ssh://git@example.test/team/repo.git", "/tmp/repo");
+
+        assert_eq!(command.program, "git");
+        assert_eq!(
+            command.args,
+            vec![
+                "clone".to_owned(),
+                "ssh://git@example.test/team/repo.git".to_owned(),
+                "/tmp/repo".to_owned()
+            ]
+        );
+        assert_eq!(command.failure_context, "run git clone");
+    }
 
     #[test]
     fn provider_interaction_dispatch_registers_lists_and_resolves() {

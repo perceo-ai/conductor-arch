@@ -412,8 +412,6 @@ textarea:disabled {
 .workspace-list .row:hover .workspace-row-shell,
 .workspace-list .row.selected .workspace-row-shell {
     background-color: var(--lc-hover-soft);
-    border-color: var(--lc-border-strong);
-    padding-right: 14px;
 }
 
 .workspace-row-shell,
@@ -576,6 +574,8 @@ button.text-button.ui-button-xs label {
 
 button.icon-button,
 button.ui-button-icon {
+    width: 30px;
+    height: 30px;
     padding: 0;
     min-width: 30px;
     min-height: 30px;
@@ -2299,6 +2299,10 @@ button.ui-button-destructive:hover {
 .lc-theme-light .nav-button-active {
     color: #111827;
 }
+.lc-theme-light .ws-chat-tabs .ws-tab-shell.ws-tab-active {
+    background-color: transparent;
+    border-bottom-color: var(--lc-accent);
+}
 .lc-theme-light .settings-readiness-pill {
     background: #fff1f2;
     border-color: #fecdd3;
@@ -2348,7 +2352,7 @@ button.ui-button-destructive:hover {
 .lc-theme-light .workspace-row-shell,
 .lc-theme-light .sidebar .history-row {
     background-color: transparent;
-    border-color: #d9e0e8;
+    border-color: transparent;
     color: #1f2937;
 }
 .lc-theme-light .project-avatar,
@@ -2359,6 +2363,9 @@ button.ui-button-destructive:hover {
 .lc-theme-light .sidebar-nav-button:hover,
 .lc-theme-light .project-row:hover,
 .lc-theme-light .workspace-row-shell:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .workspace-row-shell.selected {
     background-color: #e2e8f0;
 }
 .lc-theme-light .sidebar-nav-button.active {
@@ -2671,15 +2678,16 @@ button.ui-button-destructive:hover {
     opacity: 1;
 }
 .ws-tab-bar {
-    min-height: 46px;
-    padding: 0 18px;
+    min-height: 40px;
+    padding: 0 12px 0 0;
     background-color: #191919;
 }
 .ws-chat-tabs-scroll {
     background-color: transparent;
     border: none;
     box-shadow: none;
-    min-height: 46px;
+    min-height: 40px;
+    overflow-x: auto;
 }
 /* GTK scrollbar child -> native scrollbar; use ::-webkit-scrollbar */
 .ws-chat-tabs-scroll::-webkit-scrollbar {
@@ -2687,6 +2695,9 @@ button.ui-button-destructive:hover {
     min-width: 0;
 }
 .ws-chat-tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
     background-color: transparent;
 }
 .ws-tab-sep {
@@ -2701,19 +2712,35 @@ button.ws-tab-shell {
     text-shadow: none;
 }
 .ws-tab-shell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex: 0 0 132px;
+    width: 132px;
     min-width: 132px;
-    min-height: 46px;
-    padding: 0 6px;
+    max-width: 132px;
+    min-height: 40px;
+    padding: 0 8px;
+    gap: 7px;
     border-bottom: 2px solid transparent;
     background-color: transparent;
+    overflow: hidden;
+    text-align: left;
 }
 .ws-tab-label {
-    min-width: 84px;
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 14px;
     font-weight: 400;
     color: #8a8a8a;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ws-tab-close-button {
+    flex: 0 0 24px;
     background: transparent;
     border: none;
     box-shadow: none;
@@ -2741,6 +2768,7 @@ button.ws-tab-shell {
     color: #8fb5ff;
 }
 .ws-chat-tab-dot {
+    flex: 0 0 12px;
     min-width: 12px;
     min-height: 12px;
     color: #f0c36a;
@@ -2755,6 +2783,32 @@ button.ws-tab-shell {
 }
 .ws-chat-tab-meta-needs-input {
     color: #f2bf7e;
+}
+.ws-chat-tab-text {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.ws-file-tab-icon {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    color: #8a8a8a;
+}
+.ws-chat-new {
+    align-self: center;
+    flex: 0 0 28px;
+    width: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 5px;
+    margin: 0;
+}
+.ws-chat-new .ui-icon {
+    width: 15px;
+    height: 15px;
 }
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
@@ -2777,7 +2831,7 @@ button.ws-tab-shell {
     font-weight: 500;
 }
 .ws-tab-shell.ws-tab-active {
-    background-color: #242424;
+    background-color: transparent;
     border-bottom-color: #f0c36a;
 }
 .ws-tab-shell.ws-tab-active .ws-tab-label,
@@ -2807,7 +2861,7 @@ button.ws-tab-shell {
     border-left: 1px solid #272727;
 }
 .ws-right-tabs {
-    min-height: 38px;
+    min-height: 40px;
     background-color: #171717;
     border-bottom: 1px solid #232323;
 }
@@ -4160,10 +4214,15 @@ body,
 .session-transcript,
 .terminal-transcript-dark,
 .history-row,
-.project-row,
-.workspace-row-shell {
+.project-row {
     background-color: var(--lc-surface-muted);
     border-color: var(--lc-border);
+    color: var(--lc-text-strong);
+}
+
+.workspace-row-shell {
+    background-color: transparent;
+    border-color: transparent;
     color: var(--lc-text-strong);
 }
 

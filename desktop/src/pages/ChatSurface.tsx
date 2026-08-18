@@ -40,6 +40,7 @@ function providerToKind(provider: string): SessionKind {
 
 function ThreadTab(props: {
   thread: ArchcarChatThread;
+  label: string;
   active: boolean;
   queued: number;
   pendingInteraction: boolean;
@@ -47,6 +48,8 @@ function ThreadTab(props: {
   onClose: () => void;
 }) {
   const generating = () => props.thread.status === "running" || props.thread.status === "generating";
+  const showFinishedDot = () => !props.active && !generating() && !props.pendingInteraction;
+  const showAttentionDot = () => !props.active && props.pendingInteraction;
   return (
     <div
       class="ws-chat-tab-shell ws-tab-shell"
@@ -55,15 +58,14 @@ function ThreadTab(props: {
       role="button"
       title={`${props.thread.provider} · ${props.thread.status || "ready"}`}
     >
-      <span
-        class="ws-chat-tab-dot"
-        classList={{
-          "ws-chat-tab-spinner": generating(),
-          "ws-chat-tab-needs-input": props.pendingInteraction,
-        }}
-      />
+      <Show when={showFinishedDot() || showAttentionDot()}>
+        <span
+          class="ws-chat-tab-dot"
+          classList={{ "ws-chat-tab-needs-input": showAttentionDot() }}
+        />
+      </Show>
       <span class="ws-chat-tab-text">
-        <span class="ws-tab-label">{props.thread.title || `Chat ${props.thread.id}`}</span>
+        <span class="ws-tab-label">{props.label}</span>
       </span>
       <Show when={props.queued > 0}>
         <span class="ws-chat-tab-count">{props.queued}</span>
@@ -83,7 +85,6 @@ function ThreadTab(props: {
 }
 
 function FileTab(props: { path: string; active: boolean; onClick: () => void; onClose: () => void }) {
-  const name = () => props.path.split("/").pop() ?? props.path;
   return (
     <div
       class="ws-chat-tab-shell ws-tab-shell ws-file-tab"
@@ -93,7 +94,7 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
       title={props.path}
     >
       <Icon name="file" class="ws-file-tab-icon" />
-      <span class="ws-tab-label">{name()}</span>
+      <span class="ws-tab-label">File</span>
       <button
         class="ws-tab-close-button"
         title="Close file"
@@ -904,7 +905,7 @@ export default function ChatSurface(props: { workspace: string }) {
   const threads = createMemo(() =>
     threadsStore.list(props.workspace).filter((t) => t.provider !== "shell"),
   );
-  const [openFiles, setOpenFiles] = createSignal<string[]>([]);
+  const [openFilePath, setOpenFilePath] = createSignal<string | null>(null);
   const [view, setView] = createSignal<CenterView>({ kind: "chat" });
   const [newProvider, setNewProvider] = createSignal<string>(prefsStore.state.defaultProvider);
   // threadId -> model to apply once that (freshly created) chat's session is live.
@@ -929,11 +930,11 @@ export default function ChatSurface(props: { workspace: string }) {
   }));
 
   function openFile(path: string) {
-    setOpenFiles((f) => (f.includes(path) ? f : [...f, path]));
+    setOpenFilePath(path);
     setView({ kind: "file", path });
   }
   function closeFile(path: string) {
-    setOpenFiles((f) => f.filter((p) => p !== path));
+    if (openFilePath() === path) setOpenFilePath(null);
     setView((v) => (v.kind === "file" && v.path === path ? { kind: "chat" } : v));
   }
 
@@ -941,7 +942,7 @@ export default function ChatSurface(props: { workspace: string }) {
     on(
       () => props.workspace,
       (ws) => {
-        setOpenFiles([]);
+        setOpenFilePath(null);
         setView({ kind: "chat" });
         void threadsStore.refresh(ws).then((all) => {
           const list = all.filter((t) => t.provider !== "shell");
@@ -1016,10 +1017,21 @@ export default function ChatSurface(props: { workspace: string }) {
     <div class="chat-surface">
       <div class="ws-chat-tabs-scroll ws-tab-bar">
         <div class="ws-chat-tabs">
+          <Show when={openFilePath()}>
+            {(path) => (
+              <FileTab
+                path={path()}
+                active={view().kind === "file" && (view() as { path: string }).path === path()}
+                onClick={() => setView({ kind: "file", path: path() })}
+                onClose={() => closeFile(path())}
+              />
+            )}
+          </Show>
           <For each={threads()}>
-            {(thread) => (
+            {(thread, i) => (
               <ThreadTab
                 thread={thread}
+                label={`Chat ${i() + 1}`}
                 queued={chatStore.slice(thread.id).queue.length}
                 pendingInteraction={interactionsStore.pending(thread.id) != null}
                 active={view().kind === "chat" && nav.selectedChatThread() === thread.id}
@@ -1031,20 +1043,7 @@ export default function ChatSurface(props: { workspace: string }) {
           <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
             <Icon name="plus" />
           </button>
-          <Show when={openFiles().length > 0}>
-            <span class="ws-tab-sep-v" />
-          </Show>
-          <For each={openFiles()}>
-            {(path) => (
-              <FileTab
-                path={path}
-                active={view().kind === "file" && (view() as { path: string }).path === path}
-                onClick={() => setView({ kind: "file", path })}
-                onClose={() => closeFile(path)}
-              />
-            )}
-          </For>
-          <Show when={threads().length === 0 && openFiles().length === 0}>
+          <Show when={threads().length === 0 && openFilePath() == null}>
             <span class="empty-label">Starting chat in {titleCaseWorkspace(props.workspace)}…</span>
           </Show>
         </div>

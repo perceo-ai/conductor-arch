@@ -7,13 +7,11 @@ describe("right panel product tabs", () => {
       "files",
       "changes",
       "checks",
-      "review",
     ]);
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.label)).toEqual([
       "Files",
       "Changes",
       "Checks",
-      "Review",
     ]);
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id)).not.toContain("tasks");
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id)).not.toContain("summary");
@@ -21,6 +19,7 @@ describe("right panel product tabs", () => {
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id)).not.toContain("checkpoints");
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id)).not.toContain("processes");
     expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id)).not.toContain("pr");
+    expect(PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id)).not.toContain("review");
   });
 
   it("falls back to Changes for demoted or unknown persisted tab values", () => {
@@ -28,5 +27,6 @@ describe("right panel product tabs", () => {
     expect(rightPanelTabLabel("summary")).toBe("Changes");
     expect(rightPanelTabLabel("processes")).toBe("Changes");
     expect(rightPanelTabLabel("pr")).toBe("Changes");
+    expect(rightPanelTabLabel("review")).toBe("Changes");
   });
 });

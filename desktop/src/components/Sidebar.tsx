@@ -4,14 +4,12 @@ import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
-import Icon from "./Icon";
+import Icon, { type IconName } from "./Icon";
 import {
   dashboardTriageBadges,
-  workspaceStatusKind,
-  STATUS_COLOR,
-  STATUS_LABEL,
   type DashboardTriageBadgeTone,
 } from "@/lib/workspaceStatus";
+import { deriveWorkspacePrAction, workspacePrActionInput, type WorkspacePrActionKind } from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
 
 // Run a lifecycle action and surface any failure as a toast rather than
@@ -129,6 +127,14 @@ const ROW_TRIAGE_ICON: Partial<Record<DashboardTriageBadgeTone, "brain" | "play"
 
 const ROW_TRIAGE_TONES = new Set<DashboardTriageBadgeTone>(["agent", "run", "pr"]);
 
+const WORKSPACE_GIT_STATE_ICON: Record<WorkspacePrActionKind, IconName> = {
+  create: "git-pull-request",
+  push: "arrow-up",
+  merge: "git-merge",
+  view: "external",
+  none: "circle-check",
+};
+
 // Left sidebar: nav group (Dashboard/History) + workspace list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
 // with no workspaces yet still appears. Each workspace row reads only its own
@@ -137,7 +143,7 @@ const ROW_TRIAGE_TONES = new Set<DashboardTriageBadgeTone>(["agent", "run", "pr"
 function WorkspaceRow(props: { name: string }) {
   const row = () => workspacesStore.row(props.name);
   const selected = () => nav.selectedWorkspace() === props.name;
-  const statusKind = () => workspaceStatusKind(row() ?? {});
+  const gitState = () => deriveWorkspacePrAction(workspacePrActionInput(row(), undefined));
   const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
   const compactBadges = () =>
     dashboardTriageBadges(row() ?? {})
@@ -152,10 +158,11 @@ function WorkspaceRow(props: { name: string }) {
     >
       <span class="workspace-row-head">
         <span
-          class="workspace-status-dot"
-          style={{ "background-color": STATUS_COLOR[statusKind()] }}
-          title={STATUS_LABEL[statusKind()]}
-        />
+          class={`workspace-git-state workspace-git-state-${gitState().action}`}
+          title={gitState().title}
+        >
+          <Icon name={WORKSPACE_GIT_STATE_ICON[gitState().action]} />
+        </span>
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
         <Show when={compactBadges().length > 0}>
           <span class="workspace-row-indicators">
