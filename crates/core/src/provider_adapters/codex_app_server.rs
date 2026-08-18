@@ -2,9 +2,10 @@ use crate::archcar::harness::CodexHarnessController;
 use crate::archcar::harness_contract::{
     HarnessAdapterContext, HarnessCapability, HarnessControl, HarnessControlPlan,
     HarnessDescriptor, HarnessEffect, HarnessInput, HarnessPreflightSpec, HarnessRecoveryCause,
-    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, ManagedHarness, ManagedHarnessAdapter,
-    NativeRecord, NativeWrite, SupportMode, MANAGED_HARNESS_CONTRACT_VERSION,
-    REQUIRED_HARNESS_FEATURES,
+    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, InteractionOption, InteractionQuestion,
+    ManagedHarness, ManagedHarnessAdapter, NativeRecord, NativeWrite, ProviderInteractionDraft,
+    ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
+    MANAGED_HARNESS_CONTRACT_VERSION, REQUIRED_HARNESS_FEATURES,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -56,6 +57,10 @@ impl ManagedHarness for CodexHarnessController {
     }
 }
 
+/// Codex has no plan tool; its plan mode is a read-only sandbox, matching the
+/// codex CLI. Archcar uses the same mode name for both providers.
+pub const CODEX_PLAN_PERMISSION_MODE: &str = "plan";
+
 pub(crate) struct CodexManagedAdapter {
     context: HarnessAdapterContext,
     next_request_id: u64,
@@ -63,6 +68,12 @@ pub(crate) struct CodexManagedAdapter {
     active_input_id: Option<String>,
     active_turn_id: Option<String>,
     completed_turns: HashSet<String>,
+    /// JSON-RPC id → the method codex asked with, so the reply can be shaped
+    /// the way that method expects.
+    pending_interactions: HashMap<String, String>,
+    /// Planning turns run read-only. Codex has no plan tool: its plan mode is a
+    /// sandbox, exactly as in the codex CLI.
+    plan_mode: bool,
 }
 
 impl CodexManagedAdapter {
@@ -74,6 +85,8 @@ impl CodexManagedAdapter {
             active_input_id: None,
             active_turn_id: None,
             completed_turns: HashSet::new(),
+            pending_interactions: HashMap::new(),
+            plan_mode: false,
         }
     }
 
@@ -83,6 +96,84 @@ impl CodexManagedAdapter {
 
     pub(crate) fn set_native_session_id(&mut self, native_session_id: Option<String>) {
         self.context.native_session_id = native_session_id;
+    }
+
+    /// The ask behind a server→client request, or `None` for anything that is
+    /// not one (notifications, and replies to our own requests).
+    fn request_interaction(
+        &mut self,
+        message: &CodexAppServerMessage,
+    ) -> Option<ProviderInteractionDraft> {
+        let method = message.method.as_deref()?;
+        let kind = codex_interaction_kind(method)?;
+        let request_id = message.id.as_ref()?;
+        let native_id = codex_request_id_string(request_id)?;
+        let params = message.value.get("params").cloned().unwrap_or(Value::Null);
+        let (title, detail, questions, auto_resolution_ms) = match kind {
+            ProviderInteractionKind::UserQuestion => {
+                let questions = codex_questions(&params);
+                let title = questions
+                    .first()
+                    .map(|question| question.header.clone())
+                    .unwrap_or_else(|| "Question".to_owned());
+                let detail = questions
+                    .iter()
+                    .map(|question| question.question.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let auto_resolution_ms = params.get("autoResolutionMs").and_then(Value::as_u64);
+                (title, detail, questions, auto_resolution_ms)
+            }
+            _ => (
+                codex_approval_title(method),
+                codex_approval_detail(&params),
+                Vec::new(),
+                None,
+            ),
+        };
+        self.pending_interactions
+            .insert(native_id.clone(), method.to_owned());
+        Some(ProviderInteractionDraft {
+            provider_key: CODEX_APP_SERVER_PROVIDER.to_owned(),
+            workspace: self.context.workspace.clone(),
+            thread_id: self.context.thread_id,
+            session_id: self.context.session_id,
+            native_session_id: self.context.native_session_id.clone(),
+            native_id,
+            kind,
+            title,
+            detail,
+            questions,
+            auto_resolution_ms,
+            native_request: message.value.clone(),
+        })
+    }
+
+    /// The JSON-RPC result that answers a pending codex request.
+    fn interaction_response(
+        &mut self,
+        native_id: &str,
+        resolution: &ProviderInteractionResolution,
+    ) -> Option<NativeWrite> {
+        let method = self.pending_interactions.remove(native_id)?;
+        let result = match codex_interaction_kind(&method)? {
+            ProviderInteractionKind::UserQuestion => {
+                json!({ "answers": codex_answers(resolution) })
+            }
+            _ => json!({ "decision": codex_review_decision(resolution) }),
+        };
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": codex_request_id_value(native_id),
+            "result": result,
+        });
+        let mut bytes = serde_json::to_vec(&payload).ok()?;
+        bytes.push(b'\n');
+        Some(NativeWrite {
+            provider_key: CODEX_APP_SERVER_PROVIDER,
+            local_input_id: None,
+            payload: bytes,
+        })
     }
 
     fn take_request_id(&mut self) -> u64 {
@@ -137,7 +228,7 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
                     input: native_input,
                     cwd: None,
                     approval_policy: self.context.controls.permission_mode.clone(),
-                    sandbox_policy: None,
+                    sandbox_policy: self.plan_mode.then(|| json!({"type": "readOnly"})),
                     model: self.context.controls.model.clone(),
                     effort: self.context.controls.effort.clone(),
                     summary: None,
@@ -202,6 +293,12 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
                     });
                     effects.push(HarnessEffect::Ready);
                 }
+            }
+
+            // Server→client *requests* are the app server asking us something
+            // and holding the turn until we reply on the same JSON-RPC id.
+            if let Some(draft) = self.request_interaction(&message) {
+                effects.push(HarnessEffect::InteractionRequested(draft));
             }
 
             if let Some(turn_id) = managed_codex_turn_id(&message.value) {
@@ -288,10 +385,30 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
             }
             HarnessControl::SetPermissionMode(permission_mode) => {
+                if permission_mode.as_deref() == Some(CODEX_PLAN_PERMISSION_MODE) {
+                    // Plan mode is a sandbox on the next turn, not a policy the
+                    // server needs told about now.
+                    self.plan_mode = true;
+                    return HarnessControlPlan::Applied;
+                }
+                if self.plan_mode {
+                    self.plan_mode = false;
+                    return HarnessControlPlan::Applied;
+                }
                 self.context.controls.permission_mode = permission_mode;
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
             }
-            HarnessControl::ResolveInteraction(_) => HarnessControlPlan::Unsupported {
+            HarnessControl::ResolveInteraction {
+                native_id,
+                resolution,
+            } => match self.interaction_response(&native_id, &resolution) {
+                Some(write) => HarnessControlPlan::NativeWrite(write),
+                None => HarnessControlPlan::Unsupported {
+                    reason: format!("no pending Codex request {native_id} to answer"),
+                },
+            },
+            #[allow(unreachable_patterns)]
+            HarnessControl::ResolveInteraction { .. } => HarnessControlPlan::Unsupported {
                 reason: "Codex interaction resolution is not projected by contract v1 yet"
                     .to_owned(),
             },
@@ -325,6 +442,151 @@ fn managed_codex_thread_id(value: &Value) -> Option<String> {
     .into_iter()
     .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
     .map(ToOwned::to_owned)
+}
+
+/// Which server→client requests are asks for the human. Taken from the
+/// app-server schema (`codex app-server generate-json-schema`): the
+/// `requestApproval` family plus the experimental question tool.
+fn codex_interaction_kind(method: &str) -> Option<ProviderInteractionKind> {
+    match method {
+        "item/tool/requestUserInput" => Some(ProviderInteractionKind::UserQuestion),
+        "applyPatchApproval"
+        | "execCommandApproval"
+        | "item/commandExecution/requestApproval"
+        | "item/fileChange/requestApproval"
+        | "item/permissions/requestApproval" => Some(ProviderInteractionKind::Permission),
+        _ => None,
+    }
+}
+
+fn codex_approval_title(method: &str) -> String {
+    match method {
+        "applyPatchApproval" | "item/fileChange/requestApproval" => "Apply changes?".to_owned(),
+        "execCommandApproval" | "item/commandExecution/requestApproval" => {
+            "Run command?".to_owned()
+        }
+        "item/permissions/requestApproval" => "Grant permission?".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn codex_approval_detail(params: &Value) -> String {
+    if let Some(command) = params.get("command").and_then(Value::as_array) {
+        return command
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    for key in ["reason", "explanation", "cwd", "path"] {
+        if let Some(text) = params.get(key).and_then(Value::as_str) {
+            return text.to_owned();
+        }
+    }
+    String::new()
+}
+
+fn codex_questions(params: &Value) -> Vec<InteractionQuestion> {
+    params
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .enumerate()
+                .map(|(index, question)| InteractionQuestion {
+                    id: question
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("question-{}", index + 1)),
+                    header: question
+                        .get("header")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    question: question
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .map(|option| InteractionOption {
+                                    label: option
+                                        .get("label")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    allow_other: question
+                        .get("isOther")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    multi_select: false,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `ReviewDecision` from the app-server schema.
+fn codex_review_decision(resolution: &ProviderInteractionResolution) -> Value {
+    match resolution {
+        ProviderInteractionResolution::Approve => json!("approved"),
+        ProviderInteractionResolution::ApproveForSession => json!("approved_for_session"),
+        ProviderInteractionResolution::Deny { .. } => json!("denied"),
+        // Codex has no "ask me later": leaving the request unanswered would
+        // hang the turn, so a deferral declines this one occurrence.
+        ProviderInteractionResolution::Defer => json!("denied"),
+        ProviderInteractionResolution::Answer { .. } => json!("approved"),
+    }
+}
+
+/// `ToolRequestUserInputResponse`: question id → its selected answers.
+fn codex_answers(resolution: &ProviderInteractionResolution) -> Value {
+    let mut answers = serde_json::Map::new();
+    if let ProviderInteractionResolution::Answer {
+        answers: given_answers,
+    } = resolution
+    {
+        for answer in given_answers {
+            answers.insert(
+                answer.question_id.clone(),
+                json!({ "answers": answer.values }),
+            );
+        }
+    }
+    Value::Object(answers)
+}
+
+/// JSON-RPC ids are numbers or strings; keep the distinction so the reply
+/// matches what codex sent.
+fn codex_request_id_string(id: &Value) -> Option<String> {
+    match id {
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn codex_request_id_value(native_id: &str) -> Value {
+    native_id
+        .parse::<u64>()
+        .map(|number| json!(number))
+        .unwrap_or_else(|_| json!(native_id))
 }
 
 fn managed_codex_turn_id(value: &Value) -> Option<String> {
@@ -1900,6 +2162,7 @@ fn percent_encode_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archcar::harness_contract::InteractionAnswer;
     use serde_json::json;
     use std::io::Cursor;
     use std::path::Path;
@@ -1978,6 +2241,133 @@ mod tests {
             .pending_inputs
             .values()
             .any(|id| id == "second-input"));
+    }
+
+    fn codex_interaction_adapter() -> CodexManagedAdapter {
+        CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        })
+    }
+
+    fn only_codex_interaction(effects: Vec<HarnessEffect>) -> ProviderInteractionDraft {
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::InteractionRequested(draft) => Some(draft),
+                _ => None,
+            })
+            .expect("expected an interaction request")
+    }
+
+    #[test]
+    fn command_approval_request_becomes_a_permission_ask() {
+        // Method and params follow ExecCommandApprovalParams in the app-server
+        // schema (`codex app-server generate-json-schema`).
+        let mut adapter = codex_interaction_adapter();
+        let draft = only_codex_interaction(
+            adapter
+                .observe_native(managed_record(
+                    r#"{"id":42,"method":"item/commandExecution/requestApproval","params":{"callId":"call-1","command":["rm","-rf","build"],"conversationId":"codex-thread-1","cwd":"/tmp/berlin"}}"#,
+                ))
+                .unwrap(),
+        );
+
+        assert_eq!(draft.kind, ProviderInteractionKind::Permission);
+        assert_eq!(draft.native_id, "42");
+        assert_eq!(draft.detail, "rm -rf build");
+    }
+
+    #[test]
+    fn request_user_input_becomes_a_question_with_options() {
+        let mut adapter = codex_interaction_adapter();
+        let draft = only_codex_interaction(
+            adapter
+                .observe_native(managed_record(
+                    r#"{"id":"req-7","method":"item/tool/requestUserInput","params":{"itemId":"item-1","threadId":"codex-thread-1","turnId":"turn-1","autoResolutionMs":30000,"questions":[{"id":"q1","header":"Scope","question":"Which module?","options":[{"label":"api","description":"HTTP layer"},{"label":"db","description":"Storage"}],"isOther":true}]}}"#,
+                ))
+                .unwrap(),
+        );
+
+        assert_eq!(draft.kind, ProviderInteractionKind::UserQuestion);
+        assert_eq!(draft.native_id, "req-7");
+        assert_eq!(draft.auto_resolution_ms, Some(30000));
+        assert_eq!(draft.questions.len(), 1);
+        assert!(draft.questions[0].allow_other);
+        assert_eq!(draft.questions[0].options[1].label, "db");
+    }
+
+    #[test]
+    fn resolutions_answer_codex_on_the_request_id_it_asked_with() {
+        let mut adapter = codex_interaction_adapter();
+        adapter
+            .observe_native(managed_record(
+                r#"{"id":42,"method":"execCommandApproval","params":{"callId":"call-1","command":["ls"],"conversationId":"codex-thread-1","cwd":"/tmp"}}"#,
+            ))
+            .unwrap();
+
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "42".to_owned(),
+            resolution: ProviderInteractionResolution::ApproveForSession,
+        });
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("expected a native write");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["id"], 42);
+        assert_eq!(payload["result"]["decision"], "approved_for_session");
+    }
+
+    #[test]
+    fn question_answers_are_keyed_by_question_id() {
+        let mut adapter = codex_interaction_adapter();
+        adapter
+            .observe_native(managed_record(
+                r#"{"id":"req-7","method":"item/tool/requestUserInput","params":{"itemId":"i","threadId":"t","turnId":"tu","questions":[{"id":"q1","header":"Scope","question":"Which module?","options":[]}]}}"#,
+            ))
+            .unwrap();
+
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "req-7".to_owned(),
+            resolution: ProviderInteractionResolution::Answer {
+                answers: vec![InteractionAnswer {
+                    question_id: "q1".to_owned(),
+                    values: vec!["api".to_owned(), "db".to_owned()],
+                }],
+            },
+        });
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("expected a native write");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["id"], "req-7");
+        assert_eq!(payload["result"]["answers"]["q1"]["answers"][0], "api");
+        assert_eq!(payload["result"]["answers"]["q1"]["answers"][1], "db");
+    }
+
+    #[test]
+    fn plan_mode_starts_turns_in_a_read_only_sandbox() {
+        // Codex has no plan tool: planning is a sandbox, as in the codex CLI.
+        let mut adapter = codex_interaction_adapter();
+        assert!(matches!(
+            adapter.plan_control(HarnessControl::SetPermissionMode(Some(
+                CODEX_PLAN_PERMISSION_MODE.to_owned()
+            ))),
+            HarnessControlPlan::Applied
+        ));
+
+        let write = adapter
+            .encode_input(managed_input("input-1", "plan the change", false))
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["method"], "turn/start");
+        assert_eq!(payload["params"]["sandboxPolicy"]["type"], "readOnly");
     }
 
     #[test]

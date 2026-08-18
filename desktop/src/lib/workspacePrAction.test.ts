@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveWorkspacePrAction } from "./workspacePrAction";
+import { deriveWorkspacePrAction, workspacePrActionInput } from "./workspacePrAction";
 
 describe("deriveWorkspacePrAction", () => {
   it("promotes local changes to a create PR action", () => {
@@ -14,6 +14,17 @@ describe("deriveWorkspacePrAction", () => {
     expect(deriveWorkspacePrAction({ branchAhead: 1 })).toMatchObject({
       title: "Unpushed commits",
       actionLabel: "Push",
+      action: "push",
+    });
+  });
+
+  it("uses workspace row branch state when checks are not loaded", () => {
+    expect(
+      deriveWorkspacePrAction(
+        workspacePrActionInput({ branchAhead: 1, branchBehind: 0, changedFiles: 0 }, undefined),
+      ),
+    ).toMatchObject({
+      title: "Unpushed commits",
       action: "push",
     });
   });

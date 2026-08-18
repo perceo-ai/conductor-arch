@@ -1165,7 +1165,10 @@ impl WorkspaceStore {
             body.push_str("- None\n");
         } else {
             for task in &tasks {
-                body.push_str(&format!("- [{}] #{} {}\n", task.status, task.id, task.title));
+                body.push_str(&format!(
+                    "- [{}] #{} {}\n",
+                    task.status, task.id, task.title
+                ));
             }
         }
         body.push('\n');
@@ -1778,7 +1781,7 @@ fn extract_action_items(content: &str) -> Vec<String> {
                 .iter()
                 .any(|verb| {
                     lower.starts_with(verb)
-                        && lower[verb.len()..].chars().next().map_or(true, |c| c == ' ')
+                        && lower[verb.len()..].chars().next().is_none_or(|c| c == ' ')
                 })
                 .then(|| item.to_owned())
         })
@@ -2359,7 +2362,10 @@ mod tests {
 
         assert_eq!(refreshed.summary.scope_type, "task");
         assert_eq!(refreshed.summary.scope_id, task.id);
-        assert!(refreshed.summary.body_markdown.contains("Wire context tools"));
+        assert!(refreshed
+            .summary
+            .body_markdown
+            .contains("Wire context tools"));
         assert!(refreshed.summary.body_markdown.contains("Status: todo"));
     }
 
@@ -2431,7 +2437,9 @@ mod tests {
         assert!(synced_again.task_ids.is_empty());
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().any(|task| task.title == "Add Summary tab"));
-        assert!(tasks.iter().any(|task| task.title == "Wire MCP refresh tool"));
+        assert!(tasks
+            .iter()
+            .any(|task| task.title == "Wire MCP refresh tool"));
         assert!(tasks
             .iter()
             .all(|task| task.body == format!("Source: chat:{}", thread.id)));

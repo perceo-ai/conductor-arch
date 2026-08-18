@@ -41,11 +41,16 @@ export type ArchcarRequest =
   | { type: "move_queued_chat_input"; queue_id: number; up: boolean }
   | { type: "save_chat_paste"; thread_id: number; text: string }
   | { type: "resolve_provider_interaction"; interaction_id: string; resolution: ProviderInteractionResolution }
+  | { type: "set_chat_plan_mode"; thread_id: number; plan_mode: boolean }
+  | { type: "get_chat_plan"; thread_id: number }
   | { type: "kill_session"; session_id: number }
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
+  | { type: "list_chat_transcripts"; workspace: string; limit?: number }
+  | { type: "get_chat_transcript"; thread_id: number }
+  | { type: "list_context_plans"; workspace: string }
   | { type: "list_workspace_files"; workspace: string }
   | { type: "read_workspace_file"; workspace: string; path: string }
   | { type: "write_workspace_file"; workspace: string; path: string; content: string }
@@ -383,6 +388,30 @@ export interface ArchcarChatThread {
   archived_at?: string;
 }
 
+/** Past chat offered as attachable context on the new-chat screen. */
+export interface ArchcarChatTranscriptSummary {
+  thread_id: number;
+  title: string;
+  provider: string;
+  /** Number of user + agent messages the transcript would carry. */
+  message_count: number;
+  updated_at: string;
+}
+
+/** One transcript line: `user` or `agent`, never a tool call. */
+export interface ArchcarChatTranscriptMessage {
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+/** Plan markdown file under the workspace's `.context/plans/`. */
+export interface ArchcarContextPlan {
+  name: string;
+  path: string;
+  title: string;
+}
+
 export interface ArchcarRepositorySummary {
   id: number;
   name: string;
@@ -442,6 +471,16 @@ export type ArchcarResponse =
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
+  | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }
+  | { type: "chat_transcript"; thread_id: number; title: string; messages: ArchcarChatTranscriptMessage[] }
+  | { type: "context_plans"; workspace: string; plans: ArchcarContextPlan[] }
+  | {
+      type: "chat_plan";
+      thread_id: number;
+      plan_mode: boolean;
+      plan_path?: string;
+      plan_markdown?: string;
+    }
   | { type: "workspace_files"; workspace: string; files: string[] }
   | { type: "workspace_file_content"; workspace: string; path: string; content: string }
   | { type: "workspace_file_written"; workspace: string; path: string }
@@ -772,6 +811,7 @@ export type ArchcarEvent =
   | { type: "chat_queue_updated"; thread_id: number }
   | { type: "session_exited"; session_id: number; exit_code?: number }
   | { type: "session_error"; session_id?: number; thread_id?: number; message: string }
+  | { type: "chat_plan_updated"; thread_id: number; plan_mode: boolean; plan_path?: string }
   | { type: "provider_interaction_requested"; interaction: ProviderInteractionRecord }
   | { type: "provider_interaction_resolved"; interaction: ProviderInteractionRecord }
   | { type: "background_task_updated"; task: BackgroundTask }
@@ -782,6 +822,18 @@ export type ArchcarEvent =
 // Agent-driven interaction (permission / question / plan approval) surfaced to
 // the user mid-turn. Mirrors crates/core/src/provider_interactions.rs.
 export type ProviderInteractionKind = "permission" | "user_question" | "plan_approval";
+export interface InteractionOption {
+  label: string;
+  description: string;
+}
+export interface InteractionQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options: InteractionOption[];
+  allow_other: boolean;
+  multi_select: boolean;
+}
 export interface ProviderInteractionRecord {
   id: string;
   provider_key: string;
@@ -791,11 +843,19 @@ export interface ProviderInteractionRecord {
   kind: ProviderInteractionKind;
   title: string;
   detail: string;
-  choices: string[];
+  questions: InteractionQuestion[];
+  auto_resolution_ms?: number;
+  /** Workspace-relative path of the plan behind a plan_approval. */
+  plan_path?: string;
   status: string;
+}
+export interface InteractionAnswer {
+  question_id: string;
+  values: string[];
 }
 export type ProviderInteractionResolution =
   | { type: "approve" }
+  | { type: "approve_for_session" }
   | { type: "deny"; reason?: string }
-  | { type: "answer"; answers: [string, string][] }
+  | { type: "answer"; answers: InteractionAnswer[] }
   | { type: "defer" };

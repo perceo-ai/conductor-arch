@@ -2678,16 +2678,17 @@ button.ui-button-destructive:hover {
     opacity: 1;
 }
 .ws-tab-bar {
-    min-height: 40px;
-    padding: 0 12px 0 0;
+    min-height: 30px;
+    padding: 0 8px 0 0;
     background-color: #191919;
 }
 .ws-chat-tabs-scroll {
     background-color: transparent;
     border: none;
     box-shadow: none;
-    min-height: 40px;
-    overflow-x: auto;
+    height: 30px;
+    min-height: 30px;
+    overflow: hidden;
 }
 /* GTK scrollbar child -> native scrollbar; use ::-webkit-scrollbar */
 .ws-chat-tabs-scroll::-webkit-scrollbar {
@@ -2719,9 +2720,9 @@ button.ws-tab-shell {
     width: 132px;
     min-width: 132px;
     max-width: 132px;
-    min-height: 40px;
-    padding: 0 8px;
-    gap: 7px;
+    min-height: 30px;
+    padding: 0 6px;
+    gap: 5px;
     border-bottom: 2px solid transparent;
     background-color: transparent;
     overflow: hidden;
@@ -3529,32 +3530,32 @@ button.ws-tab-shell {
     background-color: #151515;
 }
 .chat-messages {
-    padding: 22px 24px 24px;
+    padding: 14px 22px 16px;
 }
 .chat-working-indicator {
-    margin: 2px 0 12px;
-    padding: 6px 0;
+    margin: 0 0 6px;
+    padding: 4px 0;
     color: #b8c7de;
 }
 .chat-working-indicator .card-meta {
     color: #b8c7de;
 }
 .chat-user-row {
-    margin-top: 12px;
-    margin-bottom: 10px;
+    margin-top: 5px;
+    margin-bottom: 5px;
 }
 .chat-user-bubble {
     background-color: #2e2e2e;
     color: #f4f7ff;
     border-radius: 14px;
-    padding: 11px 16px;
+    padding: 9px 14px;
     line-height: 1.4;
-    min-height: 42px;
+    min-height: 36px;
 }
 .chat-queued-row {
-    margin-top: 8px;
-    margin-bottom: 8px;
-    padding: 8px 10px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    padding: 6px 9px;
     border: 1px solid #2d2d2d;
     border-radius: 6px;
     background-color: #181818;
@@ -3571,8 +3572,8 @@ button.ws-tab-shell {
     padding: 0;
 }
 .chat-interrupted-row {
-    margin-top: 4px;
-    margin-bottom: 10px;
+    margin-top: 2px;
+    margin-bottom: 5px;
 }
 .chat-interrupted-pill {
     background-color: #262626;
@@ -3592,13 +3593,13 @@ button.ws-tab-shell {
     color: #8f8f8f;
     font-size: 13px;
     line-height: 1.45;
-    margin: 0 0 8px 0;
+    margin: 0 0 4px 0;
 }
 .chat-inline-event {
     background-color: transparent;
     border: none;
     border-radius: 0;
-    margin-bottom: 3px;
+    margin-bottom: 1px;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -4059,17 +4060,34 @@ button.chat-inline-event-expander label {
     border-color: #753838;
     color: #efb0b0;
 }
+.chat-context-usage {
+    gap: 4px;
+    min-width: 0;
+    height: 25px;
+    min-height: 25px;
+    padding: 0 7px;
+    border-color: #2b2b2b;
+    border-radius: 6px;
+    background-color: #171717;
+    color: #a8a8a8;
+}
+.chat-context-usage-icon {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 auto;
+    color: #858585;
+}
 .chat-context-details {
     min-width: 420px;
     padding: 14px;
 }
 .chat-send-btn {
-    width: 30px;
-    height: 30px;
+    width: 25px;
+    height: 25px;
     min-width: 0;
     min-height: 0;
-    border-radius: 7px;
-    background-color: transparent;
+    border-radius: 6px;
+    background-color: #171717;
     color: #9a9a9a;
     border: 1px solid #2d2d2d;
     box-shadow: none;
@@ -4086,16 +4104,18 @@ button.chat-inline-event-expander label {
     border-color: #4d3030;
 }
 .chat-send-btn-active {
-    background-color: #2b2b2b;
-    color: #f5f5f5;
+    background-color: #e8e8e8;
+    border-color: #e8e8e8;
+    color: #151515;
 }
 .chat-send-btn:hover {
     background-color: #262626;
     color: #e4e4e4;
 }
 .chat-send-btn-active:hover {
-    background-color: #333333;
-    color: #ffffff;
+    background-color: #ffffff;
+    border-color: #ffffff;
+    color: #111111;
 }
 .chat-stop-btn:hover {
     background-color: #2b1f1f;
@@ -4371,15 +4391,13 @@ body,
     border-color: #454545;
 }
 
-.suggested-action,
-.chat-send-btn-active {
+.suggested-action {
     background-color: #282828;
     border-color: #4a4a4a;
     color: #f4f4f4;
 }
 
-.suggested-action:hover,
-.chat-send-btn-active:hover {
+.suggested-action:hover {
     background-color: #333333;
     border-color: #5a5a5a;
     color: #ffffff;
@@ -4414,6 +4432,7 @@ input.text,
     border: none;
     box-shadow: none;
     color: #f8fafc;
+    min-height: 36px;
 }
 
 input,

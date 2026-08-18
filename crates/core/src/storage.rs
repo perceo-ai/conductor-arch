@@ -512,6 +512,39 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "owner",
         "ALTER TABLE tasks ADD COLUMN owner TEXT",
     )?;
+    // Providers ask in batches of questions with labelled options; the original
+    // flat `choices_json` cannot hold that shape.
+    ensure_column(
+        conn,
+        "provider_interactions",
+        "questions_json",
+        "ALTER TABLE provider_interactions ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "provider_interactions",
+        "auto_resolution_ms",
+        "ALTER TABLE provider_interactions ADD COLUMN auto_resolution_ms INTEGER",
+    )?;
+    // Where the plan behind a PlanApproval was written in the workspace.
+    ensure_column(
+        conn,
+        "provider_interactions",
+        "plan_path",
+        "ALTER TABLE provider_interactions ADD COLUMN plan_path TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "plan_mode",
+        "ALTER TABLE chat_threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "plan_path",
+        "ALTER TABLE chat_threads ADD COLUMN plan_path TEXT",
+    )?;
     ensure_column(
         conn,
         "chat_threads",

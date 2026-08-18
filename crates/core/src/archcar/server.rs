@@ -14,22 +14,26 @@ use uuid::Uuid;
 
 use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
+use crate::archcar::harness_contract::{
+    ProviderInteractionKind, ProviderInteractionResolution as InteractionResolution,
+};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
-    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChecksSummary,
-    ArchcarEvent, ArchcarMessage, ArchcarProcessSummary, ArchcarProjectionItem,
-    ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse, ArchcarRunScript,
-    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
-    WorkspaceGitAction,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChatTranscriptMessage,
+    ArchcarChatTranscriptSummary, ArchcarChecksSummary, ArchcarContextPlan, ArchcarEvent,
+    ArchcarMessage, ArchcarProcessSummary, ArchcarProjectionItem, ArchcarRepositorySummary,
+    ArchcarRequest, ArchcarResponse, ArchcarRunScript, ArchcarWorkspaceSummary, QueuedArchcarInput,
+    RpcEnvelope, WorkspaceChangeScope, WorkspaceGitAction,
 };
 use crate::archcar::remote;
 use crate::archcar::session::{
-    restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
+    restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread,
+    SessionCommand, SessionHandle,
 };
 use crate::archcar::transport::{self, DuplexStream, LocalListener};
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
-use crate::provider_interactions::ProviderInteractionStore;
+use crate::provider_interactions::{ProviderInteractionRecord, ProviderInteractionStore};
 use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
@@ -61,6 +65,10 @@ struct ServerState {
     queued_defaults: HashSet<String>,
     queued_threads: HashSet<i64>,
     draining_threads: HashSet<i64>,
+    /// Threads whose drain was requested while a drain was already running.
+    /// Without this, the second request is dropped and its input sits in the
+    /// queue until some later event happens to trigger another drain.
+    drain_reruns: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
     subscribers: Vec<Sender<ArchcarEvent>>,
 }
@@ -75,9 +83,15 @@ struct QueueDrainGuard {
 
 impl QueueDrainGuard {
     fn begin(state: &Arc<Mutex<ServerState>>, thread_id: i64) -> Option<Self> {
-        if !state.lock().ok()?.draining_threads.insert(thread_id) {
+        let mut guard = state.lock().ok()?;
+        if !guard.draining_threads.insert(thread_id) {
+            // A drain is already running for this thread; record the request so
+            // the running drain re-runs instead of losing the wakeup.
+            guard.drain_reruns.insert(thread_id);
             return None;
         }
+        guard.drain_reruns.remove(&thread_id);
+        drop(guard);
         Some(Self {
             state: Arc::clone(state),
             thread_id,
@@ -155,6 +169,7 @@ impl ArchcarServer {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -168,6 +183,7 @@ impl ArchcarServer {
 
     pub fn serve(mut self) -> Result<()> {
         let shutdown = Arc::new(AtomicBool::new(false));
+        spawn_queued_input_startup_sweep(&self.state);
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
         if let Some(remote) = self.remote.take() {
             spawn_remote_listener(remote, &self.state, Arc::clone(&shutdown));
@@ -370,6 +386,51 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
             }
         }
     });
+}
+
+/// Deliver messages that were queued before this daemon started.
+///
+/// The queue is durable, but drains are event-driven: without this sweep a
+/// message queued right before a restart (or one whose session died) waits for
+/// an event that will never arrive, and the chat shows it stuck in "Queued"
+/// forever. Runs off-thread so binding the socket is not delayed by session
+/// spawns.
+fn spawn_queued_input_startup_sweep(state: &Arc<Mutex<ServerState>>) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || drain_every_queued_chat_thread(&state));
+}
+
+fn drain_every_queued_chat_thread(state: &Arc<Mutex<ServerState>>) {
+    let db_path = match state.lock() {
+        Ok(guard) => guard.db_path.clone(),
+        Err(_) => return,
+    };
+    let thread_ids = match WorkspaceStore::open_app(&db_path)
+        .and_then(|store| store.list_queued_chat_thread_ids())
+    {
+        Ok(thread_ids) => thread_ids,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "archcar could not list queued chat threads at startup");
+            return;
+        }
+    };
+    if thread_ids.is_empty() {
+        return;
+    }
+    info!(
+        threads = thread_ids.len(),
+        "archcar delivering chat inputs queued before startup"
+    );
+    for thread_id in thread_ids {
+        if state
+            .lock()
+            .map(|guard| guard.shutting_down)
+            .unwrap_or(true)
+        {
+            return;
+        }
+        drain_queued_input_for_thread(state, thread_id);
+    }
 }
 
 fn handle_connection<S: DuplexStream>(stream: S, state: Arc<Mutex<ServerState>>) -> Result<()> {
@@ -870,26 +931,96 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     let projection = provider_projection_from_records(&records);
                     ArchcarResponse::ChatProjection {
                         thread_id,
-                        items: projection
-                            .items
-                            .into_iter()
-                            // Drop parser noise (MCP loading/loaded, skill/diff
-                            // duplicates, fallback + irrelevant status cards) so the
-                            // desktop timeline matches the GTK surface.
-                            .filter(provider_projection_item_is_relevant_chat_event)
-                            .map(|item| ArchcarProjectionItem {
-                                id: item.id,
-                                sequence: item.sequence,
-                                render_class: item.render_class.as_str().to_owned(),
-                                role_label: item.render_class.role_label().to_owned(),
-                                title: item.title,
-                                body: item.body,
-                                status: item.status.as_str().to_owned(),
-                                stream_state: item.stream_state.as_str().to_owned(),
-                            })
-                            .collect(),
+                        items: crate::provider_projection::drop_echoed_user_messages(
+                            projection.items,
+                        )
+                        .into_iter()
+                        // Drop parser noise (MCP loading/loaded, skill/diff
+                        // duplicates, fallback + irrelevant status cards) so the
+                        // desktop timeline matches the GTK surface.
+                        .filter(provider_projection_item_is_relevant_chat_event)
+                        .map(|item| ArchcarProjectionItem {
+                            id: item.id,
+                            sequence: item.sequence,
+                            render_class: item.render_class.as_str().to_owned(),
+                            role_label: item.render_class.role_label().to_owned(),
+                            title: item.title,
+                            body: item.body,
+                            status: item.status.as_str().to_owned(),
+                            stream_state: item.stream_state.as_str().to_owned(),
+                        })
+                        .collect(),
                     }
                 }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListChatTranscripts { workspace, limit } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let limit = limit.unwrap_or(crate::workspace::DEFAULT_CHAT_TRANSCRIPT_LIMIT);
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_chat_transcripts(&workspace, limit))
+            {
+                Ok(transcripts) => ArchcarResponse::ChatTranscripts {
+                    workspace,
+                    transcripts: transcripts
+                        .into_iter()
+                        .map(|t| ArchcarChatTranscriptSummary {
+                            thread_id: t.thread_id,
+                            title: t.title,
+                            provider: t.provider,
+                            message_count: t.message_count,
+                            updated_at: t.updated_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChatTranscript { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                let thread = store.get_chat_thread_record(thread_id)?;
+                let messages = store.chat_transcript_messages(thread_id)?;
+                Ok((thread, messages))
+            }) {
+                Ok((thread, messages)) => ArchcarResponse::ChatTranscript {
+                    thread_id,
+                    title: thread.title,
+                    messages: messages
+                        .into_iter()
+                        .map(|m| ArchcarChatTranscriptMessage {
+                            role: m.role,
+                            content: m.content,
+                            created_at: m.created_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListContextPlans { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_context_plans(&workspace))
+            {
+                Ok(plans) => ArchcarResponse::ContextPlans {
+                    workspace,
+                    plans: plans
+                        .into_iter()
+                        .map(|plan| ArchcarContextPlan {
+                            name: plan.name,
+                            path: plan.path,
+                            title: plan.title,
+                        })
+                        .collect(),
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -2093,6 +2224,32 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::SetChatPlanMode {
+            thread_id,
+            plan_mode,
+        } => set_chat_plan_mode(state, thread_id, plan_mode),
+        ArchcarRequest::GetChatPlan { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                let plan_mode = store.chat_thread_plan_mode(thread_id)?;
+                let plan_path = store.chat_thread_plan_path(thread_id)?;
+                let plan_markdown = match plan_path.as_deref() {
+                    Some(path) => read_thread_plan_markdown(&store, thread_id, path)?,
+                    None => None,
+                };
+                Ok((plan_mode, plan_path, plan_markdown))
+            }) {
+                Ok((plan_mode, plan_path, plan_markdown)) => ArchcarResponse::ChatPlan {
+                    thread_id,
+                    plan_mode,
+                    plan_path,
+                    plan_markdown,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -2151,8 +2308,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 let guard = state.lock().unwrap();
                 ProviderInteractionStore::new(guard.db_path.clone())
             };
-            match store.resolve(&interaction_id, resolution) {
+            match store.resolve(&interaction_id, resolution.clone()) {
                 Ok(interaction) => {
+                    // Storing the answer is not answering: the provider is
+                    // holding its turn open for a native reply keyed by the id
+                    // it asked with.
+                    deliver_interaction_resolution(state, &interaction, &resolution);
                     broadcast(
                         &mut state.lock().unwrap(),
                         ArchcarEvent::ProviderInteractionResolved {
@@ -2902,6 +3063,19 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
     let Some(_guard) = QueueDrainGuard::begin(state, thread_id) else {
         return;
     };
+    loop {
+        drain_queued_input_once(state, thread_id);
+        let rerun = state
+            .lock()
+            .map(|mut guard| guard.drain_reruns.remove(&thread_id))
+            .unwrap_or(false);
+        if !rerun {
+            return;
+        }
+    }
+}
+
+fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
     let db_path = state.lock().unwrap().db_path.clone();
     let store = match WorkspaceStore::open_app(&db_path) {
         Ok(store) => store,
@@ -2931,6 +3105,9 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
     let handle = ready_session_handle_for_thread(state, thread_id, session_kind)
         .or_else(|| restore_ready_session_handle_for_queue(state, &store, thread_id, session_kind));
     let Some(handle) = handle else {
+        // No live session at all → nothing will ever drain this queue. Start the
+        // thread's session; SessionReady drains the queue once it comes up.
+        start_session_for_queued_thread(state, &store, thread_id, session_kind);
         return;
     };
     if let Err(err) = validate_send_input_delivery(
@@ -2963,14 +3140,12 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
                 &mut state.lock().unwrap(),
                 ArchcarEvent::ChatQueueUpdated { thread_id },
             );
-            if store
-                .peek_next_queued_chat_input(thread_id)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                note_session_not_ready_for_queue(&handle);
-            }
+            // One queued input per turn. The session does not report "busy"
+            // until the provider starts the turn, so a message queued in that
+            // gap would otherwise be written into the same turn — which merges
+            // two prompts and leaves the harness's turn accounting waiting for
+            // a completion that never comes. TurnCompleted drains the next one.
+            note_session_not_ready_for_queue(&handle);
         }
         Err(err) => {
             if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
@@ -2989,6 +3164,307 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
             );
         }
     }
+}
+
+/// After a codex planning turn, take the plan it just proposed and raise the
+/// same PlanApproval a Claude ExitPlanMode would have.
+fn raise_codex_plan_approval(state: &Arc<Mutex<ServerState>>, thread_id: i64, session_id: i64) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let Ok(store) = WorkspaceStore::open_app(&db_path) else {
+        return;
+    };
+    if !store.chat_thread_plan_mode(thread_id).unwrap_or(false) {
+        return;
+    }
+    let Ok(thread) = store.get_chat_thread_record(thread_id) else {
+        return;
+    };
+    if thread.provider != "codex" {
+        return;
+    }
+    let interactions = ProviderInteractionStore::new(db_path.clone());
+    if interactions
+        .list(Some(thread_id), true)
+        .map(|pending| {
+            pending
+                .iter()
+                .any(|interaction| interaction.kind == ProviderInteractionKind::PlanApproval)
+        })
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(plan_markdown) = latest_assistant_text(&db_path, thread_id) else {
+        return;
+    };
+    let Ok(workspace) = store.get_workspace_record(thread.workspace_id) else {
+        return;
+    };
+    let draft = crate::archcar::harness_contract::ProviderInteractionDraft {
+        provider_key: "codex".to_owned(),
+        workspace: workspace.name.clone(),
+        thread_id,
+        session_id,
+        native_session_id: thread.native_thread_id.clone(),
+        // Codex is not holding a request open for this, so the id only has to
+        // be unique to the plan it belongs to.
+        native_id: format!(
+            "codex-plan-{thread_id}-{}",
+            plan_fingerprint(&plan_markdown)
+        ),
+        kind: ProviderInteractionKind::PlanApproval,
+        title: "Plan ready for review".to_owned(),
+        detail: plan_markdown.clone(),
+        questions: Vec::new(),
+        auto_resolution_ms: None,
+        native_request: serde_json::json!({ "source": "codex-plan-turn" }),
+    };
+    let runtime_store = crate::runtime_session_store::RuntimeSessionStore::new(db_path);
+    match runtime_store.register_provider_interaction(draft) {
+        Ok(interaction) => {
+            let interaction = runtime_store
+                .save_chat_plan(thread_id, &interaction.id, &plan_markdown)
+                .and_then(|plan_path| {
+                    runtime_store.attach_interaction_plan_path(&interaction.id, &plan_path)
+                })
+                .unwrap_or(interaction);
+            broadcast(
+                &mut state.lock().unwrap(),
+                ArchcarEvent::ProviderInteractionRequested { interaction },
+            );
+        }
+        Err(err) => {
+            warn!(thread_id, error = %format!("{err:#}"), "archcar could not raise a codex plan approval");
+        }
+    }
+}
+
+/// The assistant's last word in a thread — for a planning turn, that is the plan.
+fn latest_assistant_text(db_path: &Path, thread_id: i64) -> Option<String> {
+    let projection = provider_projection_from_records(
+        &ProviderEventStore::new(db_path)
+            .list_for_chat_thread(thread_id)
+            .ok()?,
+    );
+    projection
+        .items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.render_class == crate::provider_projection::ProjectionRenderClass::AssistantChat
+                && !item.body.trim().is_empty()
+        })
+        .map(|item| item.body.clone())
+}
+
+fn plan_fingerprint(plan_markdown: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    plan_markdown.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Fail pending asks whose session has exited: their native request ids died
+/// with the process, so they can never be answered.
+fn expire_pending_interactions_for_session(state: &Arc<Mutex<ServerState>>, session_id: i64) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = ProviderInteractionStore::new(db_path);
+    let Ok(pending) = store.list(None, true) else {
+        return;
+    };
+    for interaction in pending
+        .into_iter()
+        .filter(|interaction| interaction.session_id == session_id)
+    {
+        match store.expire(&interaction.id) {
+            Ok(expired) => broadcast(
+                &mut state.lock().unwrap(),
+                ArchcarEvent::ProviderInteractionResolved {
+                    interaction: expired,
+                },
+            ),
+            Err(err) => {
+                warn!(interaction = %interaction.id, error = %format!("{err:#}"), "archcar could not expire a pending interaction");
+            }
+        }
+    }
+}
+
+/// Enter or leave plan mode. Both providers switch mid-session, so a live
+/// session is told directly rather than restarted; the thread flag makes it
+/// stick for future sessions.
+fn set_chat_plan_mode(
+    state: &Arc<Mutex<ServerState>>,
+    thread_id: i64,
+    plan_mode: bool,
+) -> ArchcarResponse {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            return ArchcarResponse::Error {
+                message: err.to_string(),
+            }
+        }
+    };
+    if let Err(err) = store.set_chat_thread_plan_mode(thread_id, plan_mode) {
+        return ArchcarResponse::Error {
+            message: err.to_string(),
+        };
+    }
+    for kind in [SessionKind::Claude, SessionKind::Codex] {
+        if let Some(handle) = live_session_handle_for_thread(state, thread_id, kind) {
+            let mode = match kind {
+                SessionKind::Claude if plan_mode => {
+                    Some(crate::archcar::session::CLAUDE_PLAN_PERMISSION_MODE.to_owned())
+                }
+                SessionKind::Claude => {
+                    Some(crate::archcar::session::CLAUDE_DEFAULT_PERMISSION_MODE.to_owned())
+                }
+                // Codex carries plan mode as a read-only sandbox on the turns
+                // it starts; the adapter only needs to know which mode it is in.
+                SessionKind::Codex if plan_mode => Some(
+                    crate::provider_adapters::codex_app_server::CODEX_PLAN_PERMISSION_MODE
+                        .to_owned(),
+                ),
+                SessionKind::Codex => Some("default".to_owned()),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                let _ = handle.command_tx.send(SessionCommand::ApplyControl(
+                    crate::archcar::harness_contract::HarnessControl::SetPermissionMode(Some(mode)),
+                ));
+            }
+        }
+    }
+    let plan_path = store.chat_thread_plan_path(thread_id).ok().flatten();
+    broadcast(
+        &mut state.lock().unwrap(),
+        ArchcarEvent::ChatPlanUpdated {
+            thread_id,
+            plan_mode,
+            plan_path: plan_path.clone(),
+        },
+    );
+    ArchcarResponse::ChatPlan {
+        thread_id,
+        plan_mode,
+        plan_path,
+        plan_markdown: None,
+    }
+}
+
+/// Read a plan back out of the workspace checkout.
+fn read_thread_plan_markdown(
+    store: &WorkspaceStore,
+    thread_id: i64,
+    plan_path: &str,
+) -> Result<Option<String>> {
+    let thread = store.get_chat_thread_record(thread_id)?;
+    let workspace = store.get_workspace_record(thread.workspace_id)?;
+    let absolute = Path::new(&workspace.path).join(plan_path);
+    Ok(std::fs::read_to_string(absolute).ok())
+}
+
+/// Send a resolved interaction back to the provider that asked, and carry out
+/// what approving a plan means: leave plan mode and start building from the
+/// plan we saved.
+fn deliver_interaction_resolution(
+    state: &Arc<Mutex<ServerState>>,
+    interaction: &ProviderInteractionRecord,
+    resolution: &InteractionResolution,
+) {
+    let Some(handle) = live_session_handle_for_session(state, interaction.session_id) else {
+        warn!(
+            interaction = %interaction.id,
+            session_id = interaction.session_id,
+            "archcar could not answer a provider interaction: its session is gone"
+        );
+        return;
+    };
+    if let Err(err) = handle.command_tx.send(SessionCommand::ApplyControl(
+        crate::archcar::harness_contract::HarnessControl::ResolveInteraction {
+            native_id: interaction.native_id.clone(),
+            resolution: resolution.clone(),
+        },
+    )) {
+        warn!(
+            interaction = %interaction.id,
+            error = %err,
+            "archcar could not deliver an interaction resolution to its session"
+        );
+        return;
+    }
+    let approved = matches!(
+        resolution,
+        InteractionResolution::Approve | InteractionResolution::ApproveForSession
+    );
+    if interaction.kind == ProviderInteractionKind::PlanApproval && approved {
+        start_building_approved_plan(state, interaction);
+    }
+}
+
+/// Approving a plan ends planning: the thread leaves plan mode and the agent is
+/// told to build what was agreed, pointing at the saved file rather than
+/// re-pasting the plan.
+fn start_building_approved_plan(
+    state: &Arc<Mutex<ServerState>>,
+    interaction: &ProviderInteractionRecord,
+) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "archcar could not open store to start an approved plan");
+            return;
+        }
+    };
+    if let Err(err) = store.set_chat_thread_plan_mode(interaction.thread_id, false) {
+        warn!(error = %format!("{err:#}"), "archcar could not clear plan mode after approval");
+    }
+    broadcast(
+        &mut state.lock().unwrap(),
+        ArchcarEvent::ChatPlanUpdated {
+            thread_id: interaction.thread_id,
+            plan_mode: false,
+            plan_path: interaction.plan_path.clone(),
+        },
+    );
+    let Some(plan_path) = interaction.plan_path.clone() else {
+        return;
+    };
+    let input = format!("Implement the plan at {plan_path}.");
+    if let Err(err) = store.enqueue_chat_input(
+        interaction.thread_id,
+        &input,
+        Some("Implement the approved plan"),
+        crate::archcar::protocol::ArchcarInputKind::User,
+        session_kind_for_provider(&interaction.provider_key),
+    ) {
+        warn!(error = %format!("{err:#}"), "archcar could not queue the approved plan's build step");
+        return;
+    }
+    broadcast(
+        &mut state.lock().unwrap(),
+        ArchcarEvent::ChatQueueUpdated {
+            thread_id: interaction.thread_id,
+        },
+    );
+    drain_queued_input_for_thread(state, interaction.thread_id);
+}
+
+fn session_kind_for_provider(provider_key: &str) -> SessionKind {
+    match provider_key {
+        "claude" => SessionKind::Claude,
+        _ => SessionKind::Codex,
+    }
+}
+
+fn live_session_handle_for_session(
+    state: &Arc<Mutex<ServerState>>,
+    session_id: i64,
+) -> Option<SessionHandle> {
+    state.lock().ok()?.sessions.get(&session_id).cloned()
 }
 
 fn ready_session_handle_for_thread(
@@ -3018,6 +3494,82 @@ fn restore_ready_session_handle_for_queue(
     ready_session_handle_for_thread(state, thread_id, kind)
 }
 
+/// Any live (running) session for this thread, ready or not. A busy session
+/// still drains the queue when its turn completes, so it must not be treated as
+/// "no session" and re-spawned.
+fn live_session_handle_for_thread(
+    state: &Arc<Mutex<ServerState>>,
+    thread_id: i64,
+    kind: SessionKind,
+) -> Option<SessionHandle> {
+    state.lock().ok()?.sessions.values().find_map(|handle| {
+        let snapshot = handle.snapshot.lock().ok()?.clone();
+        (snapshot.thread_id == thread_id
+            && snapshot.kind == kind
+            && snapshot.status == crate::workspace::ProcessStatus::Running)
+            .then_some(handle.clone())
+    })
+}
+
+/// The workspace whose thread session must be started so a queued input can be
+/// delivered, or `None` when a session already exists (or the kind cannot be
+/// auto-started).
+fn workspace_needing_session_for_queue(
+    state: &Arc<Mutex<ServerState>>,
+    store: &WorkspaceStore,
+    thread_id: i64,
+    kind: SessionKind,
+) -> Option<String> {
+    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+        return None;
+    }
+    if live_session_handle_for_thread(state, thread_id, kind).is_some() {
+        return None;
+    }
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.get_workspace_record(thread.workspace_id).ok()?;
+    Some(workspace.name)
+}
+
+/// Start the session a queued input needs. Runs off-thread: spawning takes
+/// seconds and `ensure_chat_thread_session` drains the queue itself, which
+/// would re-enter the drain guard if it ran inline.
+fn start_session_for_queued_thread(
+    state: &Arc<Mutex<ServerState>>,
+    store: &WorkspaceStore,
+    thread_id: i64,
+    kind: SessionKind,
+) {
+    let Some(workspace) = workspace_needing_session_for_queue(state, store, thread_id, kind) else {
+        return;
+    };
+    info!(
+        %workspace,
+        thread_id,
+        ?kind,
+        "archcar starting chat-thread session to deliver queued input"
+    );
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        let response = ensure_chat_thread_session(
+            &state,
+            workspace.clone(),
+            thread_id,
+            kind,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+        if let ArchcarResponse::Error { message } = response {
+            warn!(
+                %workspace,
+                thread_id,
+                ?kind,
+                error = %message,
+                "archcar could not start session for queued chat input"
+            );
+        }
+    });
+}
+
 fn note_session_not_ready_for_queue(handle: &SessionHandle) {
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
@@ -3034,6 +3586,23 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         | ArchcarEvent::TurnCompleted { thread_id, .. } => Some(*thread_id),
         _ => None,
     };
+    // Codex has no ExitPlanMode: a planning turn simply ends with the plan as
+    // its answer, so the plan approval is raised here instead of by the
+    // provider. Same card, same buttons, different transport.
+    if let ArchcarEvent::TurnCompleted {
+        thread_id,
+        session_id,
+        ..
+    } = &event
+    {
+        raise_codex_plan_approval(state, *thread_id, *session_id);
+    }
+    // An ask can only be answered on the connection it arrived on; once the
+    // session is gone the request id means nothing, so pending asks must not
+    // linger in the UI as if they were still answerable.
+    if let ArchcarEvent::SessionExited { session_id, .. } = &event {
+        expire_pending_interactions_for_session(state, *session_id);
+    }
     // Continuous context maintenance: turn boundaries and message updates are
     // the evidence streams behind workspace/current-chat summaries.
     let refresh_thread_id = match &event {
@@ -3226,6 +3795,9 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListRepositories
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
+            | ArchcarRequest::ListChatTranscripts { .. }
+            | ArchcarRequest::GetChatTranscript { .. }
+            | ArchcarRequest::ListContextPlans { .. }
             | ArchcarRequest::ListWorkspaceFiles { .. }
             | ArchcarRequest::ReadWorkspaceFile { .. }
             | ArchcarRequest::GetWorkspaceChanges { .. }
@@ -4538,6 +5110,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -4554,7 +5127,8 @@ mod tests {
                     kind: ProviderInteractionKind::Permission,
                     title: "Permission".to_owned(),
                     detail: "Allow?".to_owned(),
-                    choices: Vec::new(),
+                    questions: Vec::new(),
+                    auto_resolution_ms: None,
                     native_request: json!({"tool": "bash"}),
                 },
             },
@@ -4624,6 +5198,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
         }));
@@ -4757,6 +5332,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -4847,6 +5423,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -4938,6 +5515,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: vec![subscriber_tx],
         }));
@@ -4978,6 +5556,471 @@ mod tests {
             thread_id: thread.id,
         }));
         assert_ne!(first.id, second.id);
+    }
+
+    fn interaction_draft_for(
+        thread_id: i64,
+        session_id: i64,
+        kind: ProviderInteractionKind,
+        native_id: &str,
+    ) -> crate::archcar::harness_contract::ProviderInteractionDraft {
+        crate::archcar::harness_contract::ProviderInteractionDraft {
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id,
+            session_id,
+            native_session_id: None,
+            native_id: native_id.to_owned(),
+            kind,
+            title: "Plan ready for review".to_owned(),
+            detail: "# Plan\n\n- do the thing".to_owned(),
+            questions: Vec::new(),
+            auto_resolution_ms: None,
+            native_request: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn resolving_an_interaction_answers_the_session_that_asked() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Claude,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+        let interaction = ProviderInteractionStore::new(db_path.clone())
+            .register(interaction_draft_for(
+                thread.id,
+                9,
+                ProviderInteractionKind::UserQuestion,
+                "req-1",
+            ))
+            .unwrap();
+
+        dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id.clone(),
+                resolution: InteractionResolution::Deny {
+                    reason: Some("not that one".to_owned()),
+                },
+            },
+            &state,
+        );
+
+        // Storing the answer is not answering: the provider holds its turn open
+        // until the reply reaches the session that asked.
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::ApplyControl(
+                crate::archcar::harness_contract::HarnessControl::ResolveInteraction {
+                    native_id,
+                    ..
+                }
+            )) if native_id == "req-1"
+        ));
+    }
+
+    #[test]
+    fn approving_a_plan_leaves_plan_mode_and_queues_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        store.set_chat_thread_plan_mode(thread.id, true).unwrap();
+        let (command_tx, _command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+                    session_id: 9,
+                    thread_id: thread.id,
+                    workspace: "berlin".to_owned(),
+                    kind: SessionKind::Claude,
+                    pid: 12345,
+                    status: ProcessStatus::Running,
+                    runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+                    ready: false,
+                    capabilities: None,
+                    screen: String::new(),
+                })),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+        let interactions = ProviderInteractionStore::new(db_path.clone());
+        let interaction = interactions
+            .register(interaction_draft_for(
+                thread.id,
+                9,
+                ProviderInteractionKind::PlanApproval,
+                "req-plan",
+            ))
+            .unwrap();
+        let interaction = interactions
+            .attach_plan_path(&interaction.id, ".context/plans/thread-1-abc.md")
+            .unwrap();
+
+        dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id.clone(),
+                resolution: InteractionResolution::Approve,
+            },
+            &state,
+        );
+
+        assert!(!store.chat_thread_plan_mode(thread.id).unwrap());
+        let queued = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(queued.len(), 1, "approving a plan starts the build");
+        assert!(
+            queued[0].input.contains(".context/plans/thread-1-abc.md"),
+            "the build step points at the saved plan, not a re-pasted copy: {}",
+            queued[0].input
+        );
+    }
+
+    #[test]
+    fn a_dead_session_expires_the_asks_it_was_holding() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+        let interactions = ProviderInteractionStore::new(db_path.clone());
+        interactions
+            .register(interaction_draft_for(
+                thread.id,
+                9,
+                ProviderInteractionKind::UserQuestion,
+                "req-1",
+            ))
+            .unwrap();
+
+        expire_pending_interactions_for_session(&state, 9);
+
+        // The request id died with the process; leaving it pending would show a
+        // question that can never be answered.
+        assert!(interactions.list(Some(thread.id), true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_sweep_delivers_inputs_queued_before_the_daemon_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        // Queued while the previous daemon was alive; nothing will emit a
+        // session event for it after the restart.
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "left over from before the restart",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        drain_every_queued_chat_thread(&state);
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(crate::archcar::session::SessionCommand::SendInput { input, .. })
+                if input == "left over from before the restart"
+        ));
+        assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_second_queued_input_waits_for_the_first_turn_instead_of_joining_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Claude,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let handle_snapshot = Arc::new(Mutex::new(snapshot));
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::clone(&handle_snapshot),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        // Two sends back to back, the way a user types a follow-up right after
+        // the first message: the provider has not started the turn yet, so the
+        // session still looks ready when the second one arrives.
+        for input in ["first", "second"] {
+            dispatch_request(
+                ArchcarRequest::QueueChatInput {
+                    thread_id: thread.id,
+                    input: input.to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    session_kind: SessionKind::Claude,
+                },
+                &state,
+            );
+        }
+
+        let sent = command_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(sent.len(), 1, "only the first input may reach the session");
+        assert!(!handle_snapshot.lock().unwrap().ready);
+        assert_eq!(
+            store
+                .list_queued_chat_inputs(thread.id)
+                .unwrap()
+                .into_iter()
+                .map(|queued| queued.input)
+                .collect::<Vec<_>>(),
+            vec!["second".to_owned()]
+        );
+    }
+
+    #[test]
+    fn queued_input_without_any_session_requests_a_thread_session_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "first message",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        // A brand-new chat thread has no session, so nothing would ever deliver
+        // the first message unless the queue starts one.
+        assert_eq!(
+            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::Codex),
+            Some("berlin".to_owned())
+        );
+    }
+
+    #[test]
+    fn queued_input_with_a_busy_session_does_not_request_another_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            // Mid-turn: not ready, but TurnCompleted will drain the queue.
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        assert_eq!(
+            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::Codex),
+            None
+        );
+    }
+
+    #[test]
+    fn drain_requested_during_a_drain_reruns_instead_of_being_dropped() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
+        assert!(
+            QueueDrainGuard::begin(&state, thread.id).is_none(),
+            "a second concurrent drain must not run"
+        );
+        assert!(
+            state.lock().unwrap().drain_reruns.contains(&thread.id),
+            "the skipped drain must be recorded so the running drain repeats"
+        );
+        drop(guard);
+
+        // The rerun flag is cleared when the next drain actually starts.
+        let guard = QueueDrainGuard::begin(&state, thread.id).expect("drain runs again");
+        assert!(!state.lock().unwrap().drain_reruns.contains(&thread.id));
+        drop(guard);
     }
 
     #[test]
@@ -5044,6 +6087,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5093,6 +6137,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -5134,6 +6179,7 @@ mod tests {
             queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::Codex)]),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![event_tx],
         }));
@@ -5173,6 +6219,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -5391,6 +6438,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5450,6 +6498,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::from([
                 (
                     9,
@@ -5508,6 +6557,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
         }));
@@ -5569,6 +6619,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::from([(
                 process.id,
                 crate::archcar::session::SessionHandle {
@@ -5653,6 +6704,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5704,6 +6756,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5757,6 +6810,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5826,6 +6880,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::from([requested_thread.id]),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6236,6 +7291,7 @@ icon = "cloud"
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6321,6 +7377,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6413,6 +7470,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6513,6 +7571,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6720,6 +7779,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));

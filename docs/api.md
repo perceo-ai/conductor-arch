@@ -93,6 +93,11 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
   MCP clients; changed summaries broadcast `summary_updated` events.
 - Chat task sync: `sync_chat_tasks` creates native workspace tasks from clear
   action items in chat and deduplicates by normalized title.
+- Chat transcripts: `list_chat_transcripts` (recent non-empty chats, default 8)
+  and `get_chat_transcript` (one chat's user/agent messages, tool calls
+  excluded) back the new-chat screen's attachable context.
+- Plans: `list_context_plans` lists `.context/plans/*.md` for a workspace; read
+  a plan body with `read_workspace_file`.
 - Context attachments: branch-local notes/files/pins (`archivum` source is
   reserved for the future integration).
 - Diffs and provenance: branch diff, per-session contributions,

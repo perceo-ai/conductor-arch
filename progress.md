@@ -774,3 +774,32 @@ Not yet manually smoke-verified in this branch:
   Electron boot smoke against an isolated daemon. Check-run completion has no
   dedicated server hook; check status flows into summaries on the next
   turn/task/background event instead.
+
+## New-chat context picker (added 2026-08-18)
+
+- The empty chat screen now reads "New chat in {branch}" and offers two chip
+  rows: recent chat transcripts (default 8 non-empty chats, newest first) and
+  plan markdown from the workspace's `.context/plans/`. Picking chips attaches
+  their text to the chat's next message and then clears; a failed send restores
+  the picks along with the composer text.
+- Transcripts carry the user/agent conversation only. Tool calls live in
+  `chat_events` and `/model`-style control rows are `system` messages, so
+  neither is attached.
+- New read-only RPCs: `list_chat_transcripts`, `get_chat_transcript`,
+  `list_context_plans` (plan bodies are read with `read_workspace_file`), each
+  with an `archductor archcar` subcommand. Verified with core unit tests,
+  renderer vitest suites, and a live socket smoke against an isolated daemon.
+- `Icon` now stores each glyph as a factory (`() => JSX.Element`). Solid JSX
+  evaluates to real DOM nodes, so the previous shared node was *moved* into the
+  last `<Icon>` that rendered a given name and every earlier one drew blank —
+  visible as soon as a list rendered the same icon twice (the new chips, and the
+  sidebar's repeated `+` buttons).
+- Electron smoke (isolated daemon, seeded repo/workspace/chats/plans): the empty
+  chat reads "New chat in feature/checkout-rewrite", lists three transcript chips
+  and two plan chips, selecting one of each sends
+  `Context attached from Archductor …` with the transcript's user/agent lines
+  (the `/model` control row excluded) and the plan body ahead of the typed
+  message, while the bubble shows only `📎 <label>` markers.
+- Not done: no MCP tools for the three RPCs (MCP exposes a curated subset and
+  already omits `list_chat_threads`/`get_chat_projection`), and no GTK surface
+  exists in this tree.

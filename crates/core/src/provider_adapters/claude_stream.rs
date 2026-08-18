@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::archcar::harness::ClaudeHarnessController;
 use crate::archcar::harness_contract::{
     HarnessAdapterContext, HarnessCapability, HarnessControl, HarnessControlPlan,
     HarnessDescriptor, HarnessEffect, HarnessInput, HarnessPreflightSpec, HarnessRecoveryCause,
-    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, ManagedHarness, ManagedHarnessAdapter,
-    NativeRecord, NativeWrite, SupportMode, MANAGED_HARNESS_CONTRACT_VERSION,
-    REQUIRED_HARNESS_FEATURES,
+    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, InteractionAnswer, InteractionOption,
+    InteractionQuestion, ManagedHarness, ManagedHarnessAdapter, NativeRecord, NativeWrite,
+    ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
+    MANAGED_HARNESS_CONTRACT_VERSION, REQUIRED_HARNESS_FEATURES,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -66,6 +67,14 @@ pub(crate) struct ClaudeManagedAdapter {
     context: HarnessAdapterContext,
     parser: ClaudeStreamParser,
     pub(crate) tracker: ClaudeTurnTracker,
+    /// `control_request.request_id` → the tool input we were asked about, kept
+    /// so an `allow` can echo back the `updatedInput` claude expects.
+    pending_interactions: HashMap<String, Value>,
+    control_request_seq: u64,
+    /// Planning turns must not edit the tree. Claude enforces this itself in
+    /// plan mode, but we answer its permission asks, so we must not hand back
+    /// an `allow` that would undo that.
+    plan_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +90,10 @@ struct TrackedClaudeInput {
 #[derive(Debug, Default)]
 pub(crate) struct ClaudeTurnTracker {
     initialized: bool,
+    /// `claude --input-format stream-json` withholds `system/init` until it has
+    /// read a user message, so the transport being up — not init — is what says
+    /// "this session can accept input".
+    transport_started: bool,
     next_local_turn: u64,
     written_inputs: VecDeque<TrackedClaudeInput>,
     active_turn: Option<TrackedClaudeInput>,
@@ -89,11 +102,17 @@ pub(crate) struct ClaudeTurnTracker {
 
 impl ClaudeTurnTracker {
     pub(crate) fn ready(&self) -> bool {
-        self.initialized && self.written_inputs.is_empty() && self.active_turn.is_none()
+        (self.initialized || self.transport_started)
+            && self.written_inputs.is_empty()
+            && self.active_turn.is_none()
     }
 
     fn note_initialized(&mut self) {
         self.initialized = true;
+    }
+
+    fn note_transport_started(&mut self) {
+        self.transport_started = true;
     }
 
     fn note_input_written(
@@ -126,7 +145,7 @@ impl ClaudeTurnTracker {
     }
 
     fn note_replayed_user(&mut self, text: &str, effects: &mut Vec<HarnessEffect>) {
-        if self.active_turn.is_none() && self.initialized {
+        if self.active_turn.is_none() && (self.initialized || self.transport_started) {
             let Some(front) = self.written_inputs.front() else {
                 return;
             };
@@ -232,6 +251,9 @@ impl ClaudeManagedAdapter {
             context,
             parser: ClaudeStreamParser::default(),
             tracker: ClaudeTurnTracker::default(),
+            pending_interactions: HashMap::new(),
+            control_request_seq: 0,
+            plan_mode: false,
         }
     }
 
@@ -242,6 +264,173 @@ impl ClaudeManagedAdapter {
             Some(self.context.session_id),
             "claude-stream-json",
         )
+    }
+
+    /// What this ask resolves to without asking the human, if anything.
+    ///
+    /// Ordinary tool permissions are approved outright in the wide-open default
+    /// — every tool call goes through this channel, so a round trip per call
+    /// would tax every chat. While planning, tools that would change the tree
+    /// are refused instead, because approving them would break the read-only
+    /// promise plan mode makes.
+    pub(crate) fn auto_resolution_for(
+        &self,
+        draft: &ProviderInteractionDraft,
+    ) -> Option<ProviderInteractionResolution> {
+        if draft.kind != ProviderInteractionKind::Permission {
+            return None;
+        }
+        let tool_name =
+            string_at(&draft.native_request, &["request", "tool_name"]).unwrap_or_default();
+        if self.plan_mode && claude_tool_mutates_workspace(&tool_name) {
+            return Some(ProviderInteractionResolution::Deny {
+                reason: Some(
+                    "Planning, not building yet — propose the change with ExitPlanMode instead."
+                        .to_owned(),
+                ),
+            });
+        }
+        Some(ProviderInteractionResolution::Approve)
+    }
+
+    pub(crate) fn note_plan_mode(&mut self, plan_mode: bool) {
+        self.plan_mode = plan_mode;
+    }
+
+    /// The transport is up and claude's stdin accepts input. Claude does not
+    /// announce this itself in stream-json input mode (it holds `system/init`
+    /// back until it has read a message), so the session loop reports it.
+    pub(crate) fn note_transport_started(&mut self) {
+        self.tracker.note_transport_started();
+    }
+
+    /// A `control_request` line, turned into the ask it represents.
+    ///
+    /// Claude routes tool permission through `can_use_tool` when launched with
+    /// `--permission-prompt-tool stdio`; that same channel carries the two
+    /// tools that make plan mode work — `AskUserQuestion` and `ExitPlanMode`.
+    /// Returns `None` for any other line so the transcript parser handles it.
+    fn control_request_interaction(
+        &mut self,
+        line: &str,
+    ) -> Result<Option<ProviderInteractionDraft>> {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return Ok(None);
+        };
+        if string_at(&value, &["type"]).as_deref() != Some("control_request") {
+            return Ok(None);
+        }
+        let Some(request_id) = string_at(&value, &["request_id"]) else {
+            return Ok(None);
+        };
+        if string_at(&value, &["request", "subtype"]).as_deref() != Some("can_use_tool") {
+            return Ok(None);
+        }
+        let tool_name = string_at(&value, &["request", "tool_name"]).unwrap_or_default();
+        let tool_input = value
+            .pointer("/request/input")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let kind = claude_interaction_kind(&tool_name);
+        let (title, detail, questions) = match kind {
+            ProviderInteractionKind::PlanApproval => (
+                "Plan ready for review".to_owned(),
+                string_at(&tool_input, &["plan"]).unwrap_or_default(),
+                Vec::new(),
+            ),
+            ProviderInteractionKind::UserQuestion => {
+                let questions = claude_questions(&tool_input);
+                let title = questions
+                    .first()
+                    .map(|question| question.header.clone())
+                    .unwrap_or_else(|| "Question".to_owned());
+                let detail = questions
+                    .iter()
+                    .map(|question| question.question.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (title, detail, questions)
+            }
+            ProviderInteractionKind::Permission => (
+                format!("{tool_name} permission"),
+                string_at(&value, &["request", "description"]).unwrap_or_default(),
+                Vec::new(),
+            ),
+        };
+        self.pending_interactions
+            .insert(request_id.clone(), tool_input);
+        Ok(Some(ProviderInteractionDraft {
+            provider_key: CLAUDE_PROVIDER_NAME.to_owned(),
+            workspace: self.context.workspace.clone(),
+            thread_id: self.context.thread_id,
+            session_id: self.context.session_id,
+            native_session_id: self.context.native_session_id.clone(),
+            native_id: request_id,
+            kind,
+            title,
+            detail,
+            questions,
+            auto_resolution_ms: None,
+            native_request: value,
+        }))
+    }
+
+    /// The `control_response` that answers a pending `can_use_tool`.
+    ///
+    /// Only `allow` lets the tool run, and it cannot carry text back — verified
+    /// against claude 2.1.228: answering `AskUserQuestion` with `allow` returns
+    /// "The user did not answer the questions" to the model. `deny` + `message`
+    /// is the channel that delivers our words, so answers and plan revisions
+    /// both go out that way.
+    fn control_response_for(
+        &mut self,
+        native_id: &str,
+        resolution: &ProviderInteractionResolution,
+    ) -> NativeWrite {
+        let tool_input = self
+            .pending_interactions
+            .remove(native_id)
+            .unwrap_or(Value::Null);
+        let response = match resolution {
+            ProviderInteractionResolution::Approve
+            | ProviderInteractionResolution::ApproveForSession => {
+                json!({ "behavior": "allow", "updatedInput": tool_input })
+            }
+            ProviderInteractionResolution::Deny { reason } => json!({
+                "behavior": "deny",
+                "message": reason.clone().unwrap_or_else(|| "Denied.".to_owned()),
+            }),
+            ProviderInteractionResolution::Answer { answers } => json!({
+                "behavior": "deny",
+                "message": format_claude_answers(answers),
+            }),
+            ProviderInteractionResolution::Defer => json!({
+                "behavior": "deny",
+                "message": "Deferred — ask again when it matters.",
+            }),
+        };
+        let payload = json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": native_id,
+                "response": response,
+            },
+        });
+        claude_native_write(payload)
+    }
+
+    /// Switch permission mode without restarting. Verified against claude
+    /// 2.1.228: this overrides the launch `--permission-mode` mid-session and
+    /// the CLI answers with a `control_response` carrying the new mode.
+    fn set_permission_mode_write(&mut self, mode: &str) -> NativeWrite {
+        self.control_request_seq = self.control_request_seq.saturating_add(1);
+        let payload = json!({
+            "type": "control_request",
+            "request_id": format!("archcar-mode-{}-{}", self.context.session_id, self.control_request_seq),
+            "request": { "subtype": "set_permission_mode", "mode": mode },
+        });
+        claude_native_write(payload)
     }
 
     pub(crate) fn settle_failed_input_write(&mut self, local_input_id: &str) {
@@ -287,6 +476,14 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
         let mut effects = Vec::new();
 
         for line in input.lines().filter(|line| !line.trim().is_empty()) {
+            // Control requests are the provider asking *us* something
+            // (`can_use_tool`), not transcript content. They carry a
+            // `request_id` that must be answered on stdin before the tool runs,
+            // so they are handled before the transcript parser sees them.
+            if let Some(draft) = self.control_request_interaction(line)? {
+                effects.push(HarnessEffect::InteractionRequested(draft));
+                continue;
+            }
             let Some(event) = self.parser.parse_line(line)? else {
                 continue;
             };
@@ -429,11 +626,22 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
             }
             HarnessControl::SetPermissionMode(permission_mode) => {
-                self.context.controls.permission_mode = permission_mode;
-                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+                self.context.controls.permission_mode = permission_mode.clone();
+                self.plan_mode = permission_mode.as_deref() == Some(CLAUDE_PLAN_MODE);
+                match permission_mode {
+                    // In-band, no restart: the CLI takes `set_permission_mode`
+                    // over the same stdin the transcript rides on.
+                    Some(mode) => {
+                        HarnessControlPlan::NativeWrite(self.set_permission_mode_write(&mode))
+                    }
+                    None => HarnessControlPlan::RestartRequired(self.context.controls.clone()),
+                }
             }
-            HarnessControl::ResolveInteraction(_) => {
-                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            HarnessControl::ResolveInteraction {
+                native_id,
+                resolution,
+            } => {
+                HarnessControlPlan::NativeWrite(self.control_response_for(&native_id, &resolution))
             }
         }
     }
@@ -544,10 +752,100 @@ pub struct ClaudeStreamLaunchConfig {
     pub replay_user_messages: bool,
     pub resume: Option<String>,
     pub permission_mode: Option<String>,
+    /// Name of the tool claude asks for permission with. `stdio` routes asks to
+    /// our stdin as `can_use_tool` control requests.
+    pub permission_prompt_tool: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub append_system_prompt: Option<String>,
     pub settings_json: Option<String>,
+}
+
+/// Which tools are asks for the human rather than permission checks. Claude
+/// exposes `AskUserQuestion` / `ExitPlanMode` only when a permission prompt
+/// tool is configured, and routes both through `can_use_tool`.
+pub(crate) const CLAUDE_PLAN_MODE: &str = "plan";
+
+/// Tools that write to the workspace. Read/search/inspect tools are fine while
+/// planning; these are not.
+fn claude_tool_mutates_workspace(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch" | "apply_patch"
+    )
+}
+
+fn claude_interaction_kind(tool_name: &str) -> ProviderInteractionKind {
+    match tool_name {
+        "ExitPlanMode" => ProviderInteractionKind::PlanApproval,
+        "AskUserQuestion" => ProviderInteractionKind::UserQuestion,
+        _ => ProviderInteractionKind::Permission,
+    }
+}
+
+fn claude_questions(tool_input: &Value) -> Vec<InteractionQuestion> {
+    tool_input
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .enumerate()
+                .map(|(index, question)| InteractionQuestion {
+                    id: string_at(question, &["id"])
+                        .unwrap_or_else(|| format!("question-{}", index + 1)),
+                    header: string_at(question, &["header"]).unwrap_or_default(),
+                    question: string_at(question, &["question"]).unwrap_or_default(),
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .map(|option| InteractionOption {
+                                    label: string_at(option, &["label"]).unwrap_or_default(),
+                                    description: string_at(option, &["description"])
+                                        .unwrap_or_default(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    allow_other: question
+                        .get("isOther")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                    multi_select: question
+                        .get("multiSelect")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Answers as a line per question, matching what the model reads back as the
+/// tool result.
+fn format_claude_answers(answers: &[InteractionAnswer]) -> String {
+    if answers.is_empty() {
+        return "The user gave no answer.".to_owned();
+    }
+    let body = answers
+        .iter()
+        .map(|answer| format!("{}: {}", answer.question_id, answer.values.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("User answered —\n{body}")
+}
+
+fn claude_native_write(payload: Value) -> NativeWrite {
+    let mut bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
+    bytes.push(b'\n');
+    NativeWrite {
+        provider_key: CLAUDE_PROVIDER_NAME,
+        local_input_id: None,
+        payload: bytes,
+    }
 }
 
 pub fn encode_claude_user_message(input: &str) -> Value {
@@ -577,6 +875,11 @@ pub fn build_claude_stream_args(config: &ClaudeStreamLaunchConfig) -> Vec<String
             args.push("--replay-user-messages".to_owned());
         }
     }
+    push_optional_arg(
+        &mut args,
+        "--permission-prompt-tool",
+        config.permission_prompt_tool.as_deref(),
+    );
     push_optional_arg(&mut args, "--resume", config.resume.as_deref());
     push_optional_arg(
         &mut args,
@@ -1867,6 +2170,296 @@ mod tests {
         assert!(active_adapter.tracker.active_turn.is_none());
     }
 
+    fn interaction_adapter() -> ClaudeManagedAdapter {
+        ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("fixture-session".to_owned()),
+            controls: Default::default(),
+        })
+    }
+
+    fn only_interaction(effects: Vec<HarnessEffect>) -> ProviderInteractionDraft {
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::InteractionRequested(draft) => Some(draft),
+                _ => None,
+            })
+            .expect("expected an interaction request")
+    }
+
+    #[test]
+    fn exit_plan_mode_request_becomes_a_plan_approval_carrying_the_plan() {
+        let mut adapter = interaction_adapter();
+        // Shape recorded from claude 2.1.228 with --permission-prompt-tool stdio.
+        let record = br##"{"type":"control_request","request_id":"req-plan-1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan\n\n- step one"},"tool_use_id":"toolu_1"}}
+"##;
+        let draft = only_interaction(
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "claude",
+                    payload: record.to_vec(),
+                })
+                .unwrap(),
+        );
+
+        assert_eq!(draft.kind, ProviderInteractionKind::PlanApproval);
+        assert_eq!(draft.native_id, "req-plan-1");
+        assert_eq!(draft.detail, "# Plan\n\n- step one");
+        assert_eq!(draft.thread_id, 11);
+    }
+
+    #[test]
+    fn ask_user_question_request_becomes_a_question_with_its_options() {
+        let mut adapter = interaction_adapter();
+        let record = br#"{"type":"control_request","request_id":"req-q-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which language?","header":"Language","options":[{"label":"Rust","description":"Memory safe"},{"label":"Go","description":"Simple"}],"multiSelect":false}]},"tool_use_id":"toolu_2"}}
+"#;
+        let draft = only_interaction(
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "claude",
+                    payload: record.to_vec(),
+                })
+                .unwrap(),
+        );
+
+        assert_eq!(draft.kind, ProviderInteractionKind::UserQuestion);
+        assert_eq!(draft.title, "Language");
+        assert_eq!(draft.questions.len(), 1);
+        let question = &draft.questions[0];
+        assert_eq!(question.question, "Which language?");
+        assert_eq!(
+            question
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Rust", "Go"]
+        );
+        assert!(!question.multi_select);
+    }
+
+    #[test]
+    fn ordinary_tool_permission_requests_stay_permission_asks() {
+        let mut adapter = interaction_adapter();
+        let record = br#"{"type":"control_request","request_id":"req-w-1","request":{"subtype":"can_use_tool","tool_name":"Write","description":"notes.txt","input":{"file_path":"/tmp/notes.txt","content":"hi"},"tool_use_id":"toolu_3"}}
+"#;
+        let draft = only_interaction(
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "claude",
+                    payload: record.to_vec(),
+                })
+                .unwrap(),
+        );
+
+        assert_eq!(draft.kind, ProviderInteractionKind::Permission);
+        // Routine permissions resolve without the human; plan and question asks
+        // never do.
+        assert!(adapter.auto_resolution_for(&draft).is_some());
+    }
+
+    #[test]
+    fn planning_refuses_tools_that_would_edit_the_tree() {
+        let mut adapter = interaction_adapter();
+        adapter.note_plan_mode(true);
+        let write_request = br#"{"type":"control_request","request_id":"req-w-9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/a.txt"},"tool_use_id":"t1"}}
+"#;
+        let read_request = br#"{"type":"control_request","request_id":"req-r-9","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/tmp/a.txt"},"tool_use_id":"t2"}}
+"#;
+
+        let write_draft = only_interaction(
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "claude",
+                    payload: write_request.to_vec(),
+                })
+                .unwrap(),
+        );
+        let read_draft = only_interaction(
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "claude",
+                    payload: read_request.to_vec(),
+                })
+                .unwrap(),
+        );
+
+        // Planning is read-only; approving a write here would break the promise
+        // plan mode makes, and researching must stay friction-free.
+        assert!(matches!(
+            adapter.auto_resolution_for(&write_draft),
+            Some(ProviderInteractionResolution::Deny { .. })
+        ));
+        assert!(matches!(
+            adapter.auto_resolution_for(&read_draft),
+            Some(ProviderInteractionResolution::Approve)
+        ));
+    }
+
+    #[test]
+    fn plan_and_question_asks_always_reach_the_human() {
+        let mut adapter = interaction_adapter();
+        let record = br##"{"type":"control_request","request_id":"req-plan-3","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan"},"tool_use_id":"t3"}}
+"##;
+        let draft = only_interaction(
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "claude",
+                    payload: record.to_vec(),
+                })
+                .unwrap(),
+        );
+
+        assert!(adapter.auto_resolution_for(&draft).is_none());
+    }
+
+    #[test]
+    fn approving_replays_the_tool_input_claude_asked_about() {
+        let mut adapter = interaction_adapter();
+        let record = br#"{"type":"control_request","request_id":"req-w-2","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/a.txt","content":"hi"},"tool_use_id":"toolu_4"}}
+"#;
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: record.to_vec(),
+            })
+            .unwrap();
+
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "req-w-2".to_owned(),
+            resolution: ProviderInteractionResolution::Approve,
+        });
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("expected a native write");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["type"], "control_response");
+        assert_eq!(payload["response"]["request_id"], "req-w-2");
+        assert_eq!(payload["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            payload["response"]["response"]["updatedInput"]["file_path"],
+            "/tmp/a.txt"
+        );
+    }
+
+    #[test]
+    fn answers_ride_the_deny_channel_because_allow_cannot_carry_them() {
+        // Verified against claude 2.1.228: answering AskUserQuestion with
+        // `allow` returns "The user did not answer the questions" to the model,
+        // while `deny` + `message` is delivered as the tool result verbatim.
+        let mut adapter = interaction_adapter();
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "req-q-9".to_owned(),
+            resolution: ProviderInteractionResolution::Answer {
+                answers: vec![InteractionAnswer {
+                    question_id: "Language".to_owned(),
+                    values: vec!["Rust".to_owned()],
+                }],
+            },
+        });
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("expected a native write");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["response"]["response"]["behavior"], "deny");
+        let message = payload["response"]["response"]["message"].as_str().unwrap();
+        assert!(message.contains("Language: Rust"), "message was {message}");
+    }
+
+    #[test]
+    fn revising_a_plan_denies_with_the_reviewer_feedback() {
+        let mut adapter = interaction_adapter();
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "req-plan-2".to_owned(),
+            resolution: ProviderInteractionResolution::Deny {
+                reason: Some("Add a testing section.".to_owned()),
+            },
+        });
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("expected a native write");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            payload["response"]["response"]["message"],
+            "Add a testing section."
+        );
+    }
+
+    #[test]
+    fn permission_mode_switches_in_band_instead_of_restarting() {
+        let mut adapter = interaction_adapter();
+        let plan = adapter.plan_control(HarnessControl::SetPermissionMode(Some("plan".to_owned())));
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("plan mode must not need a restart");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+
+        assert_eq!(payload["type"], "control_request");
+        assert_eq!(payload["request"]["subtype"], "set_permission_mode");
+        assert_eq!(payload["request"]["mode"], "plan");
+    }
+
+    #[test]
+    fn permission_prompt_tool_is_launched_so_plan_tools_exist() {
+        // Without it claude drops AskUserQuestion / EnterPlanMode / ExitPlanMode
+        // from the tool list entirely, and plan mode has no way to propose.
+        let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
+            persistent_input: true,
+            replay_user_messages: true,
+            permission_prompt_tool: Some("stdio".to_owned()),
+            resume: None,
+            permission_mode: Some("plan".to_owned()),
+            model: None,
+            effort: None,
+            append_system_prompt: None,
+            settings_json: None,
+        });
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--permission-prompt-tool", "stdio"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn transport_start_makes_claude_ready_before_system_init() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+
+        // `claude --input-format stream-json` holds `system/init` back until it
+        // reads a user message, so gating readiness on init strands the first
+        // queued message forever.
+        assert!(!adapter.tracker.ready());
+        adapter.note_transport_started();
+        assert!(adapter.tracker.ready());
+
+        // A written input still makes the session busy until its turn settles.
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "first-input".to_owned(),
+                content: "hello".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        assert!(!adapter.tracker.ready());
+    }
+
     #[test]
     fn terminal_rate_limit_waits_for_all_inputs_before_ready() {
         let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
@@ -2792,6 +3385,7 @@ mod tests {
     fn persistent_streamed_input_adds_stream_json_input_format() {
         let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
             persistent_input: true,
+            permission_prompt_tool: None,
             resume: Some("session-123".to_owned()),
             permission_mode: Some("plan".to_owned()),
             model: None,
