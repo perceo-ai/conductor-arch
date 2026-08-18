@@ -85,6 +85,14 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
 - Tasks: CRUD with status, human `owner`, `owner_session_id`, linked
   sessions, intended areas, blocked reason, review notes.
 - Summaries: workspace/session/task/review/handoff scopes, drafting.
+- Context briefing: `get_context_briefing` returns the current workspace,
+  current-chat, task, and next-action context for AI clients without exposing
+  UI state.
+- Summary maintenance: `refresh_summary` updates workspace/session/task
+  summaries from local evidence and is used by the desktop Summary tab plus
+  MCP clients; changed summaries broadcast `summary_updated` events.
+- Chat task sync: `sync_chat_tasks` creates native workspace tasks from clear
+  action items in chat and deduplicates by normalized title.
 - Context attachments: branch-local notes/files/pins (`archivum` source is
   reserved for the future integration).
 - Diffs and provenance: branch diff, per-session contributions,

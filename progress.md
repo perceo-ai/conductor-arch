@@ -755,3 +755,22 @@ Not yet manually smoke-verified in this branch:
 - Live queue/immediate/interrupt/model/effort/permission-mode behavior.
 - Live permission/question/plan interaction cards in Electron desktop.
 - Archcar restart with a pending Claude interaction.
+
+## Context Management (added 2026-08-18)
+
+- Summary is the first right-panel tab before Files, and it contains the
+  workspace summary, current-chat context, tasks, todos, and agent
+  contributions in one combined surface.
+- archcar continuously refreshes workspace and current-chat summaries after
+  turns, message updates, task changes, and background-task progress, with an
+  evidence-hash cursor (`summary_refresh_state`) so unchanged evidence skips
+  rewrites. Changed summaries broadcast `summary_updated`; task mutations
+  broadcast `task_updated`.
+- MCP and CLI expose `refresh_summary`, `get_context_briefing`, and
+  `sync_chat_tasks` so AI context management uses the same primitives as the
+  human UI. Verified with core/CLI/renderer tests, a live socket smoke
+  (create-task → `task_updated` + `summary_updated` events), CLI smokes for
+  refresh/briefing/sync, an MCP stdio tools/list + tools/call smoke, and an
+  Electron boot smoke against an isolated daemon. Check-run completion has no
+  dedicated server hook; check status flows into summaries on the next
+  turn/task/background event instead.

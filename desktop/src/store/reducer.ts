@@ -8,6 +8,8 @@ import { send } from "@/bridge/client";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
 import { interactionsStore } from "./interactions";
+import { workspacesStore } from "./workspaces";
+import { intelStore } from "./intel";
 
 async function refreshTerminalScreen(sessionId: number) {
   try {
@@ -168,6 +170,18 @@ export function applyEvent(event: ArchcarEvent) {
           // Notifications are best-effort; the dashboard strip still updates.
         }
       }
+      break;
+    }
+
+    case "summary_updated": {
+      intelStore.refreshWorkspaceIntel((event as { workspace: string }).workspace);
+      break;
+    }
+
+    case "task_updated": {
+      // Task counts feed the sidebar rows and the Summary tab badge.
+      intelStore.refreshWorkspaceIntel((event as { workspace: string }).workspace);
+      void workspacesStore.refresh().catch(() => {});
       break;
     }
 
