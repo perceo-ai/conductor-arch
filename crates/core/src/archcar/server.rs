@@ -323,12 +323,22 @@ fn tick_background_tasks(
     // Every advance is broadcast so clients can refresh their strips and
     // notify the user when a task reaches ready/failed.
     if !advanced.is_empty() {
-        let mut guard = state.lock().unwrap();
-        for task in &advanced {
-            broadcast(
-                &mut guard,
-                ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
-            );
+        {
+            let mut guard = state.lock().unwrap();
+            for task in &advanced {
+                broadcast(
+                    &mut guard,
+                    ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
+                );
+            }
+        }
+        // Background progress is summary evidence too.
+        let workspaces: std::collections::BTreeSet<String> = advanced
+            .iter()
+            .filter_map(|task| task.workspace_name.clone())
+            .collect();
+        for workspace in workspaces {
+            refresh_workspace_context_after_change(state, &workspace, None);
         }
     }
     Ok(advanced)
@@ -2249,32 +2259,63 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             title,
             body,
             intended_areas,
-        } => with_store(state, |store| {
-            let task = store.create_task(&workspace, &title, &body, &intended_areas)?;
-            Ok(ArchcarResponse::TaskSaved { task })
-        }),
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let task = store.create_task(&workspace, &title, &body, &intended_areas)?;
+                Ok(ArchcarResponse::TaskSaved { task })
+            });
+            if let ArchcarResponse::TaskSaved { task } = &response {
+                broadcast_task_updated(state, &workspace_name, task.id, &task.status);
+                refresh_workspace_context_after_change(state, &workspace_name, None);
+            }
+            response
+        }
         // Every id below is a global primary key, so the store resolves it
         // against the workspace the request named.
         ArchcarRequest::UpdateTask {
             workspace,
             task_id,
             update,
-        } => with_store(state, |store| {
-            let task = store.update_task(&workspace, task_id, update)?;
-            Ok(ArchcarResponse::TaskSaved { task })
-        }),
-        ArchcarRequest::DeleteTask { workspace, task_id } => with_store(state, |store| {
-            store.delete_task(&workspace, task_id)?;
-            Ok(ArchcarResponse::TaskDeleted { task_id })
-        }),
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let task = store.update_task(&workspace, task_id, update)?;
+                Ok(ArchcarResponse::TaskSaved { task })
+            });
+            if let ArchcarResponse::TaskSaved { task } = &response {
+                broadcast_task_updated(state, &workspace_name, task.id, &task.status);
+                refresh_workspace_context_after_change(state, &workspace_name, None);
+            }
+            response
+        }
+        ArchcarRequest::DeleteTask { workspace, task_id } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                store.delete_task(&workspace, task_id)?;
+                Ok(ArchcarResponse::TaskDeleted { task_id })
+            });
+            if matches!(response, ArchcarResponse::TaskDeleted { .. }) {
+                broadcast_task_updated(state, &workspace_name, task_id, "deleted");
+                refresh_workspace_context_after_change(state, &workspace_name, None);
+            }
+            response
+        }
         ArchcarRequest::AssignSessionTask {
             workspace,
             session_id,
             task_id,
-        } => with_store(state, |store| {
-            store.assign_session_task(&workspace, session_id, task_id)?;
-            Ok(ArchcarResponse::Ack)
-        }),
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                store.assign_session_task(&workspace, session_id, task_id)?;
+                Ok(ArchcarResponse::Ack)
+            });
+            if matches!(response, ArchcarResponse::Ack) {
+                refresh_workspace_context_after_change(state, &workspace_name, Some(session_id));
+            }
+            response
+        }
         ArchcarRequest::SetSessionIntendedAreas {
             workspace,
             session_id,
@@ -2325,6 +2366,31 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 workspace,
                 body_markdown,
             })
+        }),
+        ArchcarRequest::RefreshSummary {
+            workspace,
+            scope_type,
+            scope_id,
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let scope = summary_refresh_scope(workspace.clone(), &scope_type, scope_id)?;
+                let result = store.refresh_summary(scope)?;
+                Ok(ArchcarResponse::SummaryRefreshed { workspace, result })
+            });
+            if let ArchcarResponse::SummaryRefreshed { result, .. } = &response {
+                if result.changed {
+                    broadcast_summary_updated(state, &workspace_name, &result.summary);
+                }
+            }
+            response
+        }
+        ArchcarRequest::GetContextBriefing {
+            workspace,
+            thread_id,
+        } => with_store(state, |store| {
+            let briefing = store.context_briefing(&workspace, thread_id)?;
+            Ok(ArchcarResponse::ContextBriefing { briefing })
         }),
         ArchcarRequest::ListContextAttachments { workspace } => with_store(state, |store| {
             let attachments = store.list_context_attachments(&workspace)?;
@@ -2622,6 +2688,109 @@ fn abort_background_agents(state: &Arc<Mutex<ServerState>>, thread_ids: &[i64]) 
     }
 }
 
+/// Map a wire scope to a refresh scope. `session` and `current_chat` are
+/// aliases so MCP clients can name the concept they mean.
+fn summary_refresh_scope(
+    workspace: String,
+    scope_type: &str,
+    scope_id: Option<i64>,
+) -> Result<crate::workspace_intel::SummaryRefreshScope> {
+    use crate::workspace_intel::SummaryRefreshScope;
+    match scope_type {
+        "workspace" => Ok(SummaryRefreshScope::Workspace { workspace }),
+        "session" | "current_chat" => Ok(SummaryRefreshScope::CurrentChat {
+            workspace,
+            thread_id: scope_id.context("session summaries require scope_id")?,
+        }),
+        "task" => Ok(SummaryRefreshScope::Task {
+            workspace,
+            task_id: scope_id.context("task summaries require scope_id")?,
+        }),
+        other => anyhow::bail!("unsupported summary refresh scope `{other}`"),
+    }
+}
+
+fn broadcast_summary_updated(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    summary: &crate::workspace_intel::Summary,
+) {
+    let mut guard = state.lock().unwrap();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::SummaryUpdated {
+            workspace: workspace.to_owned(),
+            summary_id: summary.id,
+            scope_type: summary.scope_type.clone(),
+            scope_id: summary.scope_id,
+        },
+    );
+}
+
+fn broadcast_task_updated(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    task_id: i64,
+    status: &str,
+) {
+    let mut guard = state.lock().unwrap();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::TaskUpdated {
+            workspace: workspace.to_owned(),
+            task_id,
+            status: status.to_owned(),
+        },
+    );
+}
+
+/// Continuous summary maintenance: refresh the workspace summary (and, when a
+/// thread is known, that current chat's summary) after evidence-changing
+/// daemon events. Best effort — a refresh failure logs a warning and never
+/// fails the action that triggered it.
+fn refresh_workspace_context_after_change(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    thread_id: Option<i64>,
+) {
+    use crate::workspace_intel::SummaryRefreshScope;
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(error = %err, workspace, "summary refresh skipped: store unavailable");
+            return;
+        }
+    };
+    let mut scopes = vec![SummaryRefreshScope::Workspace {
+        workspace: workspace.to_owned(),
+    }];
+    if let Some(thread_id) = thread_id {
+        scopes.push(SummaryRefreshScope::CurrentChat {
+            workspace: workspace.to_owned(),
+            thread_id,
+        });
+    }
+    for scope in scopes {
+        match store.refresh_summary(scope) {
+            Ok(result) if result.changed => {
+                broadcast_summary_updated(state, workspace, &result.summary);
+            }
+            Ok(_) => {}
+            Err(err) => warn!(error = %err, workspace, "summary refresh failed"),
+        }
+    }
+}
+
+/// Resolve a chat thread to its workspace name, for event-driven refreshes.
+fn workspace_name_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64) -> Option<String> {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = WorkspaceStore::open_app(&db_path).ok()?;
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.get_workspace_record(thread.workspace_id).ok()?;
+    Some(workspace.name)
+}
+
 /// Open the app store and map any failure to a protocol error response. Keeps
 /// the workspace-intelligence handlers to their happy path.
 fn with_store(
@@ -2846,6 +3015,13 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         | ArchcarEvent::TurnCompleted { thread_id, .. } => Some(*thread_id),
         _ => None,
     };
+    // Continuous context maintenance: turn boundaries and message updates are
+    // the evidence streams behind workspace/current-chat summaries.
+    let refresh_thread_id = match &event {
+        ArchcarEvent::TurnCompleted { thread_id, .. }
+        | ArchcarEvent::SessionMessagesUpdated { thread_id } => Some(*thread_id),
+        _ => None,
+    };
     {
         let mut guard = state.lock().unwrap();
         if let ArchcarEvent::SessionExited { session_id, .. } = &event {
@@ -2855,6 +3031,11 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
     }
     if let Some(thread_id) = drain_thread_id {
         drain_queued_input_for_thread(state, thread_id);
+    }
+    if let Some(thread_id) = refresh_thread_id {
+        if let Some(workspace) = workspace_name_for_thread(state, thread_id) {
+            refresh_workspace_context_after_change(state, &workspace, Some(thread_id));
+        }
     }
 }
 
@@ -3060,6 +3241,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListTasks { .. }
             | ArchcarRequest::ListSummaries { .. }
             | ArchcarRequest::DraftSummary { .. }
+            | ArchcarRequest::GetContextBriefing { .. }
             | ArchcarRequest::ListContextAttachments { .. }
             | ArchcarRequest::ListSessionContributions { .. }
             | ArchcarRequest::ListSessionOverlaps { .. }
@@ -6411,6 +6593,50 @@ default = true
             matches!(saved, ArchcarResponse::SummarySaved { .. }),
             "save_summary got {saved:?}"
         );
+
+        let refreshed = dispatch_request(
+            ArchcarRequest::RefreshSummary {
+                workspace: "berlin".to_owned(),
+                scope_type: "workspace".to_owned(),
+                scope_id: None,
+            },
+            &state,
+        );
+        let ArchcarResponse::SummaryRefreshed { result, .. } = refreshed else {
+            panic!("refresh_summary got {refreshed:?}");
+        };
+        assert_eq!(result.summary.scope_type, "workspace");
+        assert_eq!(result.state.source, "auto");
+        assert!(!result.state.evidence_hash.is_empty());
+
+        // Session-scoped refresh without a scope_id is refused, not guessed.
+        let refused = dispatch_request(
+            ArchcarRequest::RefreshSummary {
+                workspace: "berlin".to_owned(),
+                scope_type: "session".to_owned(),
+                scope_id: None,
+            },
+            &state,
+        );
+        assert!(
+            matches!(refused, ArchcarResponse::Error { ref message } if message.contains("scope_id")),
+            "refresh_summary without scope_id got {refused:?}"
+        );
+
+        let briefed = dispatch_request(
+            ArchcarRequest::GetContextBriefing {
+                workspace: "berlin".to_owned(),
+                thread_id: None,
+            },
+            &state,
+        );
+        let ArchcarResponse::ContextBriefing { briefing } = briefed else {
+            panic!("get_context_briefing got {briefed:?}");
+        };
+        assert!(briefing.body_markdown.contains("## Workspace"));
+        assert!(briefing.body_markdown.contains("## Tasks"));
+        assert!(briefing.body_markdown.contains("Port the right panel"));
+        assert_eq!(briefing.task_ids, vec![task.id]);
 
         let attached = dispatch_request(
             ArchcarRequest::AddContextAttachment {

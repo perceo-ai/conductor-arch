@@ -14,8 +14,8 @@ use crate::workspace::{
     SessionHarnessOptions, SessionKind, Todo,
 };
 use crate::workspace_intel::{
-    ContextAttachment, DiffContribution, SessionContribution, SessionOverlap, SessionRunRecord,
-    Summary, Task, TaskUpdate,
+    ContextAttachment, ContextBriefing, DiffContribution, SessionContribution, SessionOverlap,
+    SessionRunRecord, Summary, SummaryRefreshResult, Task, TaskUpdate,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -645,6 +645,21 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<i64>,
     },
+    /// Refresh and store one continuously maintained summary. `scope_type` is
+    /// `workspace`, `session`/`current_chat`, or `task`; the non-workspace
+    /// scopes require `scope_id`.
+    RefreshSummary {
+        workspace: String,
+        scope_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_id: Option<i64>,
+    },
+    /// Read the combined workspace/current-chat/tasks/next-actions briefing.
+    GetContextBriefing {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+    },
     ListContextAttachments {
         workspace: String,
     },
@@ -1005,6 +1020,13 @@ pub enum ArchcarResponse {
     SummaryDraft {
         workspace: String,
         body_markdown: String,
+    },
+    SummaryRefreshed {
+        workspace: String,
+        result: SummaryRefreshResult,
+    },
+    ContextBriefing {
+        briefing: ContextBriefing,
     },
     ContextAttachments {
         workspace: String,
@@ -1822,6 +1844,25 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ),
+        ArchcarRequest::RefreshSummary {
+            workspace,
+            scope_type,
+            scope_id,
+        } => format!(
+            "refresh_summary workspace={workspace} scope={scope_type} scope_id={}",
+            scope_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        ),
+        ArchcarRequest::GetContextBriefing {
+            workspace,
+            thread_id,
+        } => format!(
+            "get_context_briefing workspace={workspace} thread={}",
+            thread_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        ),
         ArchcarRequest::ListContextAttachments { workspace } => {
             format!("list_context_attachments workspace={workspace}")
         }
@@ -2171,6 +2212,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "summary_draft workspace={workspace} chars={}",
             body_markdown.chars().count()
         ),
+        ArchcarResponse::SummaryRefreshed { workspace, result } => format!(
+            "summary_refreshed workspace={workspace} scope={} scope_id={} changed={}",
+            result.summary.scope_type, result.summary.scope_id, result.changed
+        ),
+        ArchcarResponse::ContextBriefing { briefing } => format!(
+            "context_briefing workspace={} chars={}",
+            briefing.workspace,
+            briefing.body_markdown.chars().count()
+        ),
         ArchcarResponse::ContextAttachments {
             workspace,
             attachments,
@@ -2296,6 +2346,19 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             "background_task_updated id={} status={}",
             task.id, task.status
         ),
+        ArchcarEvent::SummaryUpdated {
+            workspace,
+            summary_id,
+            scope_type,
+            scope_id,
+        } => format!(
+            "summary_updated workspace={workspace} scope={scope_type} scope_id={scope_id} summary={summary_id}"
+        ),
+        ArchcarEvent::TaskUpdated {
+            workspace,
+            task_id,
+            status,
+        } => format!("task_updated workspace={workspace} task={task_id} status={status}"),
     }
 }
 
@@ -2374,6 +2437,20 @@ pub enum ArchcarEvent {
     /// state), so clients can update their strips and notify the user.
     BackgroundTaskUpdated {
         task: BackgroundTask,
+    },
+    /// A continuously maintained summary was rewritten from new evidence.
+    /// Carries ids only; clients re-read the body through the store.
+    SummaryUpdated {
+        workspace: String,
+        summary_id: i64,
+        scope_type: String,
+        scope_id: i64,
+    },
+    /// A native workspace task changed, so context surfaces can refresh.
+    TaskUpdated {
+        workspace: String,
+        task_id: i64,
+        status: String,
     },
 }
 
@@ -3856,6 +3933,71 @@ mod tests {
         assert_eq!(
             archcar_event_summary(&event),
             "session_ready session_id=11 thread_id=5"
+        );
+    }
+
+    #[test]
+    fn context_management_protocol_round_trips_without_leaking_body() {
+        let req = ArchcarRequest::RefreshSummary {
+            workspace: "berlin".to_owned(),
+            scope_type: "workspace".to_owned(),
+            scope_id: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, req);
+        assert_eq!(
+            archcar_request_summary(&req),
+            "refresh_summary workspace=berlin scope=workspace scope_id=-"
+        );
+
+        let briefing_req = ArchcarRequest::GetContextBriefing {
+            workspace: "berlin".to_owned(),
+            thread_id: Some(7),
+        };
+        assert_eq!(
+            archcar_request_summary(&briefing_req),
+            "get_context_briefing workspace=berlin thread=7"
+        );
+
+        // Response summaries stay compact: no markdown bodies in logs.
+        let response = ArchcarResponse::ContextBriefing {
+            briefing: ContextBriefing {
+                workspace: "berlin".to_owned(),
+                thread_id: Some(7),
+                body_markdown: "## Workspace\n\nsecret details".to_owned(),
+                summary_ids: vec![1],
+                task_ids: vec![2],
+            },
+        };
+        let summary = archcar_response_summary(&response);
+        assert_eq!(summary, "context_briefing workspace=berlin chars=28");
+        assert!(!summary.contains("secret"));
+    }
+
+    #[test]
+    fn summary_updated_event_summary_is_compact() {
+        let event = ArchcarEvent::SummaryUpdated {
+            workspace: "berlin".to_owned(),
+            summary_id: 9,
+            scope_type: "session".to_owned(),
+            scope_id: 7,
+        };
+
+        assert_eq!(
+            archcar_event_summary(&event),
+            "summary_updated workspace=berlin scope=session scope_id=7 summary=9"
+        );
+
+        let task_event = ArchcarEvent::TaskUpdated {
+            workspace: "berlin".to_owned(),
+            task_id: 3,
+            status: "in_progress".to_owned(),
+        };
+        assert_eq!(
+            archcar_event_summary(&task_event),
+            "task_updated workspace=berlin task=3 status=in_progress"
         );
     }
 
