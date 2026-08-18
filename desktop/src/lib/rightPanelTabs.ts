@@ -1,4 +1,5 @@
 export const PRODUCT_RIGHT_PANEL_TABS = [
+  { id: "summary", label: "Summary" },
   { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
   { id: "checks", label: "Checks" },
@@ -11,9 +12,9 @@ const LABELS = new Map<string, string>(
 );
 
 export function normalizeRightPanelTab(tab: string): RightPanelTab {
-  return LABELS.has(tab) ? (tab as RightPanelTab) : "changes";
+  return LABELS.has(tab) ? (tab as RightPanelTab) : "summary";
 }
 
 export function rightPanelTabLabel(tab: string): string {
-  return LABELS.get(tab) ?? "Changes";
+  return LABELS.get(tab) ?? "Summary";
 }

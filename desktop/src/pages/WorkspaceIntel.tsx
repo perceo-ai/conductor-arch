@@ -1,6 +1,6 @@
 import { For, Show, createResource, createSignal } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
-import { actions, workspacesStore } from "@/store";
+import { actions, nav, workspacesStore } from "@/store";
 import { TASK_STATUSES } from "@/bridge/protocol";
 import type {
   ArchcarChecksSummary,
@@ -17,19 +17,19 @@ import type {
 } from "@/bridge/protocol";
 import { TodosPanel, TimelinePanel } from "./WorkspaceTabs";
 
-// Right-panel surfaces for the workspace-intelligence objects added in
-// crates/core/src/workspace_intel.rs: Tasks (who is doing what in this branch),
-// Summary (branch-local continuity + per-agent diff contributions), Context
-// (branch-local pinned notes/files, and Archivum context when connected), and
-// PR (the review handoff boundary).
+// The combined Summary tab: one human context surface for the workspace-
+// intelligence objects in crates/core/src/workspace_intel.rs. It holds the
+// continuously maintained workspace summary, the current chat's context,
+// native tasks/todos, and per-agent contributions. Context/PR panels remain
+// for their data models but are not registered as right-panel tabs.
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// ---- Tasks ----------------------------------------------------------------
+// ---- Tasks (a section inside the Summary tab, not a peer tab) --------------
 
-export function TasksPanel(props: { workspace: string }) {
+function TasksSection(props: { workspace: string }) {
   const [tasks, { refetch }] = createResource(
     () => props.workspace,
     async (ws): Promise<Task[]> => {
@@ -135,7 +135,7 @@ export function TasksPanel(props: { workspace: string }) {
   }
 
   return (
-    <div class="ws-tab-panel command-panel">
+    <div class="ws-summary-tasks">
       <div class="section-title">Tasks</div>
       <div class="action-row">
         <input
@@ -279,6 +279,25 @@ export function SummaryPanel(props: { workspace: string }) {
   // The editor shows unsaved edits when present, otherwise the stored summary.
   const text = () => body() ?? stored()?.body_markdown ?? "";
 
+  async function refresh() {
+    setFeedback("Refreshing…");
+    try {
+      const res = await send({
+        type: "refresh_summary",
+        workspace: props.workspace,
+        scope_type: "workspace",
+      });
+      if (res.type === "summary_refreshed") {
+        setFeedback(res.result.changed ? "Summary refreshed." : "Summary already up to date.");
+        await refetch();
+      } else if (res.type === "error") {
+        setFeedback(res.message);
+      }
+    } catch (err) {
+      setFeedback(`Refresh failed: ${errorText(err)}`);
+    }
+  }
+
   async function draft(sessionId?: number) {
     setFeedback("Drafting…");
     try {
@@ -310,7 +329,7 @@ export function SummaryPanel(props: { workspace: string }) {
         workspace: props.workspace,
         scope_type: "workspace",
         body_markdown: value,
-        source_refs: [],
+        source_refs: ["human:desktop"],
       });
       if (res.type === "error") setFeedback(res.message);
       else {
@@ -375,10 +394,13 @@ export function SummaryPanel(props: { workspace: string }) {
     <div class="ws-tab-panel command-panel">
       <div class="section-title">Summary</div>
       <div class="action-row">
-        <button class="secondary-action" onClick={() => void draft()}>
-          Draft from workspace
+        <button class="suggested-action" onClick={() => void refresh()}>
+          Refresh
         </button>
-        <button class="suggested-action" onClick={() => void save()}>
+        <button class="secondary-action" onClick={() => void draft()}>
+          Draft into editor
+        </button>
+        <button class="secondary-action" onClick={() => void save()}>
           Save
         </button>
         <Show when={body() != null}>
@@ -391,7 +413,19 @@ export function SummaryPanel(props: { workspace: string }) {
         <div class="card-meta">{feedback()}</div>
       </Show>
       <Show when={stored()}>
-        {(summary) => <div class="card-meta">Stored summary updated {summary().updated_at}</div>}
+        {(summary) => (
+          <div class="card-meta">
+            {summary().source_refs.includes("human:desktop")
+              ? "Human-edited summary"
+              : "Auto-maintained summary"}{" "}
+            · updated {summary().updated_at}
+          </div>
+        )}
+      </Show>
+      <Show when={body() != null}>
+        <div class="card-meta">
+          Unsaved edits override the auto-maintained draft until saved or discarded.
+        </div>
       </Show>
       <textarea
         class="ws-summary-editor"
@@ -399,6 +433,8 @@ export function SummaryPanel(props: { workspace: string }) {
         value={text()}
         onInput={(e) => setBody(e.currentTarget.value)}
       />
+      <CurrentChatSection workspace={props.workspace} />
+      <TasksSection workspace={props.workspace} />
       <div class="detail-label">Agent contributions</div>
       <Show
         when={(contributions() ?? []).length > 0}
@@ -466,6 +502,58 @@ export function SummaryPanel(props: { workspace: string }) {
       </Show>
       <TimelinePanel workspace={props.workspace} />
     </div>
+  );
+}
+
+/** Pull the `## Current chat` section out of a context briefing body. */
+function extractCurrentChatSection(markdown: string): string | null {
+  const match = markdown.match(/## Current chat\n\n([\s\S]*?)(?=\n## |$)/);
+  const section = match?.[1]?.trim();
+  return section ? section : null;
+}
+
+/** Read-only view of the selected chat thread's maintained context. */
+function CurrentChatSection(props: { workspace: string }) {
+  const threadId = () => nav.selectedChatThread();
+  const [chatContext] = createResource(
+    () => {
+      const id = threadId();
+      return id != null ? `${props.workspace}:${id}` : null;
+    },
+    async (): Promise<string | null> => {
+      const id = threadId();
+      if (id == null) return null;
+      try {
+        const res = await send({
+          type: "get_context_briefing",
+          workspace: props.workspace,
+          thread_id: id,
+        });
+        if (res.type !== "context_briefing") return null;
+        return extractCurrentChatSection(res.briefing.body_markdown);
+      } catch {
+        return null;
+      }
+    },
+  );
+  return (
+    <>
+      <div class="detail-label">Current chat</div>
+      <Show
+        when={chatContext()}
+        fallback={
+          <div class="card-meta">
+            {threadId() == null
+              ? "Select a chat to see its maintained context here."
+              : chatContext.loading
+                ? "Loading…"
+                : "No maintained context for this chat yet — it appears after the next turn."}
+          </div>
+        }
+      >
+        {(context) => <pre class="ws-current-chat-context card-meta">{context()}</pre>}
+      </Show>
+    </>
   );
 }
 

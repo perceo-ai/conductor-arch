@@ -8,6 +8,7 @@ import { ChangesRows } from "./WorkspaceChanges";
 import TerminalDock from "./TerminalDock";
 import WorkspacePrBar from "./WorkspacePrBar";
 import { ChecksPanel, ReviewPromptButton } from "./WorkspaceTabs";
+import { SummaryPanel } from "./WorkspaceIntel";
 import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
@@ -98,6 +99,9 @@ function RightPanel(props: { workspace: string }) {
   const tabCount = (tab: RightPanelTab) => {
     const r = row();
     if (!r) return "";
+    if (tab === "summary" && (r.openTasks > 0 || r.blockedTasks > 0)) {
+      return r.blockedTasks > 0 ? String(r.blockedTasks) : String(r.openTasks);
+    }
     if (tab === "changes" && r.changedFiles > 0) return String(r.changedFiles);
     if (tab === "checks" && (r.activeSessions > 0 || r.runRunning)) {
       return r.runRunning ? "run" : String(r.activeSessions);
@@ -130,6 +134,9 @@ function RightPanel(props: { workspace: string }) {
         </div>
         <div class="ws-right-body">
           <Switch>
+            <Match when={nav.rightPanelTab() === "summary"}>
+              <SummaryPanel workspace={props.workspace} />
+            </Match>
             <Match when={nav.rightPanelTab() === "files"}>
               <WorkspaceFiles
                 workspace={props.workspace}

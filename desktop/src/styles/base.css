@@ -2941,6 +2941,25 @@ pre.ws-file-editor-highlight.hljs {
 .ws-contribution-files {
   word-break: break-all;
 }
+.ws-current-chat-context {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  background: var(--lc-surface-raised, #161616);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 220px;
+}
+.ws-summary-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+  padding-top: 8px;
+}
 .ws-pr-draft-toggle {
   display: inline-flex;
   align-items: center;

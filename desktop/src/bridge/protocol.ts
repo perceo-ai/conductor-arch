@@ -123,6 +123,8 @@ export type ArchcarRequest =
     }
   | { type: "delete_summary"; workspace: string; summary_id: number }
   | { type: "draft_summary"; workspace: string; session_id?: number }
+  | { type: "refresh_summary"; workspace: string; scope_type: SummaryRefreshScopeType; scope_id?: number }
+  | { type: "get_context_briefing"; workspace: string; thread_id?: number }
   | { type: "list_context_attachments"; workspace: string }
   | {
       type: "add_context_attachment";
@@ -521,6 +523,8 @@ export type ArchcarResponse =
   | { type: "summary_saved"; summary: Summary }
   | { type: "summary_deleted"; summary_id: number }
   | { type: "summary_draft"; workspace: string; body_markdown: string }
+  | { type: "summary_refreshed"; workspace: string; result: SummaryRefreshResult }
+  | { type: "context_briefing"; briefing: ContextBriefing }
   | { type: "context_attachments"; workspace: string; attachments: ContextAttachment[] }
   | { type: "context_attachment_added"; attachment: ContextAttachment }
   | { type: "context_attachment_removed"; attachment_id: number }
@@ -652,6 +656,37 @@ export interface Summary {
   updated_at: string;
 }
 
+/** Wire scopes accepted by `refresh_summary` (`current_chat` aliases `session`). */
+export type SummaryRefreshScopeType = "workspace" | "session" | "current_chat" | "task";
+
+/** Evidence cursor recorded by the last auto-refresh of one summary scope. */
+export interface SummaryRefreshState {
+  id: number;
+  workspace_id: number;
+  scope_type: string;
+  scope_id: number;
+  source: string;
+  evidence_hash: string;
+  latest_message_id?: number | null;
+  latest_provider_sequence?: number | null;
+  last_refreshed_at: string;
+}
+
+export interface SummaryRefreshResult {
+  summary: Summary;
+  state: SummaryRefreshState;
+  changed: boolean;
+}
+
+/** Combined workspace/current-chat/tasks/next-actions briefing. */
+export interface ContextBriefing {
+  workspace: string;
+  thread_id?: number | null;
+  body_markdown: string;
+  summary_ids: number[];
+  task_ids: number[];
+}
+
 export interface ContextAttachment {
   id: number;
   workspace_id: number;
@@ -729,6 +764,8 @@ export type ArchcarEvent =
   | { type: "provider_interaction_requested"; interaction: ProviderInteractionRecord }
   | { type: "provider_interaction_resolved"; interaction: ProviderInteractionRecord }
   | { type: "background_task_updated"; task: BackgroundTask }
+  | { type: "summary_updated"; workspace: string; summary_id: number; scope_type: string; scope_id: number }
+  | { type: "task_updated"; workspace: string; task_id: number; status: string }
   | { type: string; [k: string]: unknown };
 
 // Agent-driven interaction (permission / question / plan approval) surfaced to
