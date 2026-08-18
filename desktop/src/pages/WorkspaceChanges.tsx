@@ -1,7 +1,8 @@
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, createResource } from "solid-js";
 import { send } from "@/bridge/client";
 import type { DiffFileSummary, WorkspaceChangeScope } from "@/bridge/protocol";
 import Diff from "@/components/Diff";
+import Icon from "@/components/Icon";
 import { langFromPath } from "@/lib/highlight";
 import { openCommitInCenter } from "./openFileBridge";
 
@@ -9,8 +10,16 @@ import { openCommitInCenter } from "./openFileBridge";
 // The right panel shows the summary rows; the main Changes tab shows rows plus
 // the three-section unified diff. Both fetch on demand via createResource.
 
-function countsText(f: DiffFileSummary): string {
-  return f.additions != null && f.deletions != null ? `+${f.additions} -${f.deletions}` : "binary";
+function Counts(props: { file: DiffFileSummary }) {
+  if (props.file.additions == null || props.file.deletions == null) {
+    return <span class="ws-file-summary-counts">binary</span>;
+  }
+  return (
+    <span class="ws-file-summary-counts">
+      <span class="ws-file-additions">+{props.file.additions}</span>
+      <span class="ws-file-deletions">-{props.file.deletions}</span>
+    </span>
+  );
 }
 
 function stateLabel(f: DiffFileSummary): string {
@@ -24,12 +33,12 @@ function stateLabel(f: DiffFileSummary): string {
 function ChangeRow(props: { file: DiffFileSummary; showState: boolean; onOpen?: (path: string) => void }) {
   return (
     <button class="ws-file-summary-row-content" onClick={() => props.onOpen?.(props.file.path)}>
-      <span class="ws-file-icon">·</span>
+      <Icon name="file-code" class="ws-file-icon" />
       <span class="ws-file-name">{props.file.path}</span>
       <Show when={props.showState}>
         <span class="ws-file-summary-state">{stateLabel(props.file)}</span>
       </Show>
-      <span class="ws-file-summary-counts">{countsText(props.file)}</span>
+      <Counts file={props.file} />
     </button>
   );
 }
@@ -38,10 +47,11 @@ export function ChangesRows(props: {
   workspace: string;
   defaultScope?: WorkspaceChangeScope;
   openFile?: (path: string) => void;
+  showCommits?: boolean;
 }) {
-  const [scope, setScope] = createSignal<WorkspaceChangeScope>(props.defaultScope ?? "uncommitted");
-  const [changes, { refetch }] = createResource(
-    () => [props.workspace, scope()] as const,
+  const scope = props.defaultScope ?? "uncommitted";
+  const [changes] = createResource(
+    () => [props.workspace, scope] as const,
     async ([ws, sc]) => {
       try {
         const res = await send({ type: "get_workspace_changes", workspace: ws, scope: sc });
@@ -51,7 +61,7 @@ export function ChangesRows(props: {
       }
     },
   );
-  const [commits, { refetch: refetchCommits }] = createResource(
+  const [commits] = createResource(
     () => props.workspace,
     async (ws): Promise<string> => {
       try {
@@ -62,66 +72,11 @@ export function ChangesRows(props: {
       }
     },
   );
-  const [commitMsg, setCommitMsg] = createSignal("");
-  const [commitFeedback, setCommitFeedback] = createSignal("");
-  async function suggestMessage() {
-    try {
-      const res = await send({ type: "get_commit_message_draft", workspace: props.workspace });
-      if (res.type === "commit_message_draft" && res.message.trim()) {
-        setCommitMsg(res.message.trim());
-        setCommitFeedback("");
-      }
-    } catch {
-      // non-fatal
-    }
-  }
-  async function commit() {
-    const message = commitMsg().trim();
-    if (!message) {
-      setCommitFeedback("Enter a commit message.");
-      return;
-    }
-    setCommitFeedback("Committing…");
-    try {
-      const res = await send({
-        type: "commit_workspace_changes",
-        workspace: props.workspace,
-        message,
-        stage_all: true,
-      });
-      if (res.type === "workspace_committed") {
-        setCommitMsg("");
-        setCommitFeedback("Committed.");
-        await Promise.all([refetch(), refetchCommits()]);
-      } else if (res.type === "error") {
-        setCommitFeedback(res.message);
-      } else {
-        setCommitFeedback("Commit failed.");
-      }
-    } catch (err) {
-      setCommitFeedback(`Commit failed: ${(err as Error).message}`);
-    }
-  }
   return (
     <div class="ws-file-summary-panel">
       <div class="ws-changes-header">
         <span class="ws-changes-title">Changes</span>
-        <div class="ws-changes-scope">
-          <button
-            class="nav-button"
-            classList={{ "nav-button-active": scope() === "uncommitted" }}
-            onClick={() => setScope("uncommitted")}
-          >
-            Uncommitted
-          </button>
-          <button
-            class="nav-button"
-            classList={{ "nav-button-active": scope() === "all" }}
-            onClick={() => setScope("all")}
-          >
-            All
-          </button>
-        </div>
+        <span class="ws-panel-kicker">{scope === "all" ? "All" : "Uncommitted"}</span>
       </div>
       <Show
         when={(changes() ?? []).length > 0}
@@ -129,33 +84,14 @@ export function ChangesRows(props: {
       >
         <For each={changes()}>
           {(file) => (
-            <ChangeRow file={file} showState={scope() === "uncommitted"} onOpen={props.openFile} />
+            <ChangeRow file={file} showState={scope === "uncommitted"} onOpen={props.openFile} />
           )}
         </For>
       </Show>
-      <Show when={(changes() ?? []).length > 0}>
-        <div class="ws-commit-box">
-          <input
-            class="ws-text-input"
-            placeholder="Commit message…"
-            value={commitMsg()}
-            onInput={(e) => setCommitMsg(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Enter" && void commit()}
-          />
-          <button class="secondary-action" title="Draft a message from changed files" onClick={() => void suggestMessage()}>
-            Suggest
-          </button>
-          <button class="suggested-action" onClick={() => void commit()}>
-            Stage all &amp; commit
-          </button>
-        </div>
-        <Show when={commitFeedback()}><div class="card-meta">{commitFeedback()}</div></Show>
-      </Show>
-      <Show when={(commits() ?? "").trim()}>
+      <Show when={props.showCommits && (commits() ?? "").trim()}>
         <div class="ws-commits-section">
           <div class="ws-commits-head">
             <span class="section-title">Recent commits</span>
-            <button class="ui-button-icon" title="Refresh" onClick={() => void refetchCommits()}>⟳</button>
           </div>
           <For each={(commits() ?? "").split("\n").filter((l) => l.trim())}>
             {(line) => {
@@ -207,7 +143,7 @@ export default function ChangesTab(props: { workspace: string }) {
   // right-panel ChangesRows keeps its own default independently.
   return (
     <div class="ws-changes-tab">
-      <ChangesRows workspace={props.workspace} defaultScope="all" />
+      <ChangesRows workspace={props.workspace} defaultScope="all" showCommits />
       <DiffView workspace={props.workspace} />
     </div>
   );

@@ -12,11 +12,14 @@ export type WorkspaceStatusKind =
 
 export interface WorkspaceStatusInput {
   status?: string; // "active" | "archived" | …
+  branch?: string;
   runRunning?: boolean;
   activeSessions?: number;
   prNumber?: number;
   prState?: string;
   changedFiles?: number;
+  additions?: number;
+  deletions?: number;
   openTodos?: number;
   openTasks?: number;
   blockedTasks?: number;
@@ -68,21 +71,23 @@ export function dashboardTriageBadges(w: WorkspaceStatusInput): DashboardTriageB
   const activeAgents = w.activeSessions ?? 0;
   const changedFiles = w.changedFiles ?? 0;
   const openTodos = w.openTodos ?? 0;
-  const badges: DashboardTriageBadge[] = [
-    {
+  const badges: DashboardTriageBadge[] = [];
+
+  if (activeAgents > 0) {
+    badges.push({
       tone: "agent",
-      label: activeAgents > 0 ? plural(activeAgents, "agent") : "No agents",
-      title:
-        activeAgents > 0
-          ? `${plural(activeAgents, "active agent session")}`
-          : "No active agent sessions",
-    },
-    {
+      label: plural(activeAgents, "agent"),
+      title: `${plural(activeAgents, "active agent session")}`,
+    });
+  }
+
+  if (w.runRunning) {
+    badges.push({
       tone: "run",
-      label: w.runRunning ? "Run live" : "Run idle",
-      title: w.runRunning ? "Run script is running" : "No run script is running",
-    },
-  ];
+      label: "Run live",
+      title: "Run script is running",
+    });
+  }
 
   const openTasks = w.openTasks ?? 0;
   const blockedTasks = w.blockedTasks ?? 0;
@@ -108,18 +113,21 @@ export function dashboardTriageBadges(w: WorkspaceStatusInput): DashboardTriageB
     });
   }
 
-  badges.push(
-    {
+  if (changedFiles > 0) {
+    badges.push({
       tone: "changes",
-      label: changedFiles > 0 ? plural(changedFiles, "file") : "Clean",
-      title: changedFiles > 0 ? plural(changedFiles, "changed file") : "No changed files",
-    },
-    {
+      label: plural(changedFiles, "file"),
+      title: plural(changedFiles, "changed file"),
+    });
+  }
+
+  if (openTodos > 0) {
+    badges.push({
       tone: "todo",
-      label: openTodos > 0 ? plural(openTodos, "todo", "todos") : "No todos",
-      title: openTodos > 0 ? plural(openTodos, "open todo", "open todos") : "No open todos",
-    },
-  );
+      label: plural(openTodos, "todo", "todos"),
+      title: plural(openTodos, "open todo", "open todos"),
+    });
+  }
 
   return badges;
 }

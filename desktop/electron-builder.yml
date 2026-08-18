@@ -24,6 +24,10 @@ extraResources:
     to: bin/archcar
   - from: ../target/release/archductor
     to: bin/archductor
+  - from: build/icon.png
+    to: icon.png
+  - from: build/icon.ico
+    to: icon.ico
 
 linux:
   target:
@@ -61,7 +65,7 @@ mac:
   target:
     - dmg
   category: public.app-category.developer-tools
-  icon: build/icon.png
+  icon: build/icon.icns
 
 win:
   target:
@@ -73,6 +77,10 @@ win:
       to: bin/archcar.exe
     - from: ../target/release/archductor.exe
       to: bin/archductor.exe
+    - from: build/icon.png
+      to: icon.png
+    - from: build/icon.ico
+      to: icon.ico
 
 nsis:
   oneClick: false

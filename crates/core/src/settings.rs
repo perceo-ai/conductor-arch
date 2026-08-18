@@ -53,6 +53,8 @@ pub struct PromptSettings {
     pub resolve_merge_conflicts: Option<String>,
     pub rename_branch: Option<String>,
     pub commit_generation: Option<String>,
+    pub push_branch: Option<String>,
+    pub merge_pr: Option<String>,
     pub test_fixing: Option<String>,
     pub refactor_style: Option<String>,
     pub setup_script: Option<String>,
@@ -87,6 +89,10 @@ pub enum PromptKind {
     RenameBranch,
     /// Prompt used when asking an agent to produce a commit.
     CommitGeneration,
+    /// Prompt used when asking an agent to push a branch.
+    PushBranch,
+    /// Prompt used when asking an agent to merge a pull request.
+    MergePr,
     /// Prompt used when asking an agent to repair tests.
     TestFixing,
     /// Prompt used when asking an agent to perform style refactors.
@@ -112,6 +118,8 @@ impl PromptKind {
             Self::ResolveMergeConflicts => "resolve_merge_conflicts",
             Self::RenameBranch => "rename_branch",
             Self::CommitGeneration => "commit_generation",
+            Self::PushBranch => "push_branch",
+            Self::MergePr => "merge_pr",
             Self::TestFixing => "test_fixing",
             Self::RefactorStyle => "refactor_style",
             Self::SetupScript => "setup_script",
@@ -135,6 +143,8 @@ impl PromptSettings {
             PromptKind::ResolveMergeConflicts => self.resolve_merge_conflicts.as_deref(),
             PromptKind::RenameBranch => self.rename_branch.as_deref(),
             PromptKind::CommitGeneration => self.commit_generation.as_deref(),
+            PromptKind::PushBranch => self.push_branch.as_deref(),
+            PromptKind::MergePr => self.merge_pr.as_deref(),
             PromptKind::TestFixing => self.test_fixing.as_deref(),
             PromptKind::RefactorStyle => self.refactor_style.as_deref(),
             PromptKind::SetupScript => self.setup_script.as_deref(),
@@ -960,6 +970,12 @@ fn default_prompt_settings() -> PromptSettings {
         commit_generation: Some(
             "Write a conventional commit message that matches the actual diff.".to_owned(),
         ),
+        push_branch: Some(
+            "Commit any remaining appropriate changes, push the current branch, and report the remote/PR state.".to_owned(),
+        ),
+        merge_pr: Some(
+            "Verify merge readiness, resolve blockers if needed, then merge the pull request and report the result.".to_owned(),
+        ),
         test_fixing: Some(
             "Run the failing test first, fix the root cause, then rerun focused tests.".to_owned(),
         ),
@@ -1213,6 +1229,10 @@ struct RawPromptSettings {
     rename_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     commit_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_pr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_fixing: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2101,6 +2121,8 @@ impl RawPromptSettings {
                 .or(self.resolve_merge_conflicts),
             rename_branch: local.rename_branch.or(self.rename_branch),
             commit_generation: local.commit_generation.or(self.commit_generation),
+            push_branch: local.push_branch.or(self.push_branch),
+            merge_pr: local.merge_pr.or(self.merge_pr),
             test_fixing: local.test_fixing.or(self.test_fixing),
             refactor_style: local.refactor_style.or(self.refactor_style),
             setup_script: local.setup_script.or(self.setup_script),
@@ -2121,6 +2143,8 @@ impl RawPromptSettings {
             resolve_merge_conflicts: self.resolve_merge_conflicts,
             rename_branch: self.rename_branch,
             commit_generation: self.commit_generation,
+            push_branch: self.push_branch,
+            merge_pr: self.merge_pr,
             test_fixing: self.test_fixing,
             refactor_style: self.refactor_style,
             setup_script: self.setup_script,
@@ -2141,6 +2165,8 @@ impl RawPromptSettings {
             resolve_merge_conflicts: settings.resolve_merge_conflicts.clone(),
             rename_branch: settings.rename_branch.clone(),
             commit_generation: settings.commit_generation.clone(),
+            push_branch: settings.push_branch.clone(),
+            merge_pr: settings.merge_pr.clone(),
             test_fixing: settings.test_fixing.clone(),
             refactor_style: settings.refactor_style.clone(),
             setup_script: settings.setup_script.clone(),
@@ -3203,6 +3229,8 @@ mod tests {
             PromptKind::ResolveMergeConflicts,
             PromptKind::RenameBranch,
             PromptKind::CommitGeneration,
+            PromptKind::PushBranch,
+            PromptKind::MergePr,
             PromptKind::TestFixing,
             PromptKind::RefactorStyle,
             PromptKind::SetupScript,
@@ -4504,6 +4532,8 @@ LOCAL_ONLY = "1"
                 resolve_merge_conflicts: Some("Preserve user changes.".to_owned()),
                 rename_branch: Some("Use short feature names.".to_owned()),
                 commit_generation: None,
+                push_branch: None,
+                merge_pr: None,
                 test_fixing: None,
                 refactor_style: None,
                 setup_script: Some("Use the configured setup script.".to_owned()),

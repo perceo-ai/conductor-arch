@@ -2,10 +2,12 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
+import { parseGithubRepos } from "./githubRepos.js";
+import { resolveWindowIconPath } from "./icon.js";
 
 const execFileP = promisify(execFile);
 
@@ -42,6 +44,58 @@ function shellPath(): string {
 /** Spawn env with a PATH that can actually find gh/git. */
 function spawnEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: shellPath() };
+}
+
+function skipWorkspaceFilePath(relativePath: string): boolean {
+  return relativePath
+    .split(/[\\/]/)
+    .some((part) => part === ".git" || part === "target" || part === "node_modules");
+}
+
+function listFilesRecursive(root: string, current: string, files: string[], cap: number): void {
+  if (files.length >= cap) return;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(current, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (files.length >= cap) return;
+    if (entry.name === ".git" || entry.name === "target" || entry.name === "node_modules") continue;
+    if (entry.isSymbolicLink()) continue;
+    const full = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      listFilesRecursive(root, full, files, cap);
+      continue;
+    }
+    if (entry.isFile()) {
+      const relative = path.relative(root, full);
+      if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) files.push(relative);
+    }
+  }
+}
+
+async function listWorkspaceFilesLocal(rootPath: string, cap = 400): Promise<string[]> {
+  const root = path.resolve(rootPath);
+  if (cap <= 0) return [];
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { encoding: "utf8", env: spawnEnv(), timeout: 3000, maxBuffer: 1024 * 1024 },
+    );
+    return stdout
+      .split("\0")
+      .filter(Boolean)
+      .filter((file) => !skipWorkspaceFilePath(file))
+      .slice(0, cap)
+      .sort();
+  } catch {
+    const files: string[] = [];
+    listFilesRecursive(root, root, files, cap);
+    return files.sort().slice(0, cap);
+  }
 }
 
 function normalizeVersion(value: string): number[] {
@@ -126,12 +180,18 @@ function sendToRenderer(channel: string, ...args: unknown[]): void {
 const bridge = new ArchcarBridge();
 
 function createWindow() {
+  const icon = resolveWindowIconPath({
+    moduleDir: __dirname,
+    resourcesPath: process.resourcesPath,
+    platform: process.platform,
+  });
   win = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: "#191919",
+    ...(icon ? { icon } : {}),
     // Frameless so we can render the GTK-style custom window chrome on Linux/Win.
     // macOS keeps native traffic lights via hiddenInset.
     frame: process.platform === "darwin",
@@ -184,6 +244,16 @@ ipcMain.handle("archcar:request", async (_evt, payload: unknown) => {
     return { ok: true, value: res };
   } catch (err) {
     logLine("error", `request ${type} failed: ${(err as Error).message}`);
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle("fs:list-workspace-files", async (_evt, opts: { rootPath?: string; cap?: number }) => {
+  try {
+    if (!opts?.rootPath) return { ok: false, error: "missing workspace path" };
+    const files = await listWorkspaceFilesLocal(opts.rootPath, opts.cap ?? 400);
+    return { ok: true, files };
+  } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
 });
@@ -330,26 +400,7 @@ ipcMain.handle("gh:list-repos", async () => {
       ],
       { env: spawnEnv(), maxBuffer: 64 * 1024 * 1024 },
     );
-    const raw = JSON.parse(stdout) as {
-      full_name: string;
-      name: string;
-      ssh_url: string;
-      html_url: string;
-      pushed_at: string;
-      owner: { login: string; avatar_url: string };
-    }[];
-    // Most-recently-pushed first — matches how people think about "recent" repos.
-    raw.sort((a, b) => (b.pushed_at ?? "").localeCompare(a.pushed_at ?? ""));
-    const repos = raw.slice(0, 300).map((r) => ({
-      nameWithOwner: r.full_name,
-      name: r.name,
-      sshUrl: r.ssh_url,
-      url: r.html_url,
-      pushedAt: r.pushed_at,
-      owner: r.owner?.login ?? "",
-      avatarUrl: r.owner?.avatar_url ? `${r.owner.avatar_url}&s=64` : "",
-    }));
-    return { ok: true, repos };
+    return { ok: true, repos: parseGithubRepos(stdout) };
   } catch (err) {
     logLine("error", `gh repo list failed: ${(err as Error).message}`);
     return { ok: false, error: (err as Error).message };
@@ -446,6 +497,33 @@ ipcMain.handle("shell:open-external", async (_evt, target: string) => {
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+});
+
+const WORKSPACE_APP_COMMANDS: Record<string, string> = {
+  cursor: "cursor",
+  vscode: "code",
+};
+
+ipcMain.handle("shell:open-workspace-app", async (_evt, opts: { rootPath?: string; appId?: string }) => {
+  const rootPath = opts?.rootPath;
+  const appId = opts?.appId;
+  const command = appId ? WORKSPACE_APP_COMMANDS[appId] : undefined;
+  if (!rootPath || !fs.existsSync(rootPath) || !command) {
+    return { ok: false, error: "invalid workspace app target" };
+  }
+  return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+    const child = spawn(command, [rootPath], {
+      cwd: rootPath,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, PATH: shellPath() },
+    });
+    child.once("error", (err) => resolve({ ok: false, error: err.message }));
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ ok: true });
+    });
+  });
 });
 
 ipcMain.handle("app:check-for-updates", async () => {

@@ -5,7 +5,7 @@ use archductor_core::archcar::client::{
 use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
-    QueuedArchcarInput, WorkspaceChangeScope,
+    QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
 };
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -356,6 +356,12 @@ enum ArchcarCommand {
     /// Print GitHub PR readiness detail (gh pr view) for a workspace.
     PrReadiness {
         workspace: String,
+    },
+    /// Print the prompt-pack-resolved agent prompt for a workspace Git action.
+    GitActionPrompt {
+        workspace: String,
+        #[arg(long, value_enum)]
+        action: CliWorkspaceGitAction,
     },
     /// Show spotlight-testing status for a workspace.
     SpotlightStatus {
@@ -1105,6 +1111,14 @@ enum CliArchcarInputKind {
     RawTerminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliWorkspaceGitAction {
+    CreatePr,
+    PushBranch,
+    MergePr,
+    OpenPr,
+}
+
 #[cfg(windows)]
 fn main() -> Result<()> {
     thread::Builder::new()
@@ -1498,6 +1512,14 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetPullRequestReadiness { workspace })?,
                     );
+                }
+                ArchcarCommand::GitActionPrompt { workspace, action } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::GetWorkspaceGitActionPrompt {
+                            workspace,
+                            action: action.into(),
+                        },
+                    )?);
                 }
                 ArchcarCommand::SpotlightStatus { workspace } => {
                     print_archcar_response(
@@ -3355,6 +3377,16 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("title: {title}");
             println!("{body}");
         }
+        ArchcarResponse::WorkspaceGitActionPrompt {
+            workspace,
+            action,
+            prompt,
+            visible_input,
+        } => {
+            println!("workspace_git_action_prompt workspace={workspace} action={action:?}");
+            println!("visible_input: {visible_input}");
+            println!("{prompt}");
+        }
         ArchcarResponse::Tasks { workspace, tasks } => {
             println!("tasks workspace={workspace} count={}", tasks.len());
             for task in tasks {
@@ -4075,6 +4107,17 @@ impl From<CliArchcarInputKind> for ArchcarInputKind {
             CliArchcarInputKind::ReviewPrompt => Self::ReviewPrompt,
             CliArchcarInputKind::ControlCommand => Self::ControlCommand,
             CliArchcarInputKind::RawTerminal => Self::RawTerminal,
+        }
+    }
+}
+
+impl From<CliWorkspaceGitAction> for WorkspaceGitAction {
+    fn from(value: CliWorkspaceGitAction) -> Self {
+        match value {
+            CliWorkspaceGitAction::CreatePr => Self::CreatePr,
+            CliWorkspaceGitAction::PushBranch => Self::PushBranch,
+            CliWorkspaceGitAction::MergePr => Self::MergePr,
+            CliWorkspaceGitAction::OpenPr => Self::OpenPr,
         }
     }
 }

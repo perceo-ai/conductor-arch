@@ -11,6 +11,7 @@ import type { ArchcarWorkspaceSummary } from "@/bridge/protocol";
 export interface WorkspaceRow {
   id: number;
   name: string;
+  path: string;
   branch: string;
   baseRef: string;
   status: string; // "active" | "archived" | ...
@@ -40,6 +41,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
   return {
     id: s.id,
     name: s.name,
+    path: s.path,
     branch: s.branch,
     baseRef: s.base_ref,
     status: s.status,

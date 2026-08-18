@@ -5,6 +5,7 @@
 export type SessionKind = "shell" | "codex" | "claude";
 export type ArchcarInputKind = "user" | "review_prompt" | "control_command" | "raw_terminal";
 export type ArchcarInputDelivery = "auto" | "immediate";
+export type WorkspaceGitAction = "create_pr" | "push_branch" | "merge_pr" | "open_pr";
 
 // --- Requests (payload of the envelope sent to archcar) --------------------
 // Only the variants the UI currently issues are typed here; add as needed.
@@ -71,6 +72,7 @@ export type ArchcarRequest =
   | { type: "get_check_log"; workspace: string }
   | { type: "commit_workspace_changes"; workspace: string; message: string; stage_all?: boolean }
   | { type: "get_pull_request_readiness"; workspace: string }
+  | { type: "get_workspace_git_action_prompt"; workspace: string; action: WorkspaceGitAction }
   | { type: "get_spotlight_status"; workspace: string }
   | { type: "start_spotlight"; workspace: string }
   | { type: "stop_spotlight"; workspace: string }
@@ -259,6 +261,7 @@ export interface ArchcarWorkspaceSummary {
   id: number;
   name: string;
   repository_name: string;
+  path: string;
   branch: string;
   base_ref: string;
   status: string;
@@ -332,6 +335,7 @@ export interface ArchcarChecksSummary {
   changed_files: number;
   run_status?: string;
   check_status?: string;
+  check_exit_code?: number;
   session_status?: string;
   active_sessions: number;
   open_todos: number;
@@ -475,6 +479,13 @@ export type ArchcarResponse =
   | { type: "check_log"; workspace: string; log: string }
   | { type: "workspace_committed"; workspace: string; output: string }
   | { type: "pull_request_readiness"; workspace: string; text: string }
+  | {
+      type: "workspace_git_action_prompt";
+      workspace: string;
+      action: WorkspaceGitAction;
+      prompt: string;
+      visible_input: string;
+    }
   | { type: "spotlight_status"; workspace: string; active: boolean; status?: string; started_at?: string }
   | { type: "workspace_script_prompt"; workspace: string; kind: string; prompt: string }
   | { type: "workspace_run_scripts"; workspace: string; scripts: ArchcarRunScript[] }

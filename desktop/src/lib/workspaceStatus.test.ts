@@ -86,16 +86,12 @@ describe("dashboardTriageBadges", () => {
         openTodos: 0,
       }),
     ).toEqual([
-      { tone: "agent", label: "No agents", title: "No active agent sessions" },
-      { tone: "run", label: "Run idle", title: "No run script is running" },
       { tone: "task", label: "1 blocked", title: "1 blocked task of 3 open tasks" },
       { tone: "pr", label: "PR #12 open", title: "Pull request #12 is open" },
-      { tone: "changes", label: "Clean", title: "No changed files" },
-      { tone: "todo", label: "No todos", title: "No open todos" },
     ]);
   });
 
-  it("keeps clean and idle workspace badges compact", () => {
+  it("does not render no-op badges for clean idle workspaces", () => {
     expect(
       dashboardTriageBadges({
         activeSessions: 0,
@@ -103,11 +99,6 @@ describe("dashboardTriageBadges", () => {
         changedFiles: 0,
         openTodos: 0,
       }),
-    ).toEqual([
-      { tone: "agent", label: "No agents", title: "No active agent sessions" },
-      { tone: "run", label: "Run idle", title: "No run script is running" },
-      { tone: "changes", label: "Clean", title: "No changed files" },
-      { tone: "todo", label: "No todos", title: "No open todos" },
-    ]);
+    ).toEqual([]);
   });
 });

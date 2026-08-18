@@ -23,6 +23,7 @@
     "anser": "^2.3.5",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.7",
+    "material-icon-theme": "5.37.0",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

@@ -1,12 +1,8 @@
 export const PRODUCT_RIGHT_PANEL_TABS = [
-  { id: "tasks", label: "Tasks" },
-  { id: "summary", label: "Summary" },
   { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
   { id: "checks", label: "Checks" },
-  { id: "context", label: "Context" },
   { id: "review", label: "Review" },
-  { id: "pr", label: "PR" },
 ] as const;
 
 export type RightPanelTab = (typeof PRODUCT_RIGHT_PANEL_TABS)[number]["id"];
@@ -16,9 +12,9 @@ const LABELS = new Map<string, string>(
 );
 
 export function normalizeRightPanelTab(tab: string): RightPanelTab {
-  return LABELS.has(tab) ? (tab as RightPanelTab) : "summary";
+  return LABELS.has(tab) ? (tab as RightPanelTab) : "changes";
 }
 
 export function rightPanelTabLabel(tab: string): string {
-  return LABELS.get(tab) ?? "Summary";
+  return LABELS.get(tab) ?? "Changes";
 }

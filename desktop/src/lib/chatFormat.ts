@@ -58,10 +58,64 @@ export function inlineEventVerbChip(renderClass: string, title: string): { verb:
   const trimmed = title.trim();
   const space = trimmed.indexOf(" ");
   const first = space === -1 ? trimmed : trimmed.slice(0, space);
+  if (isCommandCard(renderClass)) {
+    const command = first === "Ran" ? trimmed.slice(space + 1).trim() : trimmed;
+    const readChip = readOnlyCommandChip(command);
+    if (readChip) return { verb: "Read", chip: readChip };
+  }
   if (ACTION_PREFIXES.has(first)) {
     return { verb: first, chip: trimmed.slice(space + 1).trim() };
   }
   return { verb: DEFAULT_VERB[renderClass] ?? "Used", chip: trimmed };
+}
+
+function isCommandCard(renderClass: string): boolean {
+  return renderClass === "command_card" || renderClass === "process_card" || renderClass === "background_card";
+}
+
+function readOnlyCommandChip(command: string): string | null {
+  const inner = unwrapShellCommand(command);
+  if (!isReadOnlyCommand(inner)) return null;
+  return readableCommandTargets(inner) || firstCommandWord(inner);
+}
+
+function unwrapShellCommand(command: string): string {
+  const trimmed = command.trim();
+  const match = trimmed.match(/^(?:env\s+[^=\s]+=[^\s]+\s+)*\/?(?:usr\/bin\/|bin\/)?(?:zsh|bash|sh)\s+-(?:l?c|c)\s+(.+)$/);
+  if (!match) return trimmed;
+  return unquote(match[1].trim());
+}
+
+function unquote(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return trimmed;
+  const quote = trimmed[0];
+  if ((quote !== '"' && quote !== "'") || trimmed.at(-1) !== quote) return trimmed;
+  return trimmed.slice(1, -1).replace(/\\(["'\\])/g, "$1");
+}
+
+function isReadOnlyCommand(command: string): boolean {
+  const first = firstCommandWord(command);
+  if (!first) return false;
+  if (["cat", "find", "head", "ls", "nl", "pwd", "rg", "sed", "tail", "wc"].includes(first)) return true;
+  if (first === "git") return /^git\s+(?:diff|grep|log|show|status)(?:\s|$)/.test(command);
+  if (first === "gh") return /^gh\s+(?:api|pr\s+(?:checks|view|diff|status)|run\s+(?:list|view)|issue\s+(?:list|view))(?:\s|$)/.test(command);
+  return false;
+}
+
+function firstCommandWord(command: string): string {
+  return command.trim().split(/\s+/, 1)[0]?.split("/").pop() ?? "";
+}
+
+function readableCommandTargets(command: string): string {
+  const targets = command
+    .match(/(?:^|\s)(?:\.{1,2}\/|\/|[A-Za-z0-9_.-]+\/)[A-Za-z0-9_./@+-]+|(?:^|\s)[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]+/g)
+    ?.map((target) => target.trim().replace(/^['"`]|['"`]$/g, ""))
+    .filter((target) => !/^\d+(?:,\d+)?p$/.test(target) && !target.startsWith("http"))
+    .map((target) => target.split("/").filter(Boolean).at(-1) ?? target)
+    .filter(Boolean);
+  if (!targets?.length) return "";
+  return [...new Set(targets)].slice(0, 3).join(", ");
 }
 
 // Archductor-internal blocks injected into prompts/responses that must not be

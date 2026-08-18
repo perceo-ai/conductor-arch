@@ -20,6 +20,7 @@ use crate::archcar::protocol::{
     ArchcarEvent, ArchcarMessage, ArchcarProcessSummary, ArchcarProjectionItem,
     ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse, ArchcarRunScript,
     ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
+    WorkspaceGitAction,
 };
 use crate::archcar::remote;
 use crate::archcar::session::{
@@ -1210,6 +1211,31 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetWorkspaceGitActionPrompt { workspace, action } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path).and_then(|s| {
+                let prompt = match action {
+                    WorkspaceGitAction::CreatePr => {
+                        s.create_pull_request_agent_prompt(&workspace)?
+                    }
+                    WorkspaceGitAction::PushBranch => s.push_branch_agent_prompt(&workspace)?,
+                    WorkspaceGitAction::MergePr => s.merge_pull_request_agent_prompt(&workspace)?,
+                    WorkspaceGitAction::OpenPr => s.review_pull_request_agent_prompt(&workspace)?,
+                };
+                Ok(prompt)
+            });
+            match result {
+                Ok(prompt) => ArchcarResponse::WorkspaceGitActionPrompt {
+                    workspace,
+                    action,
+                    prompt,
+                    visible_input: workspace_git_action_visible_input(action).to_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetSpotlightStatus { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|s| s.spotlight_status(&workspace)) {
@@ -1439,6 +1465,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         changed_files: summary.changed_files,
                         run_status: summary.run_status.map(|s| s.as_str().to_owned()),
                         check_status: summary.check_status.map(|s| s.as_str().to_owned()),
+                        check_exit_code: summary.check_exit_code,
                         session_status: summary.session_status.map(|s| s.as_str().to_owned()),
                         active_sessions: summary.active_sessions,
                         open_todos: summary.open_todos,
@@ -2205,11 +2232,11 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             Ok(ArchcarResponse::PullRequestCreated { workspace, output })
         }),
         ArchcarRequest::GetPullRequestDraft { workspace } => with_store(state, |store| {
-            let (title, body) = store.draft_pull_request(&workspace)?;
+            let template = store.render_pull_request_template(&workspace)?;
             Ok(ArchcarResponse::PullRequestDraft {
                 workspace,
-                title,
-                body,
+                title: template.title,
+                body: template.body,
             })
         }),
         // ---- Workspace intelligence -------------------------------------
@@ -2918,6 +2945,15 @@ fn clone_repository(url: &str, dest: &str) -> Result<()> {
     Ok(())
 }
 
+fn workspace_git_action_visible_input(action: WorkspaceGitAction) -> &'static str {
+    match action {
+        WorkspaceGitAction::CreatePr => "Create pull request",
+        WorkspaceGitAction::PushBranch => "Push branch",
+        WorkspaceGitAction::MergePr => "Merge pull request",
+        WorkspaceGitAction::OpenPr => "Review pull request",
+    }
+}
+
 fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
     !matches!(
         request,
@@ -2943,6 +2979,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListLinkedDirectories { .. }
             | ArchcarRequest::GetSpotlightStatus { .. }
             | ArchcarRequest::GetPullRequestReadiness { .. }
+            | ArchcarRequest::GetWorkspaceGitActionPrompt { .. }
             | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetCommitDiff { .. }
@@ -3230,6 +3267,7 @@ fn workspace_summary_from_status_line(
         id: workspace.id,
         name: workspace.name,
         repository_name,
+        path: workspace.path.display().to_string(),
         branch: workspace.branch,
         base_ref: workspace.base_ref,
         status: workspace.status,

@@ -74,6 +74,19 @@ function relTime(iso: string): string {
   return "just now";
 }
 
+function RepoCardAvatar(props: { repo: GithubRepo }) {
+  const [broken, setBroken] = createSignal(false);
+  const initials = () => (props.repo.owner || props.repo.name || "?").slice(0, 2).toUpperCase();
+  return (
+    <Show
+      when={props.repo.avatarUrl && !broken()}
+      fallback={<span class="repo-card-avatar repo-card-avatar-fallback">{initials()}</span>}
+    >
+      <img class="repo-card-avatar" src={props.repo.avatarUrl} alt="" loading="lazy" onError={() => setBroken(true)} />
+    </Show>
+  );
+}
+
 function AddProjectForm(props: { onDone: () => void }) {
   const [mode, setMode] = createSignal<"local" | "clone">("local");
   const [path, setPath] = createSignal("");
@@ -185,9 +198,9 @@ function AddProjectForm(props: { onDone: () => void }) {
                         classList={{ selected: selected() }}
                         onClick={() => onSelectRepo(selected() ? undefined : repo)}
                       >
-                        <img class="repo-card-avatar" src={repo.avatarUrl} alt="" loading="lazy" />
+                        <RepoCardAvatar repo={repo} />
                         <div class="repo-card-text">
-                          <span class="repo-card-title">{repo.name}</span>
+                          <span class="repo-card-title">{repo.nameWithOwner || repo.name}</span>
                           <span class="repo-card-sub">{repo.owner} · edited {relTime(repo.pushedAt)}</span>
                         </div>
                         <span class="repo-card-action">{selected() ? "Selected" : "Select"}</span>

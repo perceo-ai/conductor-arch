@@ -88,7 +88,6 @@ export default function CommandPalette() {
     // Pages.
     const pages: { page: Parameters<typeof nav.goToPage>[0]; label: string }[] = [
       { page: "dashboard", label: "Dashboard" },
-      { page: "projects", label: "Projects" },
       { page: "history", label: "History" },
       { page: "settings", label: "Settings" },
     ];

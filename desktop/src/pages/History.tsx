@@ -51,7 +51,6 @@ export function HistoryPage() {
     <div class="page-shell history-view">
       <div class="page-header dashboard-header">
         <div class="dashboard-title">History</div>
-        <div class="dashboard-subtitle">Workspaces across your projects, most active first.</div>
         <div class="project-tabs">
           <For each={FILTERS}>
             {(f) => (
@@ -87,7 +86,10 @@ export function HistoryPage() {
                 </span>
                 <span class="card-meta">
                   <Show when={r.additions || r.deletions}>
-                    +{r.additions} −{r.deletions}
+                    <span class="workspace-row-diff">
+                      <span class="workspace-row-additions">+{r.additions}</span>
+                      <span class="workspace-row-deletions">-{r.deletions}</span>
+                    </span>
                     <Show when={r.openTodos > 0}> · </Show>
                   </Show>
                   <Show when={r.openTodos > 0}>

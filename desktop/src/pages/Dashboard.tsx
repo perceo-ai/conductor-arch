@@ -128,10 +128,8 @@ function ProjectTab(props: { label: string; active: boolean; onClick: () => void
 }
 
 function DashboardCard(props: { row: WorkspaceRow }) {
-  const meta = () =>
-    props.row.prNumber != null
-      ? `${props.row.repository} · PR #${props.row.prNumber}`
-      : props.row.repository;
+  const hasDiffStats = () => props.row.additions > 0 || props.row.deletions > 0;
+  const badges = () => dashboardTriageBadges(props.row);
   return (
     <button
       class="flat workspace-card-action"
@@ -142,21 +140,29 @@ function DashboardCard(props: { row: WorkspaceRow }) {
         class="workspace-card shell-card"
         style={{ "border-left-color": STATUS_COLOR[workspaceStatusKind(props.row)] }}
       >
-        <div class="dashboard-card-top">
-          <span class="card-branch">{props.row.branch}</span>
-          <span class="card-state">{props.row.status}</span>
-        </div>
         <div class="card-title">{titleCaseWorkspace(props.row.name)}</div>
-        <div class="card-meta">{meta()}</div>
-        <div class="dashboard-card-badges" aria-label="Workspace triage summary">
-          <For each={dashboardTriageBadges(props.row)}>
-            {(badge) => (
-              <span class={`triage-badge triage-badge-${badge.tone}`} title={badge.title}>
-                {badge.label}
-              </span>
-            )}
-          </For>
+        <div class="card-meta dashboard-card-essentials">
+          <Show when={hasDiffStats()} fallback={<span>{props.row.status}</span>}>
+            <span class="workspace-row-diff">
+              <span class="workspace-row-additions">+{props.row.additions}</span>
+              <span class="workspace-row-deletions">-{props.row.deletions}</span>
+            </span>
+          </Show>
+          <Show when={props.row.prNumber != null}>
+            <span>PR #{props.row.prNumber}</span>
+          </Show>
         </div>
+        <Show when={badges().length > 0}>
+          <div class="dashboard-card-badges" aria-label="Workspace triage summary">
+            <For each={badges()}>
+              {(badge) => (
+                <span class={`triage-badge triage-badge-${badge.tone}`} title={badge.title}>
+                  {badge.label}
+                </span>
+              )}
+            </For>
+          </div>
+        </Show>
       </div>
     </button>
   );
@@ -210,9 +216,6 @@ export function DashboardPage() {
         <div class="dashboard-heading-row">
           <div>
             <div class="dashboard-title">Dashboard</div>
-            <div class="dashboard-subtitle">
-              See what is ready, running, under review, or archived across your projects.
-            </div>
           </div>
           <Show when={selectedProject()}>
             {(repository) => (
@@ -228,7 +231,7 @@ export function DashboardPage() {
         </div>
         <div class="project-tabs">
           <ProjectTab
-            label="All projects"
+            label="All"
             active={project() == null}
             onClick={() => setProject(null)}
           />
@@ -248,7 +251,7 @@ export function DashboardPage() {
         fallback={
           <div class="dashboard-onboarding">
             <div class="onboarding-card">
-              <div class="onboarding-title">No projects yet</div>
+              <div class="onboarding-title">No repositories yet</div>
               <div class="onboarding-copy">
                 Add a local repository or clone one to create your first workspace and
                 start running agents.
@@ -257,7 +260,7 @@ export function DashboardPage() {
                 class="suggested-action onboarding-cta"
                 onClick={() => dialogs.open({ kind: "add-project" })}
               >
-                Add your first project
+                Add repository
               </button>
             </div>
           </div>

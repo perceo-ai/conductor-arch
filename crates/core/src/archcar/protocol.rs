@@ -64,6 +64,15 @@ pub enum WorkspaceChangeScope {
     Uncommitted,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceGitAction {
+    CreatePr,
+    PushBranch,
+    MergePr,
+    OpenPr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArchcarRequest {
@@ -266,6 +275,10 @@ pub enum ArchcarRequest {
     /// decision, deployments, review threads. Requires `gh` auth + an open PR.
     GetPullRequestReadiness {
         workspace: String,
+    },
+    GetWorkspaceGitActionPrompt {
+        workspace: String,
+        action: WorkspaceGitAction,
     },
     /// Spotlight testing: current status for a workspace (is its patch applied
     /// to the repo root for live testing).
@@ -842,6 +855,12 @@ pub enum ArchcarResponse {
         workspace: String,
         text: String,
     },
+    WorkspaceGitActionPrompt {
+        workspace: String,
+        action: WorkspaceGitAction,
+        prompt: String,
+        visible_input: String,
+    },
     SpotlightStatus {
         workspace: String,
         active: bool,
@@ -1116,6 +1135,7 @@ pub struct ArchcarWorkspaceSummary {
     pub id: i64,
     pub name: String,
     pub repository_name: String,
+    pub path: String,
     pub branch: String,
     pub base_ref: String,
     pub status: String,
@@ -1224,6 +1244,8 @@ pub struct ArchcarChecksSummary {
     pub run_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_status: Option<String>,
     pub active_sessions: usize,
@@ -1463,6 +1485,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetPullRequestReadiness { workspace } => {
             format!("get_pull_request_readiness workspace={workspace}")
         }
+        ArchcarRequest::GetWorkspaceGitActionPrompt { workspace, action } => format!(
+            "get_workspace_git_action_prompt workspace={workspace} action={action:?}"
+        ),
         ArchcarRequest::GetSpotlightStatus { workspace } => {
             format!("get_spotlight_status workspace={workspace}")
         }
@@ -2003,6 +2028,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::PullRequestReadiness { workspace, text } => {
             format!("pull_request_readiness workspace={workspace} bytes={}", text.len())
         }
+        ArchcarResponse::WorkspaceGitActionPrompt {
+            workspace,
+            action,
+            prompt,
+            ..
+        } => format!(
+            "workspace_git_action_prompt workspace={workspace} action={action:?} bytes={}",
+            prompt.len()
+        ),
         ArchcarResponse::SpotlightStatus { workspace, active, .. } => {
             format!("spotlight_status workspace={workspace} active={active}")
         }

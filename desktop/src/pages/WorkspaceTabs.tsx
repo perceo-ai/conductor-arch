@@ -1,13 +1,16 @@
-import { For, Show, createResource, createSignal } from "solid-js";
-import { send } from "@/bridge/client";
-import { actions, nav } from "@/store";
+import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import githubActionsLogo from "material-icon-theme/icons/github-actions-workflow.svg?url";
+import { openExternal, send } from "@/bridge/client";
+import { actions, nav, threadsStore, toastsStore, workspacesStore } from "@/store";
+import Icon from "@/components/Icon";
+import { parsePrReadiness, type PrCheckRow } from "@/lib/prReadiness";
 import type {
+  ArchcarChatThread,
   ArchcarChecksSummary,
   ArchcarConfiguredCheck,
   ArchcarTimelineEvent,
-  ArchcarWorkspaceConflict,
   Checkpoint,
-  ReviewComment,
+  SessionKind,
   Todo,
 } from "@/bridge/protocol";
 
@@ -378,7 +381,100 @@ export function TimelinePanel(props: { workspace: string }) {
   );
 }
 
-// ---- Checks (DB-only summary) ---------------------------------------------
+// ---- Checks (flat PR status) ----------------------------------------------
+
+function statusText(status?: string): string {
+  if (!status) return "unknown";
+  return status.toLowerCase().replace(/_/g, " ");
+}
+
+function reviewStatusLabel(summary: ArchcarChecksSummary | null | undefined, readinessText?: string): string {
+  const readiness = readinessText ? parsePrReadiness(readinessText) : null;
+  const decision = statusText(readiness?.reviewDecision);
+  if (decision && decision !== "unknown") return decision;
+  if (summary?.pull_request_number != null) return "Waiting for PR review";
+  return "No pull request yet";
+}
+
+function reviewStatusTone(summary: ArchcarChecksSummary | null | undefined, readinessText?: string): PrCheckRow["tone"] {
+  const label = reviewStatusLabel(summary, readinessText).toLowerCase();
+  if (label.includes("approved")) return "passed";
+  if (label.includes("change") || label.includes("blocked")) return "failed";
+  if (summary?.pull_request_number != null) return "running";
+  return "unknown";
+}
+
+function CheckGlyph(props: { tone: PrCheckRow["tone"] }) {
+  return (
+    <span class={`ws-check-glyph ws-check-glyph-${props.tone}`}>
+      {props.tone === "passed" ? "✓" : props.tone === "failed" ? "×" : props.tone === "running" ? "•" : "○"}
+    </span>
+  );
+}
+
+function FlatCheckRow(props: { check: PrCheckRow }) {
+  return (
+    <div class="ws-check-row-flat">
+      <CheckGlyph tone={props.check.tone} />
+      <img class="ws-check-provider-icon" src={githubActionsLogo} alt="" aria-hidden="true" />
+      <span class="ws-check-name" title={props.check.name}>
+        {props.check.name}
+      </span>
+      <span class="ws-check-status">{statusText(props.check.status)}</span>
+      <Show when={props.check.detail}>
+        {(url) => (
+          <button
+            class="ws-check-open"
+            title="Open check"
+            onClick={() => {
+              void openExternal(url());
+            }}
+          >
+            <Icon name="external" />
+          </button>
+        )}
+      </Show>
+    </div>
+  );
+}
+
+function LocalCheckRow(props: { check: ArchcarConfiguredCheck }) {
+  return (
+    <div class="ws-check-row-flat">
+      <CheckGlyph tone="unknown" />
+      <span class="ws-check-provider-icon ws-check-provider-local">⌘</span>
+      <span class="ws-check-name" title={props.check.command}>
+        {props.check.label}
+      </span>
+      <span class="ws-check-status">local</span>
+    </div>
+  );
+}
+
+function providerKind(provider: string): SessionKind {
+  const p = provider.toLowerCase();
+  if (p.includes("claude")) return "claude";
+  if (p.includes("shell")) return "shell";
+  return "codex";
+}
+
+async function activeWorkspaceChatThread(workspace: string): Promise<ArchcarChatThread> {
+  const loaded = threadsStore.list(workspace);
+  let threads = loaded.length > 0 ? loaded : await threadsStore.refresh(workspace);
+  threads = threads.filter((thread) => thread.provider !== "shell");
+  const selected = nav.selectedChatThread();
+  const existing = threads.find((thread) => thread.id === selected) ?? threads[0];
+  if (existing) return existing;
+  const created = await send({
+    type: "create_chat_thread",
+    workspace,
+    provider: "codex",
+    title: "PR review",
+  });
+  if (created.type !== "chat_thread_created") throw new Error("Unable to create chat thread.");
+  await threadsStore.refresh(workspace);
+  return created.thread;
+}
 
 export function ChecksPanel(props: { workspace: string }) {
   const [summary] = createResource(
@@ -387,6 +483,17 @@ export function ChecksPanel(props: { workspace: string }) {
       try {
         const res = await send({ type: "get_checks_summary", workspace: ws });
         return res.type === "checks_summary" ? res.summary : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  const [readiness] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string | null> => {
+      try {
+        const res = await send({ type: "get_pull_request_readiness", workspace: ws });
+        return res.type === "pull_request_readiness" ? res.text : null;
       } catch {
         return null;
       }
@@ -403,269 +510,93 @@ export function ChecksPanel(props: { workspace: string }) {
       }
     },
   );
-  const [checkLog, { refetch: refetchCheckLog }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<string> => {
-      try {
-        const res = await send({ type: "get_check_log", workspace: ws });
-        return res.type === "check_log" ? res.log : "";
-      } catch {
-        return "";
-      }
-    },
-  );
-  const [feedback, setFeedback] = createSignal("");
-  async function runCheck(check: ArchcarConfiguredCheck) {
-    setFeedback(`Running ${check.label}…`);
-    try {
-      const res = await send({
-        type: "run_workspace_check",
-        workspace: props.workspace,
-        key: check.key,
-      });
-      setFeedback(
-        res.type === "check_started"
-          ? `${check.label} started (pid ${res.pid})`
-          : `${check.label} failed`,
-      );
-      // Give the check a moment to produce output, then pull its log.
-      setTimeout(() => void refetchCheckLog(), 600);
-    } catch (err) {
-      setFeedback(`${check.label} failed: ${(err as Error).message}`);
-    }
-  }
-  const [conflicts] = createResource(
-    () => props.workspace,
-    async (ws): Promise<ArchcarWorkspaceConflict[]> => {
-      try {
-        const res = await send({ type: "list_workspace_conflicts", workspace: ws });
-        return res.type === "workspace_conflicts" ? res.conflicts : [];
-      } catch {
-        return [];
-      }
-    },
-  );
-
-  const rows = (s: ArchcarChecksSummary): [string, string][] => [
-    ["Changed files", String(s.changed_files)],
-    ["Run", s.run_status ?? "—"],
-    ["Checks", s.check_status ?? "—"],
-    ["Session", `${s.session_status ?? "—"} (${s.active_sessions} active)`],
-    ["Todos", `${s.open_todos} open / ${s.total_todos} total`],
-    ["Open review comments", String(s.open_review_comments)],
-    [
-      "Pull request",
-      s.pull_request_number != null
-        ? `#${s.pull_request_number} ${s.pull_request_state ?? ""}`.trim()
-        : "No PR",
-    ],
-    [
-      "Branch",
-      s.branch_ahead != null
-        ? `${s.branch_ahead} ahead / ${s.branch_behind ?? 0} behind`
-        : "—",
-    ],
-    ["Source branch ahead", String(s.source_branch_ahead)],
-    ["Conflicting workspaces", String(s.conflicting_workspaces)],
-  ];
-
-  // Locally-computed merge-readiness blockers (conductor's "last review pass
-  // before merge"). Uses the DB-only summary — no network.
-  const blockers = (s: ArchcarChecksSummary): string[] => {
-    const out: string[] = [];
-    if (s.open_todos > 0) out.push(`${s.open_todos} open todo${s.open_todos === 1 ? "" : "s"}`);
-    if (s.open_review_comments > 0)
-      out.push(
-        `${s.open_review_comments} open review comment${s.open_review_comments === 1 ? "" : "s"}`,
-      );
-    if ((s.check_status ?? "").toLowerCase().includes("fail")) out.push("checks failing");
-    if (s.conflicting_workspaces > 0)
-      out.push(
-        `${s.conflicting_workspaces} conflicting workspace${s.conflicting_workspaces === 1 ? "" : "s"}`,
-      );
-    if ((s.branch_behind ?? 0) > 0) out.push(`${s.branch_behind} behind base`);
-    return out;
-  };
+  const readinessView = createMemo(() => (readiness() ? parsePrReadiness(readiness()!) : null));
+  const prUrl = () => workspacesStore.row(props.workspace)?.prUrl;
 
   return (
-    <div class="ws-tab-panel command-panel">
-      <div class="section-title">Checks</div>
-      <Show when={summary()}>
-        {(s) => (
-          <div class="ws-checks-readiness">
-            <div
-              class="ws-readiness"
-              classList={{ "ws-readiness-blocked": blockers(s()).length > 0 }}
+    <div class="ws-tab-panel command-panel ws-checks-panel-flat">
+      <div class="ws-flat-section-label">Git status</div>
+      <div class="ws-git-status-line">
+        <CheckGlyph tone={reviewStatusTone(summary(), readiness() ?? undefined)} />
+        <span class="ws-check-name">{reviewStatusLabel(summary(), readiness() ?? undefined)}</span>
+        <Show when={prUrl()}>
+          {(url) => (
+            <button
+              class="ws-check-open"
+              title="Open pull request"
+              onClick={() => {
+                void openExternal(url());
+              }}
             >
-              <Show
-                when={blockers(s()).length === 0}
-                fallback={<span>Blocked by: {blockers(s()).join(", ")}</span>}
-              >
-                <span>No merge blockers found</span>
-              </Show>
-            </div>
-            <Show when={blockers(s()).length > 0}>
-              <div class="ws-blocker-list">
-                <For each={blockers(s())}>
-                  {(blocker) => (
-                    <button
-                      class="ws-blocker-chip"
-                      onClick={() => {
-                        if (blocker.includes("todo")) nav.setRightPanelTab("tasks");
-                        else if (blocker.includes("review")) nav.setRightPanelTab("review");
-                        else if (blocker.includes("check")) nav.setRightPanelTab("checks");
-                        else nav.setRightPanelTab("changes");
-                      }}
-                    >
-                      {blocker}
-                    </button>
-                  )}
-                </For>
-              </div>
-            </Show>
-          </div>
-        )}
-      </Show>
-      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
-      <Show when={(checks() ?? []).length > 0}>
-        <div class="detail-label">Local checks</div>
-        <For each={checks()}>
-          {(check) => (
-            <div class="action-row">
-              <span class="detail-value" style={{ flex: "1 1 auto" }} title={check.command}>
-                {check.label}
-              </span>
-              <button class="secondary-action" onClick={() => void runCheck(check)}>
-                Run
-              </button>
-            </div>
+              <Icon name="external" />
+            </button>
           )}
-        </For>
-        <div class="action-row">
-          <span class="detail-label" style={{ flex: "1 1 auto" }}>Latest check log</span>
-          <button class="secondary-action" onClick={() => void refetchCheckLog()}>
-            Refresh log
-          </button>
-        </div>
-        <pre class="ws-run-prompt">
-          {checkLog.loading ? "Loading…" : checkLog() || "No check run yet."}
-        </pre>
-      </Show>
-      <Show when={(conflicts() ?? []).length > 0}>
-        <div class="detail-label">Conflicting workspaces</div>
-        <For each={conflicts()}>
-          {(c) => (
-            <div class="detail-row ws-timeline-row">
-              <span class="detail-label">{c.workspace}</span>
-              <span class="detail-value">{c.files.join(", ")}</span>
-            </div>
-          )}
-        </For>
-      </Show>
+        </Show>
+      </div>
+      <div class="ws-flat-section-label">Checks</div>
       <Show
-        when={summary()}
-        fallback={<div class="empty-state">{summary.loading ? "Loading…" : "No summary"}</div>}
+        when={(readinessView()?.checks.length ?? 0) > 0}
+        fallback={
+          <Show
+            when={(checks() ?? []).length > 0}
+            fallback={<div class="ws-check-empty">{readiness.loading || summary.loading ? "Loading…" : "No checks yet"}</div>}
+          >
+            <For each={checks()}>{(check) => <LocalCheckRow check={check} />}</For>
+          </Show>
+        }
       >
-        {(s) => (
-          <For each={rows(s())}>
-            {([label, value]) => (
-              <div class="detail-row">
-                <span class="detail-label">{label}</span>
-                <span class="detail-value">{value}</span>
-              </div>
-            )}
-          </For>
-        )}
+        <For each={readinessView()!.checks}>{(check) => <FlatCheckRow check={check} />}</For>
       </Show>
     </div>
   );
 }
 
-// ---- Review (local comments) ----------------------------------------------
+// ---- Review (agent prompt) ------------------------------------------------
 
 export function ReviewPanel(props: { workspace: string }) {
-  const [comments, { refetch }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<ReviewComment[]> => {
-      try {
-        const res = await send({ type: "list_review_comments", workspace: ws });
-        return res.type === "review_comments" ? res.comments : [];
-      } catch {
-        return [];
-      }
-    },
-  );
-  const [file, setFile] = createSignal("");
-  const [line, setLine] = createSignal("");
-  const [body, setBody] = createSignal("");
-  const [feedback, setFeedback] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
 
-  async function add() {
-    if (!file().trim() || !body().trim()) {
-      setFeedback("File path and comment body are required.");
-      return;
-    }
-    const lineNum = line().trim() ? Number(line().trim()) : undefined;
+  async function queueReviewPrompt() {
+    if (busy()) return;
+    setBusy(true);
     try {
-      await actions.addReviewComment({
+      const thread = await activeWorkspaceChatThread(props.workspace);
+      const prompt = await send({
+        type: "get_workspace_git_action_prompt",
         workspace: props.workspace,
-        filePath: file().trim(),
-        lineNumber: Number.isInteger(lineNum) ? lineNum : undefined,
-        body: body().trim(),
+        action: "open_pr",
       });
-      setFile("");
-      setLine("");
-      setBody("");
-      setFeedback("");
-      await refetch();
-    } catch (err) {
-      setFeedback(`Add review comment failed: ${(err as Error).message}`);
+      if (prompt.type === "error") throw new Error(prompt.message);
+      if (prompt.type !== "workspace_git_action_prompt") throw new Error("Unable to prepare review prompt.");
+      const kind = providerKind(thread.provider);
+      nav.selectChatThread(thread.id);
+      await send({
+        type: "ensure_chat_thread_session",
+        workspace: props.workspace,
+        thread_id: thread.id,
+        kind,
+      });
+      await send({
+        type: "queue_chat_input",
+        thread_id: thread.id,
+        input: prompt.prompt,
+        visible_input: prompt.visible_input,
+        kind: "review_prompt",
+        session_kind: kind,
+      });
+      toastsStore.push(`${prompt.visible_input} queued in chat.`);
+    } catch (e) {
+      toastsStore.error(`Review failed: ${String(e)}`);
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div class="ws-tab-panel command-panel">
-      <div class="section-title">Review comments</div>
-      <div class="action-row">
-        <input class="ws-text-input" placeholder="file path" value={file()} onInput={(e) => setFile(e.currentTarget.value)} />
-        <input class="ws-text-input" style={{ "max-width": "80px" }} placeholder="line" value={line()} onInput={(e) => setLine(e.currentTarget.value)} />
-      </div>
-      <div class="action-row">
-        <input class="ws-text-input" placeholder="comment…" value={body()} onInput={(e) => setBody(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void add()} />
-        <button class="suggested-action" onClick={() => void add()}>Add</button>
-      </div>
-      <Show when={feedback()}><div class="card-meta">{feedback()}</div></Show>
-      <Show
-        when={(comments() ?? []).length > 0}
-        fallback={<div class="empty-state">{comments.loading ? "Loading…" : "No review comments"}</div>}
-      >
-        <For each={comments()}>
-          {(c) => (
-            <div class="detail-row ws-review-comment">
-              <span class="detail-label">
-                {c.file_path}
-                {c.line_number != null ? `:${c.line_number}` : ""} [{c.status}]
-              </span>
-              <span class="detail-value">{c.body}</span>
-              <Show when={c.github_thread_id}>
-                {(tid) => (
-                  <button
-                    class="secondary-action"
-                    onClick={() =>
-                      void actions
-                        .resolveReviewThread(props.workspace, tid(), c.status !== "resolved")
-                        .then(refetch)
-                        .catch((err) => setFeedback(`Resolve failed: ${(err as Error).message}`))
-                    }
-                  >
-                    {c.status === "resolved" ? "Reopen" : "Resolve"}
-                  </button>
-                )}
-              </Show>
-            </div>
-          )}
-        </For>
-      </Show>
+    <div class="ws-tab-panel command-panel ws-review-action-panel">
+      <button class="ws-review-prompt-button" disabled={busy()} onClick={() => void queueReviewPrompt()}>
+        {busy() ? "Queueing…" : "Review PR in chat"}
+      </button>
     </div>
   );
 }

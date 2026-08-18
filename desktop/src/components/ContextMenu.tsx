@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import Icon, { type IconName } from "./Icon";
 
 // Lightweight global right-click menu (parity with the GTK sidebar popovers).
 // Any surface calls openContextMenu(event, items); a single <ContextMenu/> host
@@ -6,6 +7,9 @@ import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "s
 
 export interface ContextMenuItem {
   label: string;
+  icon?: IconName;
+  iconSrc?: string;
+  iconAlt?: string;
   destructive?: boolean;
   run: () => void;
 }
@@ -23,6 +27,11 @@ export function openContextMenu(e: MouseEvent, items: ContextMenuItem[]): void {
   e.stopPropagation();
   if (items.length === 0) return;
   setMenu({ x: e.clientX, y: e.clientY, items });
+}
+
+export function openContextMenuAt(x: number, y: number, items: ContextMenuItem[]): void {
+  if (items.length === 0) return;
+  setMenu({ x, y, items });
 }
 
 export default function ContextMenu() {
@@ -89,7 +98,13 @@ export default function ContextMenu() {
                     item.run();
                   }}
                 >
-                  {item.label}
+                  <Show when={item.iconSrc}>
+                    {(src) => <img class="context-menu-item-logo" src={src()} alt={item.iconAlt ?? ""} aria-hidden={!item.iconAlt} />}
+                  </Show>
+                  <Show when={!item.iconSrc && item.icon}>
+                    <Icon name={item.icon!} class="context-menu-item-icon" />
+                  </Show>
+                  <span class="context-menu-item-label">{item.label}</span>
                 </button>
               )}
             </For>
