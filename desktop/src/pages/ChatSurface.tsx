@@ -435,7 +435,7 @@ function NewChatIntro(props: { workspace: string; threadId: number }) {
       </div>
 
       <div class="new-chat-section">
-        <div class="detail-label">Add chat transcripts:</div>
+        <div class="new-chat-section-label">Add chat transcripts</div>
         <Show
           when={pastChats().length > 0}
           fallback={
@@ -468,7 +468,7 @@ function NewChatIntro(props: { workspace: string; threadId: number }) {
       </div>
 
       <div class="new-chat-section">
-        <div class="detail-label">Add plans:</div>
+        <div class="new-chat-section-label">Add plans</div>
         <Show
           when={(plans() ?? []).length > 0}
           fallback={
@@ -1038,7 +1038,8 @@ function Composer(props: {
               }
               onClick={() => void togglePlanMode()}
             >
-              Plan
+              <Icon name="file-text" />
+              <span>Plan</span>
             </button>
           </div>
           <div class="chat-toolbar-right">
@@ -1064,7 +1065,7 @@ function Composer(props: {
                   title="Send"
                   disabled={text().trim().length === 0 && attachments().length === 0}
                 >
-                  <Icon name="send" />
+                  <Icon name="arrow-up" />
                 </button>
               }
             >
