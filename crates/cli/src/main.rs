@@ -635,6 +635,21 @@ enum ArchcarCommand {
         #[arg(long = "session")]
         session_id: Option<i64>,
     },
+    /// Refresh and store a continuously maintained summary.
+    RefreshSummary {
+        workspace: String,
+        /// workspace | session | current_chat | task
+        #[arg(long = "scope-type", default_value = "workspace")]
+        scope_type: String,
+        #[arg(long = "scope-id")]
+        scope_id: Option<i64>,
+    },
+    /// Print the combined workspace/current-chat/tasks context briefing.
+    ContextBriefing {
+        workspace: String,
+        #[arg(long = "thread-id")]
+        thread_id: Option<i64>,
+    },
     /// List branch-local context attachments.
     Context {
         workspace: String,
@@ -1787,6 +1802,26 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(client.send(ArchcarRequest::DraftSummary {
                         workspace,
                         session_id,
+                    })?);
+                }
+                ArchcarCommand::RefreshSummary {
+                    workspace,
+                    scope_type,
+                    scope_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::RefreshSummary {
+                        workspace,
+                        scope_type,
+                        scope_id,
+                    })?);
+                }
+                ArchcarCommand::ContextBriefing {
+                    workspace,
+                    thread_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetContextBriefing {
+                        workspace,
+                        thread_id,
                     })?);
                 }
                 ArchcarCommand::Context { workspace } => {
@@ -3455,6 +3490,23 @@ fn print_archcar_response(response: ArchcarResponse) {
         } => {
             println!("summary_draft workspace={workspace}");
             println!("{body_markdown}");
+        }
+        ArchcarResponse::SummaryRefreshed { workspace, result } => {
+            println!(
+                "summary_refreshed workspace={workspace} scope={} scope_id={} changed={} summary=#{}",
+                result.summary.scope_type,
+                result.summary.scope_id,
+                result.changed,
+                result.summary.id
+            );
+        }
+        ArchcarResponse::ContextBriefing { briefing } => {
+            println!(
+                "context_briefing workspace={} chars={}",
+                briefing.workspace,
+                briefing.body_markdown.chars().count()
+            );
+            println!("{}", briefing.body_markdown);
         }
         ArchcarResponse::ContextAttachments {
             workspace,
