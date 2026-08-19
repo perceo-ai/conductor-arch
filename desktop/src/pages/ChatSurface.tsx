@@ -17,6 +17,7 @@ import Diff from "@/components/Diff";
 import { renderMarkdown } from "@/lib/markdown";
 import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
+import { queueManagedChatInput } from "./chatSend";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -244,6 +245,7 @@ function Timeline(props: { threadId: number }) {
 }
 
 function Composer(props: {
+  workspace: string;
   threadId: number;
   provider: string;
   onChangeProvider: (provider: string) => void;
@@ -361,13 +363,13 @@ function Composer(props: {
     const prevAtts = attachments();
     clearComposer();
     try {
-      await send({
-        type: "queue_chat_input",
-        thread_id: props.threadId,
+      await queueManagedChatInput({
+        workspace: props.workspace,
+        threadId: props.threadId,
         input: payload.input,
-        visible_input: payload.visible,
+        visibleInput: payload.visible,
         kind: "user",
-        session_kind: sessionKind(),
+        sessionKind: sessionKind(),
       });
     } catch {
       setText(prevText);
@@ -764,6 +766,7 @@ export default function ChatSurface(props: { workspace: string }) {
             {(rec) => <InteractionBanner rec={rec()} />}
           </Show>
           <Composer
+            workspace={props.workspace}
             threadId={activeThread()!.id}
             provider={activeThread()!.provider}
             seedModel={pendingSeed()[activeThread()!.id]}
