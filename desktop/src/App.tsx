@@ -24,6 +24,7 @@ import {
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
 import { PRODUCT_RIGHT_PANEL_TABS } from "./lib/rightPanelTabs";
+import { installExternalLinkHandler } from "./lib/externalLinks";
 import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
 
 const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
@@ -113,6 +114,13 @@ export default function App() {
     // Connect the archcar event stream into the reactive store, then probe host
     // setup readiness. A blocking modal gates the app until setup is complete.
     void startStore().then(() => setupStore.check().catch(() => undefined));
+  });
+
+  // Links inside rendered markdown (chat, plans, briefings) are real anchors;
+  // without this they navigate the renderer away from the app shell.
+  onMount(() => {
+    const dispose = installExternalLinkHandler(document, (url) => void openExternal(url));
+    onCleanup(dispose);
   });
 
   function focusFirst(selectors: string[]) {

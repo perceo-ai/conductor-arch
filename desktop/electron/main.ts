@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
 import { resolveWindowIconPath } from "./icon.js";
+import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
 
 const execFileP = promisify(execFile);
 
@@ -210,6 +211,21 @@ function createWindow() {
   });
 
   win.once("ready-to-show", () => win?.show());
+
+  // Links belong in the user's browser, never in the app shell. The renderer
+  // intercepts anchor clicks itself; these two guards catch what it can't
+  // (target="_blank", window.open, redirects) so a web page can never replace
+  // the SPA or spawn a chrome-less Electron window.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isExternalOpenTarget(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    const external = externalNavigationUrl(url, DEV_SERVER_URL ?? null);
+    if (!external) return;
+    event.preventDefault();
+    void shell.openExternal(external);
+  });
 
   win.on("focus", () => sendToRenderer("window:focus", true));
   win.on("blur", () => sendToRenderer("window:focus", false));
@@ -481,11 +497,12 @@ ipcMain.handle("fs:path-exists", async (_evt, p: string) => {
 });
 
 // Open a URL in the default browser or a path in the OS default handler
-// (editor/file manager). Used by the PR status bar and the top-bar editor
-// button. Rejects non-http(s) URLs and missing paths to avoid launching junk.
+// (editor/file manager). Used by the PR status bar, the top-bar editor button,
+// and every link clicked in rendered agent markdown. Rejects schemes outside
+// http(s)/mailto and missing paths to avoid launching junk.
 ipcMain.handle("shell:open-external", async (_evt, target: string) => {
   try {
-    if (/^https?:\/\//i.test(target)) {
+    if (isExternalOpenTarget(target)) {
       await shell.openExternal(target);
       return { ok: true };
     }
