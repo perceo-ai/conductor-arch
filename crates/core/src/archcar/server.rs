@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -538,7 +538,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             message: "archcar is shutting down".to_owned(),
         };
     }
-    match request {
+    let response = match request {
         ArchcarRequest::EnsureWorkspaceDefaultSession {
             workspace,
             kind,
@@ -638,6 +638,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::SetSessionEffort { session_id, effort } => {
             send_session_control(state, session_id, HarnessControl::SetEffort(effort))
         }
+        ArchcarRequest::SetSessionFastMode {
+            session_id,
+            fast_mode,
+        } => send_session_control(state, session_id, HarnessControl::SetFastMode(fast_mode)),
         ArchcarRequest::SetSessionPermissionMode { session_id, mode } => send_session_control(
             state,
             session_id,
@@ -852,32 +856,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetInventorySnapshot => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match inventory_snapshot(&db_path) {
+                Ok((repositories, workspaces, chat_threads)) => {
+                    ArchcarResponse::InventorySnapshot {
+                        repositories,
+                        workspaces,
+                        chat_threads,
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListWorkspaces => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path).and_then(|store| {
-                let lines = store.list_status()?;
-                let task_counts = store.task_counts_by_workspace().unwrap_or_default();
-                Ok(lines
-                    .into_iter()
-                    .map(|line| {
-                        // Match the GTK dashboard card: changed-file count for the
-                        // diff badge (only meaningful for active checkouts).
-                        let changed_files = if line.workspace.status == "active" {
-                            store
-                                .changed_files(&line.workspace.name)
-                                .map(|files| files.len())
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let tasks = task_counts
-                            .get(&line.workspace.id)
-                            .copied()
-                            .unwrap_or_default();
-                        workspace_summary_from_status_line(line, changed_files, tasks)
-                    })
-                    .collect::<Vec<_>>())
-            }) {
+            match workspace_summaries(&db_path) {
                 Ok(workspaces) => ArchcarResponse::Workspaces { workspaces },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -886,23 +882,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListRepositories => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match RepositoryStore::open(&db_path)
-                .and_then(|store| store.list_with_workspace_counts())
-            {
-                Ok(rows) => ArchcarResponse::Repositories {
-                    repositories: rows
-                        .into_iter()
-                        .map(|(repo, active, total)| ArchcarRepositorySummary {
-                            id: repo.id,
-                            name: repo.name,
-                            root_path: repo.root_path.to_string_lossy().into_owned(),
-                            default_branch: repo.default_branch,
-                            remote_name: repo.remote_name,
-                            active_workspaces: active,
-                            total_workspaces: total,
-                        })
-                        .collect(),
-                },
+            match repository_summaries(&db_path) {
+                Ok(repositories) => ArchcarResponse::Repositories { repositories },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -910,24 +891,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListChatThreads { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|store| store.list_chat_threads(&workspace))
-            {
-                Ok(threads) => ArchcarResponse::ChatThreads {
-                    workspace,
-                    threads: threads
-                        .into_iter()
-                        .map(|t| ArchcarChatThread {
-                            id: t.id,
-                            provider: t.provider,
-                            title: t.title,
-                            status: t.status,
-                            model: t.model,
-                            updated_at: t.updated_at,
-                            archived_at: t.archived_at,
-                        })
-                        .collect(),
-                },
+            match chat_threads_for_workspace(&db_path, &workspace) {
+                Ok(threads) => ArchcarResponse::ChatThreads { workspace, threads },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1076,9 +1041,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path).and_then(|store| match scope {
+            match WorkspaceStore::open_app(&db_path).and_then(|store| match &scope {
                 WorkspaceChangeScope::All => store.all_file_change_summaries(&workspace),
                 WorkspaceChangeScope::Uncommitted => store.diff_file_summaries(&workspace),
+                WorkspaceChangeScope::Commit { sha } => {
+                    store.file_summaries_for_commit(&workspace, sha)
+                }
             }) {
                 Ok(files) => ArchcarResponse::WorkspaceChanges {
                     workspace,
@@ -1090,13 +1058,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetWorkspaceDiff { workspace, path } => {
+        ArchcarRequest::GetWorkspaceDiff {
+            workspace,
+            path,
+            scope,
+        } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path) {
-                Ok(store) => ArchcarResponse::WorkspaceDiff {
-                    diff: workspace_diff_sections(&store, &workspace, path.as_deref()),
-                    workspace,
-                },
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| scoped_workspace_diff(&store, &workspace, path.as_deref(), &scope))
+            {
+                Ok(diff) => ArchcarResponse::WorkspaceDiff { workspace, diff },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1272,11 +1243,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetCommitDiff { workspace, commit } => {
+        ArchcarRequest::GetCommitDiff {
+            workspace,
+            commit,
+            path,
+        } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|s| s.git_show_commit(&workspace, &commit))
-            {
+            match WorkspaceStore::open_app(&db_path).and_then(|s| match path.as_deref() {
+                Some(path) => s.commit_diff(&workspace, &commit, Some(Path::new(path))),
+                None => s.git_show_commit(&workspace, &commit),
+            }) {
                 Ok(diff) => ArchcarResponse::CommitDiff {
                     workspace,
                     commit,
@@ -1831,17 +1807,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             match WorkspaceStore::open_app(&db_path)
                 .and_then(|s| s.create_chat_thread(&workspace, &provider, &title, None))
             {
-                Ok(t) => ArchcarResponse::ChatThreadCreated {
-                    thread: ArchcarChatThread {
-                        id: t.id,
-                        provider: t.provider,
-                        title: t.title,
-                        status: t.status,
-                        model: t.model,
-                        updated_at: t.updated_at,
-                        archived_at: t.archived_at,
-                    },
-                },
+                Ok(t) => {
+                    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
+                        t.harness_metadata.as_deref(),
+                    );
+                    ArchcarResponse::ChatThreadCreated {
+                        thread: ArchcarChatThread {
+                            id: t.id,
+                            provider: t.provider,
+                            title: t.title,
+                            status: t.status,
+                            model: t.model,
+                            effort_mode: harness.effort_mode,
+                            fast_mode: harness.fast_mode,
+                            updated_at: t.updated_at,
+                            archived_at: t.archived_at,
+                        },
+                    }
+                }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -2681,6 +2664,48 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
         },
+    };
+    broadcast_inventory_change_for_response(state, &response);
+    response
+}
+
+fn broadcast_inventory_change_for_response(
+    state: &Arc<Mutex<ServerState>>,
+    response: &ArchcarResponse,
+) {
+    let event = match response {
+        ArchcarResponse::RepositoryAdded { name } | ArchcarResponse::RepositoryRemoved { name } => {
+            Some(ArchcarEvent::InventoryChanged {
+                scope: "repositories".to_owned(),
+                workspace: None,
+                repository: Some(name.clone()),
+            })
+        }
+        ArchcarResponse::WorkspaceCreated { name }
+        | ArchcarResponse::WorkspaceUpdated { name }
+        | ArchcarResponse::WorkspaceRemoved { name } => Some(ArchcarEvent::InventoryChanged {
+            scope: "workspaces".to_owned(),
+            workspace: Some(name.clone()),
+            repository: None,
+        }),
+        ArchcarResponse::WorkspaceCommitted { workspace, .. }
+        | ArchcarResponse::RunScriptStarted { workspace, .. }
+        | ArchcarResponse::RunScriptStopped { workspace, .. }
+        | ArchcarResponse::WorkspaceProcessStarted { workspace, .. }
+        | ArchcarResponse::WorkspaceProcessStopped { workspace, .. }
+        | ArchcarResponse::CheckStarted { workspace, .. }
+        | ArchcarResponse::PullRequestCreated { workspace, .. }
+        | ArchcarResponse::WorkspaceFileWritten { workspace, .. } => {
+            Some(ArchcarEvent::InventoryChanged {
+                scope: "workspaces".to_owned(),
+                workspace: Some(workspace.clone()),
+                repository: None,
+            })
+        }
+        _ => None,
+    };
+    if let Some(event) = event {
+        broadcast(&mut state.lock().unwrap(), event);
     }
 }
 
@@ -3895,6 +3920,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionMessages { .. }
             | ArchcarRequest::GetChatSnapshot { .. }
             | ArchcarRequest::ListQueuedChatInputs { .. }
+            | ArchcarRequest::GetInventorySnapshot
             | ArchcarRequest::ListWorkspaces
             | ArchcarRequest::ListRepositories
             | ArchcarRequest::ListChatThreads { .. }
@@ -3948,54 +3974,40 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
 
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 
-/// Compose the three-section unified diff (working tree / unstaged / staged)
-/// the GTK Changes tab shows. Ported from workspace_command_center::
-/// workspace_diff_sections so both surfaces render identical diff text.
-fn workspace_diff_sections(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+/// The unified diff for one scope, which is what a client actually renders.
+///
+/// This replaced a three-section document (working tree / unstaged / staged
+/// concatenated under headings). That shape forced every caller to pick a
+/// section, and the sections overlap — a file that is both staged and unstaged
+/// appeared twice with overlapping hunks. Returning exactly the scope that was
+/// asked for lets the changes panel and the file view agree on what is shown.
+fn scoped_workspace_diff(
+    store: &WorkspaceStore,
+    name: &str,
+    path: Option<&str>,
+    scope: &WorkspaceChangeScope,
+) -> Result<String> {
     let path_ref = path.map(Path::new);
-    let target = path.unwrap_or("workspace");
-    let base_ref = store
-        .workspace_base_ref(name)
-        .unwrap_or_else(|_| "base".to_owned());
-    let mut out =
-        format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
-    out.push_str(&format_diff_section(
-        "Working tree changes",
-        store.unified_diff_against_base(name, path_ref),
-    ));
-    out.push('\n');
-    out.push_str(&format_diff_section(
-        "Unstaged changes",
-        store.unified_diff(name, path_ref),
-    ));
-    out.push('\n');
-    out.push_str(&format_diff_section(
-        "Staged changes",
-        store.staged_diff(name, path_ref),
-    ));
-    out
+    let diff = match scope {
+        WorkspaceChangeScope::All => store.unified_diff_against_base(name, path_ref)?,
+        WorkspaceChangeScope::Uncommitted => store.uncommitted_diff(name, path_ref)?,
+        WorkspaceChangeScope::Commit { sha } => store.commit_diff(name, sha, path_ref)?,
+    };
+    Ok(truncate_diff_for_render(diff))
 }
 
-fn format_diff_section(title: &str, result: Result<String>) -> String {
-    let text = match result {
-        Ok(text) => text,
-        Err(err) => return format!("{title}\nCould not read diff: {err:#}\n"),
-    };
-    if text.trim().is_empty() {
-        return format!("{title}\nNo changes.\n");
+fn truncate_diff_for_render(text: String) -> String {
+    if text.len() <= DIFF_RENDER_LIMIT_BYTES {
+        return text;
     }
-    if text.len() > DIFF_RENDER_LIMIT_BYTES {
-        let mut end = DIFF_RENDER_LIMIT_BYTES;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{title}\n{}\n[Diff truncated after {DIFF_RENDER_LIMIT_BYTES} bytes. Open the file for full context.]\n",
-            &text[..end]
-        )
-    } else {
-        format!("{title}\n{text}")
+    let mut end = DIFF_RENDER_LIMIT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
     }
+    format!(
+        "{}\n[Diff truncated after {DIFF_RENDER_LIMIT_BYTES} bytes. Open the file for full context.]\n",
+        &text[..end]
+    )
 }
 
 fn exit_code_label(exit_code: Option<i32>) -> String {
@@ -4222,6 +4234,96 @@ fn workspace_summary_from_status_line(
         branch_behind: branch_push_state.map(|s| s.behind),
         updated_at: workspace.updated_at,
     }
+}
+
+fn workspace_summaries(db_path: &Path) -> Result<Vec<ArchcarWorkspaceSummary>> {
+    WorkspaceStore::open_app(db_path).and_then(|store| {
+        let lines = store.list_status()?;
+        let task_counts = store.task_counts_by_workspace().unwrap_or_default();
+        Ok(lines
+            .into_iter()
+            .map(|line| {
+                // Match the GTK dashboard card: changed-file count for the diff
+                // badge, only meaningful for active checkouts.
+                let changed_files = if line.workspace.status == "active" {
+                    store
+                        .changed_files(&line.workspace.name)
+                        .map(|files| files.len())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let tasks = task_counts
+                    .get(&line.workspace.id)
+                    .copied()
+                    .unwrap_or_default();
+                workspace_summary_from_status_line(line, changed_files, tasks)
+            })
+            .collect())
+    })
+}
+
+fn repository_summaries(db_path: &Path) -> Result<Vec<ArchcarRepositorySummary>> {
+    RepositoryStore::open(db_path)
+        .and_then(|store| store.list_with_workspace_counts())
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(repo, active, total)| ArchcarRepositorySummary {
+                    id: repo.id,
+                    name: repo.name,
+                    root_path: repo.root_path.to_string_lossy().into_owned(),
+                    default_branch: repo.default_branch,
+                    remote_name: repo.remote_name,
+                    active_workspaces: active,
+                    total_workspaces: total,
+                })
+                .collect()
+        })
+}
+
+fn chat_threads_for_workspace(db_path: &Path, workspace: &str) -> Result<Vec<ArchcarChatThread>> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.list_chat_threads(workspace))
+        .map(|threads| {
+            threads
+                .into_iter()
+                .map(|t| {
+                    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
+                        t.harness_metadata.as_deref(),
+                    );
+                    ArchcarChatThread {
+                        id: t.id,
+                        provider: t.provider,
+                        title: t.title,
+                        status: t.status,
+                        model: t.model,
+                        effort_mode: harness.effort_mode,
+                        fast_mode: harness.fast_mode,
+                        updated_at: t.updated_at,
+                        archived_at: t.archived_at,
+                    }
+                })
+                .collect()
+        })
+}
+
+fn inventory_snapshot(
+    db_path: &Path,
+) -> Result<(
+    Vec<ArchcarRepositorySummary>,
+    Vec<ArchcarWorkspaceSummary>,
+    BTreeMap<String, Vec<ArchcarChatThread>>,
+)> {
+    let repositories = repository_summaries(db_path)?;
+    let workspaces = workspace_summaries(db_path)?;
+    let mut chat_threads = BTreeMap::new();
+    for workspace in workspaces.iter().filter(|ws| ws.status != "archived") {
+        chat_threads.insert(
+            workspace.name.clone(),
+            chat_threads_for_workspace(db_path, &workspace.name)?,
+        );
+    }
+    Ok((repositories, workspaces, chat_threads))
 }
 
 fn begin_shutdown(state: &Arc<Mutex<ServerState>>) {
@@ -8069,6 +8171,149 @@ default = true
             matches!(listed, ArchcarResponse::Workspaces { ref workspaces } if workspaces.is_empty()),
             "list_workspaces got {listed:?}"
         );
+    }
+
+    #[test]
+    fn workspace_lifecycle_broadcasts_inventory_change_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ArchcarEvent::InventoryChanged {
+                        scope,
+                        repository: Some(repository),
+                        workspace: None,
+                    } if scope == "repositories" && repository == "demo"
+                )
+            }),
+            "expected repository inventory change, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ArchcarEvent::InventoryChanged {
+                        scope,
+                        repository: None,
+                        workspace: Some(workspace),
+                    } if scope == "workspaces" && workspace == "berlin"
+                )
+            }),
+            "expected workspace inventory change, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn inventory_snapshot_lists_repositories_workspaces_and_chat_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+        let created = dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: "berlin".to_owned(),
+                provider: "codex".to_owned(),
+                title: "remote client prep".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(created, ArchcarResponse::ChatThreadCreated { .. }),
+            "create_chat_thread got {created:?}"
+        );
+
+        let snapshot = dispatch_request(ArchcarRequest::GetInventorySnapshot, &state);
+        let ArchcarResponse::InventorySnapshot {
+            repositories,
+            workspaces,
+            chat_threads,
+        } = snapshot
+        else {
+            panic!("get_inventory_snapshot got {snapshot:?}");
+        };
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].name, "demo");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].name, "berlin");
+        assert_eq!(chat_threads.get("berlin").map(Vec::len), Some(1));
     }
 
     #[cfg(unix)]

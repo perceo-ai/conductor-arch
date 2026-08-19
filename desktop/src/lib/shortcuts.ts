@@ -132,13 +132,12 @@ export const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
 
 export type ShortcutMap = ShortcutBinding[];
 
-function actionForName(name: string): ShortcutAction | null {
+function bindingTargetForName(name: string, bindings: ShortcutMap): { index: number; clearSameAction: boolean } | null {
   const normalized = name.trim().toLowerCase().replaceAll("_", "-");
-  for (const binding of DEFAULT_SHORTCUTS) {
-    if (binding.action === normalized || binding.aliases?.includes(normalized)) {
-      return binding.action;
-    }
-  }
+  const aliasIndex = bindings.findIndex((binding) => binding.aliases?.includes(normalized));
+  if (aliasIndex >= 0) return { index: aliasIndex, clearSameAction: false };
+  const actionIndex = bindings.findIndex((binding) => binding.action === normalized);
+  if (actionIndex >= 0) return { index: actionIndex, clearSameAction: true };
   return null;
 }
 
@@ -214,29 +213,24 @@ function splitOverrideEntries(raw: string): string[] {
 export function parseKeybindingOverrides(raw: string | undefined, base: ShortcutMap = DEFAULT_SHORTCUTS): ShortcutMap {
   const next = base.map((binding) => ({ ...binding }));
   if (!raw?.trim()) return next;
-  const byAction = new Map<ShortcutAction, number>();
   const seenActions = new Set<ShortcutAction>();
-  next.forEach((binding, index) => {
-    if (!byAction.has(binding.action)) byAction.set(binding.action, index);
-  });
   for (const part of splitOverrideEntries(raw)) {
     const [name, ...rest] = part.split("=");
     if (!name || rest.length === 0) continue;
-    const action = actionForName(name);
+    const target = bindingTargetForName(name, next);
     const keys = normalizeChord(rest.join("=").trim());
-    if (!action || !keys) continue;
-    const index = byAction.get(action);
-    if (index == null) continue;
-    if (!seenActions.has(action)) {
+    if (!target || !keys) continue;
+    const action = next[target.index].action;
+    if (target.clearSameAction && !seenActions.has(action)) {
       for (let i = 0; i < next.length; i += 1) {
         if (next[i].action === action) next[i] = { ...next[i], keys: "" };
       }
       seenActions.add(action);
     }
     for (let i = 0; i < next.length; i += 1) {
-      if (i !== index && next[i].keys === keys) next[i] = { ...next[i], keys: "" };
+      if (i !== target.index && next[i].keys === keys) next[i] = { ...next[i], keys: "" };
     }
-    next[index] = { ...next[index], keys };
+    next[target.index] = { ...next[target.index], keys };
   }
   return next;
 }

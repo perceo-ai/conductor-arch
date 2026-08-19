@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::archcar::client::ArchcarClient;
-use crate::archcar::protocol::{ArchcarRequest, ArchcarResponse};
+use crate::archcar::protocol::{ArchcarRequest, ArchcarResponse, WorkspaceChangeScope};
 
 /// MCP protocol revision this server implements.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -49,6 +49,18 @@ fn optional_string(args: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/// Read a change scope from tool args. A `commit` sha wins over `scope`, since
+/// naming a commit is unambiguous about which changes are wanted.
+fn scope_arg(args: &Value) -> WorkspaceChangeScope {
+    if let Some(sha) = optional_string(args, "commit") {
+        return WorkspaceChangeScope::Commit { sha };
+    }
+    match optional_string(args, "scope").as_deref() {
+        Some("uncommitted") => WorkspaceChangeScope::Uncommitted,
+        _ => WorkspaceChangeScope::All,
+    }
 }
 
 fn i64_arg(args: &Value, key: &str) -> Result<i64> {
@@ -502,19 +514,16 @@ pub fn tools() -> Vec<ToolSpec> {
                     json!({
                         "workspace": {"type": "string"},
                         "scope": {"type": "string", "enum": ["all", "uncommitted"]},
+                        "commit": {"type": "string", "description": "Limit to one commit's changes."},
                     }),
                     &["workspace"],
                 )
             },
             mutating: false,
             build: |args| {
-                use crate::archcar::protocol::WorkspaceChangeScope;
                 Ok(ArchcarRequest::GetWorkspaceChanges {
                     workspace: string_arg(args, "workspace")?,
-                    scope: match optional_string(args, "scope").as_deref() {
-                        Some("uncommitted") => WorkspaceChangeScope::Uncommitted,
-                        _ => WorkspaceChangeScope::All,
-                    },
+                    scope: scope_arg(args),
                 })
             },
         },
@@ -526,6 +535,8 @@ pub fn tools() -> Vec<ToolSpec> {
                     json!({
                         "workspace": {"type": "string"},
                         "path": {"type": "string"},
+                        "scope": {"type": "string", "enum": ["all", "uncommitted"]},
+                        "commit": {"type": "string", "description": "Limit to one commit's changes."},
                     }),
                     &["workspace"],
                 )
@@ -535,6 +546,7 @@ pub fn tools() -> Vec<ToolSpec> {
                 Ok(ArchcarRequest::GetWorkspaceDiff {
                     workspace: string_arg(args, "workspace")?,
                     path: optional_string(args, "path"),
+                    scope: scope_arg(args),
                 })
             },
         },

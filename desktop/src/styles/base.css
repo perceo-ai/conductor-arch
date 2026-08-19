@@ -1121,6 +1121,23 @@ body.resizing-col {
   padding: 8px 10px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
 }
+/* Scope picker sits to the right of the title and takes the leftover width, so
+   a long commit subject truncates instead of pushing the title around. */
+.ws-changes-scope {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 60%;
+}
+/* Which scope an opened file's diff is showing. */
+.ws-file-view-scope {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--code-border);
+  border-radius: 999px;
+  color: var(--lc-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
 .ws-commit-box {
   display: flex;
   gap: 8px;
@@ -1453,42 +1470,227 @@ body.resizing-col {
   max-height: 320px;
   overflow-y: auto;
 }
-.chat-inline-event-code,
-.chat-inline-event-code-rows {
+/* ---- Diff viewer ----
+   Layout follows the conventions of GitHub and editor diff panes: a collapsible
+   block per file with a sticky path header, collapsible hunks, old/new line
+   number columns pinned against horizontal scroll, and word-level tints inside
+   changed lines. Colors come from the shared code tokens in theme.css. */
+.diff {
   display: flex;
   flex-direction: column;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  gap: 10px;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  tab-size: var(--code-tab);
+  color: var(--code-fg);
+}
+.diff-preamble {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 11px;
+}
+.diff-note {
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
   font-size: 12px;
-  line-height: 1.4;
+}
+
+.diff-file {
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  background: var(--code-surface);
+  /* Clips the rounded corners and, as a scrollport, scopes the sticky header
+     to its own file the way GitHub's per-file headers behave. */
+  overflow: hidden;
+}
+.diff-file-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--code-border);
+  background: var(--diff-header-bg);
+  color: var(--lc-text);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-file-header:hover {
+  box-shadow: inset 0 0 0 999px var(--code-line-active);
+}
+.diff-chevron,
+.diff-file-icon {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--lc-text-muted);
+}
+.diff-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--code-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-file-oldpath {
+  color: var(--lc-text-muted);
+  text-decoration: line-through;
+}
+.diff-file-arrow {
+  margin: 0 4px;
+  color: var(--lc-text-muted);
+}
+.diff-file-status {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--code-border);
+  border-radius: 999px;
+  color: var(--lc-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.diff-file-status-added {
+  border-color: var(--diff-add-word);
+  color: var(--diff-add-accent);
+}
+.diff-file-status-deleted {
+  border-color: var(--diff-del-word);
+  color: var(--diff-del-accent);
+}
+.diff-file-counts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  font-family: var(--code-font);
+  font-size: 11px;
+}
+.diff-file-add {
+  color: var(--diff-add-accent);
+}
+.diff-file-del {
+  color: var(--diff-del-accent);
+}
+.diff-file-body {
   overflow-x: auto;
 }
-.chat-inline-event-code-row {
+.diff-file-empty {
+  padding: 8px 12px;
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+}
+
+/* One width for every row, taken from the longest line and never narrower than
+   the scrollport. Rows and hunk headers then take 100% of it, so their tints
+   run the whole scroll extent instead of stopping at the fold. */
+.diff-file-rows {
+  width: max-content;
+  min-width: 100%;
+}
+.diff-hunk-header {
+  display: block;
+  width: 100%;
+  padding: 1px 0;
+  border: 0;
+  background: var(--diff-hunk-bg);
+  color: var(--diff-hunk-fg);
+  font-family: var(--code-font);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-hunk-inner {
+  position: sticky;
+  left: 0;
   display: flex;
-  flex-direction: row;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0 10px 0 6px;
+}
+.diff-hunk-section {
+  overflow: hidden;
+  color: var(--lc-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-row {
+  display: flex;
+  width: 100%;
+  background: var(--code-surface);
+  color: var(--code-fg);
   white-space: pre;
 }
-.chat-inline-event-code-sign {
-  flex: 0 0 auto;
-  width: 10px;
-  text-align: center;
-  color: var(--lc-text-muted, #8a8a8a);
+.diff-row-added {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-fg);
 }
-.diff-lineno {
+.diff-row-removed {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-fg);
+}
+
+/* The three gutter columns stay pinned while the code scrolls sideways. Their
+   text is drawn as generated content: user-select: none still lands in
+   Selection.toString(), but ::before content never does, so copying a diff
+   yields code without line numbers or +/- signs. */
+.diff-gutter,
+.diff-sign {
+  position: sticky;
+  z-index: 1;
   flex: 0 0 auto;
-  width: 3ch;
-  text-align: right;
-  color: var(--lc-text-muted, #6a6a6a);
-  opacity: 0.7;
+  background: inherit;
+  color: var(--code-gutter-fg);
   user-select: none;
   -webkit-user-select: none;
 }
-.diff-lineno-new {
-  padding-right: 4px;
-  border-right: 1px solid var(--lc-border, #2a2a2a);
+.diff-gutter::before,
+.diff-sign::before {
+  content: attr(data-n);
 }
-.chat-inline-event-code-text {
-  white-space: pre;
+.diff-gutter {
+  width: calc(var(--diff-gutter-w, 2ch) + 12px);
+  padding: 0 6px;
+  text-align: right;
+}
+.diff-gutter-old {
+  left: 0;
+}
+.diff-gutter-new {
+  left: calc(var(--diff-gutter-w, 2ch) + 12px);
+  border-right: 1px solid var(--code-border);
+}
+.diff-sign {
+  left: calc((var(--diff-gutter-w, 2ch) + 12px) * 2);
+  width: 2ch;
+  padding-left: 4px;
+}
+.diff-code {
+  flex: 1 1 auto;
+  padding: 0 10px 0 2px;
+}
+.diff-word {
+  border-radius: 2px;
+}
+.diff-row-added .diff-word {
+  background: var(--diff-add-word);
+}
+.diff-row-removed .diff-word {
+  background: var(--diff-del-word);
 }
 .chat-inline-event-terminal {
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -2492,6 +2694,11 @@ button.ui-button-icon .ui-icon,
   background: #1b1b1b;
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
 }
+/* Portalled to <body> and positioned against the trigger from JS, so a
+   scrolling ancestor cannot clip it. Above the popover layer. */
+.compact-select-menu-floating {
+  z-index: 220;
+}
 .compact-select-group {
   padding: 7px 8px 3px;
   color: #858585;
@@ -2836,33 +3043,60 @@ button.ui-button-icon .ui-icon,
   display: flex;
   flex-direction: column;
 }
-/* Editor = a transparent textarea layered over a highlighted <pre>. Both share
-   these exact metrics so the caret and glyphs register 1:1. */
+/* Editor = a transparent textarea layered over a highlighted <pre>, with a
+   line-number gutter pinned to the left. All three layers share these exact
+   metrics so the caret, the glyphs, and the numbers register 1:1. */
 .ws-file-editor-scroll {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  background: var(--lc-surface, #161616);
+  background: var(--code-surface);
   overflow: hidden;
 }
+.ws-file-editor-gutter,
 .ws-file-editor-highlight,
 .ws-file-editor-area {
   margin: 0;
   border: 0;
-  padding: 12px 14px;
-  font-family: var(--lc-mono, ui-monospace, monospace);
-  font-size: 12.5px;
-  line-height: 1.5;
-  tab-size: 2;
+  padding: 12px 0;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  tab-size: var(--code-tab);
   white-space: pre;
   word-wrap: normal;
+}
+/* Reserve the gutter's width on the text layers rather than shifting them, so
+   a long line scrolls under the numbers instead of pushing them off. */
+.ws-file-editor-highlight,
+.ws-file-editor-area {
+  padding-left: calc(var(--editor-gutter-w, 3ch) + 22px);
+  padding-right: 14px;
+}
+.ws-file-editor-gutter {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: calc(var(--editor-gutter-w, 3ch) + 16px);
+  padding-right: 8px;
+  overflow: hidden;
+  border-right: 1px solid var(--code-border);
+  background: var(--code-surface);
+  color: var(--code-gutter-fg);
+  text-align: right;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.ws-file-editor-gutter-line-active {
+  color: var(--lc-text);
 }
 pre.ws-file-editor-highlight.hljs {
   position: absolute;
   inset: 0;
   overflow: hidden;
   background: transparent;
-  color: var(--lc-text, #e6e6e6);
+  color: var(--code-fg);
   pointer-events: none;
 }
 .ws-file-editor-highlight code {
@@ -2882,6 +3116,18 @@ pre.ws-file-editor-highlight.hljs {
 .ws-file-editor-area::selection {
   background: rgba(120, 140, 255, 0.32);
 }
+/* Preview mode: a reading column over the same surface as the editor, so
+   switching Edit <-> Preview doesn't change the page under you. */
+.ws-file-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 20px 24px 32px;
+  overflow-y: auto;
+  background: var(--code-surface);
+}
+.ws-file-preview .markdown-body {
+  max-width: 78ch;
+}
 .ws-file-editor-footer {
   flex: 0 0 auto;
   display: flex;
@@ -2893,20 +3139,6 @@ pre.ws-file-editor-highlight.hljs {
 }
 .ws-file-editor-footer .card-meta {
   margin-right: auto;
-}
-
-/* ---- Diff meta rows (headers) ---- */
-.chat-inline-event-code-row-meta {
-  color: var(--lc-text-muted, #7a7a7a);
-}
-.chat-inline-event-code-row-meta .chat-inline-event-code-text {
-  opacity: 0.75;
-}
-/* highlight.js sets a container background; keep the diff surface flush so the
-   per-line +/- tints still read through. */
-.chat-inline-event-code.hljs {
-  background: transparent;
-  padding: 0;
 }
 
 /* ---- Markdown-rendered assistant/reasoning text ---- */
@@ -3002,13 +3234,14 @@ pre.ws-file-editor-highlight.hljs {
   margin: 8px 0;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid var(--lc-border, #2a2a2a);
+  border: 1px solid var(--code-border);
   overflow-x: auto;
+  tab-size: var(--code-tab);
 }
 .markdown-body pre.md-code code {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
   background: transparent;
   padding: 0;
 }
@@ -5280,4 +5513,19 @@ button.ws-tab-shell.ws-chat-new:hover {
   .chat-messages {
     padding: 20px 18px;
   }
+}
+
+.ws-changes-commit-open {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lc-text-muted);
+  cursor: pointer;
+}
+.ws-changes-commit-open:hover {
+  color: var(--lc-text);
 }

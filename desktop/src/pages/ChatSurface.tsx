@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import {
   chatStore,
   threadsStore,
@@ -21,7 +21,10 @@ import type {
   ProviderInteractionRecord,
   ProviderInteractionResolution,
   SessionKind,
+  WorkspaceChangeScope,
 } from "@/bridge/protocol";
+import { commitScopeSha } from "@/bridge/protocol";
+import { shortSha } from "@/lib/commitLog";
 import { titleCaseWorkspace } from "@/lib/text";
 import { isDisplayableTimelineItem } from "@/lib/timeline";
 import { DiffView } from "./WorkspaceChanges";
@@ -30,8 +33,10 @@ import Diff from "@/components/Diff";
 import CompactSelect from "@/components/CompactSelect";
 import Icon from "@/components/Icon";
 import type { IconName } from "@/components/Icon";
-import { renderMarkdown, renderMarkdownWithInlineFileChips } from "@/lib/markdown";
+import { renderMarkdown, renderMarkdownDocument, renderMarkdownWithInlineFileChips } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
+import { editorGutter } from "@/lib/editorGutter";
+import { previewKind } from "@/lib/filePreview";
 import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
 import {
@@ -610,6 +615,8 @@ function Composer(props: {
   workspace: string;
   provider: string;
   currentModel?: string | null;
+  currentEffortMode?: string | null;
+  currentFastMode?: boolean;
   onChangeAgentModel: (provider: string, model: string) => void;
   // Model to apply to this chat's session once it first becomes ready. Set only
   // for freshly created chats so existing chats keep their own model choice.
@@ -675,13 +682,18 @@ function Composer(props: {
   });
 
   const [model, setModel] = createSignal(props.seedModel || props.currentModel || firstModel(props.provider));
-  const [effort, setEffort] = createSignal("high");
+  const [effort, setEffort] = createSignal(props.currentEffortMode || "high");
+  const [fastMode, setFastMode] = createSignal(Boolean(props.currentFastMode));
 
   createEffect(() => {
+    const threadId = props.threadId;
     const provider = props.provider;
-    const next = props.currentModel || props.seedModel || model() || firstModel(provider);
-    if (providerForModel(next) === provider && next !== model()) setModel(next);
-    if (providerForModel(model()) !== provider) setModel(firstModel(provider));
+    const candidate = props.currentModel || props.seedModel || untrack(model);
+    const next = candidate && providerForModel(candidate) === provider ? candidate : firstModel(provider);
+    void threadId;
+    setModel(next);
+    setEffort(props.currentEffortMode || "high");
+    setFastMode(Boolean(props.currentFastMode));
   });
 
   // Seed a new chat's model: once its session is live, push the default model so
@@ -734,6 +746,12 @@ function Composer(props: {
     setEffort(next);
     const sid = sessionId();
     if (sid != null) void send({ type: "set_session_effort", session_id: sid, effort: next }).catch(() => {});
+  }
+  function toggleFastMode() {
+    const next = !fastMode();
+    setFastMode(next);
+    const sid = sessionId();
+    if (sid != null) void send({ type: "set_session_fast_mode", session_id: sid, fast_mode: next }).catch(() => {});
   }
 
   const PASTE_TO_FILE_CHARS = 2000;
@@ -1210,6 +1228,15 @@ function Composer(props: {
               icon="brain"
               class="chat-effort-select"
             />
+            <button
+              class="chat-plan-toggle"
+              classList={{ "chat-plan-toggle-on": fastMode() }}
+              title={fastMode() ? "Fast mode on" : "Fast mode off"}
+              onClick={() => toggleFastMode()}
+            >
+              <Icon name="bolt" />
+              <span>Fast</span>
+            </button>
             {/* Plan mode is provider-native: claude runs in its plan permission
                 mode, codex plans inside a read-only sandbox. */}
             <button
@@ -1274,11 +1301,14 @@ function Composer(props: {
   );
 }
 
-// File view — two modes backed by real RPCs:
-//   diff : the three-section unified diff (get_workspace_diff)
-//   edit : the file's UTF-8 text (read_workspace_file), editable + savable
-//          (write_workspace_file). Binary/oversize files surface the backend
-//          error instead of an editor.
+// File view — modes backed by real RPCs:
+//   diff    : the unified diff for the file (get_workspace_diff)
+//   edit    : the file's UTF-8 text (read_workspace_file), editable + savable
+//             (write_workspace_file). Binary/oversize files surface the backend
+//             error instead of an editor.
+//   preview : rendered output for formats that have one (markdown today), so
+//             the raw source and the finished document are both reachable.
+//             Offered only when previewKind() recognises the path.
 function FileEditor(props: { workspace: string; path: string }) {
   const [loaded] = createResource(
     () => [props.workspace, props.path] as const,
@@ -1323,15 +1353,27 @@ function FileEditor(props: { workspace: string; path: string }) {
   }
 
   // Syntax highlighting overlay: a transparent textarea sits over a highlighted
-  // <pre>. Both share identical font metrics + padding so the caret lines up;
-  // the textarea drives the scroll and mirrors it onto the highlight layer. A
-  // trailing newline keeps the last visual line height correct.
+  // <pre>, with a line-number gutter pinned left of both. All three share
+  // identical font metrics + padding so the caret lines up; the textarea drives
+  // the scroll and mirrors it onto the other layers. A trailing newline keeps
+  // the last visual line height correct.
   const lang = createMemo(() => langFromPath(props.path));
   const highlighted = createMemo(() => {
     const text = draft() ?? "";
     return highlightCode(text.endsWith("\n") ? text : text + "\n", lang());
   });
+  const [caret, setCaret] = createSignal(0);
+  const gutter = createMemo(() => editorGutter(draft() ?? "", caret()));
   let highlightRef: HTMLPreElement | undefined;
+  let gutterRef: HTMLDivElement | undefined;
+
+  function syncScroll(el: HTMLTextAreaElement) {
+    if (highlightRef) {
+      highlightRef.scrollTop = el.scrollTop;
+      highlightRef.scrollLeft = el.scrollLeft;
+    }
+    if (gutterRef) gutterRef.scrollTop = el.scrollTop;
+  }
 
   function indentSelection(el: HTMLTextAreaElement, dedent: boolean) {
     const res = applyIndent(el.value, el.selectionStart, el.selectionEnd, dedent);
@@ -1351,7 +1393,19 @@ function FileEditor(props: { workspace: string; path: string }) {
       fallback={<div class="empty-state">{loaded()?.error}</div>}
     >
       <div class="ws-file-editor">
-        <div class="ws-file-editor-scroll">
+        <div
+          class="ws-file-editor-scroll"
+          style={{ "--editor-gutter-w": `${gutter().digits}ch` }}
+        >
+          <div class="ws-file-editor-gutter" aria-hidden="true" ref={gutterRef}>
+            <For each={Array.from({ length: gutter().count }, (_, i) => i + 1)}>
+              {(n) => (
+                <div classList={{ "ws-file-editor-gutter-line-active": n === gutter().activeLine }}>
+                  {n}
+                </div>
+              )}
+            </For>
+          </div>
           <pre class="ws-file-editor-highlight hljs" aria-hidden="true" ref={highlightRef}>
             <code innerHTML={highlighted()} />
           </pre>
@@ -1361,14 +1415,12 @@ function FileEditor(props: { workspace: string; path: string }) {
             value={draft() ?? ""}
             onInput={(e) => {
               setDraft(e.currentTarget.value);
+              setCaret(e.currentTarget.selectionStart);
               setStatus("");
             }}
-            onScroll={(e) => {
-              if (highlightRef) {
-                highlightRef.scrollTop = e.currentTarget.scrollTop;
-                highlightRef.scrollLeft = e.currentTarget.scrollLeft;
-              }
-            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+            onClick={(e) => setCaret(e.currentTarget.selectionStart)}
+            onScroll={(e) => syncScroll(e.currentTarget)}
             onKeyDown={(e) => {
               if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "save") {
                 e.preventDefault();
@@ -1381,6 +1433,7 @@ function FileEditor(props: { workspace: string; path: string }) {
                 setStatus("");
               }
             }}
+            onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
           />
         </div>
         <div class="ws-file-editor-footer">
@@ -1465,40 +1518,93 @@ function FileComments(props: { workspace: string; path: string }) {
   );
 }
 
-function FileView(props: { workspace: string; path: string }) {
-  const [mode, setMode] = createSignal<"diff" | "edit">("diff");
+// Rendered markdown for the Preview mode. Uses the same renderer as chat
+// messages, which escapes raw HTML tokens and highlights fenced code through
+// the shared code tokens — so a fence here matches the editor exactly.
+function FilePreview(props: { workspace: string; path: string }) {
+  const [loaded] = createResource(
+    () => [props.workspace, props.path] as const,
+    async ([workspace, path]) => {
+      try {
+        const res = await send({ type: "read_workspace_file", workspace, path });
+        if (res.type === "workspace_file_content") return { content: res.content, error: null };
+        if (res.type === "error") return { content: "", error: res.message };
+        return { content: "", error: "Unexpected response" };
+      } catch (err) {
+        return { content: "", error: (err as Error).message };
+      }
+    },
+  );
+  return (
+    <Show
+      when={!loaded()?.error}
+      fallback={<div class="empty-state">{loaded()?.error}</div>}
+    >
+      <div class="ws-file-preview">
+        <div class="markdown-body" innerHTML={renderMarkdownDocument(loaded()?.content ?? "")} />
+      </div>
+    </Show>
+  );
+}
+
+function scopeLabel(scope: WorkspaceChangeScope): string {
+  const sha = commitScopeSha(scope);
+  if (sha) return `commit ${shortSha(sha)}`;
+  return scope === "all" ? "all changes" : "uncommitted";
+}
+
+function FileView(props: { workspace: string; path: string; scope?: WorkspaceChangeScope }) {
+  const [mode, setMode] = createSignal<"diff" | "edit" | "preview">("diff");
+  const preview = createMemo(() => previewKind(props.path));
+  const scope = createMemo<WorkspaceChangeScope>(() => props.scope ?? "all");
+  // A previewable file can be swapped for one that isn't while the tab stays
+  // open; fall back rather than render an empty pane.
+  const active = createMemo(() => (mode() === "preview" && !preview() ? "diff" : mode()));
   return (
     <div class="ws-file-view">
       <div class="ws-file-view-header">
         <span class="ws-file-view-path">{props.path}</span>
+        <Show when={active() === "diff"}>
+          <span class="ws-file-view-scope">{scopeLabel(scope())}</span>
+        </Show>
         <div class="command-center-strip ws-file-view-modes">
           <button
             class="nav-button"
-            classList={{ "nav-button-active": mode() === "diff" }}
+            classList={{ "nav-button-active": active() === "diff" }}
             onClick={() => setMode("diff")}
           >
             Diff
           </button>
           <button
             class="nav-button"
-            classList={{ "nav-button-active": mode() === "edit" }}
+            classList={{ "nav-button-active": active() === "edit" }}
             onClick={() => setMode("edit")}
           >
             Edit
           </button>
+          <Show when={preview()}>
+            <button
+              class="nav-button"
+              classList={{ "nav-button-active": active() === "preview" }}
+              onClick={() => setMode("preview")}
+            >
+              Preview
+            </button>
+          </Show>
         </div>
       </div>
-      <Show
-        when={mode() === "edit"}
-        fallback={
-          <>
-            <DiffView workspace={props.workspace} path={props.path} />
-            <FileComments workspace={props.workspace} path={props.path} />
-          </>
-        }
-      >
-        <FileEditor workspace={props.workspace} path={props.path} />
-      </Show>
+      <Switch>
+        <Match when={active() === "edit"}>
+          <FileEditor workspace={props.workspace} path={props.path} />
+        </Match>
+        <Match when={active() === "preview"}>
+          <FilePreview workspace={props.workspace} path={props.path} />
+        </Match>
+        <Match when={active() === "diff"}>
+          <DiffView workspace={props.workspace} path={props.path} scope={scope()} />
+          <FileComments workspace={props.workspace} path={props.path} />
+        </Match>
+      </Switch>
     </div>
   );
 }
@@ -1538,7 +1644,9 @@ function CommitView(props: { workspace: string; commit: string; onClose: () => v
 
 type CenterView =
   | { kind: "chat" }
-  | { kind: "file"; path: string }
+  // The scope the file was opened under, so its diff matches the list it came
+  // from rather than always showing everything since the review base.
+  | { kind: "file"; path: string; scope: WorkspaceChangeScope }
   | { kind: "commit"; commit: string };
 
 export default function ChatSurface(props: { workspace: string }) {
@@ -1548,6 +1656,9 @@ export default function ChatSurface(props: { workspace: string }) {
     threadsStore.list(props.workspace).filter((t) => t.provider !== "shell"),
   );
   const [openFilePath, setOpenFilePath] = createSignal<string | null>(null);
+  // Remembered so re-selecting the file's tab restores the scope it was opened
+  // under instead of silently falling back to "all changes".
+  const [openFileScope, setOpenFileScope] = createSignal<WorkspaceChangeScope>("all");
   const [view, setView] = createSignal<CenterView>({ kind: "chat" });
   const [newProvider, setNewProvider] = createSignal<string>(prefsStore.state.defaultProvider);
   // threadId -> model to apply once that (freshly created) chat's session is live.
@@ -1561,9 +1672,9 @@ export default function ChatSurface(props: { workspace: string }) {
   }
 
   // Let the right-panel Browse/Changes open files into the center.
-  onMount(() => registerOpenFile((ws, path) => {
+  onMount(() => registerOpenFile((ws, path, scope) => {
     if (ws !== props.workspace) return;
-    openFile(path);
+    openFile(path, scope);
   }));
   // Let the recent-commits list open a commit's diff into the center.
   onMount(() => registerOpenCommit((ws, commit) => {
@@ -1571,9 +1682,10 @@ export default function ChatSurface(props: { workspace: string }) {
     setView({ kind: "commit", commit });
   }));
 
-  function openFile(path: string) {
+  function openFile(path: string, scope: WorkspaceChangeScope = "all") {
     setOpenFilePath(path);
-    setView({ kind: "file", path });
+    setOpenFileScope(() => scope);
+    setView({ kind: "file", path, scope });
   }
   function closeFile(path: string) {
     if (openFilePath() === path) setOpenFilePath(null);
@@ -1672,7 +1784,7 @@ export default function ChatSurface(props: { workspace: string }) {
               <FileTab
                 path={path()}
                 active={view().kind === "file" && (view() as { path: string }).path === path()}
-                onClick={() => setView({ kind: "file", path: path() })}
+                onClick={() => setView({ kind: "file", path: path(), scope: openFileScope() })}
                 onClose={() => closeFile(path())}
               />
             )}
@@ -1710,7 +1822,11 @@ export default function ChatSurface(props: { workspace: string }) {
           />
         </Match>
         <Match when={view().kind === "file"}>
-          <FileView workspace={props.workspace} path={(view() as { path: string }).path} />
+          <FileView
+            workspace={props.workspace}
+            path={(view() as { path: string }).path}
+            scope={(view() as { scope: WorkspaceChangeScope }).scope}
+          />
         </Match>
         <Match when={view().kind === "chat" && activeThread()}>
           <Timeline threadId={activeThread()!.id} workspace={props.workspace} />
@@ -1729,6 +1845,8 @@ export default function ChatSurface(props: { workspace: string }) {
             workspace={props.workspace}
             provider={activeThread()!.provider}
             currentModel={activeThread()!.model}
+            currentEffortMode={activeThread()!.effort_mode}
+            currentFastMode={activeThread()!.fast_mode}
             seedModel={pendingSeed()[activeThread()!.id]}
             onSeeded={() => clearSeed(activeThread()!.id)}
             onChangeAgentModel={(provider, model) => {

@@ -23,6 +23,7 @@ export type ArchcarRequest =
   | { type: "interrupt_turn"; session_id: number }
   | { type: "set_session_model"; session_id: number; model?: string }
   | { type: "set_session_effort"; session_id: number; effort?: string }
+  | { type: "set_session_fast_mode"; session_id: number; fast_mode: boolean }
   | { type: "set_session_permission_mode"; session_id: number; mode: string }
   | { type: "resize_session"; session_id: number; rows: number; cols: number }
   | { type: "get_session_status"; session_id: number }
@@ -45,6 +46,7 @@ export type ArchcarRequest =
   | { type: "set_chat_plan_mode"; thread_id: number; plan_mode: boolean }
   | { type: "get_chat_plan"; thread_id: number }
   | { type: "kill_session"; session_id: number }
+  | { type: "get_inventory_snapshot" }
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
   | { type: "list_chat_threads"; workspace: string }
@@ -56,7 +58,12 @@ export type ArchcarRequest =
   | { type: "read_workspace_file"; workspace: string; path: string }
   | { type: "write_workspace_file"; workspace: string; path: string; content: string }
   | { type: "get_workspace_changes"; workspace: string; scope: WorkspaceChangeScope }
-  | { type: "get_workspace_diff"; workspace: string; path?: string }
+  | {
+      type: "get_workspace_diff";
+      workspace: string;
+      path?: string;
+      scope?: WorkspaceChangeScope;
+    }
   | { type: "list_todos"; workspace: string }
   | { type: "add_todo"; workspace: string; text: string }
   | { type: "list_checkpoints"; workspace: string }
@@ -69,7 +76,7 @@ export type ArchcarRequest =
   | { type: "list_linked_directories"; workspace: string }
   | { type: "get_recent_commits"; workspace: string; limit?: number }
   | { type: "get_commit_message_draft"; workspace: string }
-  | { type: "get_commit_diff"; workspace: string; commit: string }
+  | { type: "get_commit_diff"; workspace: string; commit: string; path?: string }
   | { type: "run_workspace_script"; workspace: string }
   | { type: "stop_workspace_script"; workspace: string }
   | { type: "get_run_log"; workspace: string }
@@ -214,7 +221,13 @@ export type ArchcarRequest =
   | { type: "set_default_agent_provider"; workspace: string; provider: string }
   | { type: "subscribe" };
 
-export type WorkspaceChangeScope = "all" | "uncommitted";
+// Mirrors WorkspaceChangeScope in crates/core/src/archcar/protocol.rs. The same
+// scope drives the changes list and the diff for a file opened from it.
+export type WorkspaceChangeScope = "all" | "uncommitted" | { commit: { sha: string } };
+
+export function commitScopeSha(scope: WorkspaceChangeScope): string | null {
+  return typeof scope === "object" ? scope.commit.sha : null;
+}
 
 // --- Records ---------------------------------------------------------------
 export interface ArchcarMessage {
@@ -385,6 +398,8 @@ export interface ArchcarChatThread {
   status: string;
   /** Explicit model the session was launched with, when recorded. */
   model?: string | null;
+  effort_mode?: string | null;
+  fast_mode: boolean;
   updated_at: string;
   archived_at?: string;
 }
@@ -468,6 +483,12 @@ export type ArchcarResponse =
   | { type: "session_screen"; session_id: number; screen: string }
   | { type: "chat_snapshot"; snapshot: ChatSnapshot }
   | { type: "queued_chat_inputs"; thread_id: number; inputs: QueuedArchcarInput[] }
+  | {
+      type: "inventory_snapshot";
+      repositories: ArchcarRepositorySummary[];
+      workspaces: ArchcarWorkspaceSummary[];
+      chat_threads: Record<string, ArchcarChatThread[]>;
+    }
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
@@ -821,6 +842,7 @@ export type ArchcarEvent =
   | { type: "task_updated"; workspace: string; task_id: number; status: string }
   | { type: "workspace_renamed"; old_name: string; new_name: string }
   | { type: "chat_thread_renamed"; thread_id: number; title: string }
+  | { type: "inventory_changed"; scope: string; workspace?: string; repository?: string }
   | { type: string; [k: string]: unknown };
 
 // Agent-driven interaction (permission / question / plan approval) surfaced to

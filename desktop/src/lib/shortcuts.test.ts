@@ -133,10 +133,10 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev(".", true), shortcuts)).toBe("goto-settings");
   });
 
-  it("removes every old chord when customizing an action with multiple defaults", () => {
+  it("keeps alias rows independent when customizing an action with multiple defaults", () => {
     const shortcuts = parseKeybindingOverrides("settings=ctrl+.", DEFAULT_SHORTCUTS);
     expect(resolveShortcut(ev(".", true), shortcuts)).toBe("goto-settings");
-    expect(resolveShortcut(ev(",", true), shortcuts)).toBeNull();
+    expect(resolveShortcut(ev(",", true), shortcuts)).toBe("goto-settings");
   });
 
   it("lets a custom binding claim a default chord from another action", () => {

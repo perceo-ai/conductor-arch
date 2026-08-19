@@ -30,6 +30,15 @@ export const threadsStore = {
     recordUpdate(`threads.${workspace}`);
   },
 
+  setMany(threadsByWorkspace: Record<string, ArchcarChatThread[]>) {
+    for (const [workspace, threads] of Object.entries(threadsByWorkspace)) {
+      this.setThreads(
+        workspace,
+        threads.filter((t) => t.status !== "closed"),
+      );
+    }
+  },
+
   workspaceForThread(threadId: number): string | undefined {
     return workspaceByThread.get(threadId);
   },

@@ -171,6 +171,7 @@ pub struct DesiredHarnessControls {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    pub fast_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +317,7 @@ pub enum HarnessControl {
     Kill,
     SetModel(Option<String>),
     SetEffort(Option<String>),
+    SetFastMode(bool),
     SetPermissionMode(Option<String>),
     ResolveInteraction {
         /// The provider's own id for the ask (JSON-RPC request id for codex,

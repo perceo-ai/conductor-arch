@@ -174,7 +174,7 @@ function RightPanel(props: { workspace: string }) {
             <Match when={nav.rightPanelTab() === "changes"}>
               <ChangesRows
                 workspace={props.workspace}
-                openFile={(p) => openFileInCenter(props.workspace, p)}
+                openFile={(p, scope) => openFileInCenter(props.workspace, p, scope)}
               />
             </Match>
             <Match when={nav.rightPanelTab() === "checks"}>

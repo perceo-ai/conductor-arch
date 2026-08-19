@@ -625,6 +625,10 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 self.context.controls.effort = effort;
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
             }
+            HarnessControl::SetFastMode(fast_mode) => {
+                self.context.controls.fast_mode = Some(fast_mode);
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
             HarnessControl::SetPermissionMode(permission_mode) => {
                 self.context.controls.permission_mode = permission_mode.clone();
                 self.plan_mode = permission_mode.as_deref() == Some(CLAUDE_PLAN_MODE);

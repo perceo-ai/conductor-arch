@@ -266,6 +266,9 @@ ipcMain.handle("archcar:request", async (_evt, payload: unknown) => {
 
 ipcMain.handle("fs:list-workspace-files", async (_evt, opts: { rootPath?: string; cap?: number }) => {
   try {
+    if (loadRemoteConfig()) {
+      return { ok: false, error: "remote daemon configured; use archcar workspace file listing" };
+    }
     if (!opts?.rootPath) return { ok: false, error: "missing workspace path" };
     const files = await listWorkspaceFilesLocal(opts.rootPath, opts.cap ?? 400);
     return { ok: true, files };
