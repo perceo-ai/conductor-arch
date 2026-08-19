@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   attachmentMarker,
   fileNameFromPath,
+  inlineFileMentionAt,
   insertInlineAttachmentMarker,
   promptTextWithAttachmentRefs,
+  removeAdjacentAttachmentMarker,
   type ComposerAttachment,
 } from "./chatAttachments";
 
@@ -33,5 +35,25 @@ describe("chat attachment markers", () => {
     expect(promptTextWithAttachmentRefs("read {pasted-text-a1b2c3d4.md} now", attachments)).toBe(
       "read @.context/archductor/42/pasted-text-a1b2c3d4.md now",
     );
+  });
+
+  it("finds the active @ file mention before the cursor", () => {
+    expect(inlineFileMentionAt("read @src/lib", 13)).toEqual({
+      start: 5,
+      end: 13,
+      query: "src/lib",
+    });
+    expect(inlineFileMentionAt("email a@b", 9)).toBeNull();
+  });
+
+  it("removes an adjacent marker as one unit", () => {
+    expect(removeAdjacentAttachmentMarker("abc {pasted.md} def", 15, "backward")).toEqual({
+      value: "abc def",
+      cursor: 3,
+    });
+    expect(removeAdjacentAttachmentMarker("abc {pasted.md} def", 4, "forward")).toEqual({
+      value: "abc def",
+      cursor: 3,
+    });
   });
 });

@@ -12,6 +12,20 @@ export function attachmentMarker(path: string): string {
   return `{${fileNameFromPath(path)}}`;
 }
 
+export interface InlineFileMention {
+  start: number;
+  end: number;
+  query: string;
+}
+
+export function inlineFileMentionAt(value: string, cursor: number): InlineFileMention | null {
+  const before = value.slice(0, cursor);
+  const match = /(^|\s)@([^\s{}]*)$/.exec(before);
+  if (!match) return null;
+  const query = match[2] ?? "";
+  return { start: cursor - query.length - 1, end: cursor, query };
+}
+
 export function insertInlineAttachmentMarker(
   value: string,
   marker: string,
@@ -34,4 +48,27 @@ export function promptTextWithAttachmentRefs(
     next = next.replaceAll(attachment.marker, `@${attachment.path}`);
   }
   return next;
+}
+
+export function removeAdjacentAttachmentMarker(
+  value: string,
+  cursor: number,
+  direction: "backward" | "forward",
+): { value: string; cursor: number } | null {
+  const markerPattern = /\{[^{}\s][^{}]*?\}/g;
+  for (const match of value.matchAll(markerPattern)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    const atBackwardEdge = direction === "backward" && cursor === end;
+    const atForwardEdge = direction === "forward" && cursor === start;
+    if (!atBackwardEdge && !atForwardEdge) continue;
+    const before = value.slice(0, start).replace(/[ \t]+$/, "");
+    const after = value.slice(end).replace(/^[ \t]+/, "");
+    const separator = before.length > 0 && after.length > 0 ? " " : "";
+    return {
+      value: before + separator + after,
+      cursor: before.length,
+    };
+  }
+  return null;
 }

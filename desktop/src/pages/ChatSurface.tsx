@@ -54,10 +54,13 @@ import {
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
 import {
   attachmentMarker,
+  inlineFileMentionAt,
   insertInlineAttachmentMarker,
   promptTextWithAttachmentRefs,
+  removeAdjacentAttachmentMarker,
   type ComposerAttachment,
 } from "@/lib/chatAttachments";
+import { fuzzyScore } from "@/lib/fuzzy";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -618,6 +621,8 @@ function Composer(props: {
   // agent reads them instead of us inlining a huge string.
   const [attachments, setAttachments] = createSignal<ComposerAttachment[]>([]);
   let inputRef: HTMLTextAreaElement | undefined;
+  const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
+  const [fileMentionCursor, setFileMentionCursor] = createSignal(0);
   const slice = () => chatStore.slice(props.threadId);
   const sessionKind = () => providerToKind(props.provider);
   const busy = () => slice().session?.ready === false && slice().session != null;
@@ -629,6 +634,28 @@ function Composer(props: {
   const busyStatusTitle = () => (running() ? "Agent is generating" : slowStart() ? "Agent is still starting" : "Agent starting");
   const sessionId = () => slice().session?.session_id ?? null;
   const modelOptions = agentModelOptions;
+  const [workspaceFiles] = createResource(
+    () => props.workspace,
+    async (workspace): Promise<string[]> => {
+      try {
+        const res = await send({ type: "list_workspace_files", workspace });
+        return res.type === "workspace_files" ? res.files : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const fileMentionOptions = createMemo(() => {
+    const mention = fileMention();
+    if (!mention) return [];
+    const query = mention.query.trim();
+    const scored = (workspaceFiles() ?? [])
+      .slice(0, 1000)
+      .map((path) => ({ path, score: fuzzyScore(query, path) }))
+      .filter((item): item is { path: string; score: number } => item.score !== null);
+    scored.sort((a, b) => a.score - b.score);
+    return scored.slice(0, 8).map((item) => item.path);
+  });
 
   // Readiness watchdog: a session that never reports ready (e.g. the agent CLI
   // hangs on a first-run prompt) shouldn't read as an infinite "starting…" dead
@@ -708,6 +735,39 @@ function Composer(props: {
 
   const PASTE_TO_FILE_CHARS = 2000;
 
+  function syncFileMention(value = text()) {
+    const cursor = inputRef?.selectionStart ?? value.length;
+    setFileMention(inlineFileMentionAt(value, cursor));
+    setFileMentionCursor(0);
+  }
+
+  function setEditorText(value: string, cursor?: number) {
+    setText(value);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      if (cursor != null) inputRef?.setSelectionRange(cursor, cursor);
+      syncFileMention(value);
+    });
+  }
+
+  function insertFileAttachment(path: string, range = fileMention()) {
+    if (!range) return;
+    const marker = attachmentMarker(path);
+    const before = text().slice(0, range.start);
+    const after = text().slice(range.end);
+    const inserted = insertInlineAttachmentMarker(before + after, marker, before.length, before.length);
+    setAttachments((list) => {
+      if (list.some((attachment) => attachment.path === path && attachment.marker === marker)) return list;
+      return [...list, { path, label: fileNameFromMention(path), marker }];
+    });
+    setFileMention(null);
+    setEditorText(inserted.value, inserted.cursor);
+  }
+
+  function fileNameFromMention(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+  }
+
   // Combine typed text with inline pasted-file markers and context picked on
   // the empty-chat screen. `input` (to the agent) swaps visible {file.md}
   // markers for @path references; `visible` keeps the compact inline markers.
@@ -730,6 +790,7 @@ function Composer(props: {
   function clearComposer() {
     setText("");
     setAttachments([]);
+    setFileMention(null);
     // Picked context rides on one message only; a follow-up shouldn't resend it.
     newChatContextStore.clear(props.threadId);
   }
@@ -753,12 +814,8 @@ function Composer(props: {
           selectionStart,
           selectionEnd,
         );
-        setText(inserted.value);
+        setEditorText(inserted.value, inserted.cursor);
         setAttachments((a) => [...a, { path: res.relative_path, label: res.label, marker }]);
-        queueMicrotask(() => {
-          inputRef?.focus();
-          inputRef?.setSelectionRange(inserted.cursor, inserted.cursor);
-        });
       } else {
         setText((t) => t + pasted);
       }
@@ -900,6 +957,41 @@ function Composer(props: {
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    if (fileMention()) {
+      const n = fileMentionOptions().length;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setFileMentionCursor((c) => (n === 0 ? 0 : (c + 1) % n));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setFileMentionCursor((c) => (n === 0 ? 0 : (c - 1 + n) % n));
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && n > 0) {
+        e.preventDefault();
+        insertFileAttachment(fileMentionOptions()[fileMentionCursor()]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setFileMention(null);
+        return;
+      }
+    }
+    if ((e.key === "Backspace" || e.key === "Delete") && inputRef && inputRef.selectionStart === inputRef.selectionEnd) {
+      const removed = removeAdjacentAttachmentMarker(
+        text(),
+        inputRef.selectionStart,
+        e.key === "Backspace" ? "backward" : "forward",
+      );
+      if (removed) {
+        e.preventDefault();
+        setEditorText(removed.value, removed.cursor);
+        return;
+      }
+    }
     const shortcut = resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings));
     if (shortcut === "toggle-plan-mode") {
       e.preventDefault();
@@ -1053,11 +1145,40 @@ function Composer(props: {
                   : "Ask to make changes, @mention files, run /commands"
             }
             value={text()}
-            onInput={(e) => setText(e.currentTarget.value)}
+            onInput={(e) => {
+              setText(e.currentTarget.value);
+              syncFileMention(e.currentTarget.value);
+            }}
+            onClick={() => syncFileMention()}
+            onKeyUp={(e) => {
+              if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) syncFileMention();
+            }}
             onKeyDown={onKeyDown}
             onPaste={(e) => void onPaste(e)}
             rows={1}
           />
+          <Show when={fileMention() && fileMentionOptions().length > 0}>
+            <div class="chat-file-mention-menu" role="listbox">
+              <For each={fileMentionOptions()}>
+                {(path, i) => (
+                  <button
+                    class="chat-file-mention-item"
+                    classList={{ "chat-file-mention-item-active": i() === fileMentionCursor() }}
+                    role="option"
+                    aria-selected={i() === fileMentionCursor()}
+                    onMouseEnter={() => setFileMentionCursor(i())}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      insertFileAttachment(path);
+                    }}
+                  >
+                    <span class="chat-file-mention-name">{fileNameFromMention(path)}</span>
+                    <span class="chat-file-mention-path">{path}</span>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
         </div>
         <div class="chat-toolbar">
           <div class="chat-toolbar-left">

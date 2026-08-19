@@ -900,6 +900,7 @@ body.resizing-col {
 }
 .chat-input-shell {
   display: flex;
+  position: relative;
 }
 .chat-input-view {
   width: 100%;
@@ -919,6 +920,55 @@ body.resizing-col {
 .chat-input-view:focus {
   border: none;
   outline: none;
+}
+.chat-file-mention-menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--lc-border, #303030);
+  border-radius: 6px;
+  background: #181818;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.38);
+}
+.chat-file-mention-item {
+  display: grid;
+  grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lc-text, #e4e4e4);
+  font: inherit;
+  text-align: left;
+}
+.chat-file-mention-item:hover,
+.chat-file-mention-item-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.chat-file-mention-name,
+.chat-file-mention-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-file-mention-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.chat-file-mention-path {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
 }
 .chat-toolbar {
   display: flex;
