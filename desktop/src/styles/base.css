@@ -899,12 +899,13 @@ body.resizing-col {
   padding: 8px 22px 14px;
 }
 .chat-input-shell {
-  display: flex;
+  display: grid;
   position: relative;
 }
+.chat-input-render,
 .chat-input-view {
+  grid-area: 1 / 1;
   width: 100%;
-  resize: none;
   min-height: 48px;
   max-height: 160px;
   padding: 10px 12px;
@@ -915,7 +916,24 @@ body.resizing-col {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.4;
+}
+.chat-input-render {
+  min-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+.chat-input-render p {
+  display: inline;
+  margin: 0;
+}
+.chat-input-view {
+  resize: none;
+  caret-color: var(--lc-text, #e4e4e4);
   outline: none;
+}
+.chat-input-view-has-preview {
+  color: transparent;
 }
 .chat-input-view:focus {
   border: none;

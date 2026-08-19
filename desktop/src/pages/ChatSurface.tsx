@@ -656,6 +656,9 @@ function Composer(props: {
     scored.sort((a, b) => a.score - b.score);
     return scored.slice(0, 8).map((item) => item.path);
   });
+  const composerPreviewHtml = createMemo(() =>
+    text().trim().length > 0 ? renderMarkdownWithInlineFileChips(text()) : "",
+  );
 
   // Readiness watchdog: a session that never reports ready (e.g. the agent CLI
   // hangs on a first-run prompt) shouldn't read as an infinite "starting…" dead
@@ -1133,9 +1136,15 @@ function Composer(props: {
       </Show>
       <div class="chat-composer-box">
         <div class="chat-input-shell">
+          <div
+            class="chat-input-render markdown-body"
+            aria-hidden="true"
+            innerHTML={composerPreviewHtml()}
+          />
           <textarea
             ref={inputRef}
             class="chat-input-view"
+            classList={{ "chat-input-view-has-preview": text().trim().length > 0 }}
             data-focus-target="chat-composer"
             placeholder={
               pendingPlan()
