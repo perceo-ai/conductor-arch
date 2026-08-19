@@ -2404,8 +2404,9 @@ button.ui-button-icon .ui-icon,
   color: #9a9a9a;
 }
 
+.compact-select-agent-model .compact-select-trigger,
 .compact-select-model .compact-select-trigger {
-  max-width: 190px;
+  max-width: 210px;
 }
 
 .compact-select-menu {
@@ -2422,6 +2423,17 @@ button.ui-button-icon .ui-icon,
   border-radius: 8px;
   background: #1b1b1b;
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+}
+.compact-select-group {
+  padding: 7px 8px 3px;
+  color: #858585;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.compact-select-option-grouped {
+  padding-left: 18px;
 }
 
 .compact-select-option {
@@ -4892,6 +4904,7 @@ button.ws-tab-shell.ws-chat-new:hover {
   max-width: 112px;
 }
 
+.compact-select-agent-model .compact-select-trigger,
 .compact-select-model .compact-select-trigger {
   max-width: 178px;
 }

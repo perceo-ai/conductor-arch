@@ -6,6 +6,7 @@ import type { IconName } from "./Icon";
 export interface CompactSelectOption {
   value: string;
   label: string;
+  group?: string;
 }
 
 export default function CompactSelect(props: {
@@ -107,21 +108,27 @@ export default function CompactSelect(props: {
         <div class="compact-select-menu" role="listbox" tabIndex={-1} onKeyDown={onMenuKeyDown}>
           <For each={props.options}>
             {(option, i) => (
-              <button
-                class="compact-select-option"
-                classList={{
-                  "compact-select-option-active": option.value === props.value,
-                  "compact-select-option-focused": i() === cursor(),
-                }}
-                role="option"
-                aria-selected={option.value === props.value}
-                onClick={() => {
-                  props.onChange(option.value);
-                  setOpen(false);
-                }}
-              >
-                {option.label}
-              </button>
+              <>
+                <Show when={option.group && props.options[i() - 1]?.group !== option.group}>
+                  <div class="compact-select-group">{option.group}</div>
+                </Show>
+                <button
+                  class="compact-select-option"
+                  classList={{
+                    "compact-select-option-active": option.value === props.value,
+                    "compact-select-option-focused": i() === cursor(),
+                    "compact-select-option-grouped": !!option.group,
+                  }}
+                  role="option"
+                  aria-selected={option.value === props.value}
+                  onClick={() => {
+                    props.onChange(option.value);
+                    setOpen(false);
+                  }}
+                >
+                  {option.label}
+                </button>
+              </>
             )}
           </For>
         </div>

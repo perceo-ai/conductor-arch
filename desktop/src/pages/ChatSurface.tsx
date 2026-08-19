@@ -11,7 +11,7 @@ import {
   workspacesStore,
 } from "@/store";
 import { timelineItemsForSlice } from "@/store/chat";
-import { MODELS, EFFORTS } from "@/lib/models";
+import { EFFORTS, agentModelOptions, agentModelValue, firstModel, providerForModel } from "@/lib/models";
 import { send } from "@/bridge/client";
 import type {
   ArchcarChatThread,
@@ -600,7 +600,8 @@ function Composer(props: {
   threadId: number;
   workspace: string;
   provider: string;
-  onChangeProvider: (provider: string) => void;
+  currentModel?: string | null;
+  onChangeAgentModel: (provider: string, model: string) => void;
   // Model to apply to this chat's session once it first becomes ready. Set only
   // for freshly created chats so existing chats keep their own model choice.
   seedModel?: string;
@@ -618,7 +619,7 @@ function Composer(props: {
   const starting = () => slice().phase.kind === "starting" && slice().session == null;
   const running = () => slice().session?.runtime_state === "running";
   const sessionId = () => slice().session?.session_id ?? null;
-  const models = () => MODELS[props.provider] ?? [];
+  const modelOptions = agentModelOptions;
 
   // Readiness watchdog: a session that never reports ready (e.g. the agent CLI
   // hangs on a first-run prompt) shouldn't read as an infinite "starting…" dead
@@ -634,8 +635,15 @@ function Composer(props: {
     onCleanup(() => clearTimeout(timer));
   });
 
-  const [model, setModel] = createSignal(props.seedModel ?? "");
+  const [model, setModel] = createSignal(props.seedModel || props.currentModel || firstModel(props.provider));
   const [effort, setEffort] = createSignal("high");
+
+  createEffect(() => {
+    const provider = props.provider;
+    const next = props.currentModel || props.seedModel || model() || firstModel(provider);
+    if (providerForModel(next) === provider && next !== model()) setModel(next);
+    if (providerForModel(model()) !== provider) setModel(firstModel(provider));
+  });
 
   // Seed a new chat's model: once its session is live, push the default model so
   // the chat has something to go off of. Runs once, then hands back to the user.
@@ -673,6 +681,15 @@ function Composer(props: {
     setModel(next);
     const sid = sessionId();
     if (sid != null) void send({ type: "set_session_model", session_id: sid, model: next }).catch(() => {});
+  }
+  function changeAgentModel(next: string) {
+    const option = modelOptions().find((entry) => entry.value === next);
+    if (!option) return;
+    if (option.provider !== props.provider) {
+      props.onChangeAgentModel(option.provider, option.model);
+      return;
+    }
+    changeModel(option.model);
   }
   function changeEffort(next: string) {
     setEffort(next);
@@ -1044,29 +1061,16 @@ function Composer(props: {
         </div>
         <div class="chat-toolbar">
           <div class="chat-toolbar-left">
-            {/* Provider lives in the composer (like the old GTK bar). Changing it
-                opens a NEW chat with that agent; the current chat keeps its own
-                model/session untouched. */}
+            {/* Agent/model is one choice: switching providers opens a new chat
+                with the selected model, while same-provider changes update the
+                current live session. */}
             <CompactSelect
-              title="Agent"
-              value={props.provider}
-              options={[
-                { value: "codex", label: "Codex" },
-                { value: "claude", label: "Claude" },
-              ]}
-              onChange={props.onChangeProvider}
-              icon="terminal"
-              class="chat-agent-select"
-            />
-            {/* Model + effort are always shown (even when the provider exposes no
-                switchable models yet) so the composer controls stay consistent. */}
-            <CompactSelect
-              title="Model"
-              value={model()}
-              options={[{ value: "", label: "Model" }, ...models().map((m) => ({ value: m, label: m }))]}
-              onChange={changeModel}
+              title="Agent and model"
+              value={agentModelValue(props.provider, model())}
+              options={modelOptions()}
+              onChange={changeAgentModel}
               icon="settings"
-              class="compact-select-model"
+              class="compact-select-agent-model"
             />
             <CompactSelect
               title="Reasoning effort"
@@ -1480,7 +1484,7 @@ export default function ChatSurface(props: { workspace: string }) {
 
   const activeThread = createMemo(() => threads().find((t) => t.id === nav.selectedChatThread()));
 
-  async function newChat(provider?: string) {
+  async function newChat(provider?: string, model?: string) {
     const chosen = provider ?? newProvider();
     setNewProvider(chosen);
     try {
@@ -1493,7 +1497,7 @@ export default function ChatSurface(props: { workspace: string }) {
       const list = await threadsStore.refresh(props.workspace);
       if (res.type === "chat_thread_created") {
         // Seed the new chat with the default model so it opens ready to run.
-        const seed = prefsStore.seedModelFor(chosen);
+        const seed = model || prefsStore.seedModelFor(chosen);
         if (seed) setPendingSeed((p) => ({ ...p, [res.thread.id]: seed }));
         const created = list.find((t) => t.id === res.thread.id);
         if (created) selectThread(created);
@@ -1594,10 +1598,11 @@ export default function ChatSurface(props: { workspace: string }) {
             threadId={activeThread()!.id}
             workspace={props.workspace}
             provider={activeThread()!.provider}
+            currentModel={activeThread()!.model}
             seedModel={pendingSeed()[activeThread()!.id]}
             onSeeded={() => clearSeed(activeThread()!.id)}
-            onChangeProvider={(p) => {
-              if (p !== activeThread()!.provider) void newChat(p);
+            onChangeAgentModel={(provider, model) => {
+              if (provider !== activeThread()!.provider) void newChat(provider, model);
             }}
           />
         </Match>

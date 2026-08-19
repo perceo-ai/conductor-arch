@@ -2,7 +2,7 @@ import { For, Show, createEffect, createResource, createSignal } from "solid-js"
 import { repositoriesStore, prefsStore } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, openExternal, remoteDaemon, send } from "@/bridge/client";
-import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
+import { MODELS, CHAT_PROVIDERS, modelLabel, providerLabel } from "@/lib/models";
 import { DEFAULT_SHORTCUTS, parseKeybindingOverrides, resolveShortcut, shortcutHelp } from "@/lib/shortcuts";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
@@ -399,9 +399,9 @@ export function SettingsPage() {
           >
             <For each={CHAT_PROVIDERS}>
               {(provider) => (
-                <optgroup label={provider}>
+                <optgroup label={providerLabel(provider)}>
                   <For each={MODELS[provider] ?? []}>
-                    {(m) => <option value={m}>{m}</option>}
+                    {(m) => <option value={m}>{modelLabel(m)}</option>}
                   </For>
                 </optgroup>
               )}
