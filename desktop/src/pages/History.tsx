@@ -74,11 +74,16 @@ export function HistoryPage() {
             {(r) => (
               <button class="history-row" onClick={() => nav.selectWorkspace(r.name)}>
                 <span class="history-row-head">
-                  <span
-                    class="workspace-status-dot"
-                    style={{ "background-color": STATUS_COLOR[workspaceStatusKind(r)] }}
-                    title={STATUS_LABEL[workspaceStatusKind(r)]}
-                  />
+                  <Show
+                    when={nav.selectedWorkspace() !== r.name}
+                    fallback={<span class="workspace-status-dot-spacer" aria-hidden="true" />}
+                  >
+                    <span
+                      class="workspace-status-dot"
+                      style={{ "background-color": STATUS_COLOR[workspaceStatusKind(r)] }}
+                      title={STATUS_LABEL[workspaceStatusKind(r)]}
+                    />
+                  </Show>
                   <span class="workspace-name">{titleCaseWorkspace(r.name)}</span>
                 </span>
                 <span class="workspace-meta">

@@ -425,6 +425,24 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_background_tasks_status
           ON background_tasks(status, id);
+
+        -- Cursor state for continuously maintained summaries: what evidence the
+        -- last auto-refresh saw, so unchanged evidence skips a rewrite.
+        CREATE TABLE IF NOT EXISTS summary_refresh_state (
+          id INTEGER PRIMARY KEY,
+          workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+          scope_type TEXT NOT NULL,
+          scope_id INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT 'auto',
+          evidence_hash TEXT NOT NULL DEFAULT '',
+          latest_message_id INTEGER,
+          latest_provider_sequence INTEGER,
+          last_refreshed_at TEXT NOT NULL,
+          UNIQUE(workspace_id, scope_type, scope_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_summary_refresh_state_workspace
+          ON summary_refresh_state(workspace_id, scope_type, scope_id);
         ",
     )?;
     remove_chat_events_exact_unique_constraint(conn)?;
@@ -493,6 +511,39 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "tasks",
         "owner",
         "ALTER TABLE tasks ADD COLUMN owner TEXT",
+    )?;
+    // Providers ask in batches of questions with labelled options; the original
+    // flat `choices_json` cannot hold that shape.
+    ensure_column(
+        conn,
+        "provider_interactions",
+        "questions_json",
+        "ALTER TABLE provider_interactions ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "provider_interactions",
+        "auto_resolution_ms",
+        "ALTER TABLE provider_interactions ADD COLUMN auto_resolution_ms INTEGER",
+    )?;
+    // Where the plan behind a PlanApproval was written in the workspace.
+    ensure_column(
+        conn,
+        "provider_interactions",
+        "plan_path",
+        "ALTER TABLE provider_interactions ADD COLUMN plan_path TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "plan_mode",
+        "ALTER TABLE chat_threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
+        "plan_path",
+        "ALTER TABLE chat_threads ADD COLUMN plan_path TEXT",
     )?;
     ensure_column(
         conn,

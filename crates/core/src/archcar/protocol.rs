@@ -14,8 +14,8 @@ use crate::workspace::{
     SessionHarnessOptions, SessionKind, Todo,
 };
 use crate::workspace_intel::{
-    ContextAttachment, DiffContribution, SessionContribution, SessionOverlap, SessionRunRecord,
-    Summary, Task, TaskUpdate,
+    ContextAttachment, ContextBriefing, DiffContribution, SessionContribution, SessionOverlap,
+    SessionRunRecord, Summary, SummaryRefreshResult, Task, TaskSyncResult, TaskUpdate,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,6 +149,16 @@ pub enum ArchcarRequest {
     RemoveQueuedChatInput {
         queue_id: i64,
     },
+    /// Put a chat into (or out of) plan mode. Both providers switch mid-session,
+    /// so this takes effect on the live session as well as future ones.
+    SetChatPlanMode {
+        thread_id: i64,
+        plan_mode: bool,
+    },
+    /// The plan a chat is working from, with its markdown.
+    GetChatPlan {
+        thread_id: i64,
+    },
     /// Reorder a queued chat input one slot up (toward the front) or down.
     MoveQueuedChatInput {
         queue_id: i64,
@@ -171,6 +181,22 @@ pub enum ArchcarRequest {
     },
     GetChatProjection {
         thread_id: i64,
+    },
+    /// Recent non-empty chats offered as attachable context on the new-chat
+    /// screen.
+    ListChatTranscripts {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    /// Conversation-only transcript of one chat: user and agent messages, no
+    /// tool calls.
+    GetChatTranscript {
+        thread_id: i64,
+    },
+    /// Plan markdown saved under the workspace's `.context/plans/`.
+    ListContextPlans {
+        workspace: String,
     },
     ListWorkspaceFiles {
         workspace: String,
@@ -645,6 +671,27 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<i64>,
     },
+    /// Refresh and store one continuously maintained summary. `scope_type` is
+    /// `workspace`, `session`/`current_chat`, or `task`; the non-workspace
+    /// scopes require `scope_id`.
+    RefreshSummary {
+        workspace: String,
+        scope_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_id: Option<i64>,
+    },
+    /// Read the combined workspace/current-chat/tasks/next-actions briefing.
+    GetContextBriefing {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+    },
+    /// Create native workspace tasks from clear action items in chat.
+    SyncChatTasks {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+    },
     ListContextAttachments {
         workspace: String,
     },
@@ -735,6 +782,12 @@ pub enum ArchcarResponse {
         thread_id: i64,
         inputs: Vec<QueuedArchcarInput>,
     },
+    ChatPlan {
+        thread_id: i64,
+        plan_mode: bool,
+        plan_path: Option<String>,
+        plan_markdown: Option<String>,
+    },
     Workspaces {
         workspaces: Vec<ArchcarWorkspaceSummary>,
     },
@@ -748,6 +801,19 @@ pub enum ArchcarResponse {
     ChatProjection {
         thread_id: i64,
         items: Vec<ArchcarProjectionItem>,
+    },
+    ChatTranscripts {
+        workspace: String,
+        transcripts: Vec<ArchcarChatTranscriptSummary>,
+    },
+    ChatTranscript {
+        thread_id: i64,
+        title: String,
+        messages: Vec<ArchcarChatTranscriptMessage>,
+    },
+    ContextPlans {
+        workspace: String,
+        plans: Vec<ArchcarContextPlan>,
     },
     WorkspaceFiles {
         workspace: String,
@@ -1005,6 +1071,16 @@ pub enum ArchcarResponse {
     SummaryDraft {
         workspace: String,
         body_markdown: String,
+    },
+    SummaryRefreshed {
+        workspace: String,
+        result: SummaryRefreshResult,
+    },
+    ContextBriefing {
+        briefing: ContextBriefing,
+    },
+    TasksSynced {
+        result: TaskSyncResult,
     },
     ContextAttachments {
         workspace: String,
@@ -1279,6 +1355,33 @@ pub struct ArchcarChatThread {
     pub archived_at: Option<String>,
 }
 
+/// Past chat offered as an attachable transcript on the new-chat screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChatTranscriptSummary {
+    pub thread_id: i64,
+    pub title: String,
+    pub provider: String,
+    /// Number of user + agent messages the transcript would carry.
+    pub message_count: usize,
+    pub updated_at: String,
+}
+
+/// One line of a chat transcript: `user` or `agent`, never a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChatTranscriptMessage {
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// Plan markdown file under the workspace's `.context/plans/`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarContextPlan {
+    pub name: String,
+    pub path: String,
+    pub title: String,
+}
+
 /// Repository row for the desktop sidebar projects list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArchcarRepositorySummary {
@@ -1388,6 +1491,13 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::RemoveQueuedChatInput { queue_id } => {
             format!("remove_queued_chat_input queue_id={queue_id}")
         }
+        ArchcarRequest::SetChatPlanMode {
+            thread_id,
+            plan_mode,
+        } => format!("set_chat_plan_mode thread_id={thread_id} plan_mode={plan_mode}"),
+        ArchcarRequest::GetChatPlan { thread_id } => {
+            format!("get_chat_plan thread_id={thread_id}")
+        }
         ArchcarRequest::MoveQueuedChatInput { queue_id, up } => {
             format!("move_queued_chat_input queue_id={queue_id} up={up}")
         }
@@ -1404,6 +1514,18 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::GetChatProjection { thread_id } => {
             format!("get_chat_projection thread_id={thread_id}")
+        }
+        ArchcarRequest::ListChatTranscripts { workspace, limit } => format!(
+            "list_chat_transcripts workspace={workspace} limit={}",
+            limit
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_owned())
+        ),
+        ArchcarRequest::GetChatTranscript { thread_id } => {
+            format!("get_chat_transcript thread_id={thread_id}")
+        }
+        ArchcarRequest::ListContextPlans { workspace } => {
+            format!("list_context_plans workspace={workspace}")
         }
         ArchcarRequest::ListWorkspaceFiles { workspace } => {
             format!("list_workspace_files workspace={workspace}")
@@ -1822,6 +1944,34 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ),
+        ArchcarRequest::RefreshSummary {
+            workspace,
+            scope_type,
+            scope_id,
+        } => format!(
+            "refresh_summary workspace={workspace} scope={scope_type} scope_id={}",
+            scope_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        ),
+        ArchcarRequest::GetContextBriefing {
+            workspace,
+            thread_id,
+        } => format!(
+            "get_context_briefing workspace={workspace} thread={}",
+            thread_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        ),
+        ArchcarRequest::SyncChatTasks {
+            workspace,
+            thread_id,
+        } => format!(
+            "sync_chat_tasks workspace={workspace} thread={}",
+            thread_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        ),
         ArchcarRequest::ListContextAttachments { workspace } => {
             format!("list_context_attachments workspace={workspace}")
         }
@@ -1869,6 +2019,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
 fn provider_interaction_resolution_summary(resolution: &ProviderInteractionResolution) -> String {
     match resolution {
         ProviderInteractionResolution::Approve => "resolution=approve".to_owned(),
+        ProviderInteractionResolution::ApproveForSession => {
+            "resolution=approve_for_session".to_owned()
+        }
         ProviderInteractionResolution::Deny { reason } => format!(
             "resolution=deny denial_reason_chars={}",
             reason.as_deref().unwrap_or_default().chars().count()
@@ -1878,7 +2031,8 @@ fn provider_interaction_resolution_summary(resolution: &ProviderInteractionResol
             answers.len(),
             answers
                 .iter()
-                .map(|(_, answer)| answer.chars().count())
+                .flat_map(|answer| answer.values.iter())
+                .map(|value| value.chars().count())
                 .sum::<usize>()
         ),
         ProviderInteractionResolution::Defer => "resolution=defer".to_owned(),
@@ -1935,6 +2089,16 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::QueuedChatInputs { thread_id, inputs } => {
             format!("queued_chat_inputs thread_id={thread_id} count={}", inputs.len())
         }
+        ArchcarResponse::ChatPlan {
+            thread_id,
+            plan_mode,
+            plan_path,
+            plan_markdown,
+        } => format!(
+            "chat_plan thread_id={thread_id} plan_mode={plan_mode} plan_path={} plan_chars={}",
+            plan_path.as_deref().unwrap_or("-"),
+            plan_markdown.as_deref().unwrap_or_default().chars().count()
+        ),
         ArchcarResponse::Workspaces { workspaces } => {
             format!("workspaces count={}", workspaces.len())
         }
@@ -1946,6 +2110,24 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::ChatProjection { thread_id, items } => {
             format!("chat_projection thread_id={thread_id} items={}", items.len())
+        }
+        ArchcarResponse::ChatTranscripts {
+            workspace,
+            transcripts,
+        } => format!(
+            "chat_transcripts workspace={workspace} count={}",
+            transcripts.len()
+        ),
+        ArchcarResponse::ChatTranscript {
+            thread_id,
+            messages,
+            ..
+        } => format!(
+            "chat_transcript thread_id={thread_id} messages={}",
+            messages.len()
+        ),
+        ArchcarResponse::ContextPlans { workspace, plans } => {
+            format!("context_plans workspace={workspace} count={}", plans.len())
         }
         ArchcarResponse::WorkspaceFiles { workspace, files } => {
             format!("workspace_files workspace={workspace} count={}", files.len())
@@ -2171,6 +2353,19 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "summary_draft workspace={workspace} chars={}",
             body_markdown.chars().count()
         ),
+        ArchcarResponse::SummaryRefreshed { workspace, result } => format!(
+            "summary_refreshed workspace={workspace} scope={} scope_id={} changed={}",
+            result.summary.scope_type, result.summary.scope_id, result.changed
+        ),
+        ArchcarResponse::ContextBriefing { briefing } => format!(
+            "context_briefing workspace={} chars={}",
+            briefing.workspace,
+            briefing.body_markdown.chars().count()
+        ),
+        ArchcarResponse::TasksSynced { result } => format!(
+            "tasks_synced workspace={} created={} updated={}",
+            result.workspace, result.created, result.updated
+        ),
         ArchcarResponse::ContextAttachments {
             workspace,
             attachments,
@@ -2272,6 +2467,14 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
         ArchcarEvent::ChatQueueUpdated { thread_id } => {
             format!("chat_queue_updated thread_id={thread_id}")
         }
+        ArchcarEvent::ChatPlanUpdated {
+            thread_id,
+            plan_mode,
+            plan_path,
+        } => format!(
+            "chat_plan_updated thread_id={thread_id} plan_mode={plan_mode} plan_path={}",
+            plan_path.as_deref().unwrap_or("-")
+        ),
         ArchcarEvent::SessionExited {
             session_id,
             exit_code,
@@ -2296,6 +2499,19 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             "background_task_updated id={} status={}",
             task.id, task.status
         ),
+        ArchcarEvent::SummaryUpdated {
+            workspace,
+            summary_id,
+            scope_type,
+            scope_id,
+        } => format!(
+            "summary_updated workspace={workspace} scope={scope_type} scope_id={scope_id} summary={summary_id}"
+        ),
+        ArchcarEvent::TaskUpdated {
+            workspace,
+            task_id,
+            status,
+        } => format!("task_updated workspace={workspace} task={task_id} status={status}"),
     }
 }
 
@@ -2354,6 +2570,12 @@ pub enum ArchcarEvent {
     ChatQueueUpdated {
         thread_id: i64,
     },
+    /// A chat entered or left plan mode, or its plan file changed.
+    ChatPlanUpdated {
+        thread_id: i64,
+        plan_mode: bool,
+        plan_path: Option<String>,
+    },
     SessionExited {
         session_id: i64,
         exit_code: Option<i32>,
@@ -2374,6 +2596,20 @@ pub enum ArchcarEvent {
     /// state), so clients can update their strips and notify the user.
     BackgroundTaskUpdated {
         task: BackgroundTask,
+    },
+    /// A continuously maintained summary was rewritten from new evidence.
+    /// Carries ids only; clients re-read the body through the store.
+    SummaryUpdated {
+        workspace: String,
+        summary_id: i64,
+        scope_type: String,
+        scope_id: i64,
+    },
+    /// A native workspace task changed, so context surfaces can refresh.
+    TaskUpdated {
+        workspace: String,
+        task_id: i64,
+        status: String,
     },
 }
 
@@ -2601,7 +2837,8 @@ mod tests {
                 kind: ProviderInteractionKind::UserQuestion,
                 title: "Question".to_owned(),
                 detail: "secret detail".to_owned(),
-                choices: vec!["yes".to_owned()],
+                questions: Vec::new(),
+                auto_resolution_ms: None,
                 native_request: serde_json::json!({"prompt":"secret"}),
             },
         };
@@ -2643,7 +2880,9 @@ mod tests {
             kind: ProviderInteractionKind::Permission,
             title: "Permission".to_owned(),
             detail: "secret".to_owned(),
-            choices: Vec::new(),
+            questions: Vec::new(),
+            plan_path: None,
+            auto_resolution_ms: None,
             native_request: serde_json::json!({"secret": true}),
             request_fingerprint: "abc".to_owned(),
             status: ProviderInteractionStatus::Pending,
@@ -3856,6 +4095,71 @@ mod tests {
         assert_eq!(
             archcar_event_summary(&event),
             "session_ready session_id=11 thread_id=5"
+        );
+    }
+
+    #[test]
+    fn context_management_protocol_round_trips_without_leaking_body() {
+        let req = ArchcarRequest::RefreshSummary {
+            workspace: "berlin".to_owned(),
+            scope_type: "workspace".to_owned(),
+            scope_id: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, req);
+        assert_eq!(
+            archcar_request_summary(&req),
+            "refresh_summary workspace=berlin scope=workspace scope_id=-"
+        );
+
+        let briefing_req = ArchcarRequest::GetContextBriefing {
+            workspace: "berlin".to_owned(),
+            thread_id: Some(7),
+        };
+        assert_eq!(
+            archcar_request_summary(&briefing_req),
+            "get_context_briefing workspace=berlin thread=7"
+        );
+
+        // Response summaries stay compact: no markdown bodies in logs.
+        let response = ArchcarResponse::ContextBriefing {
+            briefing: ContextBriefing {
+                workspace: "berlin".to_owned(),
+                thread_id: Some(7),
+                body_markdown: "## Workspace\n\nsecret details".to_owned(),
+                summary_ids: vec![1],
+                task_ids: vec![2],
+            },
+        };
+        let summary = archcar_response_summary(&response);
+        assert_eq!(summary, "context_briefing workspace=berlin chars=28");
+        assert!(!summary.contains("secret"));
+    }
+
+    #[test]
+    fn summary_updated_event_summary_is_compact() {
+        let event = ArchcarEvent::SummaryUpdated {
+            workspace: "berlin".to_owned(),
+            summary_id: 9,
+            scope_type: "session".to_owned(),
+            scope_id: 7,
+        };
+
+        assert_eq!(
+            archcar_event_summary(&event),
+            "summary_updated workspace=berlin scope=session scope_id=7 summary=9"
+        );
+
+        let task_event = ArchcarEvent::TaskUpdated {
+            workspace: "berlin".to_owned(),
+            task_id: 3,
+            status: "in_progress".to_owned(),
+        };
+        assert_eq!(
+            archcar_event_summary(&task_event),
+            "task_updated workspace=berlin task=3 status=in_progress"
         );
     }
 

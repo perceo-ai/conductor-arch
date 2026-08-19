@@ -1,26 +1,23 @@
-import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
-import { openExternal, openWorkspaceApp, send } from "@/bridge/client";
+import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
-import { STATUS_COLOR } from "@/lib/workspaceStatus";
-import { deriveWorkspaceBriefing, workspaceBriefingStatusLabel } from "@/lib/workspaceBriefing";
-import type { ArchcarChecksSummary } from "@/bridge/protocol";
 import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
 import TerminalDock from "./TerminalDock";
 import WorkspacePrBar from "./WorkspacePrBar";
-import { ChecksPanel, ReviewPanel } from "./WorkspaceTabs";
+import { ChecksPanel, ReviewPromptButton } from "./WorkspaceTabs";
+import { SummaryPanel } from "./WorkspaceIntel";
 import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { openFileInCenter } from "./openFileBridge";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+import { RIGHT_MAX, RIGHT_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 
-const RIGHT_MIN = 260;
-const RIGHT_MAX = 440;
 
 // Right-panel tabs: a quiet inspector beside the chat. Deeper intelligence
 // records remain in the data model, but they are not promoted as peer surfaces.
@@ -35,10 +32,8 @@ function TopBar(props: {
   workspace: string;
   rightCollapsed: boolean;
   onToggleRight: () => void;
-  checks?: ArchcarChecksSummary;
 }) {
   const row = () => workspacesStore.row(props.workspace);
-  const briefing = () => deriveWorkspaceBriefing(row(), props.checks);
   const repoRoot = () => {
     const repo = row()?.repository;
     return repo ? repositoriesStore.row(repo)?.rootPath : undefined;
@@ -76,11 +71,6 @@ function TopBar(props: {
   return (
     <div class="ws-topbar">
       <div class="ws-topbar-breadcrumb">
-        <span
-          class="ws-topbar-status-dot"
-          style={{ "background-color": STATUS_COLOR[briefing().status] }}
-          aria-label={workspaceBriefingStatusLabel(briefing())}
-        />
         <span class="ws-topbar-repo">{titleCaseWorkspace(props.workspace)}</span>
         <span class="ws-topbar-sep">&gt;</span>
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
@@ -108,6 +98,9 @@ function RightPanel(props: { workspace: string }) {
   const tabCount = (tab: RightPanelTab) => {
     const r = row();
     if (!r) return "";
+    if (tab === "summary" && (r.openTasks > 0 || r.blockedTasks > 0)) {
+      return r.blockedTasks > 0 ? String(r.blockedTasks) : String(r.openTasks);
+    }
     if (tab === "changes" && r.changedFiles > 0) return String(r.changedFiles);
     if (tab === "checks" && (r.activeSessions > 0 || r.runRunning)) {
       return r.runRunning ? "run" : String(r.activeSessions);
@@ -116,7 +109,20 @@ function RightPanel(props: { workspace: string }) {
   };
   return (
     <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
-      <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
+      <ResizeHandle
+        edge="left"
+        width={width}
+        min={RIGHT_MIN}
+        max={() =>
+          panelDragMax({
+            viewportWidth: window.innerWidth,
+            otherPanelWidth: measuredWidth(".sidebar"),
+            hardMax: RIGHT_MAX,
+            panelMin: RIGHT_MIN,
+          })
+        }
+        onChange={setWidth}
+      />
       <div class="ws-right-mid">
         <div class="ws-right-topbar">
           <WorkspacePrBar workspace={props.workspace} />
@@ -136,9 +142,13 @@ function RightPanel(props: { workspace: string }) {
               </button>
             )}
           </For>
+          <ReviewPromptButton workspace={props.workspace} />
         </div>
         <div class="ws-right-body">
           <Switch>
+            <Match when={nav.rightPanelTab() === "summary"}>
+              <SummaryPanel workspace={props.workspace} />
+            </Match>
             <Match when={nav.rightPanelTab() === "files"}>
               <WorkspaceFiles
                 workspace={props.workspace}
@@ -155,9 +165,6 @@ function RightPanel(props: { workspace: string }) {
             <Match when={nav.rightPanelTab() === "checks"}>
               <ChecksPanel workspace={props.workspace} />
             </Match>
-            <Match when={nav.rightPanelTab() === "review"}>
-              <ReviewPanel workspace={props.workspace} />
-            </Match>
           </Switch>
         </div>
       </div>
@@ -169,19 +176,6 @@ function RightPanel(props: { workspace: string }) {
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
   const [rightCollapsed, setRightCollapsed] = createSignal(false);
-  const [checks] = createResource(
-    workspace,
-    async (ws): Promise<ArchcarChecksSummary | undefined> => {
-      if (!ws) return undefined;
-      try {
-        const res = await send({ type: "get_checks_summary", workspace: ws });
-        return res.type === "checks_summary" ? res.summary : undefined;
-      } catch {
-        return undefined;
-      }
-    },
-  );
-  const currentChecks = createMemo(() => checks());
 
   return (
     <Show
@@ -193,7 +187,6 @@ export default function CommandCenter() {
           <div class="ws-center">
             <TopBar
               workspace={ws()}
-              checks={currentChecks()}
               rightCollapsed={rightCollapsed()}
               onToggleRight={() => setRightCollapsed((c) => !c)}
             />

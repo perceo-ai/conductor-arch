@@ -20,6 +20,23 @@ interface MockApi {
 let offEvent: ReturnType<typeof vi.fn>;
 let api: MockApi;
 
+const workspaceSummary = (id: number, name: string, status = "active") => ({
+  id,
+  name,
+  repository_name: "demo",
+  path: `/tmp/${name}`,
+  branch: name,
+  base_ref: "main",
+  status,
+  open_todos: 0,
+  active_sessions: 0,
+  run_running: false,
+  changed_files: 0,
+  diff_additions: 0,
+  diff_deletions: 0,
+  updated_at: "2026-08-18T00:00:00Z",
+});
+
 beforeEach(() => {
   vi.resetModules();
   offEvent = vi.fn();
@@ -104,5 +121,46 @@ describe("refreshInventory: missing-on-disk repositories", () => {
     expect(api.request).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "remove_repository" }),
     );
+  });
+
+  it("refreshes chat tabs for every active workspace after inventory loads", async () => {
+    api.request.mockImplementation(async (req: { type: string; workspace?: string }) => {
+      if (req.type === "list_workspaces") {
+        return {
+          type: "workspaces",
+          workspaces: [
+            workspaceSummary(1, "alpha"),
+            workspaceSummary(2, "beta"),
+            workspaceSummary(3, "old", "archived"),
+          ],
+        };
+      }
+      if (req.type === "list_repositories") return { type: "repositories", repositories: [] };
+      if (req.type === "list_chat_threads") {
+        return {
+          type: "chat_threads",
+          workspace: req.workspace,
+          threads: [
+            {
+              id: req.workspace === "alpha" ? 10 : 20,
+              provider: "codex",
+              title: "Chat",
+              status: "active",
+              updated_at: "2026-08-18T00:00:00Z",
+            },
+          ],
+        };
+      }
+      return { type: "ack" };
+    });
+
+    const { refreshInventory, threadsStore } = await import("./index");
+    await refreshInventory();
+
+    expect(api.request).toHaveBeenCalledWith({ type: "list_chat_threads", workspace: "alpha" });
+    expect(api.request).toHaveBeenCalledWith({ type: "list_chat_threads", workspace: "beta" });
+    expect(api.request).not.toHaveBeenCalledWith({ type: "list_chat_threads", workspace: "old" });
+    expect(threadsStore.workspaceForThread(10)).toBe("alpha");
+    expect(threadsStore.workspaceForThread(20)).toBe("beta");
   });
 });

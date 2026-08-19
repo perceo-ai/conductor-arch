@@ -165,6 +165,56 @@ pub struct DiffContribution {
     pub updated_at: String,
 }
 
+/// Which continuously maintained summary to refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SummaryRefreshScope {
+    Workspace { workspace: String },
+    CurrentChat { workspace: String, thread_id: i64 },
+    Task { workspace: String, task_id: i64 },
+}
+
+/// The evidence cursor recorded by the last auto-refresh of one summary scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRefreshState {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub scope_type: String,
+    pub scope_id: i64,
+    pub source: String,
+    pub evidence_hash: String,
+    pub latest_message_id: Option<i64>,
+    pub latest_provider_sequence: Option<i64>,
+    pub last_refreshed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRefreshResult {
+    pub summary: Summary,
+    pub state: SummaryRefreshState,
+    pub changed: bool,
+}
+
+/// One combined markdown briefing for AI clients: workspace summary, current
+/// chat, tasks, and next actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBriefing {
+    pub workspace: String,
+    pub thread_id: Option<i64>,
+    pub body_markdown: String,
+    pub summary_ids: Vec<i64>,
+    pub task_ids: Vec<i64>,
+}
+
+/// Outcome of extracting native tasks from chat evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSyncResult {
+    pub workspace: String,
+    pub thread_id: Option<i64>,
+    pub created: usize,
+    pub updated: usize,
+    pub task_ids: Vec<i64>,
+}
+
 /// Two sessions aiming at the same files. Advisory only — Archductor does not
 /// lock files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +356,35 @@ fn row_to_diff_contribution(row: &Row<'_>) -> rusqlite::Result<DiffContribution>
 
 const DIFF_CONTRIBUTION_COLUMNS: &str = "id, workspace_id, session_id, files, still_present, \
      patch_ref, commands, risks, blockers, created_at, updated_at";
+
+fn row_to_refresh_state(row: &Row<'_>) -> rusqlite::Result<SummaryRefreshState> {
+    Ok(SummaryRefreshState {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        scope_type: row.get(2)?,
+        scope_id: row.get(3)?,
+        source: row.get(4)?,
+        evidence_hash: row.get(5)?,
+        latest_message_id: row.get(6)?,
+        latest_provider_sequence: row.get(7)?,
+        last_refreshed_at: row.get(8)?,
+    })
+}
+
+const REFRESH_STATE_COLUMNS: &str = "id, workspace_id, scope_type, scope_id, source, \
+     evidence_hash, latest_message_id, latest_provider_sequence, last_refreshed_at";
+
+/// Deterministic 64-bit FNV-1a over the refresh evidence. `DefaultHasher` is
+/// randomly keyed per process, so it cannot back a cursor that persists in
+/// SQLite across daemon restarts.
+fn evidence_hash(evidence: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in evidence.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
 
 // ---- Tasks -----------------------------------------------------------------
 
@@ -837,6 +916,341 @@ impl WorkspaceStore {
         Ok(out)
     }
 
+    /// Draft an operational summary for one task: status, linked sessions, and
+    /// review state.
+    pub fn draft_task_summary(&self, workspace_name: &str, task_id: i64) -> Result<String> {
+        let task = self.task_in_workspace(workspace_name, task_id)?;
+        let mut out = String::new();
+        out.push_str(&format!("# Task #{} {}\n\n", task.id, task.title));
+        out.push_str(&format!("- Status: {}\n", task.status));
+        if let Some(owner) = &task.owner {
+            out.push_str(&format!("- Owner: {owner}\n"));
+        }
+        if let Some(reason) = &task.blocked_reason {
+            out.push_str(&format!("- Blocked: {reason}\n"));
+        }
+        if !task.linked_session_ids.is_empty() {
+            out.push_str(&format!(
+                "- Linked sessions: {}\n",
+                task.linked_session_ids
+                    .iter()
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !task.body.is_empty() {
+            out.push_str(&format!("\n{}\n", task.body));
+        }
+        if !task.review_notes.is_empty() {
+            out.push_str(&format!("\n## Review notes\n\n{}\n", task.review_notes));
+        }
+        Ok(out)
+    }
+
+    // ---- Continuous summary maintenance ------------------------------------
+
+    /// Refresh one continuously maintained summary from branch-local evidence.
+    /// Idempotent: when the evidence cursor is unchanged the stored summary is
+    /// left alone and `changed` is false.
+    pub fn refresh_summary(&self, scope: SummaryRefreshScope) -> Result<SummaryRefreshResult> {
+        match scope {
+            SummaryRefreshScope::Workspace { workspace } => {
+                let body = self.draft_workspace_summary(&workspace)?;
+                self.save_refreshed_summary(&workspace, "workspace", None, &body, "auto")
+            }
+            SummaryRefreshScope::CurrentChat {
+                workspace,
+                thread_id,
+            } => {
+                let body = self.draft_session_summary(&workspace, thread_id)?;
+                self.save_refreshed_summary(&workspace, "session", Some(thread_id), &body, "auto")
+            }
+            SummaryRefreshScope::Task { workspace, task_id } => {
+                let body = self.draft_task_summary(&workspace, task_id)?;
+                self.save_refreshed_summary(&workspace, "task", Some(task_id), &body, "auto")
+            }
+        }
+    }
+
+    fn save_refreshed_summary(
+        &self,
+        workspace_name: &str,
+        scope_type: &str,
+        scope_id: Option<i64>,
+        body: &str,
+        source: &str,
+    ) -> Result<SummaryRefreshResult> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let scope_id = scope_id.unwrap_or(0);
+        let (hash, latest_message_id, latest_provider_sequence) =
+            self.summary_evidence(workspace_name, workspace.id, scope_type, scope_id, body)?;
+
+        let existing_state = self.summary_refresh_state(workspace.id, scope_type, scope_id)?;
+        let existing_summary = self.get_summary(workspace_name, scope_type, Some(scope_id))?;
+        if let (Some(state), Some(summary)) = (&existing_state, &existing_summary) {
+            if state.evidence_hash == hash {
+                return Ok(SummaryRefreshResult {
+                    summary: summary.clone(),
+                    state: state.clone(),
+                    changed: false,
+                });
+            }
+        }
+
+        let summary = self.save_summary(
+            workspace_name,
+            scope_type,
+            Some(scope_id),
+            body,
+            &["archductor:refresh".to_owned()],
+        )?;
+        self.conn.execute(
+            "INSERT INTO summary_refresh_state (
+                workspace_id, scope_type, scope_id, source, evidence_hash,
+                latest_message_id, latest_provider_sequence, last_refreshed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(workspace_id, scope_type, scope_id) DO UPDATE SET
+                source = excluded.source,
+                evidence_hash = excluded.evidence_hash,
+                latest_message_id = excluded.latest_message_id,
+                latest_provider_sequence = excluded.latest_provider_sequence,
+                last_refreshed_at = excluded.last_refreshed_at",
+            params![
+                workspace.id,
+                scope_type,
+                scope_id,
+                source,
+                hash,
+                latest_message_id,
+                latest_provider_sequence,
+                timestamp()
+            ],
+        )?;
+        let state = self
+            .summary_refresh_state(workspace.id, scope_type, scope_id)?
+            .context("summary refresh state was not stored")?;
+        Ok(SummaryRefreshResult {
+            summary,
+            state,
+            changed: true,
+        })
+    }
+
+    fn summary_refresh_state(
+        &self,
+        workspace_id: i64,
+        scope_type: &str,
+        scope_id: i64,
+    ) -> Result<Option<SummaryRefreshState>> {
+        let state = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {REFRESH_STATE_COLUMNS} FROM summary_refresh_state
+                     WHERE workspace_id = ?1 AND scope_type = ?2 AND scope_id = ?3"
+                ),
+                params![workspace_id, scope_type, scope_id],
+                row_to_refresh_state,
+            )
+            .ok();
+        Ok(state)
+    }
+
+    /// Hash the drafted body together with every evidence stream that feeds it,
+    /// plus the newest chat message id and provider timeline sequence as the
+    /// stored cursor.
+    fn summary_evidence(
+        &self,
+        workspace_name: &str,
+        workspace_id: i64,
+        scope_type: &str,
+        scope_id: i64,
+        body: &str,
+    ) -> Result<(String, Option<i64>, Option<i64>)> {
+        let (latest_message_id, latest_provider_sequence) = if scope_type == "session" {
+            (
+                self.conn.query_row(
+                    "SELECT MAX(id) FROM chat_messages WHERE thread_id = ?1",
+                    [scope_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?,
+                self.conn.query_row(
+                    "SELECT MAX(timeline_seq) FROM provider_events WHERE chat_thread_id = ?1",
+                    [scope_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?,
+            )
+        } else {
+            (
+                self.conn.query_row(
+                    "SELECT MAX(m.id) FROM chat_messages m
+                       JOIN chat_threads t ON t.id = m.thread_id
+                      WHERE t.workspace_id = ?1",
+                    [workspace_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?,
+                self.conn.query_row(
+                    "SELECT MAX(timeline_seq) FROM provider_events WHERE workspace_id = ?1",
+                    [workspace_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?,
+            )
+        };
+
+        let tasks = self.list_tasks(workspace_name)?;
+        let changed = self.changed_files(workspace_name).unwrap_or_default();
+        let checks = self.checks_summary(workspace_name)?;
+        let mut evidence = String::new();
+        evidence.push_str(body);
+        for task in &tasks {
+            evidence.push_str(&format!("|task:{}:{}", task.id, task.updated_at));
+        }
+        evidence.push_str(&format!(
+            "|msg:{latest_message_id:?}|seq:{latest_provider_sequence:?}|files:{}|checks:{:?}:{:?}:{}:{}",
+            changed.join(","),
+            checks.check_status,
+            checks.run_status,
+            checks.active_sessions,
+            checks.open_review_comments
+        ));
+        Ok((
+            evidence_hash(&evidence),
+            latest_message_id,
+            latest_provider_sequence,
+        ))
+    }
+
+    /// One combined markdown briefing: stored workspace summary (or a fresh
+    /// draft), the current chat's summary when a thread is named, tasks, and
+    /// next actions.
+    pub fn context_briefing(
+        &self,
+        workspace_name: &str,
+        thread_id: Option<i64>,
+    ) -> Result<ContextBriefing> {
+        let tasks = self.list_tasks(workspace_name)?;
+        let checks = self.checks_summary(workspace_name)?;
+        let changed = self.changed_files(workspace_name).unwrap_or_default();
+        let mut summary_ids = Vec::new();
+
+        let mut body = String::new();
+        body.push_str("## Workspace\n\n");
+        match self.get_summary(workspace_name, "workspace", None)? {
+            Some(summary) => {
+                summary_ids.push(summary.id);
+                body.push_str(summary.body_markdown.trim());
+            }
+            None => body.push_str(self.draft_workspace_summary(workspace_name)?.trim()),
+        }
+        body.push_str("\n\n");
+
+        if let Some(thread_id) = thread_id {
+            body.push_str("## Current chat\n\n");
+            match self.get_summary(workspace_name, "session", Some(thread_id))? {
+                Some(summary) => {
+                    summary_ids.push(summary.id);
+                    body.push_str(summary.body_markdown.trim());
+                }
+                None => body.push_str(
+                    self.draft_session_summary(workspace_name, thread_id)?
+                        .trim(),
+                ),
+            }
+            body.push_str("\n\n");
+        }
+
+        body.push_str("## Tasks\n\n");
+        if tasks.is_empty() {
+            body.push_str("- None\n");
+        } else {
+            for task in &tasks {
+                body.push_str(&format!(
+                    "- [{}] #{} {}\n",
+                    task.status, task.id, task.title
+                ));
+            }
+        }
+        body.push('\n');
+
+        body.push_str("## Next actions\n\n");
+        for action in next_actions(&checks, &tasks, changed.len()) {
+            body.push_str(&format!("- {action}\n"));
+        }
+
+        Ok(ContextBriefing {
+            workspace: workspace_name.to_owned(),
+            thread_id,
+            body_markdown: body,
+            summary_ids,
+            task_ids: tasks.iter().map(|task| task.id).collect(),
+        })
+    }
+
+    // ---- Native chat task sync ---------------------------------------------
+
+    /// Create native workspace tasks from clear action items in chat messages.
+    /// Only bulleted lines that start with an action verb become tasks, titles
+    /// are deduplicated (case-insensitively) against existing tasks, and
+    /// human-created tasks are never replaced.
+    pub fn sync_chat_tasks(
+        &self,
+        workspace_name: &str,
+        thread_id: Option<i64>,
+    ) -> Result<TaskSyncResult> {
+        let workspace = self.get_by_name(workspace_name)?;
+        if let Some(thread_id) = thread_id {
+            self.ensure_session_in_workspace(workspace.id, thread_id)?;
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT m.thread_id, m.content FROM chat_messages m
+               JOIN chat_threads t ON t.id = m.thread_id
+              WHERE t.workspace_id = ?1
+                AND (?2 IS NULL OR m.thread_id = ?2)
+                AND m.role = 'assistant'
+              ORDER BY m.id",
+        )?;
+        let messages = stmt
+            .query_map(params![workspace.id, thread_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let existing = self.list_tasks(workspace_name)?;
+        let mut seen_titles: BTreeSet<String> = existing
+            .iter()
+            .map(|task| normalize_task_title(&task.title))
+            .collect();
+
+        let mut created = 0;
+        let mut task_ids = Vec::new();
+        for (message_thread_id, content) in messages {
+            for title in extract_action_items(&content) {
+                let normalized = normalize_task_title(&title);
+                if !seen_titles.insert(normalized) {
+                    continue;
+                }
+                let task = self.create_task(
+                    workspace_name,
+                    &title,
+                    &format!("Source: chat:{message_thread_id}"),
+                    &[],
+                )?;
+                created += 1;
+                task_ids.push(task.id);
+            }
+        }
+
+        Ok(TaskSyncResult {
+            workspace: workspace_name.to_owned(),
+            thread_id,
+            created,
+            updated: 0,
+            task_ids,
+        })
+    }
+
     // ---- Context attachments ----------------------------------------------
 
     pub fn add_context_attachment(
@@ -1320,6 +1734,58 @@ impl WorkspaceStore {
         }
         Ok(overlaps)
     }
+}
+
+/// Leading verbs that mark a bulleted line as a clear action item. Kept
+/// deliberately small: it is better to miss a vague line than to spam tasks.
+const ACTION_VERBS: [&str; 12] = [
+    "add",
+    "wire",
+    "fix",
+    "investigate",
+    "verify",
+    "follow up",
+    "implement",
+    "remove",
+    "update",
+    "refactor",
+    "test",
+    "document",
+];
+
+fn normalize_task_title(title: &str) -> String {
+    title.trim().to_lowercase()
+}
+
+/// Pull clear action-item titles out of one chat message: bulleted lines
+/// (`- ` / `* `, optionally a `- [ ]` checkbox) that start with an action verb.
+fn extract_action_items(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let item = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))?
+                .trim();
+            let item = item
+                .strip_prefix("[ ]")
+                .or_else(|| item.strip_prefix("[x]"))
+                .unwrap_or(item)
+                .trim();
+            if item.is_empty() || item.chars().count() > 200 {
+                return None;
+            }
+            let lower = item.to_lowercase();
+            ACTION_VERBS
+                .iter()
+                .any(|verb| {
+                    lower.starts_with(verb)
+                        && lower[verb.len()..].chars().next().is_none_or(|c| c == ' ')
+                })
+                .then(|| item.to_owned())
+        })
+        .collect()
 }
 
 fn next_actions(
@@ -1813,6 +2279,174 @@ mod tests {
             .save_summary("berlin", "session", None, "body", &[])
             .unwrap_err();
         assert!(err.to_string().contains("require a scope_id"), "{err}");
+    }
+
+    #[test]
+    fn refresh_workspace_summary_records_evidence_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+
+        let refreshed = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+
+        assert!(refreshed.changed);
+        assert_eq!(refreshed.summary.scope_type, "workspace");
+        assert_eq!(refreshed.summary.scope_id, 0);
+        assert_eq!(refreshed.state.scope_type, "workspace");
+        assert_eq!(refreshed.state.source, "auto");
+        assert!(!refreshed.state.evidence_hash.is_empty());
+
+        // Unchanged evidence leaves the stored summary alone.
+        let again = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+        assert!(!again.changed);
+        assert_eq!(again.summary.id, refreshed.summary.id);
+        assert_eq!(again.summary.updated_at, refreshed.summary.updated_at);
+        assert_eq!(again.state.evidence_hash, refreshed.state.evidence_hash);
+
+        // New evidence (a task) flips the cursor and rewrites.
+        store.create_task("berlin", "New goal", "", &[]).unwrap();
+        let changed = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+        assert!(changed.changed);
+        assert_ne!(changed.state.evidence_hash, refreshed.state.evidence_hash);
+        assert!(changed.summary.body_markdown.contains("New goal"));
+    }
+
+    #[test]
+    fn refresh_current_chat_summary_is_session_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Investigate summary tab", None)
+            .unwrap();
+
+        let refreshed = store
+            .refresh_summary(SummaryRefreshScope::CurrentChat {
+                workspace: "berlin".to_owned(),
+                thread_id: thread.id,
+            })
+            .unwrap();
+
+        assert_eq!(refreshed.summary.scope_type, "session");
+        assert_eq!(refreshed.summary.scope_id, thread.id);
+        assert!(refreshed
+            .summary
+            .body_markdown
+            .contains("Investigate summary tab"));
+    }
+
+    #[test]
+    fn refresh_task_summary_reports_task_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let task = store
+            .create_task("berlin", "Wire context tools", "Body text", &[])
+            .unwrap();
+
+        let refreshed = store
+            .refresh_summary(SummaryRefreshScope::Task {
+                workspace: "berlin".to_owned(),
+                task_id: task.id,
+            })
+            .unwrap();
+
+        assert_eq!(refreshed.summary.scope_type, "task");
+        assert_eq!(refreshed.summary.scope_id, task.id);
+        assert!(refreshed
+            .summary
+            .body_markdown
+            .contains("Wire context tools"));
+        assert!(refreshed.summary.body_markdown.contains("Status: todo"));
+    }
+
+    #[test]
+    fn context_briefing_combines_workspace_chat_tasks_and_next_actions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let task = store
+            .create_task("berlin", "Add summary tab", "Human context management", &[])
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Implement context tools", None)
+            .unwrap();
+        store
+            .assign_session_task("berlin", thread.id, Some(task.id))
+            .unwrap();
+        store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+        store
+            .refresh_summary(SummaryRefreshScope::CurrentChat {
+                workspace: "berlin".to_owned(),
+                thread_id: thread.id,
+            })
+            .unwrap();
+
+        let briefing = store.context_briefing("berlin", Some(thread.id)).unwrap();
+
+        assert_eq!(briefing.thread_id, Some(thread.id));
+        assert!(briefing.body_markdown.contains("## Workspace"));
+        assert!(briefing.body_markdown.contains("## Current chat"));
+        assert!(briefing.body_markdown.contains("## Tasks"));
+        assert!(briefing.body_markdown.contains("## Next actions"));
+        assert!(briefing.body_markdown.contains("Add summary tab"));
+        assert_eq!(briefing.summary_ids.len(), 2);
+        assert_eq!(briefing.task_ids, vec![task.id]);
+    }
+
+    #[test]
+    fn sync_chat_tasks_adds_bulleted_action_items_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        add_sibling_workspace(&store);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Plan work", None)
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "assistant",
+                "Here is the plan:\n- Add Summary tab\n- Wire MCP refresh tool\n- maybe consider caching\nProse stays prose.",
+                "test",
+            )
+            .unwrap();
+        // User messages are not mined for tasks.
+        store
+            .append_chat_message(thread.id, "user", "- Fix everything", "test")
+            .unwrap();
+
+        let synced = store.sync_chat_tasks("berlin", Some(thread.id)).unwrap();
+        let synced_again = store.sync_chat_tasks("berlin", Some(thread.id)).unwrap();
+        let tasks = store.list_tasks("berlin").unwrap();
+
+        assert_eq!(synced.created, 2);
+        assert_eq!(synced.task_ids.len(), 2);
+        assert_eq!(synced_again.created, 0);
+        assert!(synced_again.task_ids.is_empty());
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|task| task.title == "Add Summary tab"));
+        assert!(tasks
+            .iter()
+            .any(|task| task.title == "Wire MCP refresh tool"));
+        assert!(tasks
+            .iter()
+            .all(|task| task.body == format!("Source: chat:{}", thread.id)));
+
+        // Existing (human) tasks with the same normalized title block re-creation.
+        let err = store.sync_chat_tasks("oslo", Some(thread.id)).unwrap_err();
+        assert!(err.to_string().contains("workspace"), "{err}");
     }
 
     #[test]

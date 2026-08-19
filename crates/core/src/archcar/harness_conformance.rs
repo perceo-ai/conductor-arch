@@ -342,7 +342,8 @@ fn interaction(provider_key: &str, kind: ProviderInteractionKind) -> ProviderInt
         kind,
         title: format!("{kind:?}"),
         detail: "deterministic interaction".to_owned(),
-        choices: vec!["allow".to_owned(), "deny".to_owned()],
+        questions: Vec::new(),
+        auto_resolution_ms: None,
         native_request: json!({"kind": format!("{kind:?}")}),
     }
 }
@@ -439,22 +440,27 @@ fn claude_reconfigure_controls_require_resume_with_desired_controls() {
 }
 
 #[test]
-fn claude_interaction_resolution_requires_restart_with_desired_controls() {
+fn claude_interaction_resolution_answers_in_band() {
     let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
-    adapter.plan_control(HarnessControl::SetModel(Some("claude-sonnet-5".to_owned())));
 
-    assert!(matches!(
-        adapter.plan_control(HarnessControl::ResolveInteraction(
-            ProviderInteractionResolution::Approve
-        )),
-        HarnessControlPlan::RestartRequired(DesiredHarnessControls {
-            model: Some(ref model),
-            ..
-        }) if model == "claude-sonnet-5"
-    ));
+    // Claude holds its turn open until the `can_use_tool` request it asked with
+    // is answered, so a resolution has to go back over the live transport —
+    // restarting the session would strand the ask.
+    let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+        native_id: "conformance-interaction".to_owned(),
+        resolution: ProviderInteractionResolution::Approve,
+    });
+
+    let HarnessControlPlan::NativeWrite(write) = plan else {
+        panic!("expected the resolution to be written to the live session");
+    };
+    let payload: serde_json::Value = serde_json::from_slice(&write.payload).unwrap();
+    assert_eq!(payload["type"], "control_response");
+    assert_eq!(payload["response"]["request_id"], "conformance-interaction");
+    assert_eq!(payload["response"]["response"]["behavior"], "allow");
 }
 
 #[test]

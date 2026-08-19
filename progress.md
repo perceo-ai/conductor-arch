@@ -755,3 +755,70 @@ Not yet manually smoke-verified in this branch:
 - Live queue/immediate/interrupt/model/effort/permission-mode behavior.
 - Live permission/question/plan interaction cards in Electron desktop.
 - Archcar restart with a pending Claude interaction.
+
+## Context Management (added 2026-08-18)
+
+- Summary is the first right-panel tab before Files, and it contains the
+  workspace summary, current-chat context, tasks, todos, and agent
+  contributions in one combined surface.
+- archcar continuously refreshes workspace and current-chat summaries after
+  turns, message updates, task changes, and background-task progress, with an
+  evidence-hash cursor (`summary_refresh_state`) so unchanged evidence skips
+  rewrites. Changed summaries broadcast `summary_updated`; task mutations
+  broadcast `task_updated`.
+- MCP and CLI expose `refresh_summary`, `get_context_briefing`, and
+  `sync_chat_tasks` so AI context management uses the same primitives as the
+  human UI. Verified with core/CLI/renderer tests, a live socket smoke
+  (create-task → `task_updated` + `summary_updated` events), CLI smokes for
+  refresh/briefing/sync, an MCP stdio tools/list + tools/call smoke, and an
+  Electron boot smoke against an isolated daemon. Check-run completion has no
+  dedicated server hook; check status flows into summaries on the next
+  turn/task/background event instead.
+
+## New-chat context picker (added 2026-08-18)
+
+- The empty chat screen now reads "New chat in {branch}" and offers two chip
+  rows: recent chat transcripts (default 8 non-empty chats, newest first) and
+  plan markdown from the workspace's `.context/plans/`. Picking chips attaches
+  their text to the chat's next message and then clears; a failed send restores
+  the picks along with the composer text.
+- Transcripts carry the user/agent conversation only. Tool calls live in
+  `chat_events` and `/model`-style control rows are `system` messages, so
+  neither is attached.
+- New read-only RPCs: `list_chat_transcripts`, `get_chat_transcript`,
+  `list_context_plans` (plan bodies are read with `read_workspace_file`), each
+  with an `archductor archcar` subcommand. Verified with core unit tests,
+  renderer vitest suites, and a live socket smoke against an isolated daemon.
+- `Icon` now stores each glyph as a factory (`() => JSX.Element`). Solid JSX
+  evaluates to real DOM nodes, so the previous shared node was *moved* into the
+  last `<Icon>` that rendered a given name and every earlier one drew blank —
+  visible as soon as a list rendered the same icon twice (the new chips, and the
+  sidebar's repeated `+` buttons).
+- Electron smoke (isolated daemon, seeded repo/workspace/chats/plans): the empty
+  chat reads "New chat in feature/checkout-rewrite", lists three transcript chips
+  and two plan chips, selecting one of each sends
+  `Context attached from Archductor …` with the transcript's user/agent lines
+  (the `/model` control row excluded) and the plan body ahead of the typed
+  message, while the bubble shows only `📎 <label>` markers.
+- Not done: no MCP tools for the three RPCs (MCP exposes a curated subset and
+  already omits `list_chat_threads`/`get_chat_projection`), and no GTK surface
+  exists in this tree.
+
+## Shell layout rules (added 2026-08-18)
+
+- Three columns: sidebar (min 220), chat (min 360), inspector (min 260) — they
+  fit exactly at Electron's 900px minimum window. Side columns are drag-sized
+  and remember their width; `lib/panelWidths.ts` caps a drag at what is left
+  after the other panel and the chat minimum, and `max-width: min(Xpx, 30vw)`
+  keeps a remembered width from overflowing a smaller window.
+- `.content-area` and `.ws-center` use `flex-basis: 0`. With `auto` they bid for
+  their content width, which squeezed the sidebar and the inspector down to
+  their minimums on wide windows.
+- The inspector no longer disappears at 1100px (it shrinks instead); the
+  breakpoint that hides it now sits at 880px, below the minimum window.
+- Chat column order: timeline takes the slack, a pending agent ask is capped at
+  45% and scrolls, the composer never shrinks. A long plan card used to push the
+  composer off the bottom of a short window.
+- The chat tab strip scrolls (it was `overflow: hidden`, which hid every tab
+  past the first when the column narrowed) and the new-chat button is pinned
+  outside the scroller.

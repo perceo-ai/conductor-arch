@@ -412,8 +412,6 @@ textarea:disabled {
 .workspace-list .row:hover .workspace-row-shell,
 .workspace-list .row.selected .workspace-row-shell {
     background-color: var(--lc-hover-soft);
-    border-color: var(--lc-border-strong);
-    padding-right: 14px;
 }
 
 .workspace-row-shell,
@@ -576,6 +574,8 @@ button.text-button.ui-button-xs label {
 
 button.icon-button,
 button.ui-button-icon {
+    width: 30px;
+    height: 30px;
     padding: 0;
     min-width: 30px;
     min-height: 30px;
@@ -2299,6 +2299,10 @@ button.ui-button-destructive:hover {
 .lc-theme-light .nav-button-active {
     color: #111827;
 }
+.lc-theme-light .ws-chat-tabs .ws-tab-shell.ws-tab-active {
+    background-color: transparent;
+    border-bottom-color: var(--lc-accent);
+}
 .lc-theme-light .settings-readiness-pill {
     background: #fff1f2;
     border-color: #fecdd3;
@@ -2348,7 +2352,7 @@ button.ui-button-destructive:hover {
 .lc-theme-light .workspace-row-shell,
 .lc-theme-light .sidebar .history-row {
     background-color: transparent;
-    border-color: #d9e0e8;
+    border-color: transparent;
     color: #1f2937;
 }
 .lc-theme-light .project-avatar,
@@ -2359,6 +2363,9 @@ button.ui-button-destructive:hover {
 .lc-theme-light .sidebar-nav-button:hover,
 .lc-theme-light .project-row:hover,
 .lc-theme-light .workspace-row-shell:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .workspace-row-shell.selected {
     background-color: #e2e8f0;
 }
 .lc-theme-light .sidebar-nav-button.active {
@@ -2671,15 +2678,18 @@ button.ui-button-destructive:hover {
     opacity: 1;
 }
 .ws-tab-bar {
-    min-height: 46px;
-    padding: 0 18px;
+    min-height: 30px;
+    padding: 0 8px 0 0;
     background-color: #191919;
 }
 .ws-chat-tabs-scroll {
     background-color: transparent;
     border: none;
     box-shadow: none;
-    min-height: 46px;
+    height: 30px;
+    min-height: 30px;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 /* GTK scrollbar child -> native scrollbar; use ::-webkit-scrollbar */
 .ws-chat-tabs-scroll::-webkit-scrollbar {
@@ -2687,6 +2697,9 @@ button.ui-button-destructive:hover {
     min-width: 0;
 }
 .ws-chat-tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
     background-color: transparent;
 }
 .ws-tab-sep {
@@ -2701,19 +2714,35 @@ button.ws-tab-shell {
     text-shadow: none;
 }
 .ws-tab-shell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex: 0 0 132px;
+    width: 132px;
     min-width: 132px;
-    min-height: 46px;
+    max-width: 132px;
+    min-height: 30px;
     padding: 0 6px;
+    gap: 5px;
     border-bottom: 2px solid transparent;
     background-color: transparent;
+    overflow: hidden;
+    text-align: left;
 }
 .ws-tab-label {
-    min-width: 84px;
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 14px;
     font-weight: 400;
     color: #8a8a8a;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ws-tab-close-button {
+    flex: 0 0 24px;
     background: transparent;
     border: none;
     box-shadow: none;
@@ -2741,6 +2770,7 @@ button.ws-tab-shell {
     color: #8fb5ff;
 }
 .ws-chat-tab-dot {
+    flex: 0 0 12px;
     min-width: 12px;
     min-height: 12px;
     color: #f0c36a;
@@ -2755,6 +2785,32 @@ button.ws-tab-shell {
 }
 .ws-chat-tab-meta-needs-input {
     color: #f2bf7e;
+}
+.ws-chat-tab-text {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.ws-file-tab-icon {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    color: #8a8a8a;
+}
+.ws-chat-new {
+    align-self: center;
+    flex: 0 0 28px;
+    width: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 5px;
+    margin: 0;
+}
+.ws-chat-new .ui-icon {
+    width: 15px;
+    height: 15px;
 }
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
@@ -2777,7 +2833,7 @@ button.ws-tab-shell {
     font-weight: 500;
 }
 .ws-tab-shell.ws-tab-active {
-    background-color: #242424;
+    background-color: transparent;
     border-bottom-color: #f0c36a;
 }
 .ws-tab-shell.ws-tab-active .ws-tab-label,
@@ -2807,7 +2863,7 @@ button.ws-tab-shell {
     border-left: 1px solid #272727;
 }
 .ws-right-tabs {
-    min-height: 38px;
+    min-height: 40px;
     background-color: #171717;
     border-bottom: 1px solid #232323;
 }
@@ -3475,32 +3531,32 @@ button.ws-tab-shell {
     background-color: #151515;
 }
 .chat-messages {
-    padding: 22px 24px 24px;
+    padding: 14px 22px 16px;
 }
 .chat-working-indicator {
-    margin: 2px 0 12px;
-    padding: 6px 0;
+    margin: 0 0 6px;
+    padding: 4px 0;
     color: #b8c7de;
 }
 .chat-working-indicator .card-meta {
     color: #b8c7de;
 }
 .chat-user-row {
-    margin-top: 12px;
-    margin-bottom: 10px;
+    margin-top: 5px;
+    margin-bottom: 5px;
 }
 .chat-user-bubble {
     background-color: #2e2e2e;
     color: #f4f7ff;
     border-radius: 14px;
-    padding: 11px 16px;
+    padding: 8px 14px;
     line-height: 1.4;
-    min-height: 42px;
+    min-height: 0;
 }
 .chat-queued-row {
-    margin-top: 8px;
-    margin-bottom: 8px;
-    padding: 8px 10px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    padding: 6px 9px;
     border: 1px solid #2d2d2d;
     border-radius: 6px;
     background-color: #181818;
@@ -3517,8 +3573,8 @@ button.ws-tab-shell {
     padding: 0;
 }
 .chat-interrupted-row {
-    margin-top: 4px;
-    margin-bottom: 10px;
+    margin-top: 2px;
+    margin-bottom: 5px;
 }
 .chat-interrupted-pill {
     background-color: #262626;
@@ -3534,17 +3590,37 @@ button.ws-tab-shell {
     line-height: 1.55;
     margin-bottom: 0;
 }
+/* Prose needs breathing room from the actions above it; chips next to chips do
+   not. Spacing is charged at the boundary, not to every row. */
+.chat-agent-text:not(:first-child),
+.chat-reasoning-text:not(:first-child),
+.chat-user-row:not(:first-child) {
+    margin-top: 8px;
+}
+/* A chip that follows other content starts a new group and gets air; chips
+   inside the same run stack directly. Order matters: the adjacent-sibling rule
+   has to come last to win over the group rule. */
+.chat-inline-event:not(:first-child) {
+    margin-top: 6px;
+}
+.chat-inline-event + .chat-inline-event {
+    margin-top: 0;
+}
+.chat-inline-event + .chat-agent-text,
+.chat-inline-event + .chat-reasoning-text {
+    margin-top: 10px;
+}
 .chat-reasoning-text {
     color: #8f8f8f;
     font-size: 13px;
     line-height: 1.45;
-    margin: 0 0 8px 0;
+    margin: 0;
 }
 .chat-inline-event {
     background-color: transparent;
     border: none;
     border-radius: 0;
-    margin-bottom: 3px;
+    margin-bottom: 0;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -4005,17 +4081,34 @@ button.chat-inline-event-expander label {
     border-color: #753838;
     color: #efb0b0;
 }
+.chat-context-usage {
+    gap: 4px;
+    min-width: 0;
+    height: 25px;
+    min-height: 25px;
+    padding: 0 7px;
+    border-color: #2b2b2b;
+    border-radius: 6px;
+    background-color: #171717;
+    color: #a8a8a8;
+}
+.chat-context-usage-icon {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 auto;
+    color: #858585;
+}
 .chat-context-details {
     min-width: 420px;
     padding: 14px;
 }
 .chat-send-btn {
-    width: 30px;
-    height: 30px;
+    width: 25px;
+    height: 25px;
     min-width: 0;
     min-height: 0;
-    border-radius: 7px;
-    background-color: transparent;
+    border-radius: 6px;
+    background-color: #171717;
     color: #9a9a9a;
     border: 1px solid #2d2d2d;
     box-shadow: none;
@@ -4032,16 +4125,18 @@ button.chat-inline-event-expander label {
     border-color: #4d3030;
 }
 .chat-send-btn-active {
-    background-color: #2b2b2b;
-    color: #f5f5f5;
+    background-color: #e8e8e8;
+    border-color: #e8e8e8;
+    color: #151515;
 }
 .chat-send-btn:hover {
     background-color: #262626;
     color: #e4e4e4;
 }
 .chat-send-btn-active:hover {
-    background-color: #333333;
-    color: #ffffff;
+    background-color: #ffffff;
+    border-color: #ffffff;
+    color: #111111;
 }
 .chat-stop-btn:hover {
     background-color: #2b1f1f;
@@ -4160,10 +4255,15 @@ body,
 .session-transcript,
 .terminal-transcript-dark,
 .history-row,
-.project-row,
-.workspace-row-shell {
+.project-row {
     background-color: var(--lc-surface-muted);
     border-color: var(--lc-border);
+    color: var(--lc-text-strong);
+}
+
+.workspace-row-shell {
+    background-color: transparent;
+    border-color: transparent;
     color: var(--lc-text-strong);
 }
 
@@ -4312,15 +4412,13 @@ body,
     border-color: #454545;
 }
 
-.suggested-action,
-.chat-send-btn-active {
+.suggested-action {
     background-color: #282828;
     border-color: #4a4a4a;
     color: #f4f4f4;
 }
 
-.suggested-action:hover,
-.chat-send-btn-active:hover {
+.suggested-action:hover {
     background-color: #333333;
     border-color: #5a5a5a;
     color: #ffffff;
@@ -4355,6 +4453,7 @@ input.text,
     border: none;
     box-shadow: none;
     color: #f8fafc;
+    min-height: 36px;
 }
 
 input,
@@ -4647,3 +4746,4 @@ textarea:focus {
     min-width: 14px;
     min-height: 14px;
 }
+

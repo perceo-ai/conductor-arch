@@ -391,6 +391,72 @@ pub fn tools() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "refresh_summary",
+            description:
+                "Refresh and store the operational summary for a workspace, session/current chat, or task from branch-local evidence.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "scope_type": {"type": "string", "enum": ["workspace", "session", "current_chat", "task"]},
+                        "scope_id": {"type": "integer"},
+                    }),
+                    &["workspace"],
+                )
+            },
+            mutating: true,
+            build: |args| {
+                Ok(ArchcarRequest::RefreshSummary {
+                    workspace: string_arg(args, "workspace")?,
+                    scope_type: optional_string(args, "scope_type")
+                        .unwrap_or_else(|| "workspace".to_owned()),
+                    scope_id: args.get("scope_id").and_then(Value::as_i64),
+                })
+            },
+        },
+        ToolSpec {
+            name: "get_context_briefing",
+            description:
+                "Read the current AI context briefing for a workspace and optional current chat thread: workspace summary, current chat, tasks, next actions.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "thread_id": {"type": "integer"},
+                    }),
+                    &["workspace"],
+                )
+            },
+            mutating: false,
+            build: |args| {
+                Ok(ArchcarRequest::GetContextBriefing {
+                    workspace: string_arg(args, "workspace")?,
+                    thread_id: args.get("thread_id").and_then(Value::as_i64),
+                })
+            },
+        },
+        ToolSpec {
+            name: "sync_chat_tasks",
+            description:
+                "Create or update native workspace tasks from clear action items in the current chat.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "thread_id": {"type": "integer"},
+                    }),
+                    &["workspace"],
+                )
+            },
+            mutating: true,
+            build: |args| {
+                Ok(ArchcarRequest::SyncChatTasks {
+                    workspace: string_arg(args, "workspace")?,
+                    thread_id: args.get("thread_id").and_then(Value::as_i64),
+                })
+            },
+        },
+        ToolSpec {
             name: "add_context",
             description: "Pin a branch-local note or file as context for this workspace.",
             schema: || {
@@ -837,6 +903,68 @@ mod tests {
         // Missing required arguments are rejected before any RPC is sent.
         let err = (find("create_task").build)(&json!({"title": "no workspace"})).unwrap_err();
         assert!(err.to_string().contains("workspace"), "{err}");
+    }
+
+    #[test]
+    fn mcp_exposes_context_management_tools() {
+        let names: Vec<&str> = tools().into_iter().map(|tool| tool.name).collect();
+
+        assert!(names.contains(&"refresh_summary"));
+        assert!(names.contains(&"get_context_briefing"));
+        assert!(names.contains(&"sync_chat_tasks"));
+        assert!(names.contains(&"create_task"));
+        assert!(names.contains(&"update_task"));
+        assert!(names.contains(&"get_summary"));
+        assert!(names.contains(&"save_summary"));
+
+        // The briefing is read-only; refresh mutates stored summaries.
+        let read_only: Vec<Value> = tool_definitions(true);
+        let read_only_names: Vec<&str> = read_only
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(read_only_names.contains(&"get_context_briefing"));
+        assert!(!read_only_names.contains(&"refresh_summary"));
+    }
+
+    #[test]
+    fn refresh_summary_tool_builds_archcar_request() {
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "refresh_summary")
+            .unwrap();
+        let req = (tool.build)(&json!({
+            "workspace": "berlin",
+            "scope_type": "session",
+            "scope_id": 7
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            req,
+            ArchcarRequest::RefreshSummary { ref workspace, ref scope_type, scope_id: Some(7) }
+                if workspace == "berlin" && scope_type == "session"
+        ));
+
+        // Scope defaults to the workspace summary.
+        let req = (tool.build)(&json!({"workspace": "berlin"})).unwrap();
+        assert!(matches!(
+            req,
+            ArchcarRequest::RefreshSummary { ref scope_type, scope_id: None, .. }
+                if scope_type == "workspace"
+        ));
+
+        let briefing = tools
+            .iter()
+            .find(|tool| tool.name == "get_context_briefing")
+            .unwrap();
+        let req = (briefing.build)(&json!({"workspace": "berlin", "thread_id": 4})).unwrap();
+        assert!(matches!(
+            req,
+            ArchcarRequest::GetContextBriefing { ref workspace, thread_id: Some(4) }
+                if workspace == "berlin"
+        ));
     }
 
     #[test]

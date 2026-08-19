@@ -20,7 +20,7 @@ use crate::archcar::harness::{
 use crate::archcar::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessControl, HarnessControlPlan,
     HarnessEffect, HarnessInput, HarnessSignal, HarnessTurnStatus, ManagedHarnessAdapter,
-    NativeRecord,
+    NativeRecord, ProviderInteractionKind,
 };
 use crate::archcar::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarEvent, ArchcarInputDelivery,
@@ -674,8 +674,20 @@ fn apply_harness_effect(
             });
         }
         HarnessEffect::InteractionRequested(draft) => {
+            let plan_markdown = (draft.kind == ProviderInteractionKind::PlanApproval)
+                .then(|| draft.detail.clone())
+                .filter(|plan| !plan.trim().is_empty());
             match runtime_store.register_provider_interaction(draft) {
                 Ok(interaction) => {
+                    // The plan is written into the workspace by us, not by the
+                    // agent: agents scatter plans into their own state
+                    // directories, and the chat needs a stable path to show and
+                    // to build from.
+                    let interaction = match plan_markdown {
+                        Some(plan) => save_interaction_plan(runtime_store, &interaction, &plan)
+                            .unwrap_or(interaction),
+                        None => interaction,
+                    };
                     let _ =
                         event_tx.send(ArchcarEvent::ProviderInteractionRequested { interaction });
                 }
@@ -987,8 +999,22 @@ fn claude_stream_session_launch(
     launch.args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
         persistent_input: true,
         replay_user_messages: true,
+        // Route tool permission through our stdin. This is also what makes
+        // AskUserQuestion / EnterPlanMode / ExitPlanMode exist at all: without
+        // a permission prompt tool claude drops them from the tool list, and
+        // plan mode has no way to ask or to hand a plan back.
+        permission_prompt_tool: Some("stdio".to_owned()),
         resume: thread_record.native_thread_id.clone(),
-        permission_mode: claude_stream_permission_mode(&harness),
+        permission_mode: Some(
+            if store
+                .chat_thread_plan_mode(thread_record.id)
+                .unwrap_or(false)
+            {
+                CLAUDE_PLAN_PERMISSION_MODE.to_owned()
+            } else {
+                CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
+            },
+        ),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         append_system_prompt: None,
@@ -1142,9 +1168,11 @@ fn non_interactive_harness_metadata(
     Some(entries.join(";"))
 }
 
-fn claude_stream_permission_mode(_harness: &SessionHarnessOptions) -> Option<String> {
-    Some("bypassPermissions".to_owned())
-}
+/// A thread in plan mode launches claude in its own plan mode, so the agent
+/// researches read-only and proposes through ExitPlanMode; everything else
+/// stays wide open.
+pub(crate) const CLAUDE_PLAN_PERMISSION_MODE: &str = "plan";
+pub(crate) const CLAUDE_DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 fn claude_stream_effort_mode(harness: &SessionHarnessOptions) -> Option<String> {
     sanitize_harness_text(harness.effort_mode.as_deref()).or_else(|| {
@@ -1200,6 +1228,9 @@ fn apply_provider_control_plan(
     plan: HarnessControlPlan,
 ) {
     match plan {
+        // Nothing to send: the adapter changed how it will build the next
+        // request (codex's plan-mode sandbox, for instance).
+        HarnessControlPlan::Applied => {}
         HarnessControlPlan::NativeWrite(native_write) => {
             if let Err(err) = connection
                 .stdin
@@ -2521,6 +2552,25 @@ fn run_claude_stream_session_loop(
             permission_mode: connection.approval_policy.clone(),
         },
     });
+    // `claude --input-format stream-json` emits `system/init` only after it
+    // reads the first user message, so waiting for init before reporting ready
+    // deadlocks the queue: the first message is never delivered. Its stdin
+    // accepts input as soon as the transport is up, so that is the moment the
+    // session is ready.
+    adapter.note_transport_started();
+    adapter.note_plan_mode(
+        runtime_store
+            .chat_thread_plan_mode(started.thread_id)
+            .unwrap_or(false),
+    );
+    apply_harness_effect(
+        &runtime_store,
+        &snapshot,
+        &event_tx,
+        &started,
+        &mut connection.native_thread_id,
+        HarnessEffect::Ready,
+    );
 
     loop {
         drain_claude_stdout(
@@ -2718,6 +2768,29 @@ fn drain_claude_stdout(
         }) {
             Ok(effects) => {
                 for effect in effects {
+                    // A routine tool permission in the wide-open default is
+                    // answered here, in the loop, without touching the database
+                    // or the UI: every Claude tool call round-trips through us
+                    // once the permission prompt tool is on, so anything slower
+                    // would tax every tool call in every chat.
+                    if let HarnessEffect::InteractionRequested(draft) = &effect {
+                        if let Some(resolution) = adapter.auto_resolution_for(draft) {
+                            let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+                                native_id: draft.native_id.clone(),
+                                resolution,
+                            });
+                            apply_provider_control_plan(
+                                runtime_store,
+                                snapshot,
+                                event_tx,
+                                started,
+                                connection,
+                                plan,
+                            );
+                            continue;
+                        }
+                        mark_snapshot_awaiting_input(snapshot);
+                    }
                     apply_harness_effect(
                         runtime_store,
                         snapshot,
@@ -3053,6 +3126,37 @@ fn persist_runtime_user_input(
         }),
         "provider_native_user_input",
     );
+}
+
+/// Write a proposed plan into the workspace's `.context/plans/` and record the
+/// path on both the interaction and the thread.
+fn save_interaction_plan(
+    runtime_store: &RuntimeSessionStore,
+    interaction: &crate::provider_interactions::ProviderInteractionRecord,
+    plan_markdown: &str,
+) -> Option<crate::provider_interactions::ProviderInteractionRecord> {
+    match runtime_store.save_chat_plan(interaction.thread_id, &interaction.id, plan_markdown) {
+        Ok(plan_path) => runtime_store
+            .attach_interaction_plan_path(&interaction.id, &plan_path)
+            .ok(),
+        Err(err) => {
+            warn!(
+                thread_id = interaction.thread_id,
+                error = %format!("{err:#}"),
+                "archcar could not save a proposed plan into the workspace"
+            );
+            None
+        }
+    }
+}
+
+/// The provider asked the human something and is holding its turn until it is
+/// answered. Distinct from "busy": the agent is not working, it is waiting.
+fn mark_snapshot_awaiting_input(snapshot: &Arc<Mutex<SessionSnapshot>>) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.ready = false;
+        state.runtime_state = AgentSessionState::WaitingForInput;
+    }
 }
 
 fn mark_snapshot_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
@@ -3721,11 +3825,13 @@ mod tests {
             )
         });
 
+        // Claude in stream-json input mode does not emit system/init until it
+        // has read a message, so readiness comes from the transport being up.
         recv_archcar_event_until(
             &event_rx,
-            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
         );
-        assert!(!snapshot.lock().unwrap().ready);
+        wait_for_snapshot_readiness(&snapshot, true);
 
         command_tx
             .send(SessionCommand::SendInput {
@@ -3771,21 +3877,24 @@ mod tests {
 
         assert!(
             !ready_after_init,
-            "startup init must not restore readiness after the first input"
+            "init arriving mid-turn must not restore readiness before the turn ends"
         );
     }
 
     #[test]
-    fn managed_claude_lifecycle_waits_for_init_and_completes_turn_once() {
+    fn managed_claude_delivers_the_first_input_before_init_and_completes_turn_once() {
         let temp = tempfile::tempdir().unwrap();
         let fake_claude = temp.path().join("claude");
+        // Mirrors the real `claude --input-format stream-json`: it prints hook
+        // records at startup and withholds system/init until it has read a user
+        // message. Gating readiness on init would deadlock here — nothing would
+        // ever write the message that produces the init.
         fs::write(
             &fake_claude,
             r#"#!/usr/bin/env bash
 printf '%s\n' '{"type":"system","subtype":"hook_started","session_id":"fake-session","hook":"startup"}'
-while [ ! -f "$ARCHDUCTOR_TEST_INIT_GATE" ]; do sleep 0.02; done
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session","model":"claude-sonnet-fixture","capabilities":["streaming"]}'
 IFS= read -r _line
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session","model":"claude-sonnet-fixture","capabilities":["streaming"]}'
 printf '%s\n' '{"type":"user","session_id":"fake-session","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"hello lifecycle"}]}}'
 printf '%s\n' '{"type":"assistant","session_id":"fake-session","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"done"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session","result":"ok","duration_ms":1}'
@@ -3800,13 +3909,11 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             fs::set_permissions(&fake_claude, perms).unwrap();
         }
 
-        let init_gate = temp.path().join("allow-claude-init");
         let store = seeded_workspace_store(temp.path());
         let thread = store
             .create_chat_thread("berlin", "claude", "Claude", None)
             .unwrap();
         let mut child = ProcessCommand::new(&fake_claude)
-            .env("ARCHDUCTOR_TEST_INIT_GATE", &init_gate)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -3855,23 +3962,13 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             &event_rx,
             |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
         );
-        let no_ready_deadline = std::time::Instant::now() + Duration::from_millis(180);
-        while std::time::Instant::now() < no_ready_deadline {
-            if let Ok(event) = event_rx.recv_timeout(Duration::from_millis(20)) {
-                assert!(
-                    !matches!(event, ArchcarEvent::SessionReady { session_id, .. } if session_id == process.id),
-                    "managed Claude must not become ready before system/init: {event:?}"
-                );
-            }
-        }
-        assert!(!snapshot.lock().unwrap().ready);
-        fs::write(&init_gate, b"ready").unwrap();
-
+        // Ready on transport start, before any init record: the first queued
+        // message has to be deliverable or the session never starts a turn.
         recv_archcar_event_until(
             &event_rx,
             |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
         );
-        assert!(snapshot.lock().unwrap().ready);
+        wait_for_snapshot_readiness(&snapshot, true);
 
         command_tx
             .send(SessionCommand::SendInput {

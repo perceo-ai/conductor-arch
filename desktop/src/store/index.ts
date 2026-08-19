@@ -3,6 +3,7 @@ import { applyEvent } from "./reducer";
 import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
+import { threadsStore } from "./threads";
 
 export { nav } from "./nav";
 export { chatStore } from "./chat";
@@ -19,6 +20,7 @@ export { setupStore } from "./setup";
 export { threadsStore } from "./threads";
 export { terminalStore } from "./terminal";
 export { interactionsStore } from "./interactions";
+export { newChatContextStore } from "./newChatContext";
 export { toastsStore } from "./toasts";
 export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
@@ -38,6 +40,14 @@ let startPromise: Promise<void> | null = null;
  */
 export async function refreshInventory(): Promise<void> {
   await Promise.all([workspacesStore.refresh(), repositoriesStore.refresh()]);
+  await refreshWorkspaceChats();
+}
+
+export async function refreshWorkspaceChats(): Promise<void> {
+  const activeWorkspaces = workspacesStore.state.order.filter(
+    (name) => workspacesStore.row(name)?.status !== "archived",
+  );
+  await threadsStore.refreshMany(activeWorkspaces);
 }
 
 /**

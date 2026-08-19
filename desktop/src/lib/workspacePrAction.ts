@@ -27,6 +27,8 @@ export function workspacePrActionInput(
         prNumber?: number | null;
         prState?: string | null;
         changedFiles?: number | null;
+        branchAhead?: number | null;
+        branchBehind?: number | null;
       }
     | undefined,
   checks: ArchcarChecksSummary | undefined,
@@ -37,9 +39,9 @@ export function workspacePrActionInput(
     changedFiles: row?.changedFiles,
     checkStatus: checks?.check_status,
     checkExitCode: checks?.check_exit_code,
-    branchAhead: checks?.branch_ahead,
+    branchAhead: checks?.branch_ahead ?? row?.branchAhead,
     sourceBranchAhead: checks?.source_branch_ahead,
-    branchBehind: checks?.branch_behind,
+    branchBehind: checks?.branch_behind ?? row?.branchBehind,
     conflicts: checks?.conflicting_workspaces,
   };
 }
