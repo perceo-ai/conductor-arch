@@ -35,6 +35,10 @@ export interface ChatSlice {
   queue: QueuedArchcarInput[];
   session: { session_id: number; status: string; runtime_state: string; ready: boolean } | null;
   phase: ChatUiPhase;
+  completedTurnAttention: boolean;
+  /// The chat is planning rather than building.
+  planMode: boolean;
+  planPath: string | null;
 }
 
 function emptySlice(): ChatSlice {
@@ -46,6 +50,9 @@ function emptySlice(): ChatSlice {
     queue: [],
     session: null,
     phase: { kind: "ready" },
+    completedTurnAttention: false,
+    planMode: false,
+    planPath: null,
   };
 }
 
@@ -113,6 +120,9 @@ export const chatStore = {
               }
             : null,
           phase: chat[snap.thread_id]?.phase ?? { kind: "ready" },
+          completedTurnAttention: chat[snap.thread_id]?.completedTurnAttention ?? false,
+          planMode: chat[snap.thread_id]?.planMode ?? false,
+          planPath: chat[snap.thread_id]?.planPath ?? null,
         },
         { key: "id", merge: false },
       ),
@@ -155,8 +165,29 @@ export const chatStore = {
 
   setPhase(threadId: number, phase: ChatUiPhase) {
     ensure(threadId);
-    setChat(threadId, "phase", phase);
+    // reconcile, not a plain write: a plain store write merges keys, so a
+    // "failed" phase's message would survive into the next phase and keep a
+    // stale error on screen.
+    setChat(threadId, "phase", reconcile(phase));
     recordUpdate(`chat.phase.${threadId}`);
+  },
+
+  setPlanMode(threadId: number, planMode: boolean) {
+    ensure(threadId);
+    setChat(threadId, "planMode", planMode);
+    recordUpdate(`chat.planMode.${threadId}`);
+  },
+
+  setPlanPath(threadId: number, planPath: string | null) {
+    ensure(threadId);
+    setChat(threadId, "planPath", planPath);
+    recordUpdate(`chat.planPath.${threadId}`);
+  },
+
+  setCompletedTurnAttention(threadId: number, value: boolean) {
+    ensure(threadId);
+    setChat(threadId, "completedTurnAttention", value);
+    recordUpdate(`chat.completedTurnAttention.${threadId}`);
   },
 
   /** A session process exited — clear it from whichever thread owned it so the

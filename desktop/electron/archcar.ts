@@ -2,7 +2,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 // Node port of crates/core/src/archcar/{client,transport}.rs framing.
@@ -20,6 +20,38 @@ export interface RpcEnvelope<T> {
 const RPC_TIMEOUT_MS = 30_000;
 const STARTUP_ATTEMPTS = 20;
 const STARTUP_POLL_MS = 100;
+
+let cachedPath: string | null = null;
+
+function shellPath(): string {
+  if (cachedPath != null) return cachedPath;
+  const extra = [
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/opt/homebrew/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+    path.join(os.homedir(), ".local/bin"),
+    path.join(os.homedir(), "bin"),
+  ];
+  let base = process.env.PATH ?? "";
+  try {
+    const shell = process.env.SHELL || "/bin/sh";
+    const out = execFileSync(shell, ["-lc", "printf %s \"$PATH\""], {
+      encoding: "utf8",
+      timeout: 3000,
+    }).trim();
+    if (out) base = out;
+  } catch {
+    // Fall back to the process PATH plus common install dirs.
+  }
+  cachedPath = [base, ...extra].filter(Boolean).join(":");
+  return cachedPath;
+}
+
+function spawnEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: shellPath() };
+}
 
 function stateDir(): string {
   const xdg = process.env.XDG_STATE_HOME;
@@ -235,7 +267,7 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
   const child = spawn(archcarBinary(), [], {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: spawnEnv(),
   });
   child.unref();
 

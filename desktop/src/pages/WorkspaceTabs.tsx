@@ -553,7 +553,7 @@ export function ChecksPanel(props: { workspace: string }) {
 
 // ---- Review (agent prompt) ------------------------------------------------
 
-export function ReviewPanel(props: { workspace: string }) {
+export function ReviewPromptButton(props: { workspace: string }) {
   const [busy, setBusy] = createSignal(false);
 
   async function queueReviewPrompt() {
@@ -593,10 +593,8 @@ export function ReviewPanel(props: { workspace: string }) {
   }
 
   return (
-    <div class="ws-tab-panel command-panel ws-review-action-panel">
-      <button class="ws-review-prompt-button" disabled={busy()} onClick={() => void queueReviewPrompt()}>
-        {busy() ? "Queueing…" : "Review PR in chat"}
-      </button>
-    </div>
+    <button class="ws-review-prompt-button" disabled={busy()} onClick={() => void queueReviewPrompt()}>
+      {busy() ? "Queueing…" : "Review"}
+    </button>
   );
 }

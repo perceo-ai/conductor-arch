@@ -10,7 +10,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::archcar::harness_contract::{
-    ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
+    InteractionQuestion, ProviderInteractionDraft, ProviderInteractionKind,
+    ProviderInteractionResolution,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,7 +62,10 @@ pub struct ProviderInteractionRecord {
     pub kind: ProviderInteractionKind,
     pub title: String,
     pub detail: String,
-    pub choices: Vec<String>,
+    pub questions: Vec<InteractionQuestion>,
+    pub auto_resolution_ms: Option<u64>,
+    /// Set once core has written a PlanApproval's plan into the workspace.
+    pub plan_path: Option<String>,
     pub native_request: Value,
     pub request_fingerprint: String,
     pub status: ProviderInteractionStatus,
@@ -95,10 +99,11 @@ impl ProviderInteractionStore {
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO provider_interactions (
                 id, provider_key, workspace, thread_id, session_id, native_session_id, native_id,
-                kind, title, detail, choices_json, native_request_json, request_fingerprint,
+                kind, title, detail, choices_json, questions_json, auto_resolution_ms,
+                native_request_json, request_fingerprint,
                 status, resolution_json, native_response_json, error, created_at, resolved_at, consumed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                'pending', NULL, NULL, NULL, ?14, NULL, NULL)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '[]', ?11, ?12, ?13, ?14,
+                'pending', NULL, NULL, NULL, ?15, NULL, NULL)",
             params![
                 id,
                 draft.provider_key,
@@ -110,7 +115,8 @@ impl ProviderInteractionStore {
                 serde_json::to_string(&draft.kind)?,
                 draft.title,
                 draft.detail,
-                serde_json::to_string(&draft.choices)?,
+                serde_json::to_string(&draft.questions)?,
+                draft.auto_resolution_ms.map(|ms| ms as i64),
                 serde_json::to_string(&draft.native_request)?,
                 fingerprint,
                 now,
@@ -124,6 +130,31 @@ impl ProviderInteractionStore {
         };
         tx.commit()?;
         Ok(record)
+    }
+
+    /// Mark a pending ask unanswerable — its session died holding the request.
+    pub fn expire(&self, id: &str) -> Result<ProviderInteractionRecord> {
+        let conn = self.open()?;
+        let now = timestamp();
+        conn.execute(
+            "UPDATE provider_interactions
+             SET status = 'expired', resolved_at = ?2, error = ?3
+             WHERE id = ?1 AND status = 'pending'",
+            params![id, now, "the agent session ended before this was answered"],
+        )?;
+        conn.query_row(SELECT_RECORD_SQL, params![id], row_to_record)
+            .map_err(Into::into)
+    }
+
+    /// Record where a plan approval's plan was written in the workspace.
+    pub fn attach_plan_path(&self, id: &str, plan_path: &str) -> Result<ProviderInteractionRecord> {
+        let conn = self.open()?;
+        conn.execute(
+            "UPDATE provider_interactions SET plan_path = ?2 WHERE id = ?1",
+            params![id, plan_path],
+        )?;
+        conn.query_row(SELECT_RECORD_SQL, params![id], row_to_record)
+            .map_err(Into::into)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<ProviderInteractionRecord>> {
@@ -237,9 +268,9 @@ fn find_pending_by_fingerprint(
 ) -> Result<Option<ProviderInteractionRecord>> {
     conn.query_row(
         "SELECT id, provider_key, workspace, thread_id, session_id, native_session_id,
-            native_id, kind, title, detail, choices_json, native_request_json,
+            native_id, kind, title, detail, questions_json, native_request_json,
             request_fingerprint, status, resolution_json, native_response_json, error,
-            created_at, resolved_at, consumed_at
+            created_at, resolved_at, consumed_at, auto_resolution_ms, plan_path
          FROM provider_interactions
          WHERE request_fingerprint = ?1 AND status = 'pending'
          ORDER BY created_at DESC
@@ -253,19 +284,21 @@ fn find_pending_by_fingerprint(
 
 const SELECT_RECORD_SQL: &str =
     "SELECT id, provider_key, workspace, thread_id, session_id, native_session_id,
-    native_id, kind, title, detail, choices_json, native_request_json, request_fingerprint,
-    status, resolution_json, native_response_json, error, created_at, resolved_at, consumed_at
+    native_id, kind, title, detail, questions_json, native_request_json, request_fingerprint,
+    status, resolution_json, native_response_json, error, created_at, resolved_at, consumed_at,
+    auto_resolution_ms, plan_path
     FROM provider_interactions WHERE id = ?1";
 
 const SELECT_RECORD_LIST_SQL: &str =
     "SELECT id, provider_key, workspace, thread_id, session_id, native_session_id,
-    native_id, kind, title, detail, choices_json, native_request_json, request_fingerprint,
-    status, resolution_json, native_response_json, error, created_at, resolved_at, consumed_at
+    native_id, kind, title, detail, questions_json, native_request_json, request_fingerprint,
+    status, resolution_json, native_response_json, error, created_at, resolved_at, consumed_at,
+    auto_resolution_ms, plan_path
     FROM provider_interactions";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderInteractionRecord> {
     let kind_json: String = row.get(7)?;
-    let choices_json: String = row.get(10)?;
+    let questions_json: String = row.get(10)?;
     let native_request_json: String = row.get(11)?;
     let status: String = row.get(13)?;
     let resolution_json: Option<String> = row.get(14)?;
@@ -281,7 +314,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderInteractio
         kind: decode_json_column(7, &kind_json)?,
         title: row.get(8)?,
         detail: row.get(9)?,
-        choices: decode_json_column(10, &choices_json)?,
+        questions: decode_json_column(10, &questions_json)?,
+        auto_resolution_ms: row.get::<_, Option<i64>>(20)?.map(|ms| ms.max(0) as u64),
+        plan_path: row.get(21)?,
         native_request: decode_json_column(11, &native_request_json)?,
         request_fingerprint: row.get(12)?,
         status: decode_status_column(13, &status)?,
@@ -321,7 +356,8 @@ where
 
 fn status_for_resolution(resolution: &ProviderInteractionResolution) -> ProviderInteractionStatus {
     match resolution {
-        ProviderInteractionResolution::Approve => ProviderInteractionStatus::Allowed,
+        ProviderInteractionResolution::Approve
+        | ProviderInteractionResolution::ApproveForSession => ProviderInteractionStatus::Allowed,
         ProviderInteractionResolution::Deny { .. } => ProviderInteractionStatus::Denied,
         ProviderInteractionResolution::Answer { .. } => ProviderInteractionStatus::Answered,
         ProviderInteractionResolution::Defer => ProviderInteractionStatus::Pending,
@@ -352,6 +388,7 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archcar::harness_contract::InteractionAnswer;
     use crate::storage::migrate_workspace_db;
     use serde_json::json;
 
@@ -365,7 +402,10 @@ mod tests {
             .resolve(
                 &pending.id,
                 ProviderInteractionResolution::Answer {
-                    answers: vec![("confirm".to_owned(), "yes".to_owned())],
+                    answers: vec![InteractionAnswer {
+                        question_id: "confirm".to_owned(),
+                        values: vec!["yes".to_owned()],
+                    }],
                 },
             )
             .unwrap();
@@ -457,7 +497,8 @@ mod tests {
             kind: ProviderInteractionKind::UserQuestion,
             title: "Question".to_owned(),
             detail: "Continue?".to_owned(),
-            choices: vec!["yes".to_owned(), "no".to_owned()],
+            questions: Vec::new(),
+            auto_resolution_ms: None,
             native_request: json!({"question": "Continue?"}),
         }
     }

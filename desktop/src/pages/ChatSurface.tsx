@@ -1,10 +1,22 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
-import { chatStore, threadsStore, nav, loadThread, interactionsStore, actions, prefsStore } from "@/store";
+import {
+  chatStore,
+  threadsStore,
+  nav,
+  loadThread,
+  interactionsStore,
+  actions,
+  prefsStore,
+  newChatContextStore,
+  workspacesStore,
+} from "@/store";
 import { timelineItemsForSlice } from "@/store/chat";
 import { MODELS, EFFORTS } from "@/lib/models";
 import { send } from "@/bridge/client";
 import type {
   ArchcarChatThread,
+  ArchcarChatTranscriptSummary,
+  ArchcarContextPlan,
   ArchcarProjectionItem,
   ProviderInteractionRecord,
   ProviderInteractionResolution,
@@ -25,6 +37,15 @@ import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
 import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
 import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
+import {
+  contextPreamble,
+  formatPlan,
+  formatTranscript,
+  planPickKey,
+  transcriptChipDetail,
+  transcriptPickKey,
+} from "@/lib/newChatContext";
+import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -41,6 +62,7 @@ function providerToKind(provider: string): SessionKind {
 
 function ThreadTab(props: {
   thread: ArchcarChatThread;
+  label: string;
   active: boolean;
   queued: number;
   pendingInteraction: boolean;
@@ -48,6 +70,12 @@ function ThreadTab(props: {
   onClose: () => void;
 }) {
   const generating = () => props.thread.status === "running" || props.thread.status === "generating";
+  const showFinishedDot = () =>
+    !props.active &&
+    !generating() &&
+    !props.pendingInteraction &&
+    chatStore.slice(props.thread.id).completedTurnAttention;
+  const showAttentionDot = () => !props.active && props.pendingInteraction;
   return (
     <div
       class="ws-chat-tab-shell ws-tab-shell"
@@ -63,15 +91,14 @@ function ThreadTab(props: {
       tabIndex={0}
       title={`${props.thread.provider} · ${props.thread.status || "ready"}`}
     >
-      <span
-        class="ws-chat-tab-dot"
-        classList={{
-          "ws-chat-tab-spinner": generating(),
-          "ws-chat-tab-needs-input": props.pendingInteraction,
-        }}
-      />
+      <Show when={showFinishedDot() || showAttentionDot()}>
+        <span
+          class="ws-chat-tab-dot"
+          classList={{ "ws-chat-tab-needs-input": showAttentionDot() }}
+        />
+      </Show>
       <span class="ws-chat-tab-text">
-        <span class="ws-tab-label">{props.thread.title || `Chat ${props.thread.id}`}</span>
+        <span class="ws-tab-label">{props.label}</span>
       </span>
       <Show when={props.queued > 0}>
         <span class="ws-chat-tab-count">{props.queued}</span>
@@ -91,7 +118,6 @@ function ThreadTab(props: {
 }
 
 function FileTab(props: { path: string; active: boolean; onClick: () => void; onClose: () => void }) {
-  const name = () => props.path.split("/").pop() ?? props.path;
   return (
     <div
       class="ws-chat-tab-shell ws-tab-shell ws-file-tab"
@@ -108,7 +134,7 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
       title={props.path}
     >
       <Icon name="file" class="ws-file-tab-icon" />
-      <span class="ws-tab-label">{name()}</span>
+      <span class="ws-tab-label">File</span>
       <button
         class="ws-tab-close-button"
         title="Close file"
@@ -149,7 +175,7 @@ function eventIcon(renderClass: string): IconName {
 // verb (action label) + a small monospace content chip (the command/filename),
 // with the body revealed only on expand. No category badge; the row carries no
 // card chrome of its own. Bodies stay collapsed until the user asks for them.
-function InlineCard(props: { item: ArchcarProjectionItem }) {
+function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const parsed = () => inlineEventVerbChip(props.item.render_class, props.item.title);
   const verb = () => parsed().verb;
@@ -160,7 +186,7 @@ function InlineCard(props: { item: ArchcarProjectionItem }) {
       class="chat-inline-event"
       classList={{
         "chat-inline-event-failed": props.item.status === "failed",
-        "chat-inline-event-loading": props.item.status === "running",
+        "chat-inline-event-loading": props.item.status === "running" && !props.agentIdle,
       }}
     >
       <div class="chat-inline-event-header">
@@ -202,49 +228,125 @@ function InlineCard(props: { item: ArchcarProjectionItem }) {
 function InteractionBanner(props: { rec: ProviderInteractionRecord }) {
   const resolve = (resolution: ProviderInteractionResolution) =>
     void actions.resolveInteraction(props.rec.id, resolution).catch(() => {});
+  const [other, setOther] = createSignal<Record<string, string>>({});
+  const questions = () => props.rec.questions ?? [];
+  const isQuestion = () => props.rec.kind === "user_question" && questions().length > 0;
+
+  const answer = (questionId: string, value: string) => {
+    if (!value.trim()) return;
+    resolve({ type: "answer", answers: [{ question_id: questionId, values: [value] }] });
+  };
+
   return (
     <div class="chat-interaction">
       <div class="chat-interaction-head">
         <span class="chat-interaction-kind">{props.rec.kind.replace(/_/g, " ")}</span>
         <span class="chat-interaction-title">{props.rec.title}</span>
       </div>
-      <Show when={props.rec.detail.trim()}>
-        <div class="chat-interaction-detail">{props.rec.detail}</div>
+      <Show when={isQuestion()} fallback={<PermissionActions rec={props.rec} resolve={resolve} />}>
+        <For each={questions()}>
+          {(question) => (
+            <div class="chat-interaction-question">
+              <div class="chat-interaction-detail">{question.question}</div>
+              <div class="chat-interaction-actions">
+                <For each={question.options}>
+                  {(option) => (
+                    <button
+                      class="ui-button-sm"
+                      title={option.description}
+                      onClick={() => answer(question.id, option.label)}
+                    >
+                      {option.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+              {/* Providers mark a question as accepting free text; without it,
+                  answering means picking one of the offered labels. */}
+              <Show when={question.allow_other}>
+                <div class="chat-interaction-other">
+                  <input
+                    class="chat-interaction-other-input"
+                    placeholder="Answer in your own words…"
+                    value={other()[question.id] ?? ""}
+                    onInput={(e) =>
+                      setOther((prev) => ({ ...prev, [question.id]: e.currentTarget.value }))
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      answer(question.id, other()[question.id] ?? "");
+                    }}
+                  />
+                  <button
+                    class="ui-button-sm"
+                    onClick={() => answer(question.id, other()[question.id] ?? "")}
+                  >
+                    Send
+                  </button>
+                </div>
+              </Show>
+            </div>
+          )}
+        </For>
       </Show>
-      <div class="chat-interaction-actions">
-        <Show
-          when={props.rec.kind === "user_question" && props.rec.choices.length > 0}
-          fallback={
-            <>
-              <button class="ui-button-primary" onClick={() => resolve({ type: "approve" })}>
-                Approve
-              </button>
-              <button class="ui-button-destructive" onClick={() => resolve({ type: "deny" })}>
-                Deny
-              </button>
-            </>
-          }
-        >
-          <For each={props.rec.choices}>
-            {(c) => (
-              <button class="ui-button-sm" onClick={() => resolve({ type: "answer", answers: [["answer", c]] })}>
-                {c}
-              </button>
-            )}
-          </For>
-        </Show>
-        <button class="ui-button-sm" onClick={() => resolve({ type: "defer" })}>
-          Defer
-        </button>
-      </div>
     </div>
   );
 }
 
-function TimelineItem(props: { item: ArchcarProjectionItem }) {
+function PermissionActions(props: {
+  rec: ProviderInteractionRecord;
+  resolve: (resolution: ProviderInteractionResolution) => void;
+}) {
+  return (
+    <>
+      <Show when={props.rec.detail.trim()}>
+        <div class="chat-interaction-detail">{props.rec.detail}</div>
+      </Show>
+      <div class="chat-interaction-actions">
+        <button class="ui-button-primary" onClick={() => props.resolve({ type: "approve" })}>
+          Allow
+        </button>
+        <button
+          class="ui-button-sm"
+          title="Allow this and anything like it for the rest of the session"
+          onClick={() => props.resolve({ type: "approve_for_session" })}
+        >
+          Allow for session
+        </button>
+        <button class="ui-button-destructive" onClick={() => props.resolve({ type: "deny" })}>
+          Deny
+        </button>
+      </div>
+    </>
+  );
+}
+
+// The plan the agent proposed, shown as its own block with the file it was
+// written to. Approving it is what ends planning and starts the build, so the
+// buttons live in the composer where the next action is.
+function PlanCard(props: { rec: ProviderInteractionRecord }) {
+  return (
+    <div class="chat-plan-card">
+      <div class="chat-plan-card-head">
+        <Icon name="file-text" class="chat-plan-card-icon" />
+        <span class="chat-plan-card-title">Proposed plan</span>
+        <Show when={props.rec.plan_path}>
+          {(path) => <span class="chat-plan-card-path">{path()}</span>}
+        </Show>
+      </div>
+      <div
+        class="chat-plan-card-body markdown-body"
+        innerHTML={renderMarkdown(props.rec.detail)}
+      />
+    </div>
+  );
+}
+
+function TimelineItem(props: { item: ArchcarProjectionItem; agentIdle: boolean }) {
   const cls = () => props.item.render_class;
   return (
-    <Switch fallback={<InlineCard item={props.item} />}>
+    <Switch fallback={<InlineCard item={props.item} agentIdle={props.agentIdle} />}>
       <Match when={cls() === "user_chat"}>
         <UserBubble body={props.item.body} />
       </Match>
@@ -261,27 +363,223 @@ function TimelineItem(props: { item: ArchcarProjectionItem }) {
   );
 }
 
-function Timeline(props: { threadId: number }) {
-  const slice = () => chatStore.slice(props.threadId);
-  const items = createMemo<ArchcarProjectionItem[]>(() =>
-    timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+// Empty-chat screen: name the branch this chat runs on, then offer the context
+// a fresh chat usually needs — recent chat transcripts (conversation only, no
+// tool calls) and plan markdown from `.context/plans/`. Picked chips ride along
+// with the first message the composer sends.
+function NewChatIntro(props: { workspace: string; threadId: number }) {
+  const branch = () => workspacesStore.row(props.workspace)?.branch ?? props.workspace;
+
+  const [transcripts] = createResource(
+    () => props.workspace,
+    async (workspace) => {
+      try {
+        const res = await send({ type: "list_chat_transcripts", workspace });
+        return res.type === "chat_transcripts" ? res.transcripts : [];
+      } catch {
+        return [];
+      }
+    },
   );
+  const [plans] = createResource(
+    () => props.workspace,
+    async (workspace) => {
+      try {
+        const res = await send({ type: "list_context_plans", workspace });
+        return res.type === "context_plans" ? res.plans : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+
+  // This chat has no messages yet, so it never lists itself.
+  const pastChats = createMemo(() =>
+    (transcripts() ?? []).filter((t) => t.thread_id !== props.threadId),
+  );
+  const selected = (key: string) => newChatContextStore.selected(props.threadId, key);
+
+  async function toggleTranscript(summary: ArchcarChatTranscriptSummary) {
+    const key = transcriptPickKey(summary.thread_id);
+    if (selected(key)) {
+      newChatContextStore.remove(props.threadId, key);
+      return;
+    }
+    try {
+      const res = await send({ type: "get_chat_transcript", thread_id: summary.thread_id });
+      if (res.type !== "chat_transcript") return;
+      newChatContextStore.toggle(props.threadId, {
+        key,
+        kind: "transcript",
+        label: res.title || summary.title,
+        body: formatTranscript(res.title || summary.title, res.messages),
+      });
+    } catch {
+      // non-fatal: leave the chip unselected
+    }
+  }
+
+  async function togglePlan(plan: ArchcarContextPlan) {
+    const key = planPickKey(plan.path);
+    if (selected(key)) {
+      newChatContextStore.remove(props.threadId, key);
+      return;
+    }
+    try {
+      const res = await send({
+        type: "read_workspace_file",
+        workspace: props.workspace,
+        path: plan.path,
+      });
+      if (res.type !== "workspace_file_content") return;
+      newChatContextStore.toggle(props.threadId, {
+        key,
+        kind: "plan",
+        label: plan.title,
+        body: formatPlan(plan.title, plan.path, res.content),
+      });
+    } catch {
+      // non-fatal: leave the chip unselected
+    }
+  }
+
   return (
-    <div class="chat-timeline-scroll">
-      <div class="chat-messages">
+    <div class="new-chat-intro">
+      <div class="new-chat-title">
+        New chat in <span class="new-chat-branch">{branch()}</span>
+      </div>
+
+      <div class="new-chat-section">
+        <div class="new-chat-section-label">Add chat transcripts</div>
         <Show
-          when={items().length > 0}
-          fallback={<div class="empty-state">No messages yet. Say something below.</div>}
+          when={pastChats().length > 0}
+          fallback={
+            <div class="new-chat-hint">
+              {transcripts.loading ? "Loading…" : "No past chats in this workspace yet."}
+            </div>
+          }
         >
-          <For each={items()}>{(item) => <TimelineItem item={item} />}</For>
+          <div class="new-chat-chips">
+            <For each={pastChats()}>
+              {(summary) => (
+                <button
+                  class="new-chat-chip"
+                  classList={{ "new-chat-chip-on": selected(transcriptPickKey(summary.thread_id)) }}
+                  title={`${summary.provider} · ${summary.updated_at}`}
+                  onClick={() => void toggleTranscript(summary)}
+                >
+                  <Icon
+                    name={selected(transcriptPickKey(summary.thread_id)) ? "circle-check" : "history"}
+                  />
+                  <span class="new-chat-chip-label">{summary.title}</span>
+                  <span class="new-chat-chip-detail">
+                    {transcriptChipDetail(summary.message_count)}
+                  </span>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
+
+      <div class="new-chat-section">
+        <div class="new-chat-section-label">Add plans</div>
+        <Show
+          when={(plans() ?? []).length > 0}
+          fallback={
+            <div class="new-chat-hint">
+              {plans.loading ? "Loading…" : "No plans saved in .context/plans/ yet."}
+            </div>
+          }
+        >
+          <div class="new-chat-chips">
+            <For each={plans() ?? []}>
+              {(plan) => (
+                <button
+                  class="new-chat-chip"
+                  classList={{ "new-chat-chip-on": selected(planPickKey(plan.path)) }}
+                  title={plan.path}
+                  onClick={() => void togglePlan(plan)}
+                >
+                  <Icon name={selected(planPickKey(plan.path)) ? "circle-check" : "file-text"} />
+                  <span class="new-chat-chip-label">{plan.title}</span>
+                </button>
+              )}
+            </For>
+          </div>
         </Show>
       </div>
     </div>
   );
 }
 
+function Timeline(props: { threadId: number; workspace: string }) {
+  let scrollRef: HTMLDivElement | undefined;
+  let followBottom = true;
+  const slice = () => chatStore.slice(props.threadId);
+  const items = createMemo<ArchcarProjectionItem[]>(() =>
+    timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+  );
+  const scrollSignal = createMemo(() =>
+    items()
+      .map((item) => `${item.id}:${item.status}:${item.stream_state}:${item.body.length}`)
+      .join("|"),
+  );
+  // An interrupted (or crashed) turn leaves its command/tool cards marked
+  // "running". Once the agent is idle nothing is running, so those must stop
+  // spinning — a permanent spinner reads as a hung app.
+  const agentIdle = () => {
+    const session = slice().session;
+    return session == null || session.ready === true;
+  };
+
+  function updateFollowBottom() {
+    const el = scrollRef;
+    if (!el) return;
+    followBottom = isNearScrollBottom(el);
+  }
+
+  function scrollToBottom(behavior: ScrollBehavior) {
+    const el = scrollRef;
+    if (!el) return;
+    el.scrollTo({ top: scrollBottomTop(el), behavior });
+  }
+
+  onMount(() => {
+    requestAnimationFrame(() => scrollToBottom("auto"));
+  });
+
+  createEffect(
+    on(scrollSignal, () => {
+      if (!followBottom) return;
+      requestAnimationFrame(() => scrollToBottom("smooth"));
+    }),
+  );
+
+  return (
+    <div class="chat-timeline-scroll" ref={scrollRef} onScroll={updateFollowBottom}>
+      <div class="chat-messages">
+        <Show
+          when={items().length > 0}
+          fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
+        >
+          <For each={items()}>{(item) => <TimelineItem item={item} agentIdle={agentIdle()} />}</For>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+/** Message for a failed send/start, kept short enough for the banner line. */
+function sendErrorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const text = raw.trim();
+  return text.length > 0 ? text : "The agent could not be reached.";
+}
+
 function Composer(props: {
   threadId: number;
+  workspace: string;
   provider: string;
   onChangeProvider: (provider: string) => void;
   // Model to apply to this chat's session once it first becomes ready. Set only
@@ -296,6 +594,9 @@ function Composer(props: {
   const slice = () => chatStore.slice(props.threadId);
   const sessionKind = () => providerToKind(props.provider);
   const busy = () => slice().session?.ready === false && slice().session != null;
+  // Between "message queued" and the daemon's first session event there is no
+  // session to read state from, so the phase carries the starting signal.
+  const starting = () => slice().phase.kind === "starting" && slice().session == null;
   const running = () => slice().session?.runtime_state === "running";
   const sessionId = () => slice().session?.session_id ?? null;
   const models = () => MODELS[props.provider] ?? [];
@@ -306,7 +607,7 @@ function Composer(props: {
   // message typed while starting is queued and delivered once the turn goes idle.
   const [slowStart, setSlowStart] = createSignal(false);
   createEffect(() => {
-    if (!busy()) {
+    if (!busy() && !starting()) {
       setSlowStart(false);
       return;
     }
@@ -362,22 +663,32 @@ function Composer(props: {
 
   const PASTE_TO_FILE_CHARS = 2000;
 
-  // Combine the typed text with any pasted-file references. `input` (to the
-  // agent) carries the file paths; `visible` (shown in the UI) gets a compact
-  // 📎 marker so the timeline isn't cluttered with paths.
+  // Combine the typed text with any pasted-file references and context picked
+  // on the empty-chat screen. `input` (to the agent) carries the transcript /
+  // plan text and the file paths; `visible` (shown in the UI) gets compact 📎
+  // markers so the timeline isn't cluttered with paths or pasted transcripts.
   function buildPayload(): { input: string; visible: string } | null {
     const value = text().trim();
     const atts = attachments();
     if (!value && atts.length === 0) return null;
+    const picks = newChatContextStore.picks(props.threadId);
     const refs = atts.map((a) => `Attached file (${a.label}): ${a.path}`);
-    const input = [value, ...refs].filter(Boolean).join("\n\n");
-    const visible = [value, ...atts.map((a) => `📎 ${a.label}`)].filter(Boolean).join("  ");
+    const input = [contextPreamble(picks), value, ...refs].filter(Boolean).join("\n\n");
+    const visible = [
+      value,
+      ...picks.map((pick) => `📎 ${pick.label}`),
+      ...atts.map((a) => `📎 ${a.label}`),
+    ]
+      .filter(Boolean)
+      .join("  ");
     return { input, visible };
   }
 
   function clearComposer() {
     setText("");
     setAttachments([]);
+    // Picked context rides on one message only; a follow-up shouldn't resend it.
+    newChatContextStore.clear(props.threadId);
   }
 
   // Large paste → save to a workspace file and attach it as a chip instead of
@@ -400,6 +711,8 @@ function Composer(props: {
 
   // Normal send → queue. Core delivers it when the turn goes idle (and rejects
   // auto-delivery mid-turn), so queuing is always safe regardless of state.
+  // Core also starts the chat's agent session when the queue has nothing to
+  // deliver into, so the first message of a brand-new chat sends itself.
   async function queueSend() {
     const payload = buildPayload();
     if (!payload) return;
@@ -407,10 +720,16 @@ function Composer(props: {
     // the raw text (payload.input inlines file-reference paths).
     const prevText = text();
     const prevAtts = attachments();
+    const prevPicks = newChatContextStore.picks(props.threadId);
     const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
+    // Say "starting" before the daemon's first event arrives: spawning the
+    // agent takes seconds, and silence there reads as a dropped message.
+    if (sessionId() == null) {
+      chatStore.setPhase(props.threadId, { kind: "starting", provider: sessionKind() });
+    }
     try {
-      await send({
+      const res = await send({
         type: "queue_chat_input",
         thread_id: props.threadId,
         input: payload.input,
@@ -418,10 +737,13 @@ function Composer(props: {
         kind: "user",
         session_kind: sessionKind(),
       });
-    } catch {
+      if (res.type === "error") throw new Error(res.message);
+    } catch (err) {
       chatStore.removeOptimistic(props.threadId, pendingId);
+      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
       setText(prevText);
       setAttachments(prevAtts);
+      newChatContextStore.set(props.threadId, prevPicks);
     }
   }
 
@@ -437,10 +759,11 @@ function Composer(props: {
     if (!payload) return;
     const prevText = text();
     const prevAtts = attachments();
+    const prevPicks = newChatContextStore.picks(props.threadId);
     const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
     try {
-      await send({
+      const res = await send({
         type: "send_input",
         session_id: sid,
         input: payload.input,
@@ -448,10 +771,30 @@ function Composer(props: {
         kind: "user",
         delivery: "immediate",
       });
-    } catch {
+      if (res.type === "error") throw new Error(res.message);
+    } catch (err) {
       chatStore.removeOptimistic(props.threadId, pendingId);
+      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
       setText(prevText);
       setAttachments(prevAtts);
+      newChatContextStore.set(props.threadId, prevPicks);
+    }
+  }
+
+  // Recovery: restart this chat's agent session. Queued messages stay queued and
+  // drain as soon as the new session reports ready.
+  async function retrySession() {
+    chatStore.setPhase(props.threadId, { kind: "starting", provider: sessionKind() });
+    try {
+      const res = await send({
+        type: "ensure_chat_thread_session",
+        workspace: props.workspace,
+        thread_id: props.threadId,
+        kind: sessionKind(),
+      });
+      if (res.type === "error") throw new Error(res.message);
+    } catch (err) {
+      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
     }
   }
 
@@ -505,14 +848,97 @@ function Composer(props: {
   function onKeyDown(e: KeyboardEvent) {
     if (e.key !== "Enter" || e.shiftKey) return; // Shift+Enter → newline
     e.preventDefault();
+    // While a plan is under review, Enter sends revision notes back to the
+    // agent instead of starting an unrelated turn.
+    if (pendingPlan()) {
+      void sendPlanRevision();
+      return;
+    }
     // The immediate-send chord is customizable; plain Enter keeps the queue-first composer behavior.
     if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "send-immediate") {
       void steerSend();
     } else defaultEnterSend();
   }
 
+  const failure = () => {
+    const phase = slice().phase;
+    return phase.kind === "failed" ? phase.message : null;
+  };
+
+  // A plan waiting on review changes what the composer is for: the next thing
+  // you do is approve it or say what to change, not start a new turn.
+  const pendingPlan = () => {
+    const pending = interactionsStore.pending(props.threadId);
+    return pending?.kind === "plan_approval" ? pending : null;
+  };
+  const planMode = () => chatStore.slice(props.threadId).planMode;
+  // The session reads as "not ready" while an ask is outstanding, but it is not
+  // starting up — it is blocked on the human.
+  const awaitingUser = () => interactionsStore.pending(props.threadId) != null;
+
+  async function togglePlanMode() {
+    const next = !planMode();
+    chatStore.setPlanMode(props.threadId, next);
+    try {
+      const res = await send({ type: "set_chat_plan_mode", thread_id: props.threadId, plan_mode: next });
+      if (res.type === "error") throw new Error(res.message);
+    } catch (err) {
+      chatStore.setPlanMode(props.threadId, !next);
+      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
+    }
+  }
+
+  async function approvePlan() {
+    const plan = pendingPlan();
+    if (!plan) return;
+    await actions.resolveInteraction(plan.id, { type: "approve" }).catch((err) => {
+      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
+    });
+  }
+
+  /** Typing while a plan is up means "revise it", which is a denial with notes. */
+  async function sendPlanRevision() {
+    const plan = pendingPlan();
+    const feedback = text().trim();
+    if (!plan || !feedback) return;
+    const prevText = text();
+    clearComposer();
+    await actions
+      .resolveInteraction(plan.id, { type: "deny", reason: feedback })
+      .catch((err) => {
+        setText(prevText);
+        chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
+      });
+  }
+
   return (
     <div class="chat-composer">
+      <Show when={failure()}>
+        {(message) => (
+          <div class="chat-error-banner" role="alert">
+            <Icon name="alert" class="chat-error-banner-icon" />
+            <span class="chat-error-banner-text">{message()}</span>
+            <button class="chat-error-banner-btn" onClick={() => void retrySession()}>
+              Restart agent
+            </button>
+            <button
+              class="chat-error-banner-btn chat-error-banner-dismiss"
+              title="Dismiss"
+              onClick={() => chatStore.setPhase(props.threadId, { kind: "ready" })}
+            >
+              <Icon name="x" />
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={pendingPlan()}>
+        <div class="chat-plan-review">
+          <span class="chat-plan-review-label">Plan ready — approve it, or say what to change.</span>
+          <button class="ui-button-primary chat-plan-approve" onClick={() => void approvePlan()}>
+            Approve &amp; build
+          </button>
+        </div>
+      </Show>
       <Show when={slice().queue.length > 0}>
         <div class="chat-queue-overlay">
           <div class="chat-queue-heading">Queued</div>
@@ -572,12 +998,18 @@ function Composer(props: {
           <textarea
             class="chat-input-view"
             data-focus-target="chat-composer"
-            placeholder="Ask to make changes, @mention files, run /commands"
+            placeholder={
+              pendingPlan()
+                ? "What should change in the plan?"
+                : planMode()
+                  ? "Describe what to plan — the agent researches, then proposes"
+                  : "Ask to make changes, @mention files, run /commands"
+            }
             value={text()}
             onInput={(e) => setText(e.currentTarget.value)}
             onKeyDown={onKeyDown}
             onPaste={(e) => void onPaste(e)}
-            rows={2}
+            rows={1}
           />
         </div>
         <div class="chat-toolbar">
@@ -593,6 +1025,8 @@ function Composer(props: {
                 { value: "claude", label: "Claude" },
               ]}
               onChange={props.onChangeProvider}
+              icon="terminal"
+              class="chat-agent-select"
             />
             {/* Model + effort are always shown (even when the provider exposes no
                 switchable models yet) so the composer controls stay consistent. */}
@@ -601,23 +1035,51 @@ function Composer(props: {
               value={model()}
               options={[{ value: "", label: "Model" }, ...models().map((m) => ({ value: m, label: m }))]}
               onChange={changeModel}
+              icon="settings"
               class="compact-select-model"
             />
             <CompactSelect
               title="Reasoning effort"
               value={effort()}
-              options={EFFORTS.map((x) => ({ value: x, label: x }))}
+              options={EFFORTS.map((x) => ({ value: x, label: titleCaseWorkspace(x) }))}
               onChange={changeEffort}
+              icon="brain"
+              class="chat-effort-select"
             />
+            {/* Plan mode is provider-native: claude runs in its plan permission
+                mode, codex plans inside a read-only sandbox. */}
+            <button
+              class="chat-plan-toggle"
+              classList={{ "chat-plan-toggle-on": planMode() }}
+              title={
+                planMode()
+                  ? "Planning — approve a plan to start building"
+                  : "Plan before building"
+              }
+              onClick={() => void togglePlanMode()}
+            >
+              <Icon name="file-text" />
+              <span>Plan</span>
+            </button>
           </div>
           <div class="chat-toolbar-right">
             <Show when={contextPercent() != null}>
               <span class="chat-context-usage" title="Context window used">
-                {contextPercent()}% context
+                <Icon name="panel-right" class="chat-context-usage-icon" />
+                <span>{contextPercent()}%</span>
               </span>
             </Show>
-            <Show when={busy()}>
-              <span class="chat-context-usage">{slowStart() ? "Still starting" : "Starting"}</span>
+            <Show when={awaitingUser()}>
+              <span class="chat-context-usage" title="The agent is waiting on your answer">
+                <Icon name="alert" class="chat-context-usage-icon" />
+                <span>Waiting for you</span>
+              </span>
+            </Show>
+            <Show when={!awaitingUser() && (busy() || starting())}>
+              <span class="chat-context-usage" title={slowStart() ? "Agent is still starting" : "Agent starting"}>
+                <Icon name="bolt" class="chat-context-usage-icon" />
+                <span>{slowStart() ? "Still starting" : "Starting"}</span>
+              </span>
             </Show>
             <Show
               when={composerPrimaryAction(running()) === "interrupt"}
@@ -629,7 +1091,7 @@ function Composer(props: {
                   title="Send"
                   disabled={text().trim().length === 0 && attachments().length === 0}
                 >
-                  <Icon name="send" />
+                  <Icon name="arrow-up" />
                 </button>
               }
             >
@@ -921,7 +1383,7 @@ export default function ChatSurface(props: { workspace: string }) {
   const threads = createMemo(() =>
     threadsStore.list(props.workspace).filter((t) => t.provider !== "shell"),
   );
-  const [openFiles, setOpenFiles] = createSignal<string[]>([]);
+  const [openFilePath, setOpenFilePath] = createSignal<string | null>(null);
   const [view, setView] = createSignal<CenterView>({ kind: "chat" });
   const [newProvider, setNewProvider] = createSignal<string>(prefsStore.state.defaultProvider);
   // threadId -> model to apply once that (freshly created) chat's session is live.
@@ -946,11 +1408,11 @@ export default function ChatSurface(props: { workspace: string }) {
   }));
 
   function openFile(path: string) {
-    setOpenFiles((f) => (f.includes(path) ? f : [...f, path]));
+    setOpenFilePath(path);
     setView({ kind: "file", path });
   }
   function closeFile(path: string) {
-    setOpenFiles((f) => f.filter((p) => p !== path));
+    if (openFilePath() === path) setOpenFilePath(null);
     setView((v) => (v.kind === "file" && v.path === path ? { kind: "chat" } : v));
   }
 
@@ -958,7 +1420,7 @@ export default function ChatSurface(props: { workspace: string }) {
     on(
       () => props.workspace,
       (ws) => {
-        setOpenFiles([]);
+        setOpenFilePath(null);
         setView({ kind: "chat" });
         void threadsStore.refresh(ws).then((all) => {
           const list = all.filter((t) => t.provider !== "shell");
@@ -981,6 +1443,7 @@ export default function ChatSurface(props: { workspace: string }) {
 
   function selectThread(thread: ArchcarChatThread) {
     nav.selectChatThread(thread.id);
+    chatStore.setCompletedTurnAttention(thread.id, false);
     setView({ kind: "chat" });
     loadThread(thread.id);
   }
@@ -1037,12 +1500,24 @@ export default function ChatSurface(props: { workspace: string }) {
 
   return (
     <div class="chat-surface">
-      <div class="ws-chat-tabs-scroll ws-tab-bar">
-        <div class="ws-chat-tabs">
+      <div class="ws-chat-tab-bar ws-tab-bar">
+        <div class="ws-chat-tabs-scroll">
+          <div class="ws-chat-tabs">
+          <Show when={openFilePath()}>
+            {(path) => (
+              <FileTab
+                path={path()}
+                active={view().kind === "file" && (view() as { path: string }).path === path()}
+                onClick={() => setView({ kind: "file", path: path() })}
+                onClose={() => closeFile(path())}
+              />
+            )}
+          </Show>
           <For each={threads()}>
-            {(thread) => (
+            {(thread, i) => (
               <ThreadTab
                 thread={thread}
+                label={`Chat ${i() + 1}`}
                 queued={chatStore.slice(thread.id).queue.length}
                 pendingInteraction={interactionsStore.pending(thread.id) != null}
                 active={view().kind === "chat" && nav.selectedChatThread() === thread.id}
@@ -1051,26 +1526,16 @@ export default function ChatSurface(props: { workspace: string }) {
               />
             )}
           </For>
-          <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
-            <Icon name="plus" />
-          </button>
-          <Show when={openFiles().length > 0}>
-            <span class="ws-tab-sep-v" />
-          </Show>
-          <For each={openFiles()}>
-            {(path) => (
-              <FileTab
-                path={path}
-                active={view().kind === "file" && (view() as { path: string }).path === path}
-                onClick={() => setView({ kind: "file", path })}
-                onClose={() => closeFile(path)}
-              />
-            )}
-          </For>
-          <Show when={threads().length === 0 && openFiles().length === 0}>
-            <span class="empty-label">Starting chat in {titleCaseWorkspace(props.workspace)}…</span>
-          </Show>
+            <Show when={threads().length === 0 && openFilePath() == null}>
+              <span class="empty-label">Starting chat in {titleCaseWorkspace(props.workspace)}…</span>
+            </Show>
+          </div>
         </div>
+        {/* Pinned outside the scroller: opening a new chat must not require
+            scrolling past every tab you already have. */}
+        <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
+          <Icon name="plus" />
+        </button>
       </div>
       <Switch fallback={<div class="empty-state">Starting chat…</div>}>
         <Match when={view().kind === "commit"}>
@@ -1084,12 +1549,20 @@ export default function ChatSurface(props: { workspace: string }) {
           <FileView workspace={props.workspace} path={(view() as { path: string }).path} />
         </Match>
         <Match when={view().kind === "chat" && activeThread()}>
-          <Timeline threadId={activeThread()!.id} />
+          <Timeline threadId={activeThread()!.id} workspace={props.workspace} />
           <Show when={interactionsStore.pending(activeThread()!.id)}>
-            {(rec) => <InteractionBanner rec={rec()} />}
+            {(rec) => (
+              <Show
+                when={rec().kind === "plan_approval"}
+                fallback={<InteractionBanner rec={rec()} />}
+              >
+                <PlanCard rec={rec()} />
+              </Show>
+            )}
           </Show>
           <Composer
             threadId={activeThread()!.id}
+            workspace={props.workspace}
             provider={activeThread()!.provider}
             seedModel={pendingSeed()[activeThread()!.id]}
             onSeeded={() => clearSeed(activeThread()!.id)}

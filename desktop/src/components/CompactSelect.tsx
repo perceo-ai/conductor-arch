@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import Icon from "./Icon";
 import { nextListIndex } from "@/lib/keyboardList";
+import type { IconName } from "./Icon";
 
 export interface CompactSelectOption {
   value: string;
@@ -12,6 +13,7 @@ export default function CompactSelect(props: {
   options: CompactSelectOption[];
   onChange: (value: string) => void;
   title?: string;
+  icon?: IconName;
   class?: string;
 }) {
   const [open, setOpen] = createSignal(false);
@@ -95,6 +97,9 @@ export default function CompactSelect(props: {
         onClick={() => setOpen((v) => !v)}
         onKeyDown={onTriggerKeyDown}
       >
+        <Show when={props.icon}>
+          {(icon) => <Icon name={icon()} class="compact-select-icon" />}
+        </Show>
         <span class="compact-select-label">{selected()?.label ?? props.value}</span>
         <Icon name="chevron-down" class="compact-select-caret" />
       </button>

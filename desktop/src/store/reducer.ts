@@ -8,6 +8,35 @@ import { send } from "@/bridge/client";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
 import { interactionsStore } from "./interactions";
+import { nav } from "./nav";
+import { workspacesStore } from "./workspaces";
+import { threadsStore } from "./threads";
+import { intelStore } from "./intel";
+
+async function refreshWorkspaceInventoryAndChats() {
+  try {
+    await workspacesStore.refresh();
+    const activeWorkspaces = workspacesStore.state.order.filter(
+      (name) => workspacesStore.row(name)?.status !== "archived",
+    );
+    await threadsStore.refreshMany(activeWorkspaces);
+  } catch {
+    // transient; the next event or focus refresh retries
+  }
+}
+
+async function refreshThreadWorkspace(threadId: number) {
+  const workspace = threadsStore.workspaceForThread(threadId);
+  if (!workspace) {
+    await refreshWorkspaceInventoryAndChats();
+    return;
+  }
+  try {
+    await Promise.all([workspacesStore.refresh(), threadsStore.refresh(workspace)]);
+  } catch {
+    // transient; the next event or focus refresh retries
+  }
+}
 
 async function refreshTerminalScreen(sessionId: number) {
   try {
@@ -40,15 +69,28 @@ async function refreshThreadSnapshot(threadId: number) {
   }
   inflightSnapshot.add(threadId);
   try {
-    const [snap, proj] = await Promise.all([
+    // Interactions and plan state are pulled, not just listened for: an ask
+    // raised before this window opened (or before this chat was selected) has
+    // no event left to replay, and an unanswered question the user cannot see
+    // is a hung agent.
+    const [snap, proj, interactions, plan] = await Promise.all([
       send({ type: "get_chat_snapshot", thread_id: threadId }),
       send({ type: "get_chat_projection", thread_id: threadId }),
+      send({ type: "list_provider_interactions", thread_id: threadId, pending_only: true }),
+      send({ type: "get_chat_plan", thread_id: threadId }),
     ]);
     if (snap.type === "chat_snapshot") {
       chatStore.applySnapshot((snap as { snapshot: ChatSnapshot }).snapshot);
     }
     if (proj.type === "chat_projection") {
       chatStore.setProjection(threadId, proj.items);
+    }
+    if (interactions.type === "provider_interactions") {
+      interactionsStore.setPending(threadId, interactions.interactions);
+    }
+    if (plan.type === "chat_plan") {
+      chatStore.setPlanMode(threadId, plan.plan_mode);
+      chatStore.setPlanPath(threadId, plan.plan_path ?? null);
     }
   } catch {
     // page owns its own error surface; ignore transient failures
@@ -71,8 +113,16 @@ export function applyEvent(event: ArchcarEvent) {
       void refreshThreadSnapshot((event as { thread_id: number }).thread_id);
       break;
 
+    case "chat_plan_updated": {
+      const e = event as { thread_id: number; plan_mode: boolean; plan_path?: string };
+      chatStore.setPlanMode(e.thread_id, e.plan_mode);
+      chatStore.setPlanPath(e.thread_id, e.plan_path ?? null);
+      break;
+    }
+
     case "chat_queue_updated":
       void refreshThreadSnapshot((event as { thread_id: number }).thread_id);
+      void refreshThreadWorkspace((event as { thread_id: number }).thread_id);
       break;
 
     case "session_started": {
@@ -100,12 +150,14 @@ export function applyEvent(event: ArchcarEvent) {
           chatStore.setPhase(e.thread_id, { kind: "ready" });
         }
       }
+      void refreshThreadWorkspace(e.thread_id);
       break;
     }
 
     case "session_exited": {
       // Clear the exited session so running/busy spinners don't stick on.
       chatStore.markSessionExited((event as { session_id: number }).session_id);
+      void refreshWorkspaceInventoryAndChats();
       break;
     }
 
@@ -137,12 +189,15 @@ export function applyEvent(event: ArchcarEvent) {
         runtime_state: "idle",
         ready: true,
       });
+      void refreshThreadWorkspace(e.thread_id);
       break;
     }
 
     case "turn_completed": {
       const e = event as { thread_id: number };
+      chatStore.setCompletedTurnAttention(e.thread_id, nav.selectedChatThread() !== e.thread_id);
       void refreshThreadSnapshot(e.thread_id);
+      void refreshThreadWorkspace(e.thread_id);
       break;
     }
 
@@ -168,6 +223,19 @@ export function applyEvent(event: ArchcarEvent) {
           // Notifications are best-effort; the dashboard strip still updates.
         }
       }
+      void refreshWorkspaceInventoryAndChats();
+      break;
+    }
+
+    case "summary_updated": {
+      intelStore.refreshWorkspaceIntel((event as { workspace: string }).workspace);
+      break;
+    }
+
+    case "task_updated": {
+      // Task counts feed the sidebar rows and the Summary tab badge.
+      intelStore.refreshWorkspaceIntel((event as { workspace: string }).workspace);
+      void workspacesStore.refresh().catch(() => {});
       break;
     }
 

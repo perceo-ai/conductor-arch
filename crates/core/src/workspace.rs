@@ -769,6 +769,81 @@ pub struct ChatMessageRecord {
     pub updated_at: String,
 }
 
+/// One past chat offered on the new-chat screen as attachable context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatTranscriptSummary {
+    pub thread_id: i64,
+    pub title: String,
+    pub provider: String,
+    /// Count of transcript-eligible messages (user + agent), not every row.
+    pub message_count: usize,
+    pub updated_at: String,
+}
+
+/// Plan markdown file under a workspace's `.context/plans/`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextPlanFile {
+    /// File name, e.g. `checkout-rewrite.md`.
+    pub name: String,
+    /// Workspace-relative path, usable with `read_file`.
+    pub path: String,
+    /// First markdown heading when present, else the file stem.
+    pub title: String,
+}
+
+/// Default size of the new-chat transcript picker.
+pub const DEFAULT_CHAT_TRANSCRIPT_LIMIT: usize = 8;
+
+/// Workspace-relative directory holding attachable plan markdown.
+pub const CONTEXT_PLANS_DIR: &str = ".context/plans";
+
+fn is_transcript_role(role: &str) -> bool {
+    matches!(role, "user" | "agent")
+}
+
+/// List `.context/plans/*.md` under a workspace checkout. A missing directory
+/// is not an error — most workspaces have no plans saved yet.
+fn list_context_plans_in(workspace_root: &Path) -> Vec<ContextPlanFile> {
+    let dir = workspace_root.join(CONTEXT_PLANS_DIR);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut plans: Vec<ContextPlanFile> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                return None;
+            }
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            let title = fs::read_to_string(&path)
+                .ok()
+                .and_then(|body| markdown_heading_title(&body))
+                .unwrap_or(stem);
+            Some(ContextPlanFile {
+                path: format!("{CONTEXT_PLANS_DIR}/{name}"),
+                name,
+                title,
+            })
+        })
+        .collect();
+    plans.sort_by(|a, b| a.name.cmp(&b.name));
+    plans
+}
+
+fn markdown_heading_title(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('#'))
+        .map(|line| line.trim_start_matches('#').trim().to_owned())
+        .filter(|title| !title.is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueuedChatInputRecord {
     pub id: i64,
@@ -6700,6 +6775,56 @@ mutation($threadId: ID!) {{
         Ok(threads)
     }
 
+    /// Recent non-empty chats in a workspace, newest first, for the new-chat
+    /// transcript picker. Closed/archived chats stay listed: they are exactly
+    /// the history a fresh chat wants to inherit.
+    pub fn list_chat_transcripts(
+        &self,
+        workspace_name: &str,
+        limit: usize,
+    ) -> Result<Vec<ChatTranscriptSummary>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.title, t.provider, COUNT(m.id) AS message_count, t.updated_at
+             FROM chat_threads t
+             JOIN chat_messages m ON m.thread_id = t.id AND m.role IN ('user', 'agent')
+             WHERE t.workspace_id = ?1
+             GROUP BY t.id
+             ORDER BY t.updated_at DESC, t.id DESC
+             LIMIT ?2",
+        )?;
+        let transcripts = stmt
+            .query_map(params![workspace.id, limit as i64], |row| {
+                let message_count: i64 = row.get(3)?;
+                Ok(ChatTranscriptSummary {
+                    thread_id: row.get(0)?,
+                    title: row.get(1)?,
+                    provider: row.get(2)?,
+                    message_count: message_count.max(0) as usize,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(transcripts)
+    }
+
+    /// Conversation-only view of a chat: user and agent messages, in order.
+    /// Tool calls live in `chat_events` and control commands (`/model …`) land
+    /// as `system` rows, so neither shows up here.
+    pub fn chat_transcript_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
+        Ok(self
+            .list_chat_messages(thread_id)?
+            .into_iter()
+            .filter(|message| is_transcript_role(&message.role))
+            .collect())
+    }
+
+    /// Plan markdown files a workspace has saved under `.context/plans/`.
+    pub fn list_context_plans(&self, workspace_name: &str) -> Result<Vec<ContextPlanFile>> {
+        let root = self.workspace_path(workspace_name)?;
+        Ok(list_context_plans_in(&root))
+    }
+
     pub fn chat_thread_context_summaries(
         &self,
         workspace_name: &str,
@@ -6779,6 +6904,54 @@ mutation($threadId: ID!) {{
             "pasted text",
             text.as_bytes(),
         )
+    }
+
+    /// Whether this chat is planning rather than building. Plan mode is thread
+    /// state, not a launch decision: both providers switch mid-session, and the
+    /// flag has to survive a session restart.
+    pub fn chat_thread_plan_mode(&self, thread_id: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT plan_mode FROM chat_threads WHERE id = ?1",
+                [thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            != 0)
+    }
+
+    pub fn set_chat_thread_plan_mode(&self, thread_id: i64, plan_mode: bool) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads SET plan_mode = ?2, updated_at = ?3 WHERE id = ?1",
+            params![thread_id, i64::from(plan_mode), now],
+        )?;
+        Ok(())
+    }
+
+    /// The plan this chat is working from, once one has been approved or
+    /// written.
+    pub fn chat_thread_plan_path(&self, thread_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT plan_path FROM chat_threads WHERE id = ?1",
+                [thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_chat_thread_plan_path(&self, thread_id: i64, plan_path: Option<&str>) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads SET plan_path = ?2, updated_at = ?3 WHERE id = ?1",
+            params![thread_id, plan_path, now],
+        )?;
+        Ok(())
     }
 
     pub fn enqueue_chat_input(
@@ -22197,6 +22370,123 @@ spotlight_testing = true
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].source, "control_command");
         assert_eq!(messages[2].role, "agent");
+    }
+
+    #[test]
+    fn chat_transcripts_list_recent_non_empty_chats_newest_first() {
+        let (_temp, store) = test_workspace_store();
+        let first = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "claude", "Bugfix B", None)
+            .unwrap();
+        // Third chat has only a control row, so it carries no transcript.
+        let empty = store
+            .create_chat_thread("berlin", "codex", "Untouched", None)
+            .unwrap();
+
+        store
+            .append_chat_message(first.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(first.id, "agent", "Running now.", "agent_screen_parse")
+            .unwrap();
+        store
+            .append_chat_message(second.id, "user", "fix the parser", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(empty.id, "system", "/model gpt-5.6-sol", "control_command")
+            .unwrap();
+
+        let transcripts = store.list_chat_transcripts("berlin", 8).unwrap();
+
+        assert_eq!(
+            transcripts
+                .iter()
+                .map(|t| (t.thread_id, t.message_count))
+                .collect::<Vec<_>>(),
+            vec![(second.id, 1), (first.id, 2)]
+        );
+    }
+
+    #[test]
+    fn chat_transcripts_respect_the_requested_limit() {
+        let (_temp, store) = test_workspace_store();
+        for index in 0..3 {
+            let thread = store
+                .create_chat_thread("berlin", "codex", &format!("Chat {index}"), None)
+                .unwrap();
+            store
+                .append_chat_message(thread.id, "user", &format!("hello {index}"), "user_send")
+                .unwrap();
+        }
+
+        assert_eq!(store.list_chat_transcripts("berlin", 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn chat_transcript_messages_keep_only_the_user_and_agent_conversation() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "system", "/model gpt-5.6-sol", "control_command")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "Running now.", "agent_screen_parse")
+            .unwrap();
+
+        let messages = store.chat_transcript_messages(thread.id).unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| (m.role.as_str(), m.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("user", "run tests"), ("agent", "Running now.")]
+        );
+    }
+
+    #[test]
+    fn context_plans_list_markdown_with_heading_titles() {
+        let (_temp, store) = test_workspace_store();
+        let plans_dir = store
+            .workspace_path("berlin")
+            .unwrap()
+            .join(".context/plans");
+        fs::create_dir_all(&plans_dir).unwrap();
+        fs::write(
+            plans_dir.join("b-parser.md"),
+            "# Parser rewrite\n\nStep 1\n",
+        )
+        .unwrap();
+        fs::write(plans_dir.join("a-checkout.md"), "no heading here\n").unwrap();
+        fs::write(plans_dir.join("notes.txt"), "ignored\n").unwrap();
+
+        let plans = store.list_context_plans("berlin").unwrap();
+
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| (plan.path.as_str(), plan.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (".context/plans/a-checkout.md", "a-checkout"),
+                (".context/plans/b-parser.md", "Parser rewrite"),
+            ]
+        );
+    }
+
+    #[test]
+    fn context_plans_are_empty_without_a_plans_directory() {
+        let (_temp, store) = test_workspace_store();
+
+        assert!(store.list_context_plans("berlin").unwrap().is_empty());
     }
 
     #[test]
