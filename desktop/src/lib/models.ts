@@ -4,8 +4,18 @@
 // switching) and Settings (default-model preference).
 
 export const MODELS: Record<string, string[]> = {
-  codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-  claude: ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+  codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
+  claude: [
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-opus-4-8[1m]",
+    "claude-opus-4-7[1m]",
+    "claude-opus-4-6[1m]",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6[1m]",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+  ],
   shell: [],
 };
 
@@ -21,9 +31,18 @@ export function providerLabel(provider: string): string {
 }
 
 export function modelLabel(model: string): string {
-  if (model === "gpt-5.6-sol") return "Gpt 5.6 Sol";
-  if (model === "gpt-5.6-terra") return "Gpt 5.6 Terra";
-  if (model === "gpt-5.6-luna") return "Gpt 5.6 Luna";
+  if (model === "gpt-5.6-sol") return "GPT 5.6 Sol";
+  if (model === "gpt-5.6-terra") return "GPT 5.6 Terra";
+  if (model === "gpt-5.6-luna") return "GPT 5.6 Luna";
+  if (model === "gpt-5.5") return "GPT 5.5";
+  if (model === "gpt-5.4") return "GPT 5.4";
+  if (model === "claude-opus-4-8[1m]") return "Claude Opus 4.8 1M";
+  if (model === "claude-opus-4-7[1m]") return "Claude Opus 4.7 1M";
+  if (model === "claude-opus-4-6[1m]") return "Claude Opus 4.6 1M";
+  if (model === "claude-sonnet-5") return "Claude Sonnet 5 1M";
+  if (model === "claude-sonnet-4-6[1m]") return "Claude Sonnet 4.6 1M";
+  if (model === "claude-sonnet-4-6") return "Claude Sonnet 4.6";
+  if (model === "claude-haiku-4-5") return "Claude Haiku 4.5";
   return model
     .split("-")
     .filter(Boolean)
