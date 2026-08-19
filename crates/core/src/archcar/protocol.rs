@@ -2512,6 +2512,12 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             task_id,
             status,
         } => format!("task_updated workspace={workspace} task={task_id} status={status}"),
+        ArchcarEvent::WorkspaceRenamed { old_name, new_name } => {
+            format!("workspace_renamed old_name={old_name} new_name={new_name}")
+        }
+        ArchcarEvent::ChatThreadRenamed { thread_id, title } => {
+            format!("chat_thread_renamed thread_id={thread_id} title={title}")
+        }
     }
 }
 
@@ -2610,6 +2616,18 @@ pub enum ArchcarEvent {
         workspace: String,
         task_id: i64,
         status: String,
+    },
+    /// The naming pipeline renamed a workspace — either from first-message agent
+    /// metadata or from a pull request title. Clients address workspaces by name,
+    /// so they must re-point selection and reload their inventory.
+    WorkspaceRenamed {
+        old_name: String,
+        new_name: String,
+    },
+    /// A chat thread was retitled from agent metadata.
+    ChatThreadRenamed {
+        thread_id: i64,
+        title: String,
     },
 }
 

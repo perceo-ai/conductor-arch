@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inlineEventVerbChip } from "./chatFormat";
+import { formatReasoningText, inlineEventVerbChip } from "./chatFormat";
 
 describe("inlineEventVerbChip", () => {
   it("renders read-only shell wrappers as Read events", () => {
@@ -25,5 +25,13 @@ describe("inlineEventVerbChip", () => {
       verb: "Read",
       chip: "README.md",
     });
+  });
+
+  it("renders Codex reasoning summaries as muted plain text", () => {
+    expect(
+      formatReasoningText(
+        "**Summarizing live DB lock and timeout findings**\n\n**Investigating queue logs**",
+      ),
+    ).toBe("Summarizing live DB lock and timeout findings\n\nInvestigating queue logs");
   });
 });

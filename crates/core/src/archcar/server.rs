@@ -453,6 +453,7 @@ fn handle_connection<S: DuplexStream>(stream: S, state: Arc<Mutex<ServerState>>)
         ArchcarRequest::Subscribe => {
             let (tx, rx) = mpsc::channel();
             register_subscriber_with_snapshot(&mut state.lock().unwrap(), tx);
+            spawn_queued_input_startup_sweep(&state);
             while let Ok(event) = rx.recv() {
                 let envelope = RpcEnvelope {
                     id: Uuid::new_v4().to_string(),
@@ -704,7 +705,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetSessionMessages { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match session_messages_for_thread(&db_path, thread_id) {
+            // Rendering applies any agent naming directive, so this read can
+            // rename the workspace or retitle the chat.
+            let before = thread_naming_snapshot(&db_path, thread_id);
+            let response = match session_messages_for_thread(&db_path, thread_id) {
                 Ok(messages) => ArchcarResponse::SessionMessages {
                     thread_id,
                     messages,
@@ -712,7 +716,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
-            }
+            };
+            broadcast_naming_changes(state, &db_path, thread_id, before);
+            response
         }
         ArchcarRequest::GetChatSnapshot { thread_id } => {
             let (db_path, live_session) = {
@@ -722,12 +728,15 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     live_session_snapshot_for_thread(&guard, thread_id),
                 )
             };
-            match chat_snapshot_for_thread(&db_path, thread_id, live_session) {
+            let before = thread_naming_snapshot(&db_path, thread_id);
+            let response = match chat_snapshot_for_thread(&db_path, thread_id, live_session) {
                 Ok(snapshot) => ArchcarResponse::ChatSnapshot { snapshot },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
-            }
+            };
+            broadcast_naming_changes(state, &db_path, thread_id, before);
+            response
         }
         ArchcarRequest::QueueChatInput {
             thread_id,
@@ -2397,11 +2406,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             title,
             body,
             draft,
-        } => with_store(state, |store| {
-            let output =
-                store.create_pull_request(&workspace, title.as_deref(), body.as_deref(), draft)?;
-            Ok(ArchcarResponse::PullRequestCreated { workspace, output })
-        }),
+        } => {
+            let requested = workspace.clone();
+            let db_path = state.lock().unwrap().db_path.clone();
+            // Creating the PR renames the workspace to the PR title, which is the
+            // best name this work ever gets. Capture the id so we can report the
+            // new name to clients that only know the old one.
+            let workspace_id = WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.get_by_name(&requested))
+                .map(|workspace| workspace.id)
+                .ok();
+            let response = with_store(state, |store| {
+                let output = store.create_pull_request(
+                    &workspace,
+                    title.as_deref(),
+                    body.as_deref(),
+                    draft,
+                )?;
+                Ok(ArchcarResponse::PullRequestCreated { workspace, output })
+            });
+            if let Some(new_name) = workspace_id.and_then(|id| {
+                WorkspaceStore::open_app(&db_path)
+                    .and_then(|store| store.workspace_name_by_id(id))
+                    .ok()
+            }) {
+                broadcast_workspace_renamed(state, &requested, &new_name);
+            }
+            response
+        }
         ArchcarRequest::GetPullRequestDraft { workspace } => with_store(state, |store| {
             let template = store.render_pull_request_template(&workspace)?;
             Ok(ArchcarResponse::PullRequestDraft {
@@ -2907,6 +2939,63 @@ fn broadcast_summary_updated(
     );
 }
 
+/// The workspace name and chat title a thread carries right now. Agent metadata
+/// can change both while a thread is rendered, so callers snapshot before and
+/// after and tell clients what moved.
+fn thread_naming_snapshot(db_path: &Path, thread_id: i64) -> Option<(String, String)> {
+    let store = WorkspaceStore::open_app(db_path).ok()?;
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.workspace_name_by_id(thread.workspace_id).ok()?;
+    Some((workspace, thread.title))
+}
+
+fn broadcast_naming_changes(
+    state: &Arc<Mutex<ServerState>>,
+    db_path: &Path,
+    thread_id: i64,
+    before: Option<(String, String)>,
+) {
+    let Some((old_workspace, old_title)) = before else {
+        return;
+    };
+    let Some((new_workspace, new_title)) = thread_naming_snapshot(db_path, thread_id) else {
+        return;
+    };
+    let mut guard = state.lock().unwrap();
+    if new_workspace != old_workspace {
+        broadcast(
+            &mut guard,
+            ArchcarEvent::WorkspaceRenamed {
+                old_name: old_workspace,
+                new_name: new_workspace,
+            },
+        );
+    }
+    if new_title != old_title {
+        broadcast(
+            &mut guard,
+            ArchcarEvent::ChatThreadRenamed {
+                thread_id,
+                title: new_title,
+            },
+        );
+    }
+}
+
+fn broadcast_workspace_renamed(state: &Arc<Mutex<ServerState>>, old_name: &str, new_name: &str) {
+    if old_name == new_name {
+        return;
+    }
+    let mut guard = state.lock().unwrap();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::WorkspaceRenamed {
+            old_name: old_name.to_owned(),
+            new_name: new_name.to_owned(),
+        },
+    );
+}
+
 fn broadcast_task_updated(
     state: &Arc<Mutex<ServerState>>,
     workspace: &str,
@@ -3034,6 +3123,21 @@ fn queue_chat_input(
             kind != crate::archcar::protocol::ArchcarInputKind::RawTerminal,
             "raw terminal input cannot be queued"
         );
+        // The first human message of a chat carries a hidden request for real
+        // workspace/branch/chat names. It rides the provider-bound text only; the
+        // transcript keeps the visible text, so the user never sees the block.
+        let (input, visible_input) = match kind {
+            crate::archcar::protocol::ArchcarInputKind::User => {
+                match store.decorate_first_chat_input(thread_id, &input)? {
+                    Some(decorated) => (
+                        decorated,
+                        Some(visible_input.clone().unwrap_or_else(|| input.clone())),
+                    ),
+                    None => (input.clone(), visible_input.clone()),
+                }
+            }
+            _ => (input.clone(), visible_input.clone()),
+        };
         store.enqueue_chat_input(
             thread_id,
             &input,
@@ -5217,7 +5321,11 @@ mod tests {
             panic!("expected queued chat input response");
         };
         assert_eq!(input.thread_id, thread.id);
-        assert_eq!(input.input, "run tests");
+        // First human message of the chat: the provider-bound text carries the
+        // hidden naming request, the transcript keeps what the user typed.
+        assert!(input.input.starts_with("run tests"));
+        assert!(input.input.contains("<archductor_hidden_instruction>"));
+        assert_eq!(input.visible_input.as_deref(), Some("run tests"));
         assert!(matches!(
             subscriber_rx.try_recv(),
             Ok(ArchcarEvent::ChatQueueUpdated { thread_id }) if thread_id == thread.id
@@ -5234,6 +5342,96 @@ mod tests {
         };
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].id, input.id);
+
+        // A second send stacked behind the first must not ask for names again.
+        let second = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "and lint".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+            &state,
+        );
+        let ArchcarResponse::QueuedChatInput { input: second } = second else {
+            panic!("expected queued chat input response");
+        };
+        assert_eq!(second.input, "and lint");
+        assert!(!second.input.contains("<archductor_hidden_instruction>"));
+    }
+
+    #[test]
+    fn a_rename_between_snapshots_is_broadcast_to_clients() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        // Agent metadata is applied while a thread renders, so a read can rename
+        // the workspace and retitle the chat. Clients hold names, not ids.
+        let before = thread_naming_snapshot(&db_path, thread.id);
+        store.rename("berlin", "billing-webhook-fix").unwrap();
+        store
+            .update_chat_thread_title(thread.id, "Billing Webhook Fix")
+            .unwrap();
+        broadcast_naming_changes(&state, &db_path, thread.id, before);
+
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::WorkspaceRenamed { old_name, new_name }
+                    if old_name == "berlin" && new_name == "billing-webhook-fix"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::ChatThreadRenamed { thread_id, title }
+                    if *thread_id == thread.id && title == "Billing Webhook Fix"
+            )),
+            "{events:?}"
+        );
+
+        // Nothing moved this time, so clients are left alone.
+        let before = thread_naming_snapshot(&db_path, thread.id);
+        broadcast_naming_changes(&state, &db_path, thread.id, before);
+        assert!(subscriber_rx.try_iter().next().is_none());
     }
 
     #[test]

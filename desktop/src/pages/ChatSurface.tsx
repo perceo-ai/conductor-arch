@@ -11,7 +11,7 @@ import {
   workspacesStore,
 } from "@/store";
 import { timelineItemsForSlice } from "@/store/chat";
-import { MODELS, EFFORTS } from "@/lib/models";
+import { EFFORTS, agentModelOptions, agentModelValue, firstModel, providerForModel } from "@/lib/models";
 import { send } from "@/bridge/client";
 import type {
   ArchcarChatThread,
@@ -30,12 +30,19 @@ import Diff from "@/components/Diff";
 import CompactSelect from "@/components/CompactSelect";
 import Icon from "@/components/Icon";
 import type { IconName } from "@/components/Icon";
-import { renderMarkdown } from "@/lib/markdown";
+import { renderMarkdown, renderMarkdownWithInlineFileChips } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
 import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
-import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
+import {
+  formatReasoningText,
+  inlineEventVerbChip,
+  isDiffCard,
+  isTerminalCard,
+  stripArchductorMetadata,
+} from "@/lib/chatFormat";
 import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
+import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 import {
   contextPreamble,
   formatPlan,
@@ -45,6 +52,15 @@ import {
   transcriptPickKey,
 } from "@/lib/newChatContext";
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
+import {
+  attachmentMarker,
+  inlineFileMentionAt,
+  insertInlineAttachmentMarker,
+  promptTextWithAttachmentRefs,
+  removeAdjacentAttachmentMarker,
+  type ComposerAttachment,
+} from "@/lib/chatAttachments";
+import { fuzzyScore } from "@/lib/fuzzy";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -80,7 +96,14 @@ function ThreadTab(props: {
       class="ws-chat-tab-shell ws-tab-shell"
       classList={{ "ws-tab-active": props.active }}
       onClick={props.onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          props.onClick();
+        }
+      }}
       role="button"
+      tabIndex={0}
       title={`${props.thread.provider} · ${props.thread.status || "ready"}`}
     >
       <Show when={showFinishedDot() || showAttentionDot()}>
@@ -115,7 +138,14 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
       class="ws-chat-tab-shell ws-tab-shell ws-file-tab"
       classList={{ "ws-tab-active": props.active }}
       onClick={props.onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          props.onClick();
+        }
+      }}
       role="button"
+      tabIndex={0}
       title={props.path}
     >
       <Icon name="file" class="ws-file-tab-icon" />
@@ -139,7 +169,7 @@ function UserBubble(props: { body: string }) {
     <div class="chat-user-row">
       <div
         class="chat-user-bubble markdown-body"
-        innerHTML={renderMarkdown(stripArchductorMetadata(props.body))}
+        innerHTML={renderMarkdownWithInlineFileChips(stripArchductorMetadata(props.body))}
       />
     </div>
   );
@@ -204,6 +234,19 @@ function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean })
         </Switch>
       </Show>
     </div>
+  );
+}
+
+function ReasoningBlock(props: { item: ArchcarProjectionItem }) {
+  const body = () => formatReasoningText(props.item.body);
+  return (
+    <section
+      class="chat-reasoning-block"
+      classList={{ "chat-reasoning-block-streaming": props.item.stream_state === "streaming" }}
+      aria-label="Agent reasoning"
+    >
+      <div class="chat-reasoning-text">{body()}</div>
+    </section>
   );
 }
 
@@ -342,7 +385,7 @@ function TimelineItem(props: { item: ArchcarProjectionItem; agentIdle: boolean }
         />
       </Match>
       <Match when={cls() === "reasoning_card"}>
-        <div class="chat-reasoning-text markdown-body" innerHTML={renderMarkdown(props.item.body)} />
+        <ReasoningBlock item={props.item} />
       </Match>
     </Switch>
   );
@@ -566,7 +609,8 @@ function Composer(props: {
   threadId: number;
   workspace: string;
   provider: string;
-  onChangeProvider: (provider: string) => void;
+  currentModel?: string | null;
+  onChangeAgentModel: (provider: string, model: string) => void;
   // Model to apply to this chat's session once it first becomes ready. Set only
   // for freshly created chats so existing chats keep their own model choice.
   seedModel?: string;
@@ -575,7 +619,10 @@ function Composer(props: {
   const [text, setText] = createSignal("");
   // Pasted blobs saved to the workspace as files; sent as path references so the
   // agent reads them instead of us inlining a huge string.
-  const [attachments, setAttachments] = createSignal<{ path: string; label: string }[]>([]);
+  const [attachments, setAttachments] = createSignal<ComposerAttachment[]>([]);
+  let inputRef: HTMLTextAreaElement | undefined;
+  const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
+  const [fileMentionCursor, setFileMentionCursor] = createSignal(0);
   const slice = () => chatStore.slice(props.threadId);
   const sessionKind = () => providerToKind(props.provider);
   const busy = () => slice().session?.ready === false && slice().session != null;
@@ -583,8 +630,35 @@ function Composer(props: {
   // session to read state from, so the phase carries the starting signal.
   const starting = () => slice().phase.kind === "starting" && slice().session == null;
   const running = () => slice().session?.runtime_state === "running";
+  const busyStatusLabel = () => (running() ? "Generating" : slowStart() ? "Still starting" : "Starting");
+  const busyStatusTitle = () => (running() ? "Agent is generating" : slowStart() ? "Agent is still starting" : "Agent starting");
   const sessionId = () => slice().session?.session_id ?? null;
-  const models = () => MODELS[props.provider] ?? [];
+  const modelOptions = agentModelOptions;
+  const [workspaceFiles] = createResource(
+    () => props.workspace,
+    async (workspace): Promise<string[]> => {
+      try {
+        const res = await send({ type: "list_workspace_files", workspace });
+        return res.type === "workspace_files" ? res.files : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const fileMentionOptions = createMemo(() => {
+    const mention = fileMention();
+    if (!mention) return [];
+    const query = mention.query.trim();
+    const scored = (workspaceFiles() ?? [])
+      .slice(0, 1000)
+      .map((path) => ({ path, score: fuzzyScore(query, path) }))
+      .filter((item): item is { path: string; score: number } => item.score !== null);
+    scored.sort((a, b) => a.score - b.score);
+    return scored.slice(0, 8).map((item) => item.path);
+  });
+  const composerPreviewHtml = createMemo(() =>
+    text().trim().length > 0 ? renderMarkdownWithInlineFileChips(text()) : "",
+  );
 
   // Readiness watchdog: a session that never reports ready (e.g. the agent CLI
   // hangs on a first-run prompt) shouldn't read as an infinite "starting…" dead
@@ -600,8 +674,15 @@ function Composer(props: {
     onCleanup(() => clearTimeout(timer));
   });
 
-  const [model, setModel] = createSignal(props.seedModel ?? "");
+  const [model, setModel] = createSignal(props.seedModel || props.currentModel || firstModel(props.provider));
   const [effort, setEffort] = createSignal("high");
+
+  createEffect(() => {
+    const provider = props.provider;
+    const next = props.currentModel || props.seedModel || model() || firstModel(provider);
+    if (providerForModel(next) === provider && next !== model()) setModel(next);
+    if (providerForModel(model()) !== provider) setModel(firstModel(provider));
+  });
 
   // Seed a new chat's model: once its session is live, push the default model so
   // the chat has something to go off of. Runs once, then hands back to the user.
@@ -640,6 +721,15 @@ function Composer(props: {
     const sid = sessionId();
     if (sid != null) void send({ type: "set_session_model", session_id: sid, model: next }).catch(() => {});
   }
+  function changeAgentModel(next: string) {
+    const option = modelOptions().find((entry) => entry.value === next);
+    if (!option) return;
+    if (option.provider !== props.provider) {
+      props.onChangeAgentModel(option.provider, option.model);
+      return;
+    }
+    changeModel(option.model);
+  }
   function changeEffort(next: string) {
     setEffort(next);
     const sid = sessionId();
@@ -648,21 +738,52 @@ function Composer(props: {
 
   const PASTE_TO_FILE_CHARS = 2000;
 
-  // Combine the typed text with any pasted-file references and context picked
-  // on the empty-chat screen. `input` (to the agent) carries the transcript /
-  // plan text and the file paths; `visible` (shown in the UI) gets compact 📎
-  // markers so the timeline isn't cluttered with paths or pasted transcripts.
+  function syncFileMention(value = text()) {
+    const cursor = inputRef?.selectionStart ?? value.length;
+    setFileMention(inlineFileMentionAt(value, cursor));
+    setFileMentionCursor(0);
+  }
+
+  function setEditorText(value: string, cursor?: number) {
+    setText(value);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      if (cursor != null) inputRef?.setSelectionRange(cursor, cursor);
+      syncFileMention(value);
+    });
+  }
+
+  function insertFileAttachment(path: string, range = fileMention()) {
+    if (!range) return;
+    const marker = attachmentMarker(path);
+    const before = text().slice(0, range.start);
+    const after = text().slice(range.end);
+    const inserted = insertInlineAttachmentMarker(before + after, marker, before.length, before.length);
+    setAttachments((list) => {
+      if (list.some((attachment) => attachment.path === path && attachment.marker === marker)) return list;
+      return [...list, { path, label: fileNameFromMention(path), marker }];
+    });
+    setFileMention(null);
+    setEditorText(inserted.value, inserted.cursor);
+  }
+
+  function fileNameFromMention(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+  }
+
+  // Combine typed text with inline pasted-file markers and context picked on
+  // the empty-chat screen. `input` (to the agent) swaps visible {file.md}
+  // markers for @path references; `visible` keeps the compact inline markers.
   function buildPayload(): { input: string; visible: string } | null {
     const value = text().trim();
-    const atts = attachments();
-    if (!value && atts.length === 0) return null;
+    const atts = attachments().filter((a) => value.includes(a.marker));
+    if (!value) return null;
     const picks = newChatContextStore.picks(props.threadId);
-    const refs = atts.map((a) => `Attached file (${a.label}): ${a.path}`);
-    const input = [contextPreamble(picks), value, ...refs].filter(Boolean).join("\n\n");
+    const inputText = promptTextWithAttachmentRefs(value, atts);
+    const input = [contextPreamble(picks), inputText].filter(Boolean).join("\n\n");
     const visible = [
       value,
-      ...picks.map((pick) => `📎 ${pick.label}`),
-      ...atts.map((a) => `📎 ${a.label}`),
+      ...picks.map((pick) => `{${pick.label}}`),
     ]
       .filter(Boolean)
       .join("  ");
@@ -672,20 +793,32 @@ function Composer(props: {
   function clearComposer() {
     setText("");
     setAttachments([]);
+    setFileMention(null);
     // Picked context rides on one message only; a follow-up shouldn't resend it.
     newChatContextStore.clear(props.threadId);
   }
 
-  // Large paste → save to a workspace file and attach it as a chip instead of
-  // dumping thousands of characters into the textarea.
+  // Large paste → save to a workspace file and insert an inline marker instead
+  // of dumping thousands of characters into the textarea.
   async function onPaste(e: ClipboardEvent) {
     const pasted = e.clipboardData?.getData("text") ?? "";
     if (pasted.length <= PASTE_TO_FILE_CHARS) return; // small paste: default behaviour
     e.preventDefault();
+    const target = e.currentTarget as HTMLTextAreaElement;
+    const selectionStart = target.selectionStart ?? text().length;
+    const selectionEnd = target.selectionEnd ?? text().length;
     try {
       const res = await send({ type: "save_chat_paste", thread_id: props.threadId, text: pasted });
       if (res.type === "chat_paste_saved") {
-        setAttachments((a) => [...a, { path: res.relative_path, label: res.label }]);
+        const marker = attachmentMarker(res.relative_path);
+        const inserted = insertInlineAttachmentMarker(
+          text(),
+          marker,
+          selectionStart,
+          selectionEnd,
+        );
+        setEditorText(inserted.value, inserted.cursor);
+        setAttachments((a) => [...a, { path: res.relative_path, label: res.label, marker }]);
       } else {
         setText((t) => t + pasted);
       }
@@ -706,7 +839,6 @@ function Composer(props: {
     const prevText = text();
     const prevAtts = attachments();
     const prevPicks = newChatContextStore.picks(props.threadId);
-    const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
     // Say "starting" before the daemon's first event arrives: spawning the
     // agent takes seconds, and silence there reads as a dropped message.
@@ -724,7 +856,6 @@ function Composer(props: {
       });
       if (res.type === "error") throw new Error(res.message);
     } catch (err) {
-      chatStore.removeOptimistic(props.threadId, pendingId);
       chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
       setText(prevText);
       setAttachments(prevAtts);
@@ -807,11 +938,10 @@ function Composer(props: {
   async function moveQueued(queueId: number, up: boolean) {
     await send({ type: "move_queued_chat_input", queue_id: queueId, up }).catch(() => {});
   }
-  // Send a queued item now as a steer, then drop it from the queue.
+  // Send a queued item now, then drop it from the queue.
   async function steerQueued(q: { id: number; input: string; visible_input?: string }) {
     const sid = sessionId();
     if (sid == null) return;
-    const pendingId = addOptimisticMessage(q.visible_input ?? q.input);
     try {
       await send({
         type: "send_input",
@@ -825,12 +955,57 @@ function Composer(props: {
       // send would silently discard the user's message.
       await removeQueued(q.id);
     } catch {
-      chatStore.removeOptimistic(props.threadId, pendingId);
       // keep the item queued so the user can retry
     }
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    if (fileMention()) {
+      const n = fileMentionOptions().length;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setFileMentionCursor((c) => (n === 0 ? 0 : (c + 1) % n));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setFileMentionCursor((c) => (n === 0 ? 0 : (c - 1 + n) % n));
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && n > 0) {
+        e.preventDefault();
+        insertFileAttachment(fileMentionOptions()[fileMentionCursor()]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setFileMention(null);
+        return;
+      }
+    }
+    if ((e.key === "Backspace" || e.key === "Delete") && inputRef && inputRef.selectionStart === inputRef.selectionEnd) {
+      const removed = removeAdjacentAttachmentMarker(
+        text(),
+        inputRef.selectionStart,
+        e.key === "Backspace" ? "backward" : "forward",
+      );
+      if (removed) {
+        e.preventDefault();
+        setEditorText(removed.value, removed.cursor);
+        return;
+      }
+    }
+    const shortcut = resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings));
+    if (shortcut === "toggle-plan-mode") {
+      e.preventDefault();
+      void togglePlanMode();
+      return;
+    }
+    if (shortcut === "approve-plan") {
+      e.preventDefault();
+      void approvePlan();
+      return;
+    }
     if (e.key !== "Enter" || e.shiftKey) return; // Shift+Enter → newline
     e.preventDefault();
     // While a plan is under review, Enter sends revision notes back to the
@@ -839,9 +1014,10 @@ function Composer(props: {
       void sendPlanRevision();
       return;
     }
-    // Ctrl/Cmd+Enter skips the queue and steers; plain Enter queues.
-    if (e.ctrlKey || e.metaKey) void steerSend();
-    else defaultEnterSend();
+    // The immediate-send chord is customizable; plain Enter keeps the queue-first composer behavior.
+    if (shortcut === "send-immediate") {
+      void steerSend();
+    } else defaultEnterSend();
   }
 
   const failure = () => {
@@ -939,7 +1115,7 @@ function Composer(props: {
                   </button>
                   <button
                     class="chat-queued-action-btn"
-                    title="Send now (steer)"
+                    title="Send now"
                     disabled={sessionId() == null}
                     onClick={() => void steerQueued(q)}
                   >
@@ -959,28 +1135,17 @@ function Composer(props: {
         </div>
       </Show>
       <div class="chat-composer-box">
-        <Show when={attachments().length > 0}>
-          <div class="chat-attachment-chips">
-            <For each={attachments()}>
-              {(a, i) => (
-                <span class="chat-attachment-chip" title={a.path}>
-                  <Icon name="paperclip" class="chat-attachment-chip-icon" />
-                  <span class="chat-attachment-chip-label">{a.label}</span>
-                  <button
-                    class="chat-attachment-chip-remove"
-                    title="Remove attachment"
-                    onClick={() => setAttachments((list) => list.filter((_, j) => j !== i()))}
-                  >
-                    <Icon name="x" />
-                  </button>
-                </span>
-              )}
-            </For>
-          </div>
-        </Show>
         <div class="chat-input-shell">
+          <div
+            class="chat-input-render markdown-body"
+            aria-hidden="true"
+            innerHTML={composerPreviewHtml()}
+          />
           <textarea
+            ref={inputRef}
             class="chat-input-view"
+            classList={{ "chat-input-view-has-preview": text().trim().length > 0 }}
+            data-focus-target="chat-composer"
             placeholder={
               pendingPlan()
                 ? "What should change in the plan?"
@@ -989,37 +1154,53 @@ function Composer(props: {
                   : "Ask to make changes, @mention files, run /commands"
             }
             value={text()}
-            onInput={(e) => setText(e.currentTarget.value)}
+            onInput={(e) => {
+              setText(e.currentTarget.value);
+              syncFileMention(e.currentTarget.value);
+            }}
+            onClick={() => syncFileMention()}
+            onKeyUp={(e) => {
+              if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) syncFileMention();
+            }}
             onKeyDown={onKeyDown}
             onPaste={(e) => void onPaste(e)}
             rows={1}
           />
+          <Show when={fileMention() && fileMentionOptions().length > 0}>
+            <div class="chat-file-mention-menu" role="listbox">
+              <For each={fileMentionOptions()}>
+                {(path, i) => (
+                  <button
+                    class="chat-file-mention-item"
+                    classList={{ "chat-file-mention-item-active": i() === fileMentionCursor() }}
+                    role="option"
+                    aria-selected={i() === fileMentionCursor()}
+                    onMouseEnter={() => setFileMentionCursor(i())}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      insertFileAttachment(path);
+                    }}
+                  >
+                    <span class="chat-file-mention-name">{fileNameFromMention(path)}</span>
+                    <span class="chat-file-mention-path">{path}</span>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
         </div>
         <div class="chat-toolbar">
           <div class="chat-toolbar-left">
-            {/* Provider lives in the composer (like the old GTK bar). Changing it
-                opens a NEW chat with that agent; the current chat keeps its own
-                model/session untouched. */}
+            {/* Agent/model is one choice: switching providers opens a new chat
+                with the selected model, while same-provider changes update the
+                current live session. */}
             <CompactSelect
-              title="Agent"
-              value={props.provider}
-              options={[
-                { value: "codex", label: "Codex" },
-                { value: "claude", label: "Claude" },
-              ]}
-              onChange={props.onChangeProvider}
-              icon="terminal"
-              class="chat-agent-select"
-            />
-            {/* Model + effort are always shown (even when the provider exposes no
-                switchable models yet) so the composer controls stay consistent. */}
-            <CompactSelect
-              title="Model"
-              value={model()}
-              options={[{ value: "", label: "Model" }, ...models().map((m) => ({ value: m, label: m }))]}
-              onChange={changeModel}
+              title="Agent and model"
+              value={agentModelValue(props.provider, model())}
+              options={modelOptions()}
+              onChange={changeAgentModel}
               icon="settings"
-              class="compact-select-model"
+              class="compact-select-agent-model"
             />
             <CompactSelect
               title="Reasoning effort"
@@ -1059,9 +1240,9 @@ function Composer(props: {
               </span>
             </Show>
             <Show when={!awaitingUser() && (busy() || starting())}>
-              <span class="chat-context-usage" title={slowStart() ? "Agent is still starting" : "Agent starting"}>
+              <span class="chat-context-usage" title={busyStatusTitle()}>
                 <Icon name="bolt" class="chat-context-usage-icon" />
-                <span>{slowStart() ? "Still starting" : "Starting"}</span>
+                <span>{busyStatusLabel()}</span>
               </span>
             </Show>
             <Show
@@ -1069,10 +1250,10 @@ function Composer(props: {
               fallback={
                 <button
                   class="chat-send-btn"
-                  classList={{ "chat-send-btn-active": text().trim().length > 0 || attachments().length > 0 }}
+                  classList={{ "chat-send-btn-active": text().trim().length > 0 }}
                   onClick={primaryAction}
                   title="Send"
-                  disabled={text().trim().length === 0 && attachments().length === 0}
+                  disabled={text().trim().length === 0}
                 >
                   <Icon name="arrow-up" />
                 </button>
@@ -1189,7 +1370,7 @@ function FileEditor(props: { workspace: string; path: string }) {
               }
             }}
             onKeyDown={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+              if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "save") {
                 e.preventDefault();
                 void save();
                 return;
@@ -1433,7 +1614,7 @@ export default function ChatSurface(props: { workspace: string }) {
 
   const activeThread = createMemo(() => threads().find((t) => t.id === nav.selectedChatThread()));
 
-  async function newChat(provider?: string) {
+  async function newChat(provider?: string, model?: string) {
     const chosen = provider ?? newProvider();
     setNewProvider(chosen);
     try {
@@ -1446,7 +1627,7 @@ export default function ChatSurface(props: { workspace: string }) {
       const list = await threadsStore.refresh(props.workspace);
       if (res.type === "chat_thread_created") {
         // Seed the new chat with the default model so it opens ready to run.
-        const seed = prefsStore.seedModelFor(chosen);
+        const seed = model || prefsStore.seedModelFor(chosen);
         if (seed) setPendingSeed((p) => ({ ...p, [res.thread.id]: seed }));
         const created = list.find((t) => t.id === res.thread.id);
         if (created) selectThread(created);
@@ -1455,6 +1636,12 @@ export default function ChatSurface(props: { workspace: string }) {
       // non-fatal
     }
   }
+
+  onMount(() => {
+    const onNewChat = () => void newChat();
+    window.addEventListener("archductor:new-chat", onNewChat);
+    onCleanup(() => window.removeEventListener("archductor:new-chat", onNewChat));
+  });
 
   async function closeThread(thread: ArchcarChatThread) {
     try {
@@ -1541,10 +1728,11 @@ export default function ChatSurface(props: { workspace: string }) {
             threadId={activeThread()!.id}
             workspace={props.workspace}
             provider={activeThread()!.provider}
+            currentModel={activeThread()!.model}
             seedModel={pendingSeed()[activeThread()!.id]}
             onSeeded={() => clearSeed(activeThread()!.id)}
-            onChangeProvider={(p) => {
-              if (p !== activeThread()!.provider) void newChat(p);
+            onChangeAgentModel={(provider, model) => {
+              if (provider !== activeThread()!.provider) void newChat(provider, model);
             }}
           />
         </Match>

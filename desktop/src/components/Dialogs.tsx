@@ -1,4 +1,4 @@
-import { createSignal, createResource, Show, Switch, Match, For } from "solid-js";
+import { createSignal, createResource, Show, Switch, Match, For, onCleanup, onMount } from "solid-js";
 import { actions, dialogs, workspacesStore, repositoriesStore, type ConfirmSpec } from "@/store";
 import {
   selectFolder,
@@ -14,9 +14,26 @@ import {
 // re-pulls the inventory on success.
 
 function Modal(props: { title: string; onClose: () => void; children: any }) {
+  let body: HTMLDivElement | undefined;
+  onMount(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        props.onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    queueMicrotask(() => {
+      const target = body?.querySelector<HTMLElement>(
+        "input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled])",
+      );
+      target?.focus();
+    });
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
   return (
     <div class="modal-scrim" onClick={props.onClose}>
-      <div class="modal-body dialog-card" onClick={(e) => e.stopPropagation()}>
+      <div class="modal-body dialog-card" ref={body} onClick={(e) => e.stopPropagation()}>
         <div class="dialog-header">
           <span class="dialog-title">{props.title}</span>
           <button class="ui-button-icon" title="Close" onClick={props.onClose}>

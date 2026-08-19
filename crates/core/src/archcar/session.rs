@@ -2338,8 +2338,7 @@ fn run_codex_app_server_session_loop(
                     let local_input_id =
                         provider_input_local_id(started.session_id, next_input_sequence);
                     let request_id = next_turn_request_id(next_input_sequence);
-                    let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
-                    let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
+                    let route = codex_input_route(delivery, active_turn_id.as_deref());
                     let recovery_context = matches!(route, CodexInputRoute::Start)
                         .then(|| connection.pending_recovery_context.as_deref())
                         .flatten();
@@ -2864,10 +2863,8 @@ enum CodexInputResponseAction {
 fn codex_input_route(
     delivery: ArchcarInputDelivery,
     active_turn_id: Option<&str>,
-    auto_active: bool,
 ) -> CodexInputRoute {
-    let should_steer = delivery == ArchcarInputDelivery::Immediate || auto_active;
-    if should_steer {
+    if delivery == ArchcarInputDelivery::Immediate {
         if let Some(turn_id) = active_turn_id {
             return CodexInputRoute::Steer {
                 expected_turn_id: turn_id.to_owned(),
@@ -2883,7 +2880,10 @@ fn codex_input_response_action(
 ) -> CodexInputResponseAction {
     if !failed {
         CodexInputResponseAction::Complete
-    } else if pending.kind == CodexInputRequestKind::ImmediateSteer {
+    } else if matches!(
+        pending.kind,
+        CodexInputRequestKind::ImmediateSteer | CodexInputRequestKind::AutoSteer
+    ) {
         CodexInputResponseAction::RetryStart
     } else {
         CodexInputResponseAction::ReportError
@@ -5183,13 +5183,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     #[test]
     fn codex_immediate_input_routes_to_active_turn_or_new_turn() {
         assert_eq!(
-            codex_input_route(ArchcarInputDelivery::Immediate, Some("turn-7"), false),
+            codex_input_route(ArchcarInputDelivery::Immediate, Some("turn-7")),
             CodexInputRoute::Steer {
                 expected_turn_id: "turn-7".to_owned(),
             }
         );
         assert_eq!(
-            codex_input_route(ArchcarInputDelivery::Immediate, None, false),
+            codex_input_route(ArchcarInputDelivery::Immediate, None),
+            CodexInputRoute::Start
+        );
+        assert_eq!(
+            codex_input_route(ArchcarInputDelivery::Auto, Some("turn-7")),
             CodexInputRoute::Start
         );
     }
@@ -5203,6 +5207,16 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         };
         assert_eq!(
             codex_input_response_action(&immediate, true),
+            CodexInputResponseAction::RetryStart
+        );
+
+        let auto = PendingCodexInputRequest {
+            kind: CodexInputRequestKind::AutoSteer,
+            local_input_id: "input-1".to_owned(),
+            input: "adjust course".to_owned(),
+        };
+        assert_eq!(
+            codex_input_response_action(&auto, true),
             CodexInputResponseAction::RetryStart
         );
 

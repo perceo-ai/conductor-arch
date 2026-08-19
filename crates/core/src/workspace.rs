@@ -1732,46 +1732,6 @@ impl WorkspaceStore {
         Ok(renamed)
     }
 
-    pub fn apply_first_message_workspace_naming(
-        &self,
-        name: &str,
-        message: &str,
-    ) -> Result<Option<Workspace>> {
-        let message = message.trim();
-        if message.is_empty() {
-            return Ok(None);
-        }
-
-        let workspace = self.get_by_name(name)?;
-        if self.workspace_has_chat_messages(workspace.id)? {
-            return Ok(None);
-        }
-
-        let repository = self.load_repository_by_id(workspace.repository_id)?;
-        let settings = self.repository_settings(&repository.root_path)?;
-        let base = slugify(message);
-        let workspace_name =
-            self.unique_message_workspace_name(&repository, workspace.id, &base)?;
-        let prefix = settings
-            .customization
-            .workspace_defaults
-            .branch_prefix
-            .as_deref()
-            .unwrap_or("lc");
-        let branch_base = format!("{prefix}/{base}");
-        let branch =
-            unique_message_branch_name(&repository.root_path, &branch_base, &workspace.branch)?;
-
-        let mut updated = workspace;
-        if updated.branch != branch {
-            updated = self.rename_branch(&updated.name, &branch)?;
-        }
-        if updated.name != workspace_name {
-            updated = self.rename(&updated.name, &workspace_name)?;
-        }
-        Ok(Some(updated))
-    }
-
     pub fn discard(&self, name: &str) -> Result<Workspace> {
         let workspace = self.archive(name, true)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -4239,8 +4199,46 @@ impl WorkspaceStore {
         let output = command_output(&workspace.path, "gh", &args)?;
         if let Some(url) = extract_pull_request_url(&output) {
             self.record_pull_request(workspace.id, &url)?;
+            // The PR title is the most informed name this work ever gets, so it
+            // replaces the agent's first-message guess. A failure here must not
+            // fail the call: the pull request already exists on GitHub.
+            if let Err(err) = self.apply_pull_request_workspace_naming(&workspace, title) {
+                warn!(
+                    workspace = %workspace.name,
+                    error = %err,
+                    "failed to rename workspace from pull request title"
+                );
+            }
         }
         Ok(output)
+    }
+
+    /// Rename the workspace to the pull request title. The branch is left alone:
+    /// it is pushed and the pull request is bound to it.
+    fn apply_pull_request_workspace_naming(
+        &self,
+        workspace: &Workspace,
+        requested_title: Option<&str>,
+    ) -> Result<()> {
+        let title = match requested_title.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(title) => title.to_owned(),
+            // `gh pr create --fill` derives the title from the commits, so read
+            // back what GitHub actually recorded.
+            None => {
+                let args =
+                    self.gh_pr_args_for_workspace(workspace, "view", &["--json", "title"])?;
+                let output = command_output_owned(&workspace.path, "gh", &args)?;
+                extract_json_string_field(&output, "title")
+                    .context("pull request response had no title")?
+            }
+        };
+
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let name = self.metadata_workspace_name(&repository, workspace.id, &title)?;
+        if name != workspace.name {
+            self.rename(&workspace.name, &name)?;
+        }
+        Ok(())
     }
 
     pub fn render_pull_request_template(&self, name: &str) -> Result<PullRequestTemplate> {
@@ -4706,11 +4704,12 @@ impl WorkspaceStore {
 
     pub fn create_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
         let template = self.render_pull_request_template(name)?;
+        let context = self.workspace_action_context(name)?;
         self.append_resolved_prompt(
             name,
             PromptKind::CreatePr,
             format!(
-                "Prepare this workspace for a pull request.\n\nDraft title:\n{}\n\nDraft body:\n{}\n\nUse the active repository workflow. Commit any appropriate uncommitted changes, push the branch, create the PR with this draft, refresh PR state, and report the final PR URL.",
+                "Prepare this workspace for a pull request.\n\n{context}\n\nDraft title:\n{}\n\nDraft body:\n{}\n\nUse the active repository workflow. Commit any appropriate uncommitted changes, push the branch, create the PR with this draft, refresh PR state, and report the final PR URL.",
                 template.title.trim(),
                 template.body.trim()
             ),
@@ -4720,6 +4719,7 @@ impl WorkspaceStore {
     pub fn push_branch_agent_prompt(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let changed_files = self.changed_files(name)?;
+        let context = self.workspace_action_context(name)?;
         let files = if changed_files.is_empty() {
             "No uncommitted files detected.".to_owned()
         } else {
@@ -4733,13 +4733,14 @@ impl WorkspaceStore {
             name,
             PromptKind::PushBranch,
             format!(
-                "Prepare and push branch `{}` for workspace `{}`.\n\nChanged files:\n{}\n\nInspect the diff, commit any appropriate remaining changes, push the branch to the configured remote, refresh PR state if a PR exists, and report what changed.",
+                "Prepare and push branch `{}` for workspace `{}`.\n\n{context}\n\nChanged files:\n{}\n\nInspect the diff, commit any appropriate remaining changes, push the branch to the configured remote, refresh PR state if a PR exists, and report what changed.",
                 workspace.branch, workspace.name, files
             ),
         )
     }
 
     pub fn merge_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        let context = self.workspace_action_context(name)?;
         let readiness = self
             .pull_request_readiness_agent_prompt(name)
             .unwrap_or_else(|_| format!("Verify workspace `{name}` is ready to merge."));
@@ -4747,20 +4748,25 @@ impl WorkspaceStore {
             name,
             PromptKind::MergePr,
             format!(
-                "{readiness}\n\nIf the pull request is mergeable, merge it using the repository's configured method. If anything is blocked, fix the blocker or report the exact reason."
+                "{readiness}\n\n{context}\n\nIf the pull request is mergeable, merge it using the repository's configured method. If anything is blocked, fix the blocker or report the exact reason."
             ),
         )
     }
 
     pub fn review_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        let context = self.workspace_action_context(name)?;
         self.pull_request_readiness_agent_prompt(name)
-            .or_else(|_| self.pull_request_review_agent_prompt(name))
+            .map(|prompt| format!("{prompt}\n\n{context}"))
+            .or_else(|_| {
+                self.pull_request_review_agent_prompt(name)
+                    .map(|prompt| format!("{prompt}\n\n{context}"))
+            })
             .or_else(|_| {
                 self.append_resolved_prompt(
                     name,
                     PromptKind::CodeReview,
                     format!(
-                        "Review the pull request state for workspace `{name}`, resolve actionable blockers through code changes where appropriate, and report what remains."
+                        "Review the pull request state for workspace `{name}`, resolve actionable blockers through code changes where appropriate, and report what remains.\n\n{context}"
                     ),
                 )
             })
@@ -5200,9 +5206,132 @@ mutation($threadId: ID!) {{
             .collect::<Vec<_>>();
         self.append_resolved_prompt(
             name,
-            PromptKind::CodeReview,
-            format_review_comments_agent_prompt(name, &comments),
+            PromptKind::ReviewComments,
+            format!(
+                "{}\n\n{}",
+                format_review_comments_agent_prompt(name, &comments),
+                self.workspace_action_context(name)?
+            ),
         )
+    }
+
+    fn workspace_action_context(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let repository_label = repository
+            .root_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository");
+        let mut lines = vec![
+            "Workspace context:".to_owned(),
+            format!("- Workspace: {}", workspace.name),
+            format!("- Repository: {}", repository_label),
+            format!("- Branch: {}", workspace.branch),
+            format!("- Base ref: {}", workspace_base_ref(&workspace)),
+            format!("- Workspace path: {}", workspace.path.display()),
+        ];
+
+        if let Ok(Some(pr)) = self.pull_request_by_workspace_id(workspace.id) {
+            lines.push(format!(
+                "- Pull request: #{} {} ({})",
+                pr.number, pr.state, pr.url
+            ));
+        } else {
+            lines.push("- Pull request: none recorded".to_owned());
+        }
+
+        if let Ok(summary) = self.checks_summary(name) {
+            lines.push(format!(
+                "- Status: changed_files={} run={} check={}{} session={} active_sessions={} todos={}/{} review_comments={} source_ahead={} conflicts={}",
+                summary.changed_files,
+                summary
+                    .run_status
+                    .map(ProcessStatus::as_str)
+                    .unwrap_or("unknown"),
+                summary
+                    .check_status
+                    .map(ProcessStatus::as_str)
+                    .unwrap_or("unknown"),
+                summary
+                    .check_exit_code
+                    .map(|code| format!(" exit={code}"))
+                    .unwrap_or_default(),
+                summary
+                    .session_status
+                    .map(ProcessStatus::as_str)
+                    .unwrap_or("unknown"),
+                summary.active_sessions,
+                summary.open_todos,
+                summary.total_todos,
+                summary.open_review_comments,
+                summary.source_branch_ahead,
+                summary.conflicting_workspaces.len()
+            ));
+            if !summary.conflicting_workspaces.is_empty() {
+                lines.push("- Conflicting sibling workspaces:".to_owned());
+                for (sibling, files) in summary.conflicting_workspaces.iter().take(5) {
+                    lines.push(format!("  - {sibling}: {}", files.join(", ")));
+                }
+            }
+        }
+
+        if let Ok(status) = self.git_status_short(name) {
+            let status = status.trim();
+            if !status.is_empty() {
+                lines.push("- Git status:".to_owned());
+                lines.extend(status.lines().take(30).map(|line| format!("  {line}")));
+            }
+        }
+
+        if let Ok(diff_stats) = self.diff_stats_against_base(name) {
+            lines.push(format!(
+                "- Diff against base: +{} -{}",
+                diff_stats.0, diff_stats.1
+            ));
+        }
+
+        if let Ok(files) = self.all_file_change_summaries(name) {
+            let files = files
+                .into_iter()
+                .filter(|file| !is_conductor_context_path(&file.path))
+                .take(30)
+                .collect::<Vec<_>>();
+            if !files.is_empty() {
+                lines.push("- Files changed against base:".to_owned());
+                lines.extend(files.iter().map(|file| {
+                    let additions = file
+                        .additions
+                        .map(|count| format!("+{count}"))
+                        .unwrap_or_else(|| "+binary".to_owned());
+                    let deletions = file
+                        .deletions
+                        .map(|count| format!("-{count}"))
+                        .unwrap_or_else(|| "-binary".to_owned());
+                    format!("  - {} ({additions} {deletions})", file.path)
+                }));
+            }
+        }
+
+        if let Ok(commits) = self.commit_file_change_summaries(name, 5) {
+            if !commits.is_empty() {
+                lines.push("- Recent branch commits:".to_owned());
+                lines.extend(commits.iter().map(|commit| {
+                    let short = commit.commit.chars().take(7).collect::<String>();
+                    format!("  - {short} {}", commit.subject)
+                }));
+            }
+        }
+
+        if let Ok(Some(summary)) = self.latest_session_summary(&workspace) {
+            let summary = truncate_chars(summary.trim(), 1200);
+            if !summary.is_empty() {
+                lines.push("- Latest session summary:".to_owned());
+                lines.push(summary);
+            }
+        }
+
+        Ok(lines.join("\n"))
     }
 
     fn append_resolved_prompt(
@@ -7307,6 +7436,80 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
+    /// What the agent should be asked to name when this chat's first human
+    /// message is sent, or `None` once the chat has a human message (or one
+    /// already queued) — naming is a one-shot at the start of a conversation.
+    pub fn chat_naming_request(&self, thread_id: i64) -> Result<Option<ChatNamingRequest>> {
+        let thread = self.get_chat_thread(thread_id)?;
+        // Asked once per chat. A queued first message may still be in flight when
+        // the user types a follow-up, so this cannot be inferred from whether a
+        // user message has been persisted yet.
+        if self.chat_naming_requested(thread_id)? {
+            return Ok(None);
+        }
+        if self.workspace_has_user_message(thread_id)? {
+            return Ok(None);
+        }
+
+        let workspace = self.get_by_id(thread.workspace_id)?;
+        if self.workspace_agent_metadata_applied(workspace.id)? {
+            return Ok(Some(ChatNamingRequest::ChatOnly));
+        }
+        Ok(Some(
+            if self.workspace_branch_is_codename_derived(&workspace)? {
+                ChatNamingRequest::WorkspaceBranchAndChat
+            } else {
+                ChatNamingRequest::WorkspaceAndChat
+            },
+        ))
+    }
+
+    /// Append the naming instruction to text bound for the provider. Returns
+    /// `None` when this send is not the first human message of the chat, so
+    /// callers can pass the original text through untouched.
+    pub fn decorate_first_chat_input(&self, thread_id: i64, input: &str) -> Result<Option<String>> {
+        let Some(request) = self.chat_naming_request(thread_id)? else {
+            return Ok(None);
+        };
+        self.mark_chat_naming_requested(thread_id)?;
+        Ok(Some(format!(
+            "{input}\n\n{}",
+            archductor_naming_instruction(request)
+        )))
+    }
+
+    fn chat_naming_requested(&self, thread_id: i64) -> Result<bool> {
+        let requested_at: Option<String> = self.conn.query_row(
+            "SELECT naming_requested_at FROM chat_threads WHERE id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(requested_at.is_some())
+    }
+
+    fn mark_chat_naming_requested(&self, thread_id: i64) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads SET naming_requested_at = ?1 WHERE id = ?2",
+            params![now, thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// True when the branch is just the workspace codename behind the configured
+    /// prefix. A branch like `lc/gh-issue-42` carries an identity we must keep.
+    fn workspace_branch_is_codename_derived(&self, workspace: &Workspace) -> Result<bool> {
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
+        Ok(workspace.branch == format!("{prefix}/{}", workspace.name))
+    }
+
     fn workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<bool> {
         let applied_at: Option<String> = self.conn.query_row(
             "SELECT agent_metadata_applied_at FROM workspaces WHERE id = ?1",
@@ -8415,17 +8618,6 @@ mutation($threadId: ID!) {{
         Ok(Path::new(&current_path) == candidate_path)
     }
 
-    fn workspace_has_chat_messages(&self, workspace_id: i64) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*)
-             FROM chat_messages
-             WHERE thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)",
-            [workspace_id],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
     fn unique_message_workspace_name(
         &self,
         repository: &RepositoryRecord,
@@ -8581,7 +8773,7 @@ mutation($threadId: ID!) {{
             .with_context(|| format!("load process {id}"))
     }
 
-    fn workspace_name_by_id(&self, id: i64) -> Result<String> {
+    pub fn workspace_name_by_id(&self, id: i64) -> Result<String> {
         self.conn
             .query_row("SELECT name FROM workspaces WHERE id = ?1", [id], |row| {
                 row.get(0)
@@ -10086,6 +10278,75 @@ struct ArchductorMetadataDirective {
     workspace_name: Option<String>,
     branch_name: Option<String>,
     chat_title: Option<String>,
+}
+
+/// What an agent should be asked to name on the first human message of a chat.
+/// Workspaces start on an autogenerated codename and chats on "New chat", so the
+/// first message is the only moment where the agent knows the task and nothing
+/// has been built on the old names yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatNamingRequest {
+    /// Fresh workspace on a codename-derived branch: everything is up for grabs.
+    WorkspaceBranchAndChat,
+    /// The branch encodes an external identity (a GitHub issue or PR), so it
+    /// stays put while the workspace and chat get real names.
+    WorkspaceAndChat,
+    /// The workspace already carries an agent-supplied name; only this chat is new.
+    ChatOnly,
+}
+
+impl ChatNamingRequest {
+    fn wants_workspace_name(self) -> bool {
+        !matches!(self, ChatNamingRequest::ChatOnly)
+    }
+
+    fn wants_branch_name(self) -> bool {
+        matches!(self, ChatNamingRequest::WorkspaceBranchAndChat)
+    }
+}
+
+/// Build the hidden block that asks the agent for names. It is appended to the
+/// text sent to the provider, never to the text persisted for the user, and the
+/// reply's `<archductor_metadata>` block is stripped before display.
+pub fn archductor_naming_instruction(request: ChatNamingRequest) -> String {
+    let mut fields = Vec::new();
+    if request.wants_workspace_name() {
+        fields.push("\"workspace_name\":\"…\"");
+    }
+    if request.wants_branch_name() {
+        fields.push("\"branch_name\":\"…\"");
+    }
+    fields.push("\"chat_title\":\"…\"");
+
+    let mut rules = Vec::new();
+    if request.wants_workspace_name() {
+        rules.push("- workspace_name: 2-4 words naming the task, lowercase, spaces allowed");
+    }
+    if request.wants_branch_name() {
+        rules.push("- branch_name: kebab-case slug of the same task, no prefix");
+    }
+    rules.push("- chat_title: at most 48 characters, title case");
+
+    let subject = if request.wants_workspace_name() {
+        "This workspace and chat still have placeholder names."
+    } else {
+        "This chat still has a placeholder name."
+    };
+
+    format!(
+        "{ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN}\n\
+         Archductor, the app hosting this session, needs metadata. {subject}\n\
+         Before your first tool call, emit exactly this block:\n\
+         {ARCHDUCTOR_METADATA_OPEN}{{{fields}}}{ARCHDUCTOR_METADATA_CLOSE}\n\
+         Fill it from the request above:\n\
+         {rules}\n\
+         Emit it before reading files or running commands, then answer the request \
+         normally. Archductor strips the block from the transcript, so the user never \
+         sees it — do not mention it or ask about it.\n\
+         {ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE}",
+        fields = fields.join(","),
+        rules = rules.join("\n"),
+    )
 }
 
 fn extract_archductor_metadata_directive(
@@ -12713,89 +12974,6 @@ branch_prefix = "team"
             .unwrap();
 
         assert_eq!(workspace.branch, "team/build-source-defaults");
-    }
-
-    #[test]
-    fn first_message_workspace_naming_renames_workspace_and_branch() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        let workspace_parent = temp.path().join("workspaces/demo");
-
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path.clone(),
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(workspace_parent.clone()),
-            })
-            .unwrap();
-
-        let store = WorkspaceStore::open(&db_path).unwrap();
-        let workspace = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        store
-            .create_chat_thread(&workspace.name, "codex", "New Chat", None)
-            .unwrap();
-
-        let renamed = store
-            .apply_first_message_workspace_naming(
-                &workspace.name,
-                "Fix the customer billing webhook failure",
-            )
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(renamed.name, "fix-the-customer-billing-webhook-failure");
-        assert_eq!(
-            renamed.branch,
-            "lc/fix-the-customer-billing-webhook-failure"
-        );
-        assert_eq!(renamed.path, workspace.path);
-        assert!(renamed.path.is_dir());
-        let branch = git_output(&renamed.path, ["branch", "--show-current"]);
-        assert_eq!(branch.trim(), "lc/fix-the-customer-billing-webhook-failure");
-        let worktrees = Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["worktree", "list", "--porcelain"])
-            .output()
-            .unwrap();
-        let worktrees = String::from_utf8_lossy(&worktrees.stdout);
-        assert!(worktrees.contains(workspace.path.to_str().unwrap()));
-        assert!(!worktrees.contains(
-            workspace_parent
-                .join("fix-the-customer-billing-webhook-failure")
-                .to_str()
-                .unwrap()
-        ));
-    }
-
-    #[test]
-    fn first_message_workspace_naming_skips_after_existing_message() {
-        let (_temp, store) = test_workspace_store();
-        let workspace = store.get_by_name("berlin").unwrap();
-        let thread = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
-            .unwrap();
-        store
-            .append_chat_message(thread.id, "user", "existing message", "user_send")
-            .unwrap();
-
-        let renamed = store
-            .apply_first_message_workspace_naming("berlin", "Rename from later message")
-            .unwrap();
-
-        assert!(renamed.is_none());
-        assert_eq!(store.get_by_name("berlin").unwrap(), workspace);
     }
 
     #[test]
@@ -19599,6 +19777,67 @@ general = "Keep changes focused."
     }
 
     #[test]
+    fn git_action_prompt_includes_prompt_pack_instructions_and_workspace_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor/prompt-packs")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[prompt_pack]
+active = "team"
+path = ".archductor/prompt-packs/team.toml"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            repo_path.join(".archductor/prompt-packs/team.toml"),
+            r#"
+name = "team"
+version = "v1"
+
+[prompts]
+create_pr = "Team PR rule: include screenshots when UI changes."
+"#,
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nmore\n").unwrap();
+
+        let prompt = store.create_pull_request_agent_prompt("berlin").unwrap();
+
+        assert!(prompt.contains("Prepare this workspace for a pull request."));
+        assert!(prompt.contains("Workspace context:"));
+        assert!(prompt.contains("- Repository: demo"));
+        assert!(prompt.contains("- Branch: lc/berlin"));
+        assert!(prompt.contains("README.md"));
+        assert!(prompt.contains("- Diff against base: +1 -0"));
+        assert!(prompt.contains("Repository instructions:"));
+        assert!(prompt.contains("Team PR rule: include screenshots when UI changes."));
+    }
+
+    #[test]
     fn truncate_text_at_char_boundary_reserves_marker_space() {
         let (diff, truncated) = truncate_text_at_char_boundary("a".repeat(80), 64);
 
@@ -21641,6 +21880,124 @@ exit 1
     }
 
     #[test]
+    fn creating_a_pull_request_renames_the_workspace_to_the_pr_title() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf 'https://github.com/example/demo/pull/42\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("touched.txt"), "change\n").unwrap();
+
+        store
+            .create_pull_request(
+                "berlin",
+                Some("Retry failed billing webhooks"),
+                Some("Body"),
+                false,
+            )
+            .unwrap();
+
+        restore_path(old_path);
+        // The PR title is the best name we ever get, so it replaces the earlier guess.
+        let renamed = store.get_by_name("retry-failed-billing-webhooks").unwrap();
+        assert_eq!(renamed.id, workspace.id);
+        // The branch is pushed and the PR is bound to it, so it must not move.
+        assert_eq!(renamed.branch, "lc/berlin");
+        assert!(store.get_by_name("berlin").is_err());
+    }
+
+    #[test]
+    fn pull_request_rename_reads_back_a_filled_title() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf 'https://github.com/example/demo/pull/42\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"title":"Drop the legacy parser"}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("touched.txt"), "change\n").unwrap();
+
+        // No title argument: gh fills it from the commits, so we read it back.
+        store
+            .create_pull_request("berlin", None, None, false)
+            .unwrap();
+
+        restore_path(old_path);
+        let renamed = store.get_by_name("drop-the-legacy-parser").unwrap();
+        assert_eq!(renamed.id, workspace.id);
+    }
+
+    #[test]
     fn todos_can_be_added_listed_and_completed() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -23258,6 +23615,130 @@ spotlight_testing = true
         assert_eq!(
             store.get_chat_thread_record(second.id).unwrap().title,
             "Billing Dashboard"
+        );
+    }
+
+    #[test]
+    fn first_user_message_asks_for_workspace_branch_and_chat_names() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+
+        let request = store.chat_naming_request(thread.id).unwrap();
+        assert_eq!(request, Some(ChatNamingRequest::WorkspaceBranchAndChat));
+
+        let decorated = store
+            .decorate_first_chat_input(thread.id, "Fix the billing webhook retries")
+            .unwrap()
+            .expect("first message should carry the naming instruction");
+        assert!(decorated.starts_with("Fix the billing webhook retries"));
+        assert!(decorated.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN));
+        assert!(decorated.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE));
+        assert!(decorated.contains("\"workspace_name\""));
+        assert!(decorated.contains("\"branch_name\""));
+        assert!(decorated.contains("\"chat_title\""));
+        // The user never sees the block, so the visible text must survive stripping.
+        assert_eq!(
+            strip_archductor_metadata_block(&decorated),
+            "Fix the billing webhook retries"
+        );
+    }
+
+    #[test]
+    fn meaningful_branch_is_not_offered_for_renaming() {
+        let (_temp, store) = test_workspace_store();
+        store.rename_branch("berlin", "lc/gh-issue-42").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+
+        // The branch encodes an external identity, so only the workspace and chat
+        // names are up for grabs.
+        assert_eq!(
+            store.chat_naming_request(thread.id).unwrap(),
+            Some(ChatNamingRequest::WorkspaceAndChat)
+        );
+        let decorated = store
+            .decorate_first_chat_input(thread.id, "Fix the issue")
+            .unwrap()
+            .unwrap();
+        assert!(decorated.contains("\"workspace_name\""));
+        assert!(!decorated.contains("\"branch_name\""));
+    }
+
+    #[test]
+    fn named_workspace_only_asks_for_a_chat_title() {
+        let (_temp, store) = test_workspace_store();
+        let first = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(first.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                first.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing webhook fix\",\"branch_name\":\"lc/billing-webhook-fix\",\"chat_title\":\"Billing Webhook Fix\"}</archductor_metadata>\nOn it.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        let second = store
+            .create_chat_thread("billing-webhook-fix", "codex", "New chat", None)
+            .unwrap();
+        assert_eq!(
+            store.chat_naming_request(second.id).unwrap(),
+            Some(ChatNamingRequest::ChatOnly)
+        );
+        let decorated = store
+            .decorate_first_chat_input(second.id, "Add the dashboard")
+            .unwrap()
+            .unwrap();
+        assert!(decorated.contains("\"chat_title\""));
+        assert!(!decorated.contains("\"workspace_name\""));
+        assert!(!decorated.contains("\"branch_name\""));
+    }
+
+    #[test]
+    fn naming_is_requested_once_per_chat() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+
+        assert_eq!(store.chat_naming_request(thread.id).unwrap(), None);
+        assert_eq!(
+            store
+                .decorate_first_chat_input(thread.id, "And also the dashboard")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn naming_is_asked_once_even_while_the_first_message_is_in_flight() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+
+        assert!(store
+            .decorate_first_chat_input(thread.id, "Fix billing webhook")
+            .unwrap()
+            .is_some());
+
+        // The first message has left the queue but its user row is not persisted
+        // yet. A follow-up typed in that window must not ask for names again.
+        assert_eq!(store.chat_naming_request(thread.id).unwrap(), None);
+        assert_eq!(
+            store
+                .decorate_first_chat_input(thread.id, "And also the dashboard")
+                .unwrap(),
+            None
         );
     }
 

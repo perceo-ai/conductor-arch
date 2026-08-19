@@ -21,7 +21,7 @@ help:
 		'make tag VERSION=x.y.z        Create git tag vVERSION' \
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION' \
 		'make desktop-install          Install Electron UI deps (pnpm)' \
-		'make desktop-dev              Run Electron UI in dev mode' \
+		'make desktop-dev              Run Electron UI in dev mode (restarts branch sidecar)' \
 		'make desktop-build            Build Electron UI bundles' \
 		'make desktop-package          Build sidecars + package all installers' \
 		'make desktop-package-linux    Build sidecars + Linux installers only'
@@ -63,10 +63,10 @@ publish-tag:
 desktop-install:
 	cd desktop && pnpm install
 
-# Dev mode needs a concrete archcar binary. Run through the branch-scoped
-# environment so Electron resolves ARCHDUCTOR_ARCHCAR_BIN instead of relying on
-# a global PATH install.
+# Dev mode needs a concrete archcar binary. Restart the branch-scoped sidecar
+# before rebuilding so Electron cannot reconnect to a stale daemon.
 desktop-dev:
+	$(DEV_ENV) scripts/stop-dev-archcar.sh
 	$(DEV_ENV) cargo build --bin archcar
 	$(DEV_ENV) bash -lc 'cd desktop && pnpm dev'
 

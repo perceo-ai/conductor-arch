@@ -819,6 +819,8 @@ export type ArchcarEvent =
   | { type: "background_task_updated"; task: BackgroundTask }
   | { type: "summary_updated"; workspace: string; summary_id: number; scope_type: string; scope_id: number }
   | { type: "task_updated"; workspace: string; task_id: number; status: string }
+  | { type: "workspace_renamed"; old_name: string; new_name: string }
+  | { type: "chat_thread_renamed"; thread_id: number; title: string }
   | { type: string; [k: string]: unknown };
 
 // Agent-driven interaction (permission / question / plan approval) surfaced to

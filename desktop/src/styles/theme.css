@@ -1943,13 +1943,15 @@ button.ui-button-destructive:hover {
 .lc-theme-light .context-menu-item {
     color: #1f2328;
 }
-.lc-theme-light .context-menu-item:hover {
+.lc-theme-light .context-menu-item:hover,
+.lc-theme-light .context-menu-item-focused {
     background-color: #f1f5f9;
 }
 .lc-theme-light .context-menu-item-destructive {
     color: #cf222e;
 }
-.lc-theme-light .context-menu-item-destructive:hover {
+.lc-theme-light .context-menu-item-destructive:hover,
+.lc-theme-light .context-menu-item-destructive.context-menu-item-focused {
     background-color: #ffebe9;
 }
 .lc-theme-light .toast,
@@ -3593,7 +3595,7 @@ button.ws-tab-shell {
 /* Prose needs breathing room from the actions above it; chips next to chips do
    not. Spacing is charged at the boundary, not to every row. */
 .chat-agent-text:not(:first-child),
-.chat-reasoning-text:not(:first-child),
+.chat-reasoning-block:not(:first-child),
 .chat-user-row:not(:first-child) {
     margin-top: 8px;
 }
@@ -3607,14 +3609,20 @@ button.ws-tab-shell {
     margin-top: 0;
 }
 .chat-inline-event + .chat-agent-text,
-.chat-inline-event + .chat-reasoning-text {
+.chat-inline-event + .chat-reasoning-block {
     margin-top: 10px;
 }
+.chat-reasoning-block {
+    margin: 0;
+    max-width: 78ch;
+}
 .chat-reasoning-text {
-    color: #8f8f8f;
+    color: #818181;
     font-size: 13px;
+    font-weight: 400;
     line-height: 1.45;
     margin: 0;
+    white-space: pre-wrap;
 }
 .chat-inline-event {
     background-color: transparent;
@@ -4746,4 +4754,3 @@ textarea:focus {
     min-width: 14px;
     min-height: 14px;
 }
-

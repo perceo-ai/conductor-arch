@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import Icon, { type IconName } from "./Icon";
+import { nextListIndex } from "@/lib/keyboardList";
 
 // Lightweight global right-click menu (parity with the GTK sidebar popovers).
 // Any surface calls openContextMenu(event, items); a single <ContextMenu/> host
@@ -29,6 +30,15 @@ export function openContextMenu(e: MouseEvent, items: ContextMenuItem[]): void {
   setMenu({ x: e.clientX, y: e.clientY, items });
 }
 
+export function openContextMenuFromKeyboard(e: KeyboardEvent, items: ContextMenuItem[]): void {
+  const target = e.currentTarget as HTMLElement | null;
+  if (!target || items.length === 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const rect = target.getBoundingClientRect();
+  setMenu({ x: rect.left + 8, y: rect.bottom + 4, items });
+}
+
 export function openContextMenuAt(x: number, y: number, items: ContextMenuItem[]): void {
   if (items.length === 0) return;
   setMenu({ x, y, items });
@@ -36,14 +46,40 @@ export function openContextMenuAt(x: number, y: number, items: ContextMenuItem[]
 
 export default function ContextMenu() {
   const close = () => setMenu(null);
+  const [cursor, setCursor] = createSignal(0);
   // Clamped position, filled in once the menu is measured. Null until then so we
   // render at the raw cursor coords (no top-left flash) and refine after mount.
   const [pos, setPos] = createSignal<{ left: number; top: number } | null>(null);
-  createEffect(on(menu, () => setPos(null)));
+  createEffect(on(menu, () => {
+    setPos(null);
+    setCursor(0);
+  }));
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      const m = menu();
+      if (!m) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCursor((index) => nextListIndex(index, m.items.length, "next"));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCursor((index) => nextListIndex(index, m.items.length, "previous"));
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        setCursor(0);
+      } else if (e.key === "End") {
+        e.preventDefault();
+        setCursor(Math.max(0, m.items.length - 1));
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        const item = m.items[cursor()];
+        close();
+        item?.run();
+      }
     };
     window.addEventListener("keydown", onKey);
     // Close if the window loses focus, resizes, or anything scrolls underneath —
@@ -84,15 +120,21 @@ export default function ContextMenu() {
         >
           <div
             class="context-menu"
+            role="menu"
             ref={(el) => queueMicrotask(() => clamp(el))}
             style={{ left: `${pos()?.left ?? m().x}px`, top: `${pos()?.top ?? m().y}px` }}
             onClick={(e) => e.stopPropagation()}
           >
             <For each={m().items}>
-              {(item) => (
+              {(item, i) => (
                 <button
                   class="context-menu-item"
-                  classList={{ "context-menu-item-destructive": !!item.destructive }}
+                  classList={{
+                    "context-menu-item-destructive": !!item.destructive,
+                    "context-menu-item-focused": i() === cursor(),
+                  }}
+                  role="menuitem"
+                  onMouseEnter={() => setCursor(i())}
                   onClick={() => {
                     close();
                     item.run();

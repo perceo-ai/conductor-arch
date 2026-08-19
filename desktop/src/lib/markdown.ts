@@ -38,3 +38,13 @@ export function renderMarkdown(md: string): string {
     return escapeHtml(md);
   }
 }
+
+const INLINE_FILE_MARKER =
+  /\{([A-Za-z0-9_.@+ -]+\.(?:c|cc|cpp|css|gif|go|h|hpp|html|jpeg|jpg|js|jsx|json|md|pdf|png|py|rs|scss|sh|sql|toml|ts|tsx|txt|webp|ya?ml))\}/g;
+
+export function renderMarkdownWithInlineFileChips(md: string): string {
+  return renderMarkdown(md).replace(INLINE_FILE_MARKER, (_match, label: string) => {
+    const safe = escapeHtml(label);
+    return `<span class="chat-inline-file-chip" title="${safe}">${safe}</span>`;
+  });
+}

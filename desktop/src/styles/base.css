@@ -275,6 +275,11 @@ body.resizing-col {
 .workspace-row-shell:hover {
   background: var(--lc-hover-soft);
 }
+.workspace-row-shell:focus-visible,
+.project-row:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: 2px;
+}
 .workspace-row-shell.selected {
   background: var(--lc-hover);
   box-shadow: none;
@@ -894,11 +899,13 @@ body.resizing-col {
   padding: 8px 22px 14px;
 }
 .chat-input-shell {
-  display: flex;
+  display: grid;
+  position: relative;
 }
+.chat-input-render,
 .chat-input-view {
+  grid-area: 1 / 1;
   width: 100%;
-  resize: none;
   min-height: 48px;
   max-height: 160px;
   padding: 10px 12px;
@@ -909,11 +916,77 @@ body.resizing-col {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.4;
+}
+.chat-input-render {
+  min-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+.chat-input-render p {
+  display: inline;
+  margin: 0;
+}
+.chat-input-view {
+  resize: none;
+  caret-color: var(--lc-text, #e4e4e4);
   outline: none;
+}
+.chat-input-view-has-preview {
+  color: transparent;
 }
 .chat-input-view:focus {
   border: none;
   outline: none;
+}
+.chat-file-mention-menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--lc-border, #303030);
+  border-radius: 6px;
+  background: #181818;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.38);
+}
+.chat-file-mention-item {
+  display: grid;
+  grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lc-text, #e4e4e4);
+  font: inherit;
+  text-align: left;
+}
+.chat-file-mention-item:hover,
+.chat-file-mention-item-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.chat-file-mention-name,
+.chat-file-mention-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-file-mention-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.chat-file-mention-path {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
 }
 .chat-toolbar {
   display: flex;
@@ -2399,8 +2472,9 @@ button.ui-button-icon .ui-icon,
   color: #9a9a9a;
 }
 
+.compact-select-agent-model .compact-select-trigger,
 .compact-select-model .compact-select-trigger {
-  max-width: 190px;
+  max-width: 210px;
 }
 
 .compact-select-menu {
@@ -2417,6 +2491,17 @@ button.ui-button-icon .ui-icon,
   border-radius: 8px;
   background: #1b1b1b;
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+}
+.compact-select-group {
+  padding: 7px 8px 3px;
+  color: #858585;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.compact-select-option-grouped {
+  padding-left: 18px;
 }
 
 .compact-select-option {
@@ -2436,6 +2521,7 @@ button.ui-button-icon .ui-icon,
 }
 
 .compact-select-option:hover,
+.compact-select-option-focused,
 .compact-select-option-active {
   background: #2a2a2a;
   color: #f0f0f0;
@@ -2680,6 +2766,12 @@ button.ui-button-icon .ui-icon,
   color: var(--lc-text-muted, #b0b0b0);
 }
 
+.settings-shortcuts-preview {
+  max-height: 180px;
+  overflow: auto;
+  padding: 6px 0 0;
+}
+
 .ws-readiness {
   margin: 6px 0;
   padding: 6px 10px;
@@ -2887,6 +2979,24 @@ pre.ws-file-editor-highlight.hljs {
   background: rgba(255, 255, 255, 0.08);
   color: #e6b673;
 }
+.chat-inline-file-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 24ch;
+  margin: 0 2px;
+  padding: 1px 5px;
+  vertical-align: 0.08em;
+  overflow: hidden;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--lc-text, #e6e6e6);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78em;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* fenced code block (highlighted) */
 .markdown-body pre.md-code {
   margin: 8px 0;
@@ -3041,31 +3151,20 @@ pre.ws-file-editor-highlight.hljs {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.context-menu-item:hover {
+.context-menu-item:hover,
+.context-menu-item-focused {
   background: var(--lc-hover, rgba(255, 255, 255, 0.08));
 }
 .context-menu-item-destructive {
   color: #f0a8a8;
 }
-.context-menu-item-destructive:hover {
+.context-menu-item-destructive:hover,
+.context-menu-item-destructive.context-menu-item-focused {
   background: rgba(255, 120, 120, 0.14);
 }
 
 
-/* ---- Workspace intelligence panels (Tasks / Summary / Context / PR) ---- */
-.ws-task-row,
-.ws-contribution-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--lc-border, #2a2a2a);
-}
-.ws-task-blocked {
-  border-left: 2px solid #d97706;
-  padding-left: 6px;
-}
-.ws-task-status,
+/* ---- Workspace intelligence panels (Summary / Context / PR) ---- */
 .ws-context-kind {
   max-width: 120px;
   flex: 0 0 auto;
@@ -3083,36 +3182,11 @@ pre.ws-file-editor-highlight.hljs {
   background: var(--lc-surface-muted, #141414);
   color: inherit;
 }
-.ws-contribution-files {
-  word-break: break-all;
-}
-.ws-current-chat-context {
-  margin: 4px 0 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--lc-border, #2a2a2a);
-  background: var(--lc-surface-raised, #161616);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-x: auto;
-  max-height: 220px;
-}
-.ws-summary-tasks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--lc-border, #2a2a2a);
-  padding-top: 8px;
-}
 .ws-pr-draft-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-}
-.ws-overlap-row .detail-value {
-  word-break: break-all;
 }
 
 
@@ -3432,6 +3506,11 @@ button.ws-tab-shell {
 .ws-tab-shell:hover {
   background: #191919;
 }
+.ws-chat-tab-shell:focus-visible,
+.ws-file-tab:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: -2px;
+}
 
 .ws-tab-shell.ws-tab-active {
   background: #1d1d1d;
@@ -3669,6 +3748,7 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 
 .compact-select-option:hover,
+.compact-select-option-focused,
 .compact-select-option-active {
   background: #292929;
   color: #f0f0f0;
@@ -3871,6 +3951,159 @@ button.ws-tab-shell.ws-chat-new:hover {
   color: #747474;
   font-size: 12px;
   line-height: 18px;
+}
+
+/* ---- Summary tab ----
+   Same flat vocabulary as the Checks tab above: one surface, quiet section
+   labels, single-line rows. Nothing here draws its own card. */
+.ws-summary-panel {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.ws-summary-status {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 4px;
+}
+
+.ws-summary-provenance {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-edit-active {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-summary-feedback {
+  color: #8a8a8a;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Agent prose. The panel is ~300px wide, so the shared .markdown-body sizes
+   are stepped down and headings stop competing with the section labels. */
+.ws-summary-prose {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #c6c6c6;
+  overflow-wrap: anywhere;
+}
+
+.ws-summary-prose h1,
+.ws-summary-prose h2,
+.ws-summary-prose h3 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.ws-summary-prose > :first-child {
+  margin-top: 0;
+}
+
+.ws-summary-prose ul,
+.ws-summary-prose ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.ws-summary-prose li {
+  margin: 1px 0;
+}
+
+.ws-summary-prose p {
+  margin: 4px 0;
+}
+
+.ws-summary-row {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  padding: 0 2px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-summary-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-summary-row-icon {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  color: #777777;
+}
+
+.ws-summary-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-row-detail,
+.ws-summary-row-status {
+  flex: 0 1 auto;
+  max-width: 96px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one write this panel keeps. Chromeless until hovered so a column of
+   these does not read as a form. */
+.ws-summary-row-select {
+  flex: 0 0 auto;
+  max-width: 88px;
+  /* The native arrow makes a column of these read as a form; the control is
+     still discoverable because the whole row lifts on hover. */
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: transparent;
+  color: #858585;
+  font: inherit;
+  font-size: 11px;
+  text-align: right;
+  cursor: pointer;
+}
+
+.ws-summary-row:hover .ws-summary-row-select,
+.ws-summary-row-select:focus {
+  background: #222222;
+  color: #d8d8d8;
+  outline: none;
+}
+
+.ws-summary-row-note {
+  padding: 0 2px 2px 22px;
+  color: #c08a4a;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.ws-summary-edit-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .ws-review-prompt-button {
@@ -4872,6 +5105,7 @@ button.ws-tab-shell.ws-chat-new:hover {
   max-width: 112px;
 }
 
+.compact-select-agent-model .compact-select-trigger,
 .compact-select-model .compact-select-trigger {
   max-width: 178px;
 }

@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { isDisplayableTimelineItem } from "./timeline";
 import type { ArchcarProjectionItem } from "@/bridge/protocol";
 
-// Text bubbles (assistant + reasoning) render only when finalized; command and
-// other cards render live so a running command shows immediately.
+// Assistant text renders only when finalized; reasoning, command, and other
+// activity cards render live so the agent's current state is visible.
 function item(overrides: Partial<ArchcarProjectionItem>): ArchcarProjectionItem {
   return {
     id: "x",
@@ -32,10 +32,10 @@ describe("isDisplayableTimelineItem", () => {
     ).toBe(true);
   });
 
-  it("hides streaming reasoning text", () => {
+  it("shows streaming reasoning text", () => {
     expect(
       isDisplayableTimelineItem(item({ render_class: "reasoning_card", stream_state: "streaming" })),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("shows command card while running", () => {

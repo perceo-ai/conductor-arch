@@ -676,7 +676,17 @@ fn projection_item_from_event(
     event: ProviderProjectionEvent,
 ) -> ProviderProjectionItem {
     let render_class = render_class_for_category(event.category);
-    let title = projection_title(event.category, &event.title);
+    let mut title_source = event.title;
+    let mut body = event.body;
+    if event.category == ProviderProjectionCategory::Reasoning
+        && body.trim().is_empty()
+        && !title_source.trim().is_empty()
+        && title_source.trim() != "Reasoning"
+    {
+        body = title_source;
+        title_source = String::new();
+    }
+    let title = projection_title(event.category, &title_source);
     let raw_payload = event
         .raw_payload
         .as_ref()
@@ -701,7 +711,7 @@ fn projection_item_from_event(
         category: event.category,
         render_class,
         title,
-        body: event.body,
+        body,
         status: event.status,
         stream_state: event.stream_state,
         parent_id: event.parent_id,
@@ -1110,6 +1120,55 @@ mod tests {
             .unwrap();
 
         assert!(provider_projection_item_is_relevant_chat_event(&item));
+    }
+
+    #[test]
+    fn reasoning_projection_renders_title_only_summary_as_body_text() {
+        let mut event = record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+            "item/reasoning/summaryTextDelta",
+        );
+        event.normalized_payload = json!({
+            "title": "Acknowledging ambiguous queue message",
+            "body": "",
+        });
+
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(item.render_class, ProjectionRenderClass::ReasoningCard);
+        assert_eq!(item.title, "Reasoning");
+        assert_eq!(item.body, "Acknowledging ambiguous queue message");
+        assert!(provider_projection_item_is_relevant_chat_event(&item));
+    }
+
+    #[test]
+    fn reasoning_projection_prefers_body_summary_over_generic_title() {
+        let mut event = record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Completed,
+            "item/reasoning/completed",
+        );
+        event.normalized_payload = json!({
+            "title": "Reasoning",
+            "body": "**Acknowledging ambiguous queue message**\n**Preparing status update**",
+        });
+
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(item.render_class, ProjectionRenderClass::ReasoningCard);
+        assert_eq!(
+            item.body,
+            "**Acknowledging ambiguous queue message**\n**Preparing status update**"
+        );
     }
 
     #[test]

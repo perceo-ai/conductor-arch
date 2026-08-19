@@ -25,8 +25,10 @@ export type IconName =
   | "panel-left"
   | "panel-right"
   | "paperclip"
+  | "pencil"
   | "play"
   | "plus"
+  | "refresh"
   | "circle-check"
   | "send"
   | "sidebar"
@@ -64,8 +66,10 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   "panel-left": () => <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,
   "panel-right": () => <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   paperclip: () => <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 1 1-2.83-2.83l8.49-8.48" />,
+  pencil: () => <><path d="M17 3.5a2.1 2.1 0 0 1 3 3L7.5 19 3 21l2-4.5Z" /><path d="m15 5.5 3 3" /></>,
   play: () => <path d="m6 3 15 9-15 9V3z" />,
   plus: () => <path d="M12 5v14m-7-7h14" />,
+  refresh: () => <><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16" /><path d="M3 12a9 9 0 0 1 15.3-6.4L21 8" /><path d="M21 4v4h-4" /><path d="M3 20v-4h4" /></>,
   "circle-check": () => <><circle cx="12" cy="12" r="9" /><path d="m8 12 2.6 2.6L16 9" /></>,
   send: () => <path d="m22 2-7 20-4-9-9-4 20-7z" />,
   sidebar: () => <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 4v16" /></>,

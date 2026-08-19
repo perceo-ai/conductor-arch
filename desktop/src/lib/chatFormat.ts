@@ -133,6 +133,12 @@ export function stripArchductorMetadata(text: string): string {
   return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export function formatReasoningText(text: string): string {
+  return stripArchductorMetadata(text)
+    .replace(/\*\*([^*\n][^*]*?)\*\*/g, "$1")
+    .trim();
+}
+
 export function isDiffCard(item: ArchcarProjectionItem): boolean {
   return item.render_class === "diff_card";
 }

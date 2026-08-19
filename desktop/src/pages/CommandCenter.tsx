@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
 import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
@@ -33,6 +33,7 @@ function TopBar(props: {
   rightCollapsed: boolean;
   onToggleRight: () => void;
 }) {
+  let openButton: HTMLButtonElement | undefined;
   const row = () => workspacesStore.row(props.workspace);
   const repoRoot = () => {
     const repo = row()?.repository;
@@ -68,6 +69,15 @@ function TopBar(props: {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     openContextMenuAt(rect.left, rect.bottom + 4, openItems());
   }
+  onMount(() => {
+    const onOpen = () => {
+      const rect = openButton?.getBoundingClientRect();
+      if (!rect) return;
+      openContextMenuAt(rect.left, rect.bottom + 4, openItems());
+    };
+    window.addEventListener("archductor:open-workspace-menu", onOpen);
+    onCleanup(() => window.removeEventListener("archductor:open-workspace-menu", onOpen));
+  });
   return (
     <div class="ws-topbar">
       <div class="ws-topbar-breadcrumb">
@@ -76,7 +86,7 @@ function TopBar(props: {
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
       </div>
       <div class="ws-topbar-actions">
-        <button class="ws-open-menu-button ws-topbar-btn" title="Open" onClick={openMenu}>
+        <button class="ws-open-menu-button ws-topbar-btn" title="Open" ref={openButton} onClick={openMenu}>
           <Icon name="external" />
           <Icon name="chevron-down" class="ws-open-menu-chevron" />
         </button>
@@ -108,7 +118,12 @@ function RightPanel(props: { workspace: string }) {
     return "";
   };
   return (
-    <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
+    <aside
+      class="ws-right-panel"
+      data-focus-target="workspace-panel"
+      tabIndex={-1}
+      style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}
+    >
       <ResizeHandle
         edge="left"
         width={width}
@@ -176,6 +191,11 @@ function RightPanel(props: { workspace: string }) {
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
   const [rightCollapsed, setRightCollapsed] = createSignal(false);
+  onMount(() => {
+    const onToggle = () => setRightCollapsed((c) => !c);
+    window.addEventListener("archductor:toggle-right-panel", onToggle);
+    onCleanup(() => window.removeEventListener("archductor:toggle-right-panel", onToggle));
+  });
 
   return (
     <Show
@@ -183,7 +203,7 @@ export default function CommandCenter() {
       fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}
     >
       {(ws) => (
-        <div class="ws-command-center page-shell">
+        <div class="ws-command-center page-shell" data-focus-target="workspace-main" tabIndex={-1}>
           <div class="ws-center">
             <TopBar
               workspace={ws()}

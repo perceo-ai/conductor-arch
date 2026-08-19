@@ -10,7 +10,7 @@ describe("prefsStore", () => {
   it("defaults to a concrete codex model", async () => {
     const { prefsStore } = await import("./prefs");
     expect(prefsStore.state.defaultProvider).toBe("codex");
-    expect(prefsStore.state.defaultModel).toBe("gpt-5.5");
+    expect(prefsStore.state.defaultModel).toBe("gpt-5.6-sol");
   });
 
   it("derives the provider when the default model changes", async () => {
@@ -26,7 +26,7 @@ describe("prefsStore", () => {
     // Same provider as the default → use the exact default model.
     expect(prefsStore.seedModelFor("claude")).toBe("claude-sonnet-5");
     // Different provider → fall back to that provider's first model.
-    expect(prefsStore.seedModelFor("codex")).toBe("gpt-5.5");
+    expect(prefsStore.seedModelFor("codex")).toBe("gpt-5.6-sol");
   });
 
   it("defaults appearance to dark / amber / cozy", async () => {
@@ -51,6 +51,13 @@ describe("prefsStore", () => {
     expect(prefsStore.state.sidebarCollapsed).toBe(false);
     prefsStore.setSidebarCollapsed(true);
     expect(prefsStore.state.sidebarCollapsed).toBe(true);
+  });
+
+  it("tracks custom keyboard bindings", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.keybindings).toBe("");
+    prefsStore.setKeybindings("palette=ctrl+p; focus=ctrl+shift+f");
+    expect(prefsStore.state.keybindings).toBe("palette=ctrl+p; focus=ctrl+shift+f");
   });
 
   it("exposes a hex for every accent", async () => {

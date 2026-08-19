@@ -239,6 +239,23 @@ export function applyEvent(event: ArchcarEvent) {
       break;
     }
 
+    case "workspace_renamed": {
+      // The naming pipeline renamed this workspace server-side (first-message
+      // agent metadata, or a pull request title). Everything here keys off the
+      // name, so re-point selection before reloading or the open workspace goes
+      // blank.
+      const e = event as { old_name: string; new_name: string };
+      if (nav.selectedWorkspace() === e.old_name) nav.selectWorkspace(e.new_name);
+      void refreshWorkspaceInventoryAndChats();
+      break;
+    }
+
+    case "chat_thread_renamed": {
+      // Retitled from agent metadata; the tab strip reads the thread list.
+      void refreshThreadWorkspace((event as { thread_id: number }).thread_id);
+      break;
+    }
+
     default:
       // session_screen_updated, session_exited, etc. handled by the surfaces that
       // care (e.g. terminal) once those pages exist.

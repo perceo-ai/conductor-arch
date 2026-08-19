@@ -160,3 +160,25 @@ describe("applyEvent chat attention", () => {
     expect(chatStore.slice(1).completedTurnAttention).toBe(false);
   });
 });
+
+describe("applyEvent workspace renames", () => {
+  it("follows a server-side rename so the open workspace does not go blank", async () => {
+    const { applyEvent } = await import("./reducer");
+    const { nav } = await import("./nav");
+
+    nav.selectWorkspace("berlin");
+    applyEvent({ type: "workspace_renamed", old_name: "berlin", new_name: "billing-webhook-fix" });
+
+    expect(nav.selectedWorkspace()).toBe("billing-webhook-fix");
+  });
+
+  it("leaves selection alone when a different workspace is renamed", async () => {
+    const { applyEvent } = await import("./reducer");
+    const { nav } = await import("./nav");
+
+    nav.selectWorkspace("berlin");
+    applyEvent({ type: "workspace_renamed", old_name: "oslo", new_name: "parser-cleanup" });
+
+    expect(nav.selectedWorkspace()).toBe("berlin");
+  });
+});

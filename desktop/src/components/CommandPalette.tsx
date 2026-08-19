@@ -13,10 +13,11 @@ import type { Accent } from "@/store/prefs";
 import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
+import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 import { send } from "@/bridge/client";
 import { openFileInCenter } from "@/pages/openFileBridge";
 
-// Command palette — Cmd/Ctrl+K global launcher, ported from the GTK command
+// Command palette — customizable global launcher, ported from the GTK command
 // palette (crates/gtk-app command_palette). Fuzzy-filters a flat command list
 // spanning page navigation, workspace jumps, workspace-tab switches, and
 // create/lifecycle actions. Keyboard-first: ↑/↓ move, Enter runs, Esc closes.
@@ -39,6 +40,7 @@ export default function CommandPalette() {
   const [open, setOpen] = createSignal(false);
   const [query, setQuery] = createSignal("");
   const [cursor, setCursor] = createSignal(0);
+  const activeShortcuts = createMemo(() => parseKeybindingOverrides(prefsStore.state.keybindings));
   let inputRef: HTMLInputElement | undefined;
 
   function close() {
@@ -56,7 +58,8 @@ export default function CommandPalette() {
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+      const action = resolveShortcut(e, activeShortcuts());
+      if (action === "open-palette" || action === "quick-open") {
         e.preventDefault();
         toggle();
       } else if (e.key === "Escape" && open()) {
@@ -64,11 +67,19 @@ export default function CommandPalette() {
         close();
       }
     };
+    const onOpen = () => {
+      setOpen(true);
+      queueMicrotask(() => inputRef?.focus());
+    };
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    window.addEventListener("archductor:open-command-palette", onOpen);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("archductor:open-command-palette", onOpen);
+    });
   });
 
-  // Fuzzy file open (conductor's Cmd+P): load the selected workspace's file
+  // Fuzzy file open: load the selected workspace's file
   // list while the palette is open, and surface "Open <path>" commands once the
   // user starts typing so they don't bury navigation on the empty palette.
   const [files] = createResource(
@@ -158,6 +169,13 @@ export default function CommandPalette() {
       hint: "Help",
       group: "Help",
       run: () => uiStore.setHelpOpen(true),
+    });
+    list.push({
+      id: "help:customize-shortcuts",
+      label: "Customize keyboard bindings",
+      hint: "Settings",
+      group: "Help",
+      run: () => nav.goToPage("settings"),
     });
     // Actions.
     list.push({
