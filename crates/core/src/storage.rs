@@ -557,6 +557,15 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "review_notes",
         "ALTER TABLE tasks ADD COLUMN review_notes TEXT NOT NULL DEFAULT ''",
     )?;
+    // Set when the hidden naming request has been attached to a message for this
+    // chat. Asking is a one-shot; inferring it from queue/message state races the
+    // in-flight first message.
+    ensure_column(
+        conn,
+        "chat_threads",
+        "naming_requested_at",
+        "ALTER TABLE chat_threads ADD COLUMN naming_requested_at TEXT",
+    )?;
     Ok(())
 }
 

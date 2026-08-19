@@ -787,7 +787,12 @@ impl WorkspaceStore {
             .iter()
             .find(|task| task.status != "done")
             .map(|task| task.title.clone())
-            .or_else(|| sessions.first().map(|session| session.title.clone()))
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find(|session| !is_placeholder_chat_title(&session.title))
+                    .map(|session| session.title.clone())
+            })
             .unwrap_or_else(|| format!("Work on branch {}", workspace.branch));
         out.push_str(&format!("{goal}\n\n"));
 
@@ -1339,6 +1344,15 @@ impl WorkspaceStore {
             .iter()
             .find(|task| task.status != "done")
             .map(|task| task.title.clone())
+            // The first chat's agent-supplied title describes the task in prose;
+            // a branch slug with the dashes swapped out does not.
+            .or_else(|| {
+                self.list_chat_threads(workspace_name)
+                    .ok()?
+                    .into_iter()
+                    .find(|thread| !is_placeholder_chat_title(&thread.title))
+                    .map(|thread| thread.title)
+            })
             .unwrap_or_else(|| {
                 let branch = workspace
                     .branch
@@ -1786,6 +1800,14 @@ fn extract_action_items(content: &str) -> Vec<String> {
                 .then(|| item.to_owned())
         })
         .collect()
+}
+
+/// Chats open on a placeholder title and keep it until the agent supplies a real
+/// one. Surfacing "New chat" as a goal or a pull request title is worse than
+/// falling through to the branch name.
+fn is_placeholder_chat_title(title: &str) -> bool {
+    let title = title.trim();
+    title.is_empty() || title.eq_ignore_ascii_case("new chat")
 }
 
 fn next_actions(
@@ -2499,6 +2521,43 @@ mod tests {
         assert!(body.contains("## Tasks"), "{body}");
         assert!(body.contains("waiting on gh auth"), "{body}");
         assert!(body.contains("No checks were run"), "{body}");
+    }
+
+    #[test]
+    fn drafts_prefer_a_named_chat_over_the_branch_slug() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .create_chat_thread("berlin", "codex", "Retry failed billing webhooks", None)
+            .unwrap();
+
+        // No tasks yet, so the agent-supplied chat title is the best description
+        // available — better than "berlin" with its dashes swapped out.
+        let (title, _) = store.draft_pull_request("berlin").unwrap();
+        assert_eq!(title, "Retry failed billing webhooks");
+        let summary = store.draft_workspace_summary("berlin").unwrap();
+        assert!(
+            summary.contains("Retry failed billing webhooks"),
+            "{summary}"
+        );
+        assert!(!summary.contains("## Goal\n\nNew chat"), "{summary}");
+    }
+
+    #[test]
+    fn drafts_fall_back_to_the_branch_when_every_chat_is_unnamed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+
+        let (title, _) = store.draft_pull_request("berlin").unwrap();
+        assert_eq!(title, "berlin");
+        let summary = store.draft_workspace_summary("berlin").unwrap();
+        assert!(summary.contains("Work on branch lc/berlin"), "{summary}");
     }
 
     #[test]
