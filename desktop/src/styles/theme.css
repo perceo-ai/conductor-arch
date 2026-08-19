@@ -3595,7 +3595,7 @@ button.ws-tab-shell {
 /* Prose needs breathing room from the actions above it; chips next to chips do
    not. Spacing is charged at the boundary, not to every row. */
 .chat-agent-text:not(:first-child),
-.chat-reasoning-text:not(:first-child),
+.chat-reasoning-block:not(:first-child),
 .chat-user-row:not(:first-child) {
     margin-top: 8px;
 }
@@ -3609,13 +3609,34 @@ button.ws-tab-shell {
     margin-top: 0;
 }
 .chat-inline-event + .chat-agent-text,
-.chat-inline-event + .chat-reasoning-text {
+.chat-inline-event + .chat-reasoning-block {
     margin-top: 10px;
 }
-.chat-reasoning-text {
-    color: #8f8f8f;
+.chat-reasoning-block {
+    margin: 0;
+    color: #a8a8a8;
+}
+.chat-reasoning-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+    color: #c9c9c9;
     font-size: 13px;
-    line-height: 1.45;
+    font-weight: 650;
+}
+.chat-reasoning-icon {
+    width: 14px;
+    height: 14px;
+    color: #a7a7a7;
+}
+.chat-reasoning-title {
+    line-height: 1.2;
+}
+.chat-reasoning-text {
+    color: #a8a8a8;
+    font-size: 14px;
+    line-height: 1.55;
     margin: 0;
 }
 .chat-inline-event {
@@ -4748,4 +4769,3 @@ textarea:focus {
     min-width: 14px;
     min-height: 14px;
 }
-

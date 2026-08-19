@@ -1,10 +1,10 @@
 import type { ArchcarProjectionItem } from "@/bridge/protocol";
 import { isRenderableClass } from "./chatFormat";
 
-// Text bubbles (assistant + reasoning) only render once finalized; everything
-// else — command/process/diff/tool cards, user input — renders live so the user
-// sees a command the moment it runs, then its final output.
-const TEXT_FINALIZED_ONLY = new Set(["assistant_chat", "reasoning_card"]);
+// Assistant answer text only renders once finalized to avoid partial markdown
+// churn. Reasoning/thinking and command/tool cards render live so the user can
+// see what the agent is doing mid-turn.
+const TEXT_FINALIZED_ONLY = new Set(["assistant_chat"]);
 
 export function isDisplayableTimelineItem(item: ArchcarProjectionItem): boolean {
   // Strict allowlist (GTK parity): only known text + inline-event classes render;

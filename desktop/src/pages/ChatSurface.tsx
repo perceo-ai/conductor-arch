@@ -222,6 +222,29 @@ function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean })
   );
 }
 
+function ReasoningBlock(props: { item: ArchcarProjectionItem }) {
+  const title = () => {
+    const raw = props.item.title.trim();
+    return !raw || raw.toLowerCase() === "reasoning" ? "Thinking" : raw;
+  };
+  return (
+    <section
+      class="chat-reasoning-block"
+      classList={{ "chat-reasoning-block-streaming": props.item.stream_state === "streaming" }}
+      aria-label={title()}
+    >
+      <div class="chat-reasoning-head">
+        <Icon name={eventIcon("reasoning_card")} class="chat-reasoning-icon" />
+        <span class="chat-reasoning-title">{title()}</span>
+      </div>
+      <div
+        class="chat-reasoning-text markdown-body"
+        innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
+      />
+    </section>
+  );
+}
+
 // Agent asked for something mid-turn (permission / question / plan approval).
 // Rendered above the composer with actionable buttons; resolving it unblocks the
 // turn (else tools that require approval silently stall).
@@ -357,7 +380,7 @@ function TimelineItem(props: { item: ArchcarProjectionItem; agentIdle: boolean }
         />
       </Match>
       <Match when={cls() === "reasoning_card"}>
-        <div class="chat-reasoning-text markdown-body" innerHTML={renderMarkdown(props.item.body)} />
+        <ReasoningBlock item={props.item} />
       </Match>
     </Switch>
   );
