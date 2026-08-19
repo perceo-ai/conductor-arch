@@ -4706,11 +4706,12 @@ impl WorkspaceStore {
 
     pub fn create_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
         let template = self.render_pull_request_template(name)?;
+        let context = self.workspace_action_context(name)?;
         self.append_resolved_prompt(
             name,
             PromptKind::CreatePr,
             format!(
-                "Prepare this workspace for a pull request.\n\nDraft title:\n{}\n\nDraft body:\n{}\n\nUse the active repository workflow. Commit any appropriate uncommitted changes, push the branch, create the PR with this draft, refresh PR state, and report the final PR URL.",
+                "Prepare this workspace for a pull request.\n\n{context}\n\nDraft title:\n{}\n\nDraft body:\n{}\n\nUse the active repository workflow. Commit any appropriate uncommitted changes, push the branch, create the PR with this draft, refresh PR state, and report the final PR URL.",
                 template.title.trim(),
                 template.body.trim()
             ),
@@ -4720,6 +4721,7 @@ impl WorkspaceStore {
     pub fn push_branch_agent_prompt(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let changed_files = self.changed_files(name)?;
+        let context = self.workspace_action_context(name)?;
         let files = if changed_files.is_empty() {
             "No uncommitted files detected.".to_owned()
         } else {
@@ -4733,13 +4735,14 @@ impl WorkspaceStore {
             name,
             PromptKind::PushBranch,
             format!(
-                "Prepare and push branch `{}` for workspace `{}`.\n\nChanged files:\n{}\n\nInspect the diff, commit any appropriate remaining changes, push the branch to the configured remote, refresh PR state if a PR exists, and report what changed.",
+                "Prepare and push branch `{}` for workspace `{}`.\n\n{context}\n\nChanged files:\n{}\n\nInspect the diff, commit any appropriate remaining changes, push the branch to the configured remote, refresh PR state if a PR exists, and report what changed.",
                 workspace.branch, workspace.name, files
             ),
         )
     }
 
     pub fn merge_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        let context = self.workspace_action_context(name)?;
         let readiness = self
             .pull_request_readiness_agent_prompt(name)
             .unwrap_or_else(|_| format!("Verify workspace `{name}` is ready to merge."));
@@ -4747,20 +4750,25 @@ impl WorkspaceStore {
             name,
             PromptKind::MergePr,
             format!(
-                "{readiness}\n\nIf the pull request is mergeable, merge it using the repository's configured method. If anything is blocked, fix the blocker or report the exact reason."
+                "{readiness}\n\n{context}\n\nIf the pull request is mergeable, merge it using the repository's configured method. If anything is blocked, fix the blocker or report the exact reason."
             ),
         )
     }
 
     pub fn review_pull_request_agent_prompt(&self, name: &str) -> Result<String> {
+        let context = self.workspace_action_context(name)?;
         self.pull_request_readiness_agent_prompt(name)
-            .or_else(|_| self.pull_request_review_agent_prompt(name))
+            .map(|prompt| format!("{prompt}\n\n{context}"))
+            .or_else(|_| {
+                self.pull_request_review_agent_prompt(name)
+                    .map(|prompt| format!("{prompt}\n\n{context}"))
+            })
             .or_else(|_| {
                 self.append_resolved_prompt(
                     name,
                     PromptKind::CodeReview,
                     format!(
-                        "Review the pull request state for workspace `{name}`, resolve actionable blockers through code changes where appropriate, and report what remains."
+                        "Review the pull request state for workspace `{name}`, resolve actionable blockers through code changes where appropriate, and report what remains.\n\n{context}"
                     ),
                 )
             })
@@ -5200,9 +5208,132 @@ mutation($threadId: ID!) {{
             .collect::<Vec<_>>();
         self.append_resolved_prompt(
             name,
-            PromptKind::CodeReview,
-            format_review_comments_agent_prompt(name, &comments),
+            PromptKind::ReviewComments,
+            format!(
+                "{}\n\n{}",
+                format_review_comments_agent_prompt(name, &comments),
+                self.workspace_action_context(name)?
+            ),
         )
+    }
+
+    fn workspace_action_context(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let repository_label = repository
+            .root_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository");
+        let mut lines = vec![
+            "Workspace context:".to_owned(),
+            format!("- Workspace: {}", workspace.name),
+            format!("- Repository: {}", repository_label),
+            format!("- Branch: {}", workspace.branch),
+            format!("- Base ref: {}", workspace_base_ref(&workspace)),
+            format!("- Workspace path: {}", workspace.path.display()),
+        ];
+
+        if let Ok(Some(pr)) = self.pull_request_by_workspace_id(workspace.id) {
+            lines.push(format!(
+                "- Pull request: #{} {} ({})",
+                pr.number, pr.state, pr.url
+            ));
+        } else {
+            lines.push("- Pull request: none recorded".to_owned());
+        }
+
+        if let Ok(summary) = self.checks_summary(name) {
+            lines.push(format!(
+                "- Status: changed_files={} run={} check={}{} session={} active_sessions={} todos={}/{} review_comments={} source_ahead={} conflicts={}",
+                summary.changed_files,
+                summary
+                    .run_status
+                    .map(ProcessStatus::as_str)
+                    .unwrap_or("unknown"),
+                summary
+                    .check_status
+                    .map(ProcessStatus::as_str)
+                    .unwrap_or("unknown"),
+                summary
+                    .check_exit_code
+                    .map(|code| format!(" exit={code}"))
+                    .unwrap_or_default(),
+                summary
+                    .session_status
+                    .map(ProcessStatus::as_str)
+                    .unwrap_or("unknown"),
+                summary.active_sessions,
+                summary.open_todos,
+                summary.total_todos,
+                summary.open_review_comments,
+                summary.source_branch_ahead,
+                summary.conflicting_workspaces.len()
+            ));
+            if !summary.conflicting_workspaces.is_empty() {
+                lines.push("- Conflicting sibling workspaces:".to_owned());
+                for (sibling, files) in summary.conflicting_workspaces.iter().take(5) {
+                    lines.push(format!("  - {sibling}: {}", files.join(", ")));
+                }
+            }
+        }
+
+        if let Ok(status) = self.git_status_short(name) {
+            let status = status.trim();
+            if !status.is_empty() {
+                lines.push("- Git status:".to_owned());
+                lines.extend(status.lines().take(30).map(|line| format!("  {line}")));
+            }
+        }
+
+        if let Ok(diff_stats) = self.diff_stats_against_base(name) {
+            lines.push(format!(
+                "- Diff against base: +{} -{}",
+                diff_stats.0, diff_stats.1
+            ));
+        }
+
+        if let Ok(files) = self.all_file_change_summaries(name) {
+            let files = files
+                .into_iter()
+                .filter(|file| !is_conductor_context_path(&file.path))
+                .take(30)
+                .collect::<Vec<_>>();
+            if !files.is_empty() {
+                lines.push("- Files changed against base:".to_owned());
+                lines.extend(files.iter().map(|file| {
+                    let additions = file
+                        .additions
+                        .map(|count| format!("+{count}"))
+                        .unwrap_or_else(|| "+binary".to_owned());
+                    let deletions = file
+                        .deletions
+                        .map(|count| format!("-{count}"))
+                        .unwrap_or_else(|| "-binary".to_owned());
+                    format!("  - {} ({additions} {deletions})", file.path)
+                }));
+            }
+        }
+
+        if let Ok(commits) = self.commit_file_change_summaries(name, 5) {
+            if !commits.is_empty() {
+                lines.push("- Recent branch commits:".to_owned());
+                lines.extend(commits.iter().map(|commit| {
+                    let short = commit.commit.chars().take(7).collect::<String>();
+                    format!("  - {short} {}", commit.subject)
+                }));
+            }
+        }
+
+        if let Ok(Some(summary)) = self.latest_session_summary(&workspace) {
+            let summary = truncate_chars(summary.trim(), 1200);
+            if !summary.is_empty() {
+                lines.push("- Latest session summary:".to_owned());
+                lines.push(summary);
+            }
+        }
+
+        Ok(lines.join("\n"))
     }
 
     fn append_resolved_prompt(
@@ -19596,6 +19727,67 @@ general = "Keep changes focused."
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn git_action_prompt_includes_prompt_pack_instructions_and_workspace_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join(".archductor/prompt-packs")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[prompt_pack]
+active = "team"
+path = ".archductor/prompt-packs/team.toml"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            repo_path.join(".archductor/prompt-packs/team.toml"),
+            r#"
+name = "team"
+version = "v1"
+
+[prompts]
+create_pr = "Team PR rule: include screenshots when UI changes."
+"#,
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nmore\n").unwrap();
+
+        let prompt = store.create_pull_request_agent_prompt("berlin").unwrap();
+
+        assert!(prompt.contains("Prepare this workspace for a pull request."));
+        assert!(prompt.contains("Workspace context:"));
+        assert!(prompt.contains("- Repository: demo"));
+        assert!(prompt.contains("- Branch: lc/berlin"));
+        assert!(prompt.contains("README.md"));
+        assert!(prompt.contains("- Diff against base: +1 -0"));
+        assert!(prompt.contains("Repository instructions:"));
+        assert!(prompt.contains("Team PR rule: include screenshots when UI changes."));
     }
 
     #[test]
