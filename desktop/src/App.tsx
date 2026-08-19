@@ -73,6 +73,13 @@ const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "switch-workspace-9",
 ]);
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select";
+}
+
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsedRaw] = createSignal(prefsStore.state.sidebarCollapsed);
   const setSidebarCollapsed = (next: boolean | ((c: boolean) => boolean)) => {
@@ -162,6 +169,7 @@ export default function App() {
         setHelpOpen(false);
         return;
       }
+      if (isTypingTarget(e.target)) return;
       const action = resolveShortcut(e, activeShortcuts());
       if (!action || action === "open-palette") return;
       if (!GLOBAL_SHORTCUT_ACTIONS.has(action)) return;

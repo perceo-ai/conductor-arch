@@ -23,6 +23,11 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("b", true))).toBe("toggle-sidebar");
   });
 
+  it("does not treat Space as a disabled empty shortcut", () => {
+    expect(resolveShortcut(ev(" "))).toBeNull();
+    expect(resolveShortcut(ev("Space"))).toBeNull();
+  });
+
   it("maps nav and page shortcuts", () => {
     expect(resolveShortcut(ev("[", true))).toBe("nav-back");
     expect(resolveShortcut(ev("]", true))).toBe("nav-forward");
@@ -71,17 +76,17 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("O", true))).toBe("open-in-app");
     expect(resolveShortcut(ev("O", true, true))).toBe("open-menu");
     expect(resolveShortcut(ev("C", true, true))).toBe("copy-link");
-    expect(resolveShortcut(ev("F", false, false, true))).toBe("show-files");
-    expect(resolveShortcut(ev("C", false, false, true))).toBe("show-uncommitted");
-    expect(resolveShortcut(ev("C", false, true, true))).toBe("show-checks");
-    expect(resolveShortcut(ev("N", false, false, true))).toBe("show-summary");
+    expect(resolveShortcut(ev("F", true, false, true))).toBe("show-files");
+    expect(resolveShortcut(ev("C", true, false, true))).toBe("show-uncommitted");
+    expect(resolveShortcut(ev("C", true, true, true))).toBe("show-checks");
+    expect(resolveShortcut(ev("N", true, false, true))).toBe("show-summary");
   });
 
   it("maps surface action shortcuts through the customizable resolver", () => {
     expect(resolveShortcut(ev("s", true))).toBe("save");
     expect(resolveShortcut(ev("Enter", true))).toBe("send-immediate");
     expect(resolveShortcut(ev("t", true))).toBe("new-chat");
-    expect(resolveShortcut(ev("Tab", false, true))).toBe("toggle-plan-mode");
+    expect(resolveShortcut(ev("Tab", true, true))).toBe("toggle-plan-mode");
     expect(resolveShortcut(ev("Enter", true, true))).toBe("approve-plan");
   });
 
@@ -99,6 +104,17 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut({ key: "Enter", ctrlKey: false, metaKey: true, shiftKey: false }, shortcuts)).toBe(
       "send-immediate",
     );
+  });
+
+  it("rejects custom shortcuts without the primary modifier", () => {
+    const shortcuts = parseKeybindingOverrides(
+      "dashboard=space; files=alt+f; plan=shift+tab; settings=ctrl+.",
+      DEFAULT_SHORTCUTS,
+    );
+    expect(resolveShortcut(ev(" "))).toBeNull();
+    expect(resolveShortcut(ev("F", false, false, true), shortcuts)).toBeNull();
+    expect(resolveShortcut(ev("Tab", false, true), shortcuts)).toBeNull();
+    expect(resolveShortcut(ev(".", true), shortcuts)).toBe("goto-settings");
   });
 
   it("keeps invalid custom bindings out of the active map", () => {

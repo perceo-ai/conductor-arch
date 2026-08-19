@@ -120,11 +120,11 @@ export const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
   { action: "open-in-app", keys: "mod+o", label: "Open in app", aliases: ["open"] },
   { action: "open-menu", keys: "mod+shift+o", label: "Open in menu", aliases: ["open-menu"] },
   { action: "copy-link", keys: "mod+shift+c", label: "Copy link", aliases: ["copy-link", "copy"] },
-  { action: "show-uncommitted", keys: "alt+c", label: "Show uncommitted changes", aliases: ["uncommitted"] },
-  { action: "show-files", keys: "alt+f", label: "Show files", aliases: ["files"] },
-  { action: "show-checks", keys: "shift+alt+c", label: "Show checks", aliases: ["checks"] },
-  { action: "show-summary", keys: "alt+n", label: "Show notes", aliases: ["notes", "summary"] },
-  { action: "toggle-plan-mode", keys: "shift+tab", label: "Toggle plan mode", aliases: ["plan"] },
+  { action: "show-uncommitted", keys: "mod+alt+c", label: "Show uncommitted changes", aliases: ["uncommitted"] },
+  { action: "show-files", keys: "mod+alt+f", label: "Show files", aliases: ["files"] },
+  { action: "show-checks", keys: "mod+shift+alt+c", label: "Show checks", aliases: ["checks"] },
+  { action: "show-summary", keys: "mod+alt+n", label: "Show notes", aliases: ["notes", "summary"] },
+  { action: "toggle-plan-mode", keys: "mod+shift+tab", label: "Toggle plan mode", aliases: ["plan"] },
   { action: "approve-plan", keys: "mod+shift+enter", label: "Approve plan", aliases: ["approve"] },
   { action: "save", keys: "mod+s", label: "Save", aliases: ["save"] },
   { action: "send-immediate", keys: "mod+enter", label: "Send immediately", aliases: ["send", "steer"] },
@@ -143,22 +143,25 @@ function actionForName(name: string): ShortcutAction | null {
 }
 
 function normalizeKeyName(key: string): string {
-  const lower = key.trim().toLowerCase();
-  if (lower === "cmd" || lower === "command" || lower === "meta") return "meta";
-  if (lower === "control" || lower === "ctl") return "ctrl";
-  if (lower === "option") return "alt";
-  if (lower === "esc") return "escape";
-  if (lower === "left") return "arrowleft";
-  if (lower === "right") return "arrowright";
-  if (lower === "up") return "arrowup";
-  if (lower === "down") return "arrowdown";
-  return lower;
+  const lower = key.toLowerCase();
+  if (lower === " ") return "space";
+  const trimmed = lower.trim();
+  if (trimmed === "space" || trimmed === "spacebar") return "space";
+  if (!trimmed) return "";
+  if (trimmed === "cmd" || trimmed === "command" || trimmed === "meta") return "meta";
+  if (trimmed === "control" || trimmed === "ctl") return "ctrl";
+  if (trimmed === "option") return "alt";
+  if (trimmed === "esc") return "escape";
+  if (trimmed === "left") return "arrowleft";
+  if (trimmed === "right") return "arrowright";
+  if (trimmed === "up") return "arrowup";
+  if (trimmed === "down") return "arrowdown";
+  return trimmed;
 }
 
 function normalizeChord(chord: string): string | null {
   const raw = chord.trim();
   if (!raw) return null;
-  if (raw === "?") return "?";
   const parts = raw.split("+").map(normalizeKeyName).filter(Boolean);
   if (parts.length === 0) return null;
   const key = parts.at(-1);
@@ -172,6 +175,7 @@ function normalizeChord(chord: string): string | null {
     modifiers.delete("ctrl");
     modifiers.delete("meta");
   }
+  if (!modifiers.has("mod")) return null;
   const ordered = ["mod", "shift", "alt"].filter((part) => modifiers.has(part));
   return [...ordered, key].join("+");
 }
@@ -239,7 +243,7 @@ export function parseKeybindingOverrides(raw: string | undefined, base: Shortcut
 
 export function resolveShortcut(e: KeyEventLike, shortcuts: ShortcutMap = DEFAULT_SHORTCUTS): ShortcutAction | null {
   const chord = eventChord(e);
-  const binding = shortcuts.find((candidate) => candidate.keys === chord);
+  const binding = shortcuts.find((candidate) => candidate.keys && candidate.keys === chord);
   return binding?.action ?? null;
 }
 
