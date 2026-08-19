@@ -404,7 +404,7 @@ function reviewStatusTone(summary: ArchcarChecksSummary | null | undefined, read
   return "unknown";
 }
 
-function CheckGlyph(props: { tone: PrCheckRow["tone"] }) {
+export function CheckGlyph(props: { tone: PrCheckRow["tone"] }) {
   return (
     <span class={`ws-check-glyph ws-check-glyph-${props.tone}`}>
       {props.tone === "passed" ? "✓" : props.tone === "failed" ? "×" : props.tone === "running" ? "•" : "○"}

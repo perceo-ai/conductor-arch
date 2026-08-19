@@ -3164,20 +3164,7 @@ pre.ws-file-editor-highlight.hljs {
 }
 
 
-/* ---- Workspace intelligence panels (Tasks / Summary / Context / PR) ---- */
-.ws-task-row,
-.ws-contribution-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--lc-border, #2a2a2a);
-}
-.ws-task-blocked {
-  border-left: 2px solid #d97706;
-  padding-left: 6px;
-}
-.ws-task-status,
+/* ---- Workspace intelligence panels (Summary / Context / PR) ---- */
 .ws-context-kind {
   max-width: 120px;
   flex: 0 0 auto;
@@ -3195,36 +3182,11 @@ pre.ws-file-editor-highlight.hljs {
   background: var(--lc-surface-muted, #141414);
   color: inherit;
 }
-.ws-contribution-files {
-  word-break: break-all;
-}
-.ws-current-chat-context {
-  margin: 4px 0 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--lc-border, #2a2a2a);
-  background: var(--lc-surface-raised, #161616);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-x: auto;
-  max-height: 220px;
-}
-.ws-summary-tasks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--lc-border, #2a2a2a);
-  padding-top: 8px;
-}
 .ws-pr-draft-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-}
-.ws-overlap-row .detail-value {
-  word-break: break-all;
 }
 
 
@@ -3989,6 +3951,159 @@ button.ws-tab-shell.ws-chat-new:hover {
   color: #747474;
   font-size: 12px;
   line-height: 18px;
+}
+
+/* ---- Summary tab ----
+   Same flat vocabulary as the Checks tab above: one surface, quiet section
+   labels, single-line rows. Nothing here draws its own card. */
+.ws-summary-panel {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.ws-summary-status {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 4px;
+}
+
+.ws-summary-provenance {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-edit-active {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-summary-feedback {
+  color: #8a8a8a;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Agent prose. The panel is ~300px wide, so the shared .markdown-body sizes
+   are stepped down and headings stop competing with the section labels. */
+.ws-summary-prose {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #c6c6c6;
+  overflow-wrap: anywhere;
+}
+
+.ws-summary-prose h1,
+.ws-summary-prose h2,
+.ws-summary-prose h3 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.ws-summary-prose > :first-child {
+  margin-top: 0;
+}
+
+.ws-summary-prose ul,
+.ws-summary-prose ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.ws-summary-prose li {
+  margin: 1px 0;
+}
+
+.ws-summary-prose p {
+  margin: 4px 0;
+}
+
+.ws-summary-row {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  padding: 0 2px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-summary-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-summary-row-icon {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  color: #777777;
+}
+
+.ws-summary-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-row-detail,
+.ws-summary-row-status {
+  flex: 0 1 auto;
+  max-width: 96px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one write this panel keeps. Chromeless until hovered so a column of
+   these does not read as a form. */
+.ws-summary-row-select {
+  flex: 0 0 auto;
+  max-width: 88px;
+  /* The native arrow makes a column of these read as a form; the control is
+     still discoverable because the whole row lifts on hover. */
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: transparent;
+  color: #858585;
+  font: inherit;
+  font-size: 11px;
+  text-align: right;
+  cursor: pointer;
+}
+
+.ws-summary-row:hover .ws-summary-row-select,
+.ws-summary-row-select:focus {
+  background: #222222;
+  color: #d8d8d8;
+  outline: none;
+}
+
+.ws-summary-row-note {
+  padding: 0 2px 2px 22px;
+  color: #c08a4a;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.ws-summary-edit-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .ws-review-prompt-button {
