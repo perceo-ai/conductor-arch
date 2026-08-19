@@ -757,7 +757,6 @@ function Composer(props: {
     const prevText = text();
     const prevAtts = attachments();
     const prevPicks = newChatContextStore.picks(props.threadId);
-    const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
     // Say "starting" before the daemon's first event arrives: spawning the
     // agent takes seconds, and silence there reads as a dropped message.
@@ -775,7 +774,6 @@ function Composer(props: {
       });
       if (res.type === "error") throw new Error(res.message);
     } catch (err) {
-      chatStore.removeOptimistic(props.threadId, pendingId);
       chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
       setText(prevText);
       setAttachments(prevAtts);
@@ -862,7 +860,6 @@ function Composer(props: {
   async function steerQueued(q: { id: number; input: string; visible_input?: string }) {
     const sid = sessionId();
     if (sid == null) return;
-    const pendingId = addOptimisticMessage(q.visible_input ?? q.input);
     try {
       await send({
         type: "send_input",
@@ -876,7 +873,6 @@ function Composer(props: {
       // send would silently discard the user's message.
       await removeQueued(q.id);
     } catch {
-      chatStore.removeOptimistic(props.threadId, pendingId);
       // keep the item queued so the user can retry
     }
   }
