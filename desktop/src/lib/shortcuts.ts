@@ -2,18 +2,32 @@
 // wires the returned action id to the actual handlers. Uses Cmd on Mac and Ctrl
 // elsewhere (the caller passes whichever modifier is pressed via `mod`).
 
+type WorkspaceSlot = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
 export type ShortcutAction =
   | "toggle-sidebar"
+  | "toggle-right-panel"
+  | "toggle-theme"
   | "nav-back"
   | "nav-forward"
   | "open-palette"
+  | "quick-open"
   | "goto-dashboard"
   | "goto-history"
   | "goto-settings"
   | "show-help"
   | "new-workspace"
+  | "archive-workspace"
   | "show-changes"
+  | "show-uncommitted"
+  | "show-files"
+  | "show-checks"
+  | "show-summary"
   | "create-pr"
+  | "merge-pr"
+  | "push-branch"
+  | "open-pr-github"
+  | "start-review"
   | "focus-composer"
   | "focus-workspace"
   | "focus-search"
@@ -26,13 +40,20 @@ export type ShortcutAction =
   | "workspace-actions"
   | "add-project"
   | "new-chat"
-  | "toggle-terminal";
+  | "toggle-terminal"
+  | "open-in-app"
+  | "open-menu"
+  | "copy-link"
+  | "toggle-plan-mode"
+  | "approve-plan"
+  | `switch-workspace-${WorkspaceSlot}`;
 
 export interface KeyEventLike {
   key: string;
   ctrlKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
+  altKey?: boolean;
 }
 
 export interface ShortcutBinding {
@@ -44,7 +65,10 @@ export interface ShortcutBinding {
 
 export const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
   { action: "open-palette", keys: "mod+k", label: "Command palette", aliases: ["palette"] },
-  { action: "new-workspace", keys: "mod+shift+n", label: "New workspace", aliases: ["new"] },
+  { action: "quick-open", keys: "mod+p", label: "Quick open file", aliases: ["quick-open", "open-file"] },
+  { action: "toggle-theme", keys: "mod+alt+t", label: "Toggle theme", aliases: ["theme"] },
+  { action: "new-workspace", keys: "mod+n", label: "New workspace", aliases: ["new"] },
+  { action: "new-workspace", keys: "mod+shift+n", label: "New workspace", aliases: ["new-workspace"] },
   {
     action: "show-changes",
     keys: "mod+shift+d",
@@ -57,25 +81,51 @@ export const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
     label: "Create / refresh pull request",
     aliases: ["pr"],
   },
-  { action: "focus-composer", keys: "mod+j", label: "Focus chat composer", aliases: ["focus"] },
-  { action: "focus-workspace", keys: "mod+l", label: "Focus workspace", aliases: ["workspace"] },
+  { action: "archive-workspace", keys: "mod+shift+a", label: "Archive workspace", aliases: ["archive"] },
+  { action: "merge-pr", keys: "mod+shift+m", label: "Merge pull request", aliases: ["merge"] },
+  { action: "push-branch", keys: "mod+shift+y", label: "Push branch", aliases: ["push"] },
+  { action: "open-pr-github", keys: "mod+shift+g", label: "Open PR in GitHub", aliases: ["github"] },
+  { action: "start-review", keys: "mod+shift+r", label: "Start review", aliases: ["review"] },
+  { action: "focus-composer", keys: "mod+l", label: "Focus chat input", aliases: ["focus"] },
+  { action: "focus-workspace", keys: "mod+alt+l", label: "Focus workspace", aliases: ["workspace"] },
   { action: "focus-search", keys: "mod+f", label: "Focus sidebar", aliases: ["search", "focus-sidebar"] },
-  { action: "next-panel", keys: "mod+arrowright", label: "Next workspace panel", aliases: ["next"] },
-  { action: "prev-panel", keys: "mod+arrowleft", label: "Previous workspace panel", aliases: ["previous", "prev"] },
-  { action: "next-workspace", keys: "mod+arrowdown", label: "Next workspace", aliases: ["next-workspace"] },
-  { action: "prev-workspace", keys: "mod+arrowup", label: "Previous workspace", aliases: ["prev-workspace", "previous-workspace"] },
-  { action: "workspace-actions", keys: "mod+shift+a", label: "Workspace actions", aliases: ["actions", "workspace-actions"] },
-  { action: "add-project", keys: "mod+shift+o", label: "Add project", aliases: ["add-project", "project"] },
-  { action: "new-chat", keys: "mod+shift+c", label: "New chat", aliases: ["chat", "new-chat"] },
-  { action: "toggle-terminal", keys: "mod+`", label: "Toggle terminal dock", aliases: ["terminal", "dock"] },
+  { action: "next-panel", keys: "mod+shift+]", label: "Next tab", aliases: ["next"] },
+  { action: "next-panel", keys: "mod+alt+arrowright", label: "Next tab", aliases: ["next-panel"] },
+  { action: "prev-panel", keys: "mod+shift+[", label: "Previous tab", aliases: ["previous", "prev"] },
+  { action: "prev-panel", keys: "mod+alt+arrowleft", label: "Previous tab", aliases: ["prev-panel"] },
+  { action: "next-workspace", keys: "mod+alt+arrowdown", label: "Next workspace", aliases: ["next-workspace"] },
+  { action: "prev-workspace", keys: "mod+alt+arrowup", label: "Previous workspace", aliases: ["prev-workspace", "previous-workspace"] },
+  { action: "workspace-actions", keys: "mod+shift+alt+a", label: "Workspace actions", aliases: ["actions", "workspace-actions"] },
+  { action: "add-project", keys: "mod+alt+a", label: "Add repository", aliases: ["add-project", "project"] },
+  { action: "new-chat", keys: "mod+t", label: "New chat tab", aliases: ["chat", "new-chat"] },
+  { action: "toggle-terminal", keys: "mod+j", label: "Toggle terminal panel", aliases: ["terminal", "dock"] },
   { action: "toggle-sidebar", keys: "mod+b", label: "Toggle sidebar", aliases: ["sidebar"] },
+  { action: "toggle-right-panel", keys: "mod+alt+b", label: "Toggle right sidebar", aliases: ["right-sidebar", "right-panel"] },
   { action: "nav-back", keys: "mod+[", label: "Navigate back", aliases: ["back"] },
   { action: "nav-forward", keys: "mod+]", label: "Navigate forward", aliases: ["forward"] },
-  { action: "goto-dashboard", keys: "mod+1", label: "Dashboard", aliases: ["dashboard"] },
-  { action: "goto-history", keys: "mod+2", label: "History", aliases: ["history"] },
-  { action: "goto-settings", keys: "mod+3", label: "Settings", aliases: ["settings"] },
+  { action: "switch-workspace-1", keys: "mod+1", label: "Switch to workspace 1", aliases: ["workspace-1"] },
+  { action: "switch-workspace-2", keys: "mod+2", label: "Switch to workspace 2", aliases: ["workspace-2"] },
+  { action: "switch-workspace-3", keys: "mod+3", label: "Switch to workspace 3", aliases: ["workspace-3"] },
+  { action: "switch-workspace-4", keys: "mod+4", label: "Switch to workspace 4", aliases: ["workspace-4"] },
+  { action: "switch-workspace-5", keys: "mod+5", label: "Switch to workspace 5", aliases: ["workspace-5"] },
+  { action: "switch-workspace-6", keys: "mod+6", label: "Switch to workspace 6", aliases: ["workspace-6"] },
+  { action: "switch-workspace-7", keys: "mod+7", label: "Switch to workspace 7", aliases: ["workspace-7"] },
+  { action: "switch-workspace-8", keys: "mod+8", label: "Switch to workspace 8", aliases: ["workspace-8"] },
+  { action: "switch-workspace-9", keys: "mod+9", label: "Switch to workspace 9", aliases: ["workspace-9"] },
+  { action: "goto-dashboard", keys: "", label: "Dashboard", aliases: ["dashboard"] },
+  { action: "goto-history", keys: "", label: "History", aliases: ["history"] },
+  { action: "goto-settings", keys: "", label: "Settings", aliases: ["settings"] },
   { action: "goto-settings", keys: "mod+,", label: "Settings", aliases: ["preferences"] },
   { action: "show-help", keys: "mod+/", label: "Keyboard shortcuts", aliases: ["help", "shortcuts"] },
+  { action: "open-in-app", keys: "mod+o", label: "Open in app", aliases: ["open"] },
+  { action: "open-menu", keys: "mod+shift+o", label: "Open in menu", aliases: ["open-menu"] },
+  { action: "copy-link", keys: "mod+shift+c", label: "Copy link", aliases: ["copy-link", "copy"] },
+  { action: "show-uncommitted", keys: "alt+c", label: "Show uncommitted changes", aliases: ["uncommitted"] },
+  { action: "show-files", keys: "alt+f", label: "Show files", aliases: ["files"] },
+  { action: "show-checks", keys: "shift+alt+c", label: "Show checks", aliases: ["checks"] },
+  { action: "show-summary", keys: "alt+n", label: "Show notes", aliases: ["notes", "summary"] },
+  { action: "toggle-plan-mode", keys: "shift+tab", label: "Toggle plan mode", aliases: ["plan"] },
+  { action: "approve-plan", keys: "mod+shift+enter", label: "Approve plan", aliases: ["approve"] },
   { action: "save", keys: "mod+s", label: "Save", aliases: ["save"] },
   { action: "send-immediate", keys: "mod+enter", label: "Send immediately", aliases: ["send", "steer"] },
 ];
@@ -132,6 +182,7 @@ function eventChord(e: KeyEventLike): string {
   const modifiers: string[] = [];
   if (e.ctrlKey || e.metaKey) modifiers.push("mod");
   if (e.shiftKey) modifiers.push("shift");
+  if (e.altKey) modifiers.push("alt");
   return [...modifiers, key].join("+");
 }
 

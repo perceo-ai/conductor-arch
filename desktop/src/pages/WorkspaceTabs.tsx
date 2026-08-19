@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import githubActionsLogo from "material-icon-theme/icons/github-actions-workflow.svg?url";
 import { openExternal, send } from "@/bridge/client";
 import { actions, nav, threadsStore, toastsStore, workspacesStore } from "@/store";
@@ -591,6 +591,12 @@ export function ReviewPromptButton(props: { workspace: string }) {
       setBusy(false);
     }
   }
+
+  onMount(() => {
+    const onStartReview = () => void queueReviewPrompt();
+    window.addEventListener("archductor:start-review", onStartReview);
+    onCleanup(() => window.removeEventListener("archductor:start-review", onStartReview));
+  });
 
   return (
     <button class="ws-review-prompt-button" disabled={busy()} onClick={() => void queueReviewPrompt()}>

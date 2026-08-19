@@ -58,7 +58,8 @@ export default function CommandPalette() {
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (resolveShortcut(e, activeShortcuts()) === "open-palette") {
+      const action = resolveShortcut(e, activeShortcuts());
+      if (action === "open-palette" || action === "quick-open") {
         e.preventDefault();
         toggle();
       } else if (e.key === "Escape" && open()) {
@@ -66,8 +67,16 @@ export default function CommandPalette() {
         close();
       }
     };
+    const onOpen = () => {
+      setOpen(true);
+      queueMicrotask(() => inputRef?.focus());
+    };
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    window.addEventListener("archductor:open-command-palette", onOpen);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("archductor:open-command-palette", onOpen);
+    });
   });
 
   // Fuzzy file open: load the selected workspace's file

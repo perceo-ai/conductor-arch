@@ -21,6 +21,7 @@ import {
   workspacesStore,
   repositoriesStore,
 } from "./store";
+import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
 import { PRODUCT_RIGHT_PANEL_TABS } from "./lib/rightPanelTabs";
 import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
@@ -47,6 +48,29 @@ const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "add-project",
   "new-chat",
   "toggle-terminal",
+  "toggle-theme",
+  "toggle-right-panel",
+  "archive-workspace",
+  "merge-pr",
+  "push-branch",
+  "open-pr-github",
+  "start-review",
+  "show-uncommitted",
+  "show-files",
+  "show-checks",
+  "show-summary",
+  "open-in-app",
+  "open-menu",
+  "copy-link",
+  "switch-workspace-1",
+  "switch-workspace-2",
+  "switch-workspace-3",
+  "switch-workspace-4",
+  "switch-workspace-5",
+  "switch-workspace-6",
+  "switch-workspace-7",
+  "switch-workspace-8",
+  "switch-workspace-9",
 ]);
 
 export default function App() {
@@ -113,6 +137,22 @@ export default function App() {
     queueMicrotask(() => focusFirst(["[data-focus-target='workspace-main']", ".page-shell"]));
   }
 
+  function selectWorkspaceSlot(action: ShortcutAction) {
+    const match = /^switch-workspace-(\d)$/.exec(action);
+    if (!match) return false;
+    const names = workspacesStore.state.order.filter((name) => workspacesStore.row(name)?.status !== "archived");
+    const name = names[Number(match[1]) - 1];
+    if (!name) return true;
+    nav.selectWorkspace(name);
+    queueMicrotask(() => focusFirst(["[data-focus-target='workspace-main']", ".page-shell"]));
+    return true;
+  }
+
+  function activeWorkspace() {
+    const name = nav.selectedWorkspace();
+    return name ? workspacesStore.row(name) : undefined;
+  }
+
   // Global keyboard shortcuts (GTK parity plus keyboard-first focus movement).
   // The command palette owns "open-palette", so this handler skips it.
   onMount(() => {
@@ -126,9 +166,16 @@ export default function App() {
       if (!action || action === "open-palette") return;
       if (!GLOBAL_SHORTCUT_ACTIONS.has(action)) return;
       e.preventDefault();
+      if (selectWorkspaceSlot(action)) return;
       switch (action) {
+        case "toggle-theme":
+          prefsStore.setTheme(prefsStore.state.theme === "dark" ? "light" : "dark");
+          break;
         case "toggle-sidebar":
           setSidebarCollapsed((c) => !c);
+          break;
+        case "toggle-right-panel":
+          window.dispatchEvent(new CustomEvent("archductor:toggle-right-panel"));
           break;
         case "nav-back":
           nav.back();
@@ -169,6 +216,29 @@ export default function App() {
           if (active) void actions.refreshPullRequest(active);
           break;
         }
+        case "archive-workspace": {
+          const active = nav.selectedWorkspace();
+          if (active) void actions.archiveWorkspace(active);
+          break;
+        }
+        case "merge-pr": {
+          const active = nav.selectedWorkspace();
+          if (active) void actions.mergePullRequest(active);
+          break;
+        }
+        case "push-branch": {
+          const active = nav.selectedWorkspace();
+          if (active) void actions.pushBranch(active);
+          break;
+        }
+        case "open-pr-github": {
+          const url = activeWorkspace()?.prUrl;
+          if (url) void openExternal(url);
+          break;
+        }
+        case "start-review":
+          window.dispatchEvent(new CustomEvent("archductor:start-review"));
+          break;
         case "focus-composer":
           focusFirst(["[data-focus-target='chat-composer']", ".chat-input-view"]);
           break;
@@ -205,6 +275,52 @@ export default function App() {
         case "toggle-terminal":
           window.dispatchEvent(new CustomEvent("archductor:toggle-terminal-dock"));
           break;
+        case "show-uncommitted": {
+          const active = nav.selectedWorkspace();
+          if (active) {
+            nav.selectWorkspace(active);
+            nav.setRightPanelTab("changes");
+          }
+          break;
+        }
+        case "show-files": {
+          const active = nav.selectedWorkspace();
+          if (active) {
+            nav.selectWorkspace(active);
+            nav.setRightPanelTab("files");
+          }
+          break;
+        }
+        case "show-checks": {
+          const active = nav.selectedWorkspace();
+          if (active) {
+            nav.selectWorkspace(active);
+            nav.setRightPanelTab("checks");
+          }
+          break;
+        }
+        case "show-summary": {
+          const active = nav.selectedWorkspace();
+          if (active) {
+            nav.selectWorkspace(active);
+            nav.setRightPanelTab("summary");
+          }
+          break;
+        }
+        case "open-in-app": {
+          const path = activeWorkspace()?.path;
+          if (path) void openExternal(path);
+          break;
+        }
+        case "open-menu":
+          window.dispatchEvent(new CustomEvent("archductor:open-workspace-menu"));
+          break;
+        case "copy-link": {
+          const row = activeWorkspace();
+          const target = row?.prUrl ?? row?.path;
+          if (target) void navigator.clipboard?.writeText(target).catch(() => undefined);
+          break;
+        }
       }
     };
     window.addEventListener("keydown", onKey);

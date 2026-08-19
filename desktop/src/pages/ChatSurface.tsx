@@ -846,6 +846,17 @@ function Composer(props: {
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    const shortcut = resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings));
+    if (shortcut === "toggle-plan-mode") {
+      e.preventDefault();
+      void togglePlanMode();
+      return;
+    }
+    if (shortcut === "approve-plan") {
+      e.preventDefault();
+      void approvePlan();
+      return;
+    }
     if (e.key !== "Enter" || e.shiftKey) return; // Shift+Enter → newline
     e.preventDefault();
     // While a plan is under review, Enter sends revision notes back to the
@@ -855,7 +866,7 @@ function Composer(props: {
       return;
     }
     // The immediate-send chord is customizable; plain Enter keeps the queue-first composer behavior.
-    if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "send-immediate") {
+    if (shortcut === "send-immediate") {
       void steerSend();
     } else defaultEnterSend();
   }

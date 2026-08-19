@@ -466,7 +466,7 @@ export function SettingsPage() {
             class="settings-machine-entry"
             spellcheck={false}
             rows={2}
-            placeholder="palette=ctrl+p; shortcuts=ctrl+/; save=ctrl+s; terminal=ctrl+`"
+            placeholder="palette=ctrl+k; quick-open=ctrl+p; shortcuts=ctrl+/; terminal=ctrl+j"
             value={prefsStore.state.keybindings}
             onInput={(e) => prefsStore.setKeybindings(e.currentTarget.value)}
           />

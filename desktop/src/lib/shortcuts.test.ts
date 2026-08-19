@@ -9,11 +9,12 @@ import {
   type KeyEventLike,
 } from "./shortcuts";
 
-const ev = (key: string, mod = false, shift = false): KeyEventLike => ({
+const ev = (key: string, mod = false, shift = false, alt = false): KeyEventLike => ({
   key,
   ctrlKey: mod,
   metaKey: false,
   shiftKey: shift,
+  altKey: alt,
 });
 
 describe("resolveShortcut", () => {
@@ -26,10 +27,9 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("[", true))).toBe("nav-back");
     expect(resolveShortcut(ev("]", true))).toBe("nav-forward");
     expect(resolveShortcut(ev("k", true))).toBe("open-palette");
-    expect(resolveShortcut(ev("1", true))).toBe("goto-dashboard");
-    expect(resolveShortcut(ev("2", true))).toBe("goto-history");
-    expect(resolveShortcut(ev("3", true))).toBe("goto-settings");
-    expect(resolveShortcut(ev("4", true))).toBeNull();
+    expect(resolveShortcut(ev("p", true))).toBe("quick-open");
+    expect(resolveShortcut(ev("1", true))).toBe("switch-workspace-1");
+    expect(resolveShortcut(ev("9", true))).toBe("switch-workspace-9");
     expect(resolveShortcut(ev(",", true))).toBe("goto-settings");
   });
 
@@ -52,27 +52,37 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("N", true, true))).toBe("new-workspace");
     expect(resolveShortcut(ev("D", true, true))).toBe("show-changes");
     expect(resolveShortcut(ev("P", true, true))).toBe("create-pr");
-    // mod+shift with an unmapped letter is null (doesn't fall through to plain map)
-    expect(resolveShortcut(ev("B", true, true))).toBeNull();
+    expect(resolveShortcut(ev("A", true, true))).toBe("archive-workspace");
+    expect(resolveShortcut(ev("M", true, true))).toBe("merge-pr");
+    expect(resolveShortcut(ev("R", true, true))).toBe("start-review");
   });
 
-  it("maps keyboard-first focus shortcuts", () => {
-    expect(resolveShortcut(ev("j", true))).toBe("focus-composer");
-    expect(resolveShortcut(ev("l", true))).toBe("focus-workspace");
+  it("maps keyboard-first Conductor parity shortcuts", () => {
+    expect(resolveShortcut(ev("t", true, false, true))).toBe("toggle-theme");
+    expect(resolveShortcut(ev("a", true, false, true))).toBe("add-project");
+    expect(resolveShortcut(ev("b", true, false, true))).toBe("toggle-right-panel");
+    expect(resolveShortcut(ev("j", true))).toBe("toggle-terminal");
+    expect(resolveShortcut(ev("l", true))).toBe("focus-composer");
     expect(resolveShortcut(ev("f", true))).toBe("focus-search");
-    expect(resolveShortcut(ev("ArrowRight", true))).toBe("next-panel");
-    expect(resolveShortcut(ev("ArrowLeft", true))).toBe("prev-panel");
-    expect(resolveShortcut(ev("ArrowDown", true))).toBe("next-workspace");
-    expect(resolveShortcut(ev("ArrowUp", true))).toBe("prev-workspace");
-    expect(resolveShortcut(ev("A", true, true))).toBe("workspace-actions");
-    expect(resolveShortcut(ev("O", true, true))).toBe("add-project");
-    expect(resolveShortcut(ev("C", true, true))).toBe("new-chat");
-    expect(resolveShortcut(ev("`", true))).toBe("toggle-terminal");
+    expect(resolveShortcut(ev("]", true, true))).toBe("next-panel");
+    expect(resolveShortcut(ev("[", true, true))).toBe("prev-panel");
+    expect(resolveShortcut(ev("ArrowDown", true, false, true))).toBe("next-workspace");
+    expect(resolveShortcut(ev("ArrowUp", true, false, true))).toBe("prev-workspace");
+    expect(resolveShortcut(ev("O", true))).toBe("open-in-app");
+    expect(resolveShortcut(ev("O", true, true))).toBe("open-menu");
+    expect(resolveShortcut(ev("C", true, true))).toBe("copy-link");
+    expect(resolveShortcut(ev("F", false, false, true))).toBe("show-files");
+    expect(resolveShortcut(ev("C", false, false, true))).toBe("show-uncommitted");
+    expect(resolveShortcut(ev("C", false, true, true))).toBe("show-checks");
+    expect(resolveShortcut(ev("N", false, false, true))).toBe("show-summary");
   });
 
   it("maps surface action shortcuts through the customizable resolver", () => {
     expect(resolveShortcut(ev("s", true))).toBe("save");
     expect(resolveShortcut(ev("Enter", true))).toBe("send-immediate");
+    expect(resolveShortcut(ev("t", true))).toBe("new-chat");
+    expect(resolveShortcut(ev("Tab", false, true))).toBe("toggle-plan-mode");
+    expect(resolveShortcut(ev("Enter", true, true))).toBe("approve-plan");
   });
 
   it("lets custom bindings override defaults and supports legacy aliases", () => {
@@ -110,7 +120,6 @@ describe("resolveShortcut", () => {
   it("removes every old chord when customizing an action with multiple defaults", () => {
     const shortcuts = parseKeybindingOverrides("settings=ctrl+.", DEFAULT_SHORTCUTS);
     expect(resolveShortcut(ev(".", true), shortcuts)).toBe("goto-settings");
-    expect(resolveShortcut(ev("3", true), shortcuts)).toBeNull();
     expect(resolveShortcut(ev(",", true), shortcuts)).toBeNull();
   });
 
