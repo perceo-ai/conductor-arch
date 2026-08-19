@@ -34,7 +34,13 @@ import { renderMarkdown } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
 import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
-import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
+import {
+  formatReasoningText,
+  inlineEventVerbChip,
+  isDiffCard,
+  isTerminalCard,
+  stripArchductorMetadata,
+} from "@/lib/chatFormat";
 import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
 import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 import {
@@ -223,24 +229,14 @@ function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean })
 }
 
 function ReasoningBlock(props: { item: ArchcarProjectionItem }) {
-  const title = () => {
-    const raw = props.item.title.trim();
-    return !raw || raw.toLowerCase() === "reasoning" ? "Thinking" : raw;
-  };
+  const body = () => formatReasoningText(props.item.body);
   return (
     <section
       class="chat-reasoning-block"
       classList={{ "chat-reasoning-block-streaming": props.item.stream_state === "streaming" }}
-      aria-label={title()}
+      aria-label="Agent reasoning"
     >
-      <div class="chat-reasoning-head">
-        <Icon name={eventIcon("reasoning_card")} class="chat-reasoning-icon" />
-        <span class="chat-reasoning-title">{title()}</span>
-      </div>
-      <div
-        class="chat-reasoning-text markdown-body"
-        innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
-      />
+      <div class="chat-reasoning-text">{body()}</div>
     </section>
   );
 }
